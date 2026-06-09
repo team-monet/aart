@@ -217,7 +217,19 @@ with real Chromium; secrets redacted; portable to macOS + WSL2.
 - [x] **Static gate** — a node block's code must compile (isolated-vm
       `compileScriptSync`) to be registered (`validateDraft`).
 - decision settled: sandbox tier = `isolated-vm` (in-process, ms-scale, no Docker).
-  Cost: native addon (needs a C++ toolchain to `npm install`).
+  It's a native addon but ships **prebuilt binaries** for macOS-arm64, Linux
+  x64/arm64 (incl. WSL2), Windows-x64 on recent Node — so `npm install` needs no
+  compiler there (only Intel mac / odd ABIs build from source). Made an
+  **optionalDependency + lazy-loaded**, so install never fails and QA-only usage
+  works without it.
+
+### Distribution `[/]`
+- [x] **npx**: `files: ["dist","examples"]` (no src/docs leak), `prepare` builds dist,
+      `prepublishOnly` runs typecheck+tests; isolated-vm optional → `npx aart mcp` works
+      with no clone and no toolchain on common platforms. Verified: pack contents clean,
+      bin runs, QA path works without isolated-vm. See docs/PUBLISHING.md. (Not yet published.)
+- [ ] later: Docker image (GHCR) for zero-toolchain "any laptop with Docker"; deeper
+      static analysis (reference/output-type inference).
 - [ ] later: deeper static analysis (reference/output-type inference, the legacy
       analyzer concept) — lower priority now that the sandbox is the hard boundary.
 

@@ -1,5 +1,23 @@
-import ivm from 'isolated-vm'
 import type { ExecutionContext } from './context'
+
+// isolated-vm is an OPTIONAL dependency (a native addon). It is only needed to
+// run/validate `node` blocks — the QA pack's native browser/api/assert blocks
+// never touch it. Load it lazily so installing aart never fails on a platform
+// without a prebuilt binary, and so QA-only usage works without it.
+type Ivm = typeof import('isolated-vm')
+let _ivm: Ivm | undefined
+function ivm(): Ivm {
+  if (_ivm) return _ivm
+  try {
+    _ivm = require('isolated-vm') as Ivm
+  } catch {
+    throw new Error(
+      'Running `node` blocks requires the optional "isolated-vm" package. ' +
+        'Install it with:  npm i isolated-vm   (native browser/api/assert blocks do not need it).',
+    )
+  }
+  return _ivm
+}
 
 export interface ExecResult {
   output: Record<string, unknown>
@@ -45,7 +63,7 @@ const WRAPPER = `(async function () {
 
 // The wrapper is constant, so its V8 compile cache is a single off-heap handle
 // (no per-block growth). It survives isolate disposal and is reused every run.
-let wrapperCache: ivm.ExternalCopy<ArrayBuffer> | undefined
+let wrapperCache: import('isolated-vm').ExternalCopy<ArrayBuffer> | undefined
 
 // Bound the number of simultaneously-live isolates (each is a worker thread that
 // reserves its memory ceiling) so parallel runs can't exhaust host resources.
@@ -84,8 +102,9 @@ export async function runNodeBlock(
   const logs: string[] = []
   const start = Date.now()
 
+  const m = ivm()
   await acquire()
-  const isolate = new ivm.Isolate({ memoryLimit: memoryMb })
+  const isolate = new m.Isolate({ memoryLimit: memoryMb })
   let timer: ReturnType<typeof setTimeout> | undefined
 
   try {
@@ -94,13 +113,13 @@ export async function runNodeBlock(
     await jail.set('__userCode', code)
     await jail.set('__inputsJson', JSON.stringify(inputs ?? {}))
     await jail.set('__ctxJson', JSON.stringify({ runId: ctx.runId, vars: ctx.vars }))
-    await jail.set('__log', new ivm.Callback((s: string) => void logs.push(s)))
+    await jail.set('__log', new m.Callback((s: string) => void logs.push(s)))
 
     const script = await isolate.compileScript(
       WRAPPER,
       wrapperCache ? { cachedData: wrapperCache } : { produceCachedData: true },
     )
-    const produced = (script as unknown as { cachedData?: ivm.ExternalCopy<ArrayBuffer> }).cachedData
+    const produced = (script as unknown as { cachedData?: import('isolated-vm').ExternalCopy<ArrayBuffer> }).cachedData
     if (!wrapperCache && produced) wrapperCache = produced
 
     // The isolate `timeout` cancels sync CPU loops; a host wall-clock race also
@@ -146,7 +165,7 @@ export async function runNodeBlock(
  * wrapper) at registration time. Returns an error message, or null if valid.
  */
 export function checkNodeSyntax(code: string): string | null {
-  const isolate = new ivm.Isolate({ memoryLimit: 8 })
+  const isolate = new (ivm().Isolate)({ memoryLimit: 8 })
   try {
     isolate.compileScriptSync(`(async function (inputs, ctx, console) {\n${code}\n})`)
     return null

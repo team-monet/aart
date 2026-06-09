@@ -35,32 +35,56 @@ governance gate and a real `node`-code sandbox are the next phases.
 | `node` block sandbox (isolated-vm: own heap, memory cap, hard timeout) | ✅ working |
 | Static gate (node code must compile to register) | ✅ working |
 
-## Quick start
+## Install & run
+
+No clone needed — once published to npm:
 
 ```bash
-npm install          # `prepare` builds dist/ automatically
-npm link             # makes the `aart` command available on PATH
+npx aart --help                 # run without installing
+# or:  npm i -g aart            # then `aart …`
+npx playwright install chromium # only needed for the QA *browser* blocks
+```
+
+Point a coding agent's MCP config at it:
+
+```json
+{ "command": "npx", "args": ["-y", "aart", "mcp"],
+  "env": { "AART_WORKSPACE": "/path/to/your/project" } }
+```
+
+`isolated-vm` (the `node`-block sandbox) is an **optional** dependency: it ships
+prebuilt binaries for macOS (Apple Silicon), Linux (x64/arm64, incl. WSL2), and
+Windows on recent Node — so `npm install` needs **no compiler** there. On an
+uncovered combo (e.g. Intel mac, or an unusual Node version) it builds from
+source (`build-essential python3` / Xcode CLT) — and if it's absent entirely,
+install still succeeds: the QA pack (native browser/api/assert blocks) works, and
+only authoring/running `node` blocks asks you to `npm i isolated-vm`.
+
+(See [docs/PUBLISHING.md](docs/PUBLISHING.md) to publish; not yet on npm.)
+
+## Quick start (from source)
+
+```bash
+npm install && npm link   # `prepare` builds dist/; link puts `aart` on PATH
 
 aart block add examples/blocks/echo.block.yaml
 aart block add examples/blocks/upper.block.yaml
 # definitions land as `draft`; --yes runs an unapproved one once (or `aart approve`)
 aart run examples/workflows/echo-smoke.workflow.yaml --input '{"start":"hello"}' --yes
 
-npm test             # unit + engine + QA tests
+npm test                  # unit + engine + QA tests
 ```
 
 Expected: the workflow runs `echo → upper`, prints a per-step trace, returns
 `{ "final": "HELLO" }`, and writes a report to `.aa/runs/<id>/run.json` (replay
 with `aart report <id>`). (No `npm link`? Use `npm run dev -- <cmd>`.)
 
-### Running on WSL2 / Linux
+### Note for WSL2 / Linux
 
-`isolated-vm` (the `node` sandbox) is a native addon, so `npm install` needs a
-C++ toolchain. On Ubuntu/WSL2: `sudo apt install -y build-essential python3`
-(macOS: Xcode Command Line Tools). Then, for the QA browser blocks:
+For the QA **browser** blocks, plain `npx playwright install chromium` is not
+enough on a fresh Ubuntu/WSL2 — pull the system libraries too:
 
 ```bash
-# Chromium + its system libraries (plain `install chromium` is NOT enough on Ubuntu/WSL2)
 npx playwright install --with-deps chromium
 ```
 

@@ -1,21 +1,28 @@
 {
   "name": "aart",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "description": "Agentic Automation RunTime — a governed block/workflow runtime for AI agents",
   "license": "UNLICENSED",
-  "private": true,
   "bin": {
     "aart": "dist/cli/index.js"
   },
   "main": "dist/cli/index.js",
+  "files": [
+    "dist",
+    "examples"
+  ],
   "engines": {
     "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "scripts": {
     "dev": "tsx src/cli/index.ts",
     "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
     "build": "npm run clean && tsc -p tsconfig.json",
     "prepare": "npm run build",
+    "prepublishOnly": "npm run typecheck && npm test",
     "start": "node dist/cli/index.js",
     "test": "vitest run",
     "test:watch": "vitest",
@@ -24,11 +31,13 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
     "commander": "^12.1.0",
-    "isolated-vm": "^6.1.2",
     "playwright": "^1.60.0",
     "yaml": "^2.5.1",
     "zod": "^3.23.8",
     "zod-to-json-schema": "^3.25.2"
+  },
+  "optionalDependencies": {
+    "isolated-vm": "^6.1.2"
   },
   "devDependencies": {
     "@types/node": "^20.14.0",
