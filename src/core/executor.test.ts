@@ -39,6 +39,12 @@ describe('runNodeBlock (isolated-vm sandbox)', () => {
   it('propagates a thrown error message', async () => {
     await expect(runNodeBlock('throw new Error("kaboom");', {}, ctx)).rejects.toThrow(/kaboom/)
   })
+
+  it('a structural break-out cannot hijack the wrapper (fails cleanly)', async () => {
+    // A stray `}` that under naive splicing would restructure the wrapper.
+    const breakout = 'return 0;\n}; globalThis.LEAK = 1; const z = async () => {'
+    await expect(runNodeBlock(breakout, {}, ctx)).rejects.toThrow()
+  })
 })
 
 describe('checkNodeSyntax (static gate)', () => {
@@ -47,5 +53,8 @@ describe('checkNodeSyntax (static gate)', () => {
   })
   it('rejects invalid code', () => {
     expect(checkNodeSyntax('return { ok: ;')).toBeTruthy()
+  })
+  it('rejects a structural break-out at registration time', () => {
+    expect(checkNodeSyntax('return 0;\n}; globalThis.LEAK = 1; const z = async () => {')).toBeTruthy()
   })
 })

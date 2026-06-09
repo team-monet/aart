@@ -17,6 +17,8 @@ const STEP_LIMIT = 10_000
 
 export interface EngineOptions {
   timeoutMs?: number
+  /** Per-`node`-block memory ceiling (MB); defaults to the executor's default. */
+  memoryMb?: number
   /** Handlers for `native` (pack-provided) blocks, keyed by block id. */
   nativeHandlers?: Map<string, NativeRunFn>
 }
@@ -87,6 +89,7 @@ export class Engine {
     if (block.execution.type === 'node') {
       const res = await runNodeBlock(block.execution.code, inputs, ctx, {
         timeoutMs: this.opts.timeoutMs,
+        memoryMb: this.opts.memoryMb,
       })
       // Mask secrets that a block may have printed before logging to stderr.
       const sv = res.logs.length ? secretValues(ctx.secrets) : []

@@ -1,4 +1,3 @@
-import crypto from 'node:crypto'
 import ivm from 'isolated-vm'
 import type { ExecutionContext } from './context'
 
@@ -15,46 +14,64 @@ export interface ExecOptions {
 
 const DEFAULT_TIMEOUT_MS = 30_000
 const DEFAULT_MEMORY_MB = 128
+const MAX_CONCURRENT = 8
 
-// Cross-isolate V8 compile cache, keyed by the wrapped source hash. `cachedData`
-// is an ExternalCopy that lives in the host and survives isolate disposal, so a
-// given block's code is parsed once even though every run gets a fresh isolate.
-const compileCache = new Map<string, ivm.ExternalCopy<ArrayBuffer>>()
-
-function wrap(code: string): string {
-  // User code may reference `inputs`, `ctx`, `console`, and `return` a value.
-  return `(async function () {
+/**
+ * Constant trusted wrapper. The user's code is NOT spliced into this source —
+ * it is passed in as the `__userCode` global string and turned into an async
+ * function via the Function constructor INSIDE the isolate. That makes the
+ * wrapper structurally un-breakable: a stray `}` in user code can no longer
+ * restructure the wrapper or hijack the return value (it just makes the
+ * AsyncFunction throw a SyntaxError). The wrapper always returns a JSON string.
+ */
+const WRAPPER = `(async function () {
   const inputs = JSON.parse(__inputsJson);
   const ctx = JSON.parse(__ctxJson);
+  const code = __userCode;
+  delete globalThis.__inputsJson;
+  delete globalThis.__ctxJson;
+  delete globalThis.__userCode;
   const console = {
     log: (...a) => __log(a.map(String).join(' ')),
     info: (...a) => __log(a.map(String).join(' ')),
     warn: (...a) => __log(a.map(String).join(' ')),
     error: (...a) => __log(a.map(String).join(' ')),
   };
-  const __run = async () => { ${code}
-  };
-  const out = await __run();
+  const AsyncFunction = (async () => {}).constructor;
+  const run = new AsyncFunction('inputs', 'ctx', 'console', code);
+  const out = await run(inputs, ctx, console);
   return JSON.stringify(out === undefined ? null : out);
 })()`
+
+// The wrapper is constant, so its V8 compile cache is a single off-heap handle
+// (no per-block growth). It survives isolate disposal and is reused every run.
+let wrapperCache: ivm.ExternalCopy<ArrayBuffer> | undefined
+
+// Bound the number of simultaneously-live isolates (each is a worker thread that
+// reserves its memory ceiling) so parallel runs can't exhaust host resources.
+let active = 0
+const waiters: Array<() => void> = []
+async function acquire(): Promise<void> {
+  if (active >= MAX_CONCURRENT) await new Promise<void>((r) => waiters.push(r))
+  active++
+}
+function release(): void {
+  active--
+  waiters.shift()?.()
 }
 
 /**
  * Run a `node` block's code in a real V8 isolate (isolated-vm). The isolate has
  * its own heap with NO references to the host: no `process`, `require`, `fs`,
  * network, timers, or env — so the constructor-chain escape that defeats
- * `node:vm` is impossible. Enforces a memory limit and a hard timeout (a runaway
- * loop is actually terminated, not just abandoned).
- *
- * A fresh isolate per run gives full isolation between blocks (no shared heap, so
- * no cross-block prototype pollution); the V8 compile cache keeps repeated runs
- * of the same code cheap.
+ * `node:vm` is impossible. Enforces a memory limit and a HARD timeout (a runaway
+ * loop is terminated, not just abandoned). A fresh isolate per run gives full
+ * isolation between blocks (no shared heap → no cross-block prototype pollution).
  *
  * Constraints by design: a sandboxed block is pure compute. It receives `inputs`
- * and a minimal `ctx` ({runId, vars}) as COPIES and returns a JSON-serializable
- * object. It does NOT receive capabilities (e.g. a live browser page) or secrets
- * — those cannot cross an isolate boundary, and capability work belongs in
- * trusted native pack blocks.
+ * and a minimal `ctx` ({runId, vars}) as COPIES and must return a JSON-
+ * serializable object. It gets NO capabilities or secrets — those cannot cross
+ * an isolate boundary, and capability work belongs in trusted native pack blocks.
  */
 export async function runNodeBlock(
   code: string,
@@ -66,30 +83,25 @@ export async function runNodeBlock(
   const memoryMb = opts.memoryMb ?? DEFAULT_MEMORY_MB
   const logs: string[] = []
   const start = Date.now()
+
+  await acquire()
   const isolate = new ivm.Isolate({ memoryLimit: memoryMb })
   let timer: ReturnType<typeof setTimeout> | undefined
 
   try {
     const context = await isolate.createContext()
     const jail = context.global
+    await jail.set('__userCode', code)
     await jail.set('__inputsJson', JSON.stringify(inputs ?? {}))
     await jail.set('__ctxJson', JSON.stringify({ runId: ctx.runId, vars: ctx.vars }))
-    await jail.set(
-      '__log',
-      new ivm.Callback((s: string) => {
-        logs.push(s)
-      }),
-    )
+    await jail.set('__log', new ivm.Callback((s: string) => void logs.push(s)))
 
-    const wrapped = wrap(code)
-    const key = crypto.createHash('sha256').update(wrapped).digest('hex')
-    const cached = compileCache.get(key)
     const script = await isolate.compileScript(
-      wrapped,
-      cached ? { cachedData: cached } : { produceCachedData: true },
+      WRAPPER,
+      wrapperCache ? { cachedData: wrapperCache } : { produceCachedData: true },
     )
     const produced = (script as unknown as { cachedData?: ivm.ExternalCopy<ArrayBuffer> }).cachedData
-    if (!cached && produced) compileCache.set(key, produced)
+    if (!wrapperCache && produced) wrapperCache = produced
 
     // The isolate `timeout` cancels sync CPU loops; a host wall-clock race also
     // covers an async block that never settles (no timers exist in-isolate).
@@ -99,12 +111,22 @@ export async function runNodeBlock(
         timeoutMs + 250,
       )
     })
-    const resultStr = (await Promise.race([
+    const raw: unknown = await Promise.race([
       script.run(context, { timeout: timeoutMs, promise: true }),
       hostTimeout,
-    ])) as string
+    ])
 
-    const parsed: unknown = JSON.parse(resultStr)
+    // The wrapper always returns a JSON string; anything else means the block
+    // produced a non-serializable value — fail clearly rather than opaquely.
+    if (typeof raw !== 'string') {
+      throw new Error('block did not return a JSON-serializable value')
+    }
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(raw)
+    } catch {
+      throw new Error('block did not return a JSON-serializable value')
+    }
     const output =
       parsed !== null && typeof parsed === 'object'
         ? (parsed as Record<string, unknown>)
@@ -113,19 +135,20 @@ export async function runNodeBlock(
   } finally {
     if (timer) clearTimeout(timer)
     if (!isolate.isDisposed) isolate.dispose()
+    release()
   }
 }
 
 /**
- * Static gate: compile a `node` block's code (without running it) to reject
- * syntactically invalid code at registration time. Returns an error message, or
- * null if the code parses. The sandbox is the security boundary; this is the
- * cheap correctness gate on top of it.
+ * Static gate: compile a `node` block's code as a parenthesized async function
+ * EXPRESSION (without running it). This rejects both syntax errors AND a
+ * structural break-out (a stray `}` that would otherwise restructure the run
+ * wrapper) at registration time. Returns an error message, or null if valid.
  */
 export function checkNodeSyntax(code: string): string | null {
   const isolate = new ivm.Isolate({ memoryLimit: 8 })
   try {
-    isolate.compileScriptSync(wrap(code))
+    isolate.compileScriptSync(`(async function (inputs, ctx, console) {\n${code}\n})`)
     return null
   } catch (err) {
     return err instanceof Error ? (err.message.split('\n')[0] ?? err.message) : String(err)
