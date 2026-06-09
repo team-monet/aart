@@ -6,6 +6,7 @@ import { z } from 'zod'
 import { buildCatalog } from '../agent/catalog'
 import { definitionJsonSchema } from '../agent/schema'
 import { validateDraft } from '../agent/validate'
+import { renderDefinition } from '../agent/render'
 import { unapprovedInTree } from '../core/approval'
 import { setApproval } from '../core/governance'
 import { AUTHORING_GUIDE } from '../agent/guide'
@@ -167,8 +168,9 @@ export async function startMcpServer(): Promise<void> {
         )
       }
       return text(
-        `registered ${result.block.id}@${result.block.version} as DRAFT. ` +
-          `Now ask the user to approve it; once they say yes, call aa_approve with id "${result.block.id}".`,
+        `Registered ${result.block.id}@${result.block.version} as DRAFT.\n\n` +
+          `SHOW the user exactly what they're approving:\n\n${renderDefinition(result.block)}\n\n` +
+          `Then ask them to approve it. Once they say yes, call aa_approve with id "${result.block.id}".`,
       )
     },
   )

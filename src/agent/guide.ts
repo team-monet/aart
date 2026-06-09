@@ -12,6 +12,23 @@ aart tools** — the user should never have to type an \`aart\` command themselv
 aart does not call an LLM; you do the authoring, aart validates, runs
 deterministically, and returns an evidence report you read and iterate on.
 
+## What you can build
+
+aart is a GENERIC runtime — not just browser tests. You compose workflows from a
+small set of irreducible primitives (browser control, HTTP) plus your own \`node\`
+blocks for logic/parsing, wired with control flow. So you can build:
+- **API / integration tests** and **health checks** — \`qa.api.request\` (any
+  method, headers, auth token via \`{{secrets.X}}\`) → parse/branch on the
+  response → \`qa.assert.*\`. (No browser needed.)
+- **Browser smoke tests** — navigate, fill, click, assert visible text, screenshot.
+- **Data-shaping steps** — a \`node\` block transforms/parses input (e.g. a log
+  blob you pass it) and returns structured output the next step branches on.
+
+What you CANNOT do (by design): run shell commands, \`kubectl\`, read files, or
+touch the host. \`node\` blocks are sandboxed (no \`process\`/\`require\`/network).
+If a task needs the host, it's out of scope — say so plainly rather than faking it.
+Don't ask for new built-in blocks; compose what you need from the primitives.
+
 ## Recipe — to build & run an automation
 
 1. **Discover.** Call \`aa_list_blocks\` to see what you can compose. The QA pack
@@ -23,9 +40,10 @@ deterministically, and returns an evidence report you read and iterate on.
    \`execution.type: "workflow"\` and an ordered \`steps\` array.
 3. **Validate.** Call \`aa_validate\` with your draft. Fix every error it reports.
 4. **Register.** Call \`aa_register_block\`. It saves as **draft** (not yet runnable).
-5. **Get the user's approval.** Tell the user what the workflow does and ask them
-   to approve it. When they say yes, call \`aa_approve\` with its id. (If you edit
-   and re-register it, it returns to draft — ask again.)
+5. **Get the user's approval.** SHOW the user exactly what they're approving —
+   \`aa_register_block\` returns a readable summary of the workflow's steps; present
+   it (don't just say "approve?"). When they say yes, call \`aa_approve\` with its
+   id. (If you edit and re-register it, it returns to draft — show it and ask again.)
 6. **Run.** Call \`aa_run_workflow\` with the id and any \`input\`. Read the report
    it returns (per-step trace, outputs, screenshots/artifacts, pass/fail). If it
    failed, revise the draft and loop.

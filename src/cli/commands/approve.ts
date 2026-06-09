@@ -1,5 +1,5 @@
-import YAML from 'yaml'
 import { setApproval } from '../../core/governance'
+import { renderDefinition } from '../../agent/render'
 import type { ApprovalStatus } from '../../core/approval'
 import { openRuntime } from '../workspace'
 
@@ -36,5 +36,5 @@ export async function showCommand(id: string, opts: StatusOpts): Promise<void> {
     console.error(`Block not found: ${id}${opts.version ? '@' + opts.version : ''}`)
     process.exit(1)
   }
-  console.log(YAML.stringify(block))
+  console.log(renderDefinition(block))
 }
