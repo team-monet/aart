@@ -1,0 +1,15 @@
+id: echo
+name: Echo
+version: 0.1.0
+description: Returns its input value unchanged.
+inputs:
+  - name: value
+    type: string
+    required: true
+outputs:
+  - name: value
+    type: string
+execution:
+  type: node
+  code: |
+    return { value: inputs.value };

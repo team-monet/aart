@@ -1,0 +1,40 @@
+# Forward-looking example (Phase 3+). References blocks from the QA pack, which
+# is not implemented yet. This is the target shape the AI workflow generator
+# (Phase 4) should produce from a request like:
+#   "log in to my local app and check the dashboard shows up"
+id: login-smoke
+name: Login Smoke
+version: 0.1.0
+inputs:
+  - name: appUrl
+    type: string
+    required: true
+execution:
+  type: workflow
+  steps:
+    - id: open_login
+      block: qa.browser.goto
+      inputs:
+        url: "{{inputs.appUrl}}/login"
+    - id: fill_email
+      block: qa.browser.fill
+      inputs:
+        selector: "input[name=email]"
+        value: "{{ctx.secrets.email}}"
+    - id: fill_password
+      block: qa.browser.fill
+      inputs:
+        selector: "input[name=password]"
+        value: "{{ctx.secrets.password}}"
+    - id: submit
+      block: qa.browser.click
+      inputs:
+        selector: "button[type=submit]"
+    - id: assert_dashboard
+      block: qa.browser.text_visible
+      inputs:
+        text: "Dashboard"
+    - id: screenshot
+      block: qa.browser.screenshot
+      inputs:
+        name: "dashboard-after-login"

@@ -1,0 +1,33 @@
+{
+  "name": "aart",
+  "version": "0.0.1",
+  "description": "Agentic Automation RunTime — a governed block/workflow runtime for AI agents",
+  "license": "UNLICENSED",
+  "private": true,
+  "bin": {
+    "aart": "dist/cli/index.js"
+  },
+  "main": "dist/cli/index.js",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "tsx src/cli/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/cli/index.js",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "commander": "^12.1.0",
+    "yaml": "^2.5.1",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "tsx": "^4.19.1",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  }
+}

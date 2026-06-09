@@ -1,0 +1,23 @@
+id: echo-smoke
+name: Echo Smoke
+version: 0.1.0
+description: >
+  Minimal end-to-end workflow. Exercises {{inputs.x}} interpolation, a
+  $stepId.output reference between steps, and outputMapping.
+inputs:
+  - name: start
+    type: string
+    required: true
+execution:
+  type: workflow
+  steps:
+    - id: echo_it
+      block: echo
+      inputs:
+        value: "{{inputs.start}}"
+    - id: shout
+      block: upper
+      inputs:
+        value: "$echo_it.value"
+  outputMapping:
+    final: "$shout.value"

@@ -1,0 +1,15 @@
+id: upper
+name: Uppercase
+version: 0.1.0
+description: Uppercases a string value.
+inputs:
+  - name: value
+    type: string
+    required: true
+outputs:
+  - name: value
+    type: string
+execution:
+  type: node
+  code: |
+    return { value: String(inputs.value).toUpperCase() };
