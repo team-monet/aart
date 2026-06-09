@@ -61,12 +61,24 @@ you can read and iterate on.
 2. **Draft** — write a definition (YAML/JSON) that matches the schema
    (\`aart schema\` / \`aa_get_schema\`), composing existing blocks.
 3. **Validate** — \`aart validate <file>\` / \`aa_validate\`. Fix every error.
-4. **Approve** — present the draft to the human for approval (this is a gate;
-   never self-approve and run destructive things silently).
-5. **Register** — \`aart block add <file>\` / \`aa_register_block\`.
-6. **Run** — \`aart run <id> --input '{...}'\` / \`aa_run_workflow\`.
+4. **Register** — \`aa_register_block\`. It lands as **draft**.
+5. **Get approval** — you CANNOT run a draft. Ask the human to review and
+   approve it (\`aart approve <id>\`); they can also test it once with
+   \`aart run <id> --yes\`. Only approved definitions run.
+6. **Run** — \`aa_run_workflow\` (works once the definition is approved).
 7. **Inspect** — read the returned report (per-step trace, outputs, error,
-   artifacts). If it failed, revise the workflow/block and loop.
+   artifacts). If it failed, revise and re-register (which resets it to draft,
+   needing re-approval).
+
+## Governance (the human approves, you don't)
+
+- Every registration lands as **draft**. Only a human, via the \`aart approve\`
+  CLI command, can mark a definition **approved** — there is no approve tool for
+  you. Do not try to approve your own work.
+- \`aa_run_workflow\` refuses any definition that is not approved (and refuses an
+  inline definition outright). Register it, then ask the human to approve.
+- The catalog shows each block's \`status\`: \`native\` (built-in, trusted),
+  \`draft\`, \`approved\`, or \`deprecated\`. Native pack blocks are always usable.
 
 ## Rules
 

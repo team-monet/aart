@@ -11,7 +11,9 @@ import { BlockDefinitionSchema, type BlockDefinition } from '../core/types'
  * Fixes vs legacy:
  *   - real numeric semver ordering for `latest` (legacy used localeCompare,
  *     so `1.0.10` sorted below `1.0.2`);
- *   - a per-instance cache (legacy re-read & re-parsed the whole dir per step).
+ *   - reads a single known file per lookup (legacy re-read & re-parsed the WHOLE
+ *     dir per step). Reads are fresh, so external writes (e.g. `aart approve`)
+ *     are seen immediately.
  */
 export interface Registry {
   getBlock(id: string, version?: string): BlockDefinition | undefined
@@ -24,7 +26,6 @@ const FILE_RE = /^(.+)_v(.+)\.ya?ml$/
 
 export class FileRegistry implements Registry {
   private dir: string
-  private cache = new Map<string, BlockDefinition>()
 
   constructor(base: string) {
     this.dir = path.join(base, 'blocks')
@@ -38,7 +39,6 @@ export class FileRegistry implements Registry {
   registerBlock(block: BlockDefinition): void {
     const parsed = BlockDefinitionSchema.parse(block)
     fs.writeFileSync(this.file(parsed.id, parsed.version), YAML.stringify(parsed))
-    this.cache.set(`${parsed.id}_v${parsed.version}`, parsed)
   }
 
   /** All on-disk (id, version) pairs. */
@@ -62,17 +62,16 @@ export class FileRegistry implements Registry {
     return versions.sort((a, b) => compareSemver(b, a))[0]
   }
 
+  // Read fresh each call (a single small file) so an external process
+  // writing/approving a definition — e.g. `aart approve` while an `aart mcp`
+  // server is running — is always seen. This is still far cheaper than the
+  // legacy registry, which re-read and re-parsed the WHOLE directory per step.
   getBlock(id: string, version = 'latest'): BlockDefinition | undefined {
     const resolved = version === 'latest' ? this.latestVersion(id) : version
     if (!resolved) return undefined
-    const key = `${id}_v${resolved}`
-    const cached = this.cache.get(key)
-    if (cached) return cached
     const file = this.file(id, resolved)
     if (!fs.existsSync(file)) return undefined
-    const def = BlockDefinitionSchema.parse(YAML.parse(fs.readFileSync(file, 'utf8')))
-    this.cache.set(key, def)
-    return def
+    return BlockDefinitionSchema.parse(YAML.parse(fs.readFileSync(file, 'utf8')))
   }
 
   listBlocks(): BlockDefinition[] {
@@ -85,7 +84,6 @@ export class FileRegistry implements Registry {
   deleteBlock(id: string): void {
     for (const version of this.versionsOf(id)) {
       fs.rmSync(this.file(id, version), { force: true })
-      this.cache.delete(`${id}_v${version}`)
     }
   }
 }

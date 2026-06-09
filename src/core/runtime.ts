@@ -65,8 +65,9 @@ export class Runtime {
     def: BlockDefinition,
     inputs: Record<string, unknown>,
     params?: Record<string, unknown>,
-    opts: { verbose?: boolean; timeoutMs?: number } = {},
+    opts: { verbose?: boolean; timeoutMs?: number; approved?: boolean } = {},
   ): Promise<RunRecord> {
+    const approved = opts.approved ?? true
     const runId = randomUUID()
     const artifacts = new ArtifactStore(runDir(this.workspace, runId))
     const secrets = loadSecrets(this.workspace)
@@ -90,12 +91,11 @@ export class Runtime {
       }
     } catch (err) {
       await this.teardown(active, ctx)
-      const record = redactRecord(
-        failedRecord(def, inputs, params, runId, ctx.artifacts.list(), `capability setup failed: ${
-          err instanceof Error ? err.message : String(err)
-        }`),
-        secrets,
-      )
+      const failed = failedRecord(def, inputs, params, runId, ctx.artifacts.list(), `capability setup failed: ${
+        err instanceof Error ? err.message : String(err)
+      }`)
+      failed.approved = approved
+      const record = redactRecord(failed, secrets)
       await this.persist(record, ctx)
       return record
     }
@@ -108,6 +108,7 @@ export class Runtime {
         nativeHandlers: this.nativeHandlers,
         timeoutMs: opts.timeoutMs,
       }).run(def, inputs, ctx, params)
+      raw.approved = approved
       // Mask secret values before anything is persisted, printed, or returned.
       const record = redactRecord(raw, secrets)
       await this.persist(record, ctx)

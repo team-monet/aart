@@ -7,6 +7,7 @@ import { contextCommand } from './commands/context'
 import { schemaCommand } from './commands/schema'
 import { validateCommand } from './commands/validate'
 import { mcpCommand } from './commands/mcp'
+import { approveCommand, deprecateCommand, showCommand } from './commands/approve'
 import { setWorkspace } from './workspace'
 
 const program = new Command()
@@ -26,6 +27,7 @@ program
   .argument('<workflow>', 'workflow id in the registry, or a path to a .yaml file')
   .option('-i, --input <json>', 'inputs as a JSON object', '{}')
   .option('-p, --param <json>', 'params as a JSON object', '{}')
+  .option('--yes', 'approve this one run of an unapproved definition (human override)', false)
   .option('--verbose', 'print block logs', false)
   .description('run a workflow and write a structured run report')
   .action(runCommand)
@@ -55,6 +57,27 @@ program
   .argument('<file>', 'path to a draft definition (.yaml)')
   .description('validate an agent-authored draft before registering')
   .action(validateCommand)
+
+program
+  .command('show')
+  .argument('<id>', 'a registered block/workflow id')
+  .option('--version <v>', 'a specific version (default: latest)')
+  .description('print a registered definition (review it before approving)')
+  .action(showCommand)
+
+program
+  .command('approve')
+  .argument('<id>', 'a registered block/workflow id')
+  .option('--version <v>', 'a specific version (default: latest)')
+  .description('approve a definition for use (human governance gate)')
+  .action(approveCommand)
+
+program
+  .command('deprecate')
+  .argument('<id>', 'a registered block/workflow id')
+  .option('--version <v>', 'a specific version (default: latest)')
+  .description('mark a definition deprecated (no longer approved)')
+  .action(deprecateCommand)
 
 program
   .command('schema')

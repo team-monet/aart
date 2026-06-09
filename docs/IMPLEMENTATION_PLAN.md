@@ -191,10 +191,18 @@ raw `ctx.secrets` no longer handed to `node:vm` code). Residual, documented limi
 **Dogfood status: GO** — full author→validate→register→run→report loop verified live on CLI + MCP
 with real Chromium; secrets redacted; portable to macOS + WSL2.
 
-### Phase 4 — Governance: the approval gate `[ ]`
-- [ ] Human approval mechanic for agent-authored drafts (interactive `--yes`, and/or
-      a registry `draft`/`approved`/`deprecated` state)
-- [ ] `aa_register_block` requires/records approval; runs of unapproved defs are flagged
+### Phase 4 — Governance: the approval gate `[x]`
+- [x] Registry lifecycle state `draft → approved → deprecated` on the definition;
+      every registration (CLI `block add` + MCP `aa_register_block`) lands as **draft**
+- [x] Human-only `aart approve` / `aart deprecate` / `aart show` (no MCP approve tool)
+- [x] Run gate (transitive over referenced blocks; native blocks pre-trusted):
+      CLI `aart run` refuses an unapproved def unless `--yes` (one-time human override);
+      MCP `aa_run_workflow` refuses any unapproved def and all inline defs
+- [x] Run report records `approved` (a `--yes` run is flagged ⚠ UNAPPROVED); catalog
+      shows each block's `status`; guide/AGENTS document the protocol
+- **Honest scope:** a real boundary for an MCP-constrained agent + an audit trail;
+  a *shell-capable* agent can call `aart approve` itself, so it is deliberate-action
+  governance, not a hard security control. (Hardening it further ties into Phase 5.)
 
 ### Phase 5 — Block-code safety for agent-authored `node` blocks `[ ]`
 - [ ] Hardened static analyzer (port the legacy `static-analyzer` concept; use the

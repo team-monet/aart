@@ -31,8 +31,8 @@ governance gate and a real `node`-code sandbox are the next phases.
 | Capability model + native pack blocks | ✅ working |
 | QA pack — `qa.api.*`, `qa.assert.*`, `qa.browser.*` (Playwright) | ✅ working (verified incl. real Chromium) |
 | Secrets (`{{secrets.NAME}}`, redacted from reports) | ✅ working |
+| Approval gate (`draft`→`approved`, human-only) | ✅ working |
 | `node` block executor | ⚠️ temporary (`node:vm`, **not a sandbox**) |
-| Approval gate / governance | 🚧 Phase 4 |
 | Block-code static-analysis gate | 🚧 Phase 5 |
 
 ## Quick start
@@ -43,7 +43,8 @@ npm link             # makes the `aart` command available on PATH
 
 aart block add examples/blocks/echo.block.yaml
 aart block add examples/blocks/upper.block.yaml
-aart run examples/workflows/echo-smoke.workflow.yaml --input '{"start":"hello"}'
+# definitions land as `draft`; --yes runs an unapproved one once (or `aart approve`)
+aart run examples/workflows/echo-smoke.workflow.yaml --input '{"start":"hello"}' --yes
 
 npm test             # unit + engine + QA tests
 ```
@@ -69,6 +70,30 @@ npx playwright install --with-deps chromium
   `[wsl2] networkingMode=mirrored`, Win11 22H2+). Remote/staging URLs just work.
 - Keep the repo (and the Playwright browser cache) under your Linux home (`~/…`),
   not `/mnt/c/…`, to avoid slow 9p filesystem I/O.
+
+## Governance (the approval gate)
+
+"AI authors, humans govern." Every registration lands as **`draft`**; only a
+human can promote it:
+
+```bash
+aart show <id>        # review the definition
+aart approve <id>     # → approved (the only way to grant approval)
+aart deprecate <id>   # → deprecated
+```
+
+- **Agents cannot approve** — `aa_register_block` always writes `draft`, and there
+  is no MCP approve tool. An agent's `aa_run_workflow` refuses anything not
+  `approved` (and refuses inline definitions).
+- **You can override one run** with `aart run <id> --yes` (the report records it
+  as an unapproved run). Approved definitions run without `--yes`.
+- Built-in **pack blocks are trusted** (`native`); referenced blocks must be
+  approved too (the gate is transitive). Re-registering an edited definition
+  resets it to `draft`.
+- **Honest scope:** this is a real boundary for an MCP-constrained agent and an
+  audit trail for everyone. A coding agent with *shell access* can run
+  `aart approve` itself — so treat the gate as deliberate-action governance, not
+  a hard security control against a shell-capable agent.
 
 ## Workspace & secrets
 

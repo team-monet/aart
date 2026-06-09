@@ -28,6 +28,9 @@ const glyph = (s: RunStatus): string =>
 export function renderReport(record: RunRecord): string {
   const lines: string[] = []
   lines.push(`${glyph(record.status)} ${record.blockId}  [${record.status}]  run ${record.runId}`)
+  if (record.approved === false) {
+    lines.push('  ⚠ ran UNAPPROVED (one-time --yes override)')
+  }
   if (record.endedAt) {
     const ms = Date.parse(record.endedAt) - Date.parse(record.startedAt)
     lines.push(`  duration: ${ms}ms`)

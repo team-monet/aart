@@ -16,18 +16,20 @@ server's `instructions` carry the full authoring guide:
 | `aa_get_block` | inspect one definition |
 | `aa_get_schema` | the definition JSON Schema + authoring guide |
 | `aa_validate` | check a draft (schema + referenced blocks exist) |
-| `aa_register_block` | save a validated draft (**get human approval first**) |
-| `aa_run_workflow` | run by id or inline def → structured report |
+| `aa_register_block` | save a validated draft (lands as **draft** — pending human approval) |
+| `aa_run_workflow` | run an **approved** registry workflow → structured report |
 | `aa_get_report` | fetch a past run record |
 
 **CLI (equivalent):**
 ```bash
 aart context                 # guide + live catalog + schema, all in one
-aart list --json             # machine-readable catalog
+aart list --json             # machine-readable catalog (incl. approval status)
 aart schema                  # definition JSON Schema
 aart validate <file>         # validate a draft before registering
-aart block add <file>        # validate + register
-aart run <id|file> -i '{…}'  # run, prints + persists a report
+aart block add <file>        # validate + register (lands as draft)
+aart show <id>               # print a definition (review before approving)
+aart approve <id>            # human-only: approve a definition for use
+aart run <id|file> -i '{…}'  # run an approved def (--yes to override once)
 aart report <runId>          # replay a past report
 ```
 
@@ -36,9 +38,11 @@ aart report <runId>          # replay a past report
 1. **Discover** existing blocks — reuse before authoring new.
 2. **Draft** a definition that matches the schema (compose existing blocks).
 3. **Validate** — fix every error.
-4. **Get the human's approval** before registering/running anything with effects.
-5. **Register**, then **run**.
-6. **Read the report** (per-step trace, outputs, error, artifacts); revise; repeat.
+4. **Register** (`aa_register_block`) — it lands as **draft**.
+5. **Ask the human to approve** it (`aart approve <id>`). You can't run a draft,
+   and there is no approve tool for you — the human governs.
+6. **Run** (`aa_run_workflow`, once approved), then **read the report**; revise;
+   re-register (resets to draft) and repeat.
 
 ## Authoring quick reference
 

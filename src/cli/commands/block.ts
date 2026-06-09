@@ -17,6 +17,8 @@ export async function addCommand(file: string): Promise<void> {
     for (const e of result.errors) console.error(`  - ${e}`)
     process.exit(1)
   }
+  // Registration always lands as draft — only `aart approve` grants approval.
+  result.block.approval = 'draft'
   try {
     runtime.registry.registerBlock(result.block)
   } catch (err) {
@@ -24,7 +26,8 @@ export async function addCommand(file: string): Promise<void> {
     process.exit(1)
   }
   const kind = result.block.execution.type === 'workflow' ? 'workflow' : 'block'
-  console.log(`registered ${kind} ${result.block.id}@${result.block.version} (${result.block.name})`)
+  console.log(`registered ${kind} ${result.block.id}@${result.block.version} (${result.block.name}) [draft]`)
+  console.log(`approve it with:  aart approve ${result.block.id}`)
 }
 
 interface ListOpts {
@@ -43,6 +46,7 @@ export async function listCommand(opts: ListOpts = {}): Promise<void> {
     return
   }
   for (const b of catalog) {
-    console.log(`${b.id}@${b.version}\t[${b.type}]\t${b.name}`)
+    const tag = b.status === 'native' ? '[native]' : `[${b.type} · ${b.status}]`
+    console.log(`${b.id}@${b.version}\t${tag}\t${b.name}`)
   }
 }

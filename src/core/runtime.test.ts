@@ -65,6 +65,21 @@ describe('Runtime capability lifecycle', () => {
     expect(events).toEqual(['setup', 'run', 'teardown'])
   })
 
+  it('records the approved flag on the run record', async () => {
+    const nodeWf: BlockDefinition = {
+      id: 'plain',
+      name: 'plain',
+      version: '0.1.0',
+      inputs: [],
+      outputs: [],
+      execution: { type: 'node', code: 'return { ok: true };' },
+    }
+    const approved = await new Runtime(dir, []).run(nodeWf, {}, undefined, { approved: true })
+    expect(approved.approved).toBe(true)
+    const unapproved = await new Runtime(dir, []).run(nodeWf, {}, undefined, { approved: false })
+    expect(unapproved.approved).toBe(false)
+  })
+
   it('does NOT set up a capability a workflow does not need', async () => {
     const events: string[] = []
     const wf: BlockDefinition = {

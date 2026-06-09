@@ -6,6 +6,7 @@ import { z } from 'zod'
 import { buildCatalog } from '../agent/catalog'
 import { definitionJsonSchema } from '../agent/schema'
 import { validateDraft } from '../agent/validate'
+import { unapprovedInTree } from '../core/approval'
 import { AUTHORING_GUIDE } from '../agent/guide'
 import { renderReport, readRun } from '../core/report'
 import { openRuntime, workspace } from '../cli/workspace'
@@ -36,6 +37,7 @@ const runViewShape = {
   runId: z.string(),
   blockId: z.string(),
   status: statusEnum,
+  approved: z.boolean().optional(),
   inputs: z.record(z.unknown()),
   params: z.record(z.unknown()).optional(),
   results: z.record(z.unknown()).optional(),
@@ -63,6 +65,7 @@ function runView(record: RunRecord) {
     runId: record.runId,
     blockId: record.blockId,
     status: record.status,
+    approved: record.approved,
     inputs: record.inputs,
     params: record.params,
     results: record.results,
@@ -75,8 +78,8 @@ function runView(record: RunRecord) {
 }
 
 export async function startMcpServer(): Promise<void> {
-  // Build the runtime once; its registry cache survives across tool calls and
-  // its packs (QA, …) are available to every run.
+  // Build the runtime once so its packs (QA, …) are available to every run;
+  // registry reads are fresh, so an out-of-band `aart approve` is seen.
   const ws = workspace()
   const runtime = openRuntime(ws)
   const registry = runtime.registry
@@ -149,6 +152,8 @@ export async function startMcpServer(): Promise<void> {
       if (!result.ok || !result.block) {
         return fail(`Refused — invalid definition:\n- ${result.errors.join('\n- ')}`)
       }
+      // Always lands as draft — only the human (`aart approve`) can approve.
+      result.block.approval = 'draft'
       try {
         registry.registerBlock(result.block)
       } catch (err) {
@@ -158,7 +163,10 @@ export async function startMcpServer(): Promise<void> {
           }`,
         )
       }
-      return text(`registered ${result.block.id}@${result.block.version}`)
+      return text(
+        `registered ${result.block.id}@${result.block.version} as DRAFT — pending human approval. ` +
+          `Ask the human to review and run: aart approve ${result.block.id}`,
+      )
     },
   )
 
@@ -191,7 +199,16 @@ export async function startMcpServer(): Promise<void> {
       } else {
         return fail('Provide either `id` or `definition`.')
       }
-      const record = await runtime.run(def, input ?? {}, params)
+      // Governance gate: an agent may only run human-approved definitions. An
+      // inline definition is never pre-trusted; a registry id's status is.
+      const pending = unapprovedInTree(def, registry, !definition)
+      if (pending.length) {
+        return fail(
+          `Refused — not approved: ${pending.join(', ')}. A human must review and run ` +
+            `\`aart approve ${pending.join(' ')}\` first (or run it once with \`aart run <id> --yes\`).`,
+        )
+      }
+      const record = await runtime.run(def, input ?? {}, params, { approved: true })
       return {
         content: [{ type: 'text' as const, text: renderReport(record) }],
         structuredContent: runView(record),
