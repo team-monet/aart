@@ -7,6 +7,7 @@ import { contextCommand } from './commands/context'
 import { schemaCommand } from './commands/schema'
 import { validateCommand } from './commands/validate'
 import { mcpCommand } from './commands/mcp'
+import { setWorkspace } from './workspace'
 
 const program = new Command()
 
@@ -14,6 +15,11 @@ program
   .name('aart')
   .description('Agentic Automation RunTime — a governed block/workflow runtime for AI agents')
   .version('0.0.1')
+  .option('-w, --workspace <dir>', 'workspace directory (default: $AART_WORKSPACE or cwd)')
+  .hook('preAction', () => {
+    const ws = program.opts().workspace
+    if (ws) setWorkspace(ws)
+  })
 
 program
   .command('run')

@@ -28,7 +28,18 @@ export const browserCapability: Capability = {
   name: 'browser',
   async setup() {
     const { chromium } = await import('playwright')
-    const browser = await chromium.launch({ headless: true })
+    let browser
+    try {
+      browser = await chromium.launch({ headless: true })
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      // The common Linux/WSL2 failure: binary downloaded but system libs missing.
+      throw new Error(
+        `failed to launch Chromium: ${msg}\n` +
+          'Install the browser and its system libraries with:\n' +
+          '  npx playwright install --with-deps chromium',
+      )
+    }
     const context = await browser.newContext()
     const page = await context.newPage()
     return { browser, context, page } as unknown as BrowserCap

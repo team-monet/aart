@@ -1,18 +1,13 @@
-# Forward-looking example (Phase 3+). References blocks from the QA pack, which
-# is not implemented yet. This is the target shape the AI workflow generator
-# (Phase 4) should produce from a request like:
-#   "log in to my local app and check the dashboard shows up"
+# Example login QA workflow composing QA-pack blocks. Credentials come from
+# secrets (AART_SECRET_EMAIL / AART_SECRET_PASSWORD or .aa/secrets.json) and are
+# redacted from the report. Run e.g.:
+#   AART_SECRET_EMAIL=me@x.com AART_SECRET_PASSWORD=hunter2 \
+#     aart run examples/qa/login-smoke.yaml --input '{"appUrl":"http://localhost:3000"}'
 id: login-smoke
 name: Login Smoke
 version: 0.1.0
 inputs:
   - name: appUrl
-    type: string
-    required: true
-  - name: email
-    type: string
-    required: true
-  - name: password
     type: string
     required: true
 execution:
@@ -26,12 +21,12 @@ execution:
       block: qa.browser.fill
       inputs:
         selector: "input[name=email]"
-        value: "{{inputs.email}}"
+        value: "{{secrets.email}}"
     - id: fill_password
       block: qa.browser.fill
       inputs:
         selector: "input[name=password]"
-        value: "{{inputs.password}}"
+        value: "{{secrets.password}}"
     - id: submit
       block: qa.browser.click
       inputs:

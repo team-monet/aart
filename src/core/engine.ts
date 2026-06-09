@@ -105,9 +105,11 @@ export class Engine {
     const stepIndex = new Map(steps.map((s, i) => [s.id, i]))
     const stepOutputs: Record<string, Record<string, unknown>> = {}
 
-    // A single ctx view, used identically for step inputs, conditions, and the
-    // output mapping, so `{{ctx.*}}` resolves the same everywhere.
+    // A single ctx view + secrets, used identically for step inputs, conditions,
+    // and the output mapping, so `{{ctx.*}}` / `{{secrets.*}}` resolve the same
+    // everywhere. Secret values are redacted from the persisted report.
     const ctxView = { runId: ctx.runId, vars: ctx.vars }
+    const secrets = ctx.secrets
 
     let current: string | null = steps[0]?.id ?? null
     let guard = 0
@@ -127,6 +129,7 @@ export class Engine {
         inputs,
         params,
         ctx: ctxView,
+        secrets,
         steps: stepOutputs,
       }
       const stepInputs = resolveInputs(step.inputs, scope)
@@ -158,11 +161,12 @@ export class Engine {
       current = this.nextStep(step, index, steps, {
         inputs,
         ctx: ctxView,
+        secrets,
         steps: stepOutputs,
       })
     }
 
-    return this.mapOutputs(block, inputs, params, ctxView, stepOutputs, record)
+    return this.mapOutputs(block, inputs, params, ctxView, secrets, stepOutputs, record)
   }
 
   /** Decide the next step id: conditional jump, explicit next, or fall through. */
@@ -186,13 +190,14 @@ export class Engine {
     inputs: Record<string, unknown>,
     params: Record<string, unknown> | undefined,
     ctxView: Record<string, unknown>,
+    secrets: Record<string, string>,
     stepOutputs: Record<string, Record<string, unknown>>,
     record: RunRecord,
   ): Record<string, unknown> {
     if (block.execution.type !== 'workflow') return {}
     const mapping = block.execution.outputMapping
     if (mapping) {
-      const scope: ResolveScope = { inputs, params, ctx: ctxView, steps: stepOutputs }
+      const scope: ResolveScope = { inputs, params, ctx: ctxView, secrets, steps: stepOutputs }
       const out: Record<string, unknown> = {}
       for (const [k, expr] of Object.entries(mapping)) {
         out[k] = resolveValue(expr, scope)

@@ -18,18 +18,19 @@ the salvage decisions behind it.
 
 ## Status
 
-Early skeleton. The **core runtime is real and runnable**; AI generation and the
-QA pack are stubbed for later phases.
+The **core runtime + agent interface + QA pack are working and tested**; the
+governance gate and a real `node`-code sandbox are the next phases.
 
 | Layer | State |
 |---|---|
 | Core types (zod), resolver, engine, report | ✅ working + tested |
 | Filesystem registry (semver, cached) | ✅ working + tested |
-| CLI (`run`, `block add/list`, `validate`, `schema`, `context`, `report`) | ✅ working |
+| CLI (`run`, `block add/list`, `validate`, `schema`, `context`, `report`, `mcp`) | ✅ working |
 | Agent interface (catalog + schema + guide + validate) | ✅ working |
 | MCP server (`aart mcp`, 7 tools) | ✅ working (verified over stdio) |
 | Capability model + native pack blocks | ✅ working |
 | QA pack — `qa.api.*`, `qa.assert.*`, `qa.browser.*` (Playwright) | ✅ working (verified incl. real Chromium) |
+| Secrets (`{{secrets.NAME}}`, redacted from reports) | ✅ working |
 | `node` block executor | ⚠️ temporary (`node:vm`, **not a sandbox**) |
 | Approval gate / governance | 🚧 Phase 4 |
 | Block-code static-analysis gate | 🚧 Phase 5 |
@@ -37,21 +38,47 @@ QA pack are stubbed for later phases.
 ## Quick start
 
 ```bash
-npm install
+npm install          # `prepare` builds dist/ automatically
+npm link             # makes the `aart` command available on PATH
 
-# register two example blocks, then run the example workflow
-npm run dev -- block add examples/blocks/echo.block.yaml
-npm run dev -- block add examples/blocks/upper.block.yaml
-npm run dev -- run examples/workflows/echo-smoke.workflow.yaml --input '{"start":"hello"}'
+aart block add examples/blocks/echo.block.yaml
+aart block add examples/blocks/upper.block.yaml
+aart run examples/workflows/echo-smoke.workflow.yaml --input '{"start":"hello"}'
 
-npm test          # run the unit + engine tests
+npm test             # unit + engine + QA tests
 ```
 
 Expected: the workflow runs `echo → upper`, prints a per-step trace, returns
 `{ "final": "HELLO" }`, and writes a report to `.aa/runs/<id>/run.json` (replay
-it with `npm run dev -- report <id>`).
+with `aart report <id>`). (No `npm link`? Use `npm run dev -- <cmd>`.)
 
-Once built (`npm run build && npm link`) the command is just `aart`.
+### Running on WSL2 / Linux
+
+The code is portable; two setup steps for the QA browser blocks:
+
+```bash
+# Chromium + its system libraries (plain `install chromium` is NOT enough on Ubuntu/WSL2)
+npx playwright install --with-deps chromium
+```
+
+- aart runs **its own headless Chromium** Linux-side — it does not use your
+  Windows Chrome, and needs no display (no WSLg required).
+- **Target URL:** an app *inside* WSL2 is reachable at `http://localhost:PORT`.
+  An app on the **Windows host** is not reachable via `localhost` under default
+  WSL2 NAT — use the host IP, or enable mirrored networking (`.wslconfig` →
+  `[wsl2] networkingMode=mirrored`, Win11 22H2+). Remote/staging URLs just work.
+- Keep the repo (and the Playwright browser cache) under your Linux home (`~/…`),
+  not `/mnt/c/…`, to avoid slow 9p filesystem I/O.
+
+## Workspace & secrets
+
+- **Workspace** — all state lives under `<workspace>/.aa`. Resolution order:
+  `--workspace <dir>` → `$AART_WORKSPACE` → cwd. **Set `AART_WORKSPACE` in your
+  MCP server config** so `.aa` always lands in your project, whatever cwd the
+  agent host uses.
+- **Secrets** — reference credentials in a workflow as `{{secrets.NAME}}`. Values
+  come from `AART_SECRET_<NAME>` env vars or `<workspace>/.aa/secrets.json`, and
+  are **redacted** from the run report. Never put a real secret in an input.
 
 ## Concepts
 
@@ -70,7 +97,7 @@ Once built (`npm run build && npm link`) the command is just `aart`.
 
 ```
 src/
-  core/        types, engine, context, resolver, report, executor, run-service
+  core/        types, engine, context, resolver, report, executor, runtime, secrets
   registry/    file-registry (YAML on disk)
   artifacts/   artifact-store (evidence)
   agent/       guide, catalog, schema, validate (the "what & how" for coding agents)

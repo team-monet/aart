@@ -1,3 +1,5 @@
+import fs from 'node:fs'
+import path from 'node:path'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod'
@@ -78,6 +80,13 @@ export async function startMcpServer(): Promise<void> {
   const ws = workspace()
   const runtime = openRuntime(ws)
   const registry = runtime.registry
+
+  // Make the resolved workspace loud on startup — a wrong cwd is the main
+  // footgun (it silently shows only native blocks and writes a stray .aa).
+  const hasRegistry = fs.existsSync(path.join(ws, '.aa', 'registry'))
+  console.error(
+    `aart MCP server — workspace: ${ws}${hasRegistry ? '' : '  (no .aa/registry here yet)'}`,
+  )
 
   const server = new McpServer(
     { name: 'aart', version: '0.0.1' },

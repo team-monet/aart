@@ -167,6 +167,21 @@ MCP registry is built once (cache survives calls). Still deferred:
 - [ ] trace/console/network artifacts (later); a real coding agent authoring a QA
       workflow via MCP is the live dogfood once an agent is pointed at `aart mcp`
 
+### Pre-dogfood hardening `[x]` (2026-06-09)
+From the dogfood-readiness audit (flow trace + WSL2 portability + capability gap):
+- [x] **Workspace override** — `--workspace` flag + `$AART_WORKSPACE` (→ cwd); `aart mcp`
+      logs the resolved workspace on startup (kills the silent wrong-cwd footgun)
+- [x] **`aart` available** — `prepare` builds `dist/` on install; clean build drops stale files
+- [x] **Secrets** — `{{secrets.NAME}}` from `AART_SECRET_*` / `.aa/secrets.json`, resolved at
+      run time and **redacted** from the report (no plaintext credentials on disk) — login is now safe
+- [x] **WSL2** — README section (`playwright install --with-deps chromium`, networking/URL
+      guidance, keep repo off `/mnt/c`); friendlier Chromium-launch error pointing at the fix
+- [ ] nice-to-have: per-step artifact metadata (`{type, stepId, path}`); headed/visible mode
+      (WSLg or CDP-connect to a Windows browser); `wait_for_url`/`selector_visible` blocks
+
+**Dogfood status: GO** — full author→validate→register→run→report loop verified live on CLI + MCP
+with real Chromium; secrets redacted; portable to macOS + WSL2.
+
 ### Phase 4 — Governance: the approval gate `[ ]`
 - [ ] Human approval mechanic for agent-authored drafts (interactive `--yes`, and/or
       a registry `draft`/`approved`/`deprecated` state)

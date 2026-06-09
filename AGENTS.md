@@ -44,8 +44,9 @@ aart report <runId>          # replay a past report
 
 - A workflow **is** a block with `execution.type: workflow` and ordered `steps`.
 - Wire data: `"{{inputs.x}}"` (string interp), `"$stepId.out"` (typed ref, nestable),
-  `"{{ctx.runId}}"`. (Secrets aren't wired into step interpolation yet — read
-  `ctx.secrets` inside `node` code only.)
+  `"{{ctx.runId}}"`, and `"{{secrets.NAME}}"` for credentials. Secrets come from
+  `AART_SECRET_<NAME>` env vars or `.aa/secrets.json` and are redacted from the
+  report — never put a real secret in an input literal.
 - Branch: a step's `if` is a **safe comparison** (`inputs.n > 3`), jumping to
   `then`/`else`; or use `next`; else steps fall through in order.
 - Reference only block ids that exist. Keep `node` code small and single-purpose.

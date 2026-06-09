@@ -38,10 +38,10 @@ you can read and iterate on.
 - \`"$stepId.outputName"\`  — reference a previous step's output (keeps its type;
   nested paths like \`$stepId.user.id\` are allowed).
 - \`"{{ctx.runId}}"\`       — interpolate runtime context (runId, vars).
-
-(Secrets are not wired into step interpolation yet — see docs/IMPLEMENTATION_PLAN.md.
-Inside a \`node\` block's code you can read \`ctx.secrets\`, but do not reference
-secrets in step \`inputs\` for now.)
+- \`"{{secrets.NAME}}"\`    — interpolate a secret (e.g. a password). Use this for
+  credentials — NEVER put a real secret in a step input literal or pass it as a
+  plain input. Secret values are sourced from \`AART_SECRET_<NAME>\` env vars or
+  \`.aa/secrets.json\`, and are automatically REDACTED from the run report.
 
 ## Control flow (per step)
 

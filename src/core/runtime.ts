@@ -4,6 +4,7 @@ import { Engine } from './engine'
 import { createContext, createLogger } from './context'
 import { ArtifactStore } from '../artifacts/artifact-store'
 import { writeRun, runDir } from './report'
+import { loadSecrets, redactRecord } from './secrets'
 import { FileRegistry, type Registry } from '../registry/file-registry'
 import { CompositeRegistry } from '../pack/composite-registry'
 import type { Capability, NativeRunFn, Pack } from '../pack/types'
@@ -68,10 +69,12 @@ export class Runtime {
   ): Promise<RunRecord> {
     const runId = randomUUID()
     const artifacts = new ArtifactStore(runDir(this.workspace, runId))
+    const secrets = loadSecrets(this.workspace)
     const ctx = createContext({
       runId,
       workspace: this.workspace,
       artifacts,
+      secrets,
       logger: createLogger(opts.verbose),
     })
 
@@ -87,9 +90,12 @@ export class Runtime {
       }
     } catch (err) {
       await this.teardown(active, ctx)
-      const record = failedRecord(def, inputs, params, runId, ctx.artifacts.list(), `capability setup failed: ${
-        err instanceof Error ? err.message : String(err)
-      }`)
+      const record = redactRecord(
+        failedRecord(def, inputs, params, runId, ctx.artifacts.list(), `capability setup failed: ${
+          err instanceof Error ? err.message : String(err)
+        }`),
+        secrets,
+      )
       await this.persist(record, ctx)
       return record
     }
@@ -98,10 +104,12 @@ export class Runtime {
     // released, even if the engine path or persistence throws.
     try {
       // Engine.run catches block failures internally and returns a FAILED record.
-      const record = await new Engine(this.registry, {
+      const raw = await new Engine(this.registry, {
         nativeHandlers: this.nativeHandlers,
         timeoutMs: opts.timeoutMs,
       }).run(def, inputs, ctx, params)
+      // Mask secret values before anything is persisted, printed, or returned.
+      const record = redactRecord(raw, secrets)
       await this.persist(record, ctx)
       return record
     } finally {

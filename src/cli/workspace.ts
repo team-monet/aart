@@ -3,9 +3,21 @@ import { FileRegistry } from '../registry/file-registry'
 import { Runtime } from '../core/runtime'
 import { builtinPacks } from '../packs'
 
-/** The current workspace is just the cwd; all state lives under `<cwd>/.aa`. */
+let override: string | undefined
+
+/** Set the workspace explicitly (from the global `--workspace` flag). */
+export function setWorkspace(dir?: string): void {
+  override = dir ? path.resolve(dir) : undefined
+}
+
+/**
+ * The workspace holds all state under `<workspace>/.aa`. Resolution order:
+ *   --workspace flag  >  $AART_WORKSPACE  >  process.cwd()
+ * Set AART_WORKSPACE in your MCP server config so `.aa` always lands in your
+ * project dir, regardless of the cwd the agent host launches the server from.
+ */
 export function workspace(): string {
-  return process.cwd()
+  return path.resolve(override ?? process.env.AART_WORKSPACE ?? process.cwd())
 }
 
 /** A Runtime with the built-in packs loaded (composite registry + capabilities). */

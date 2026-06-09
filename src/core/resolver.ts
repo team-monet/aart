@@ -16,6 +16,8 @@ export interface ResolveScope {
   inputs: Record<string, unknown>
   params?: Record<string, unknown>
   ctx?: Record<string, unknown>
+  /** Secret values, referenced as {{secrets.NAME}} (redacted from reports). */
+  secrets?: Record<string, string>
   /** stepId -> that step's output object. */
   steps: Record<string, Record<string, unknown>>
 }
@@ -49,6 +51,8 @@ function resolveRef(expr: string, scope: ResolveScope): unknown {
       return getPath(scope.params ?? {}, rest)
     case 'ctx':
       return getPath(scope.ctx ?? {}, rest)
+    case 'secrets':
+      return getPath(scope.secrets ?? {}, rest)
     case 'steps':
       return getPath(scope.steps, rest)
     default:
