@@ -179,6 +179,15 @@ From the dogfood-readiness audit (flow trace + WSL2 portability + capability gap
 - [ ] nice-to-have: per-step artifact metadata (`{type, stepId, path}`); headed/visible mode
       (WSLg or CDP-connect to a Windows browser); `wait_for_url`/`selector_visible` blocks
 
+**Secret redaction is best-effort defense-in-depth, not a hard boundary** (hardened in the
+review pass: masks verbatim + JSON/URL-encoded forms, longest-first, node-block logs redacted,
+raw `ctx.secrets` no longer handed to `node:vm` code). Residual, documented limitations:
+- artifact CONTENTS (screenshots) are not scrubbed — use the screenshot `mask` option;
+- other transforms (base64/hash/partial reflections) can still slip through.
+- [ ] future hardening: reference-aware redaction (mask exactly the values resolved from
+      `{{secrets.X}}`) so there's zero over-/under-redaction; never let raw secret values enter
+      the RunRecord. Until then, treat the run dir as low-sensitivity, not secret-free.
+
 **Dogfood status: GO** — full author→validate→register→run→report loop verified live on CLI + MCP
 with real Chromium; secrets redacted; portable to macOS + WSL2.
 

@@ -44,7 +44,8 @@ export async function runNodeBlock(
     ctx: {
       runId: ctx.runId,
       vars: ctx.vars,
-      secrets: ctx.secrets,
+      // NB: the raw secrets map is intentionally NOT exposed to node-block code.
+      // A block receives any secret it needs via resolved {{secrets.X}} inputs.
       capabilities: ctx.capabilities,
     },
     console: { log: record, error: record, warn: record, info: record },

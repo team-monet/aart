@@ -27,6 +27,15 @@ describe('loadSecrets', () => {
     process.env.AART_SECRET_TOKEN = 'envtok'
     expect(loadSecrets(dir).token).toBe('envtok')
   })
+
+  it('lowercases file keys so env overrides a differently-cased file key', () => {
+    fs.mkdirSync(path.join(dir, '.aa'), { recursive: true })
+    fs.writeFileSync(path.join(dir, '.aa', 'secrets.json'), JSON.stringify({ TOKEN: 'fileval' }))
+    process.env.AART_SECRET_TOKEN = 'envval'
+    const s = loadSecrets(dir)
+    expect(s.token).toBe('envval')
+    expect(s.TOKEN).toBeUndefined()
+  })
 })
 
 describe('redactRecord', () => {
@@ -48,6 +57,20 @@ describe('redactRecord', () => {
     expect((out.trace[0]!.inputs as Record<string, unknown>).x).toBe('pre *** post')
     // short secrets (< 4 chars) are not redacted, to avoid mangling text
     expect((out.results as Record<string, unknown>).keep).toBe('ab')
+  })
+
+  it('masks a longer secret fully even when a shorter secret is its prefix', () => {
+    const rec = { results: { x: 'token is abcdef here' } } as unknown as RunRecord
+    const out = redactRecord(rec, { a: 'abcd', b: 'abcdef' })
+    expect((out.results as Record<string, unknown>).x).toBe('token is *** here')
+  })
+
+  it('masks the JSON-escaped form of a secret (e.g. reflected in an api body)', () => {
+    const secret = 'a"b\\c-secret'
+    const escaped = JSON.stringify(secret).slice(1, -1) // a\"b\\c-secret
+    const rec = { results: { body: `{"echo":"${escaped}"}` } } as unknown as RunRecord
+    const out = redactRecord(rec, { p: secret })
+    expect(JSON.stringify(out)).not.toContain(escaped)
   })
 })
 

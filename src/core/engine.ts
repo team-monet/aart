@@ -1,5 +1,6 @@
 import { resolveInputs, resolveValue, evalCondition, type ResolveScope } from './resolver'
 import { runNodeBlock } from './executor'
+import { secretValues, redactText } from './secrets'
 import type { ExecutionContext } from './context'
 import type { Registry } from '../registry/file-registry'
 import type { NativeRunFn } from '../pack/types'
@@ -87,7 +88,9 @@ export class Engine {
       const res = await runNodeBlock(block.execution.code, inputs, ctx, {
         timeoutMs: this.opts.timeoutMs,
       })
-      for (const line of res.logs) ctx.logger.debug(`[${block.id}] ${line}`)
+      // Mask secrets that a block may have printed before logging to stderr.
+      const sv = res.logs.length ? secretValues(ctx.secrets) : []
+      for (const line of res.logs) ctx.logger.debug(`[${block.id}] ${redactText(line, sv)}`)
       return res.output
     }
 

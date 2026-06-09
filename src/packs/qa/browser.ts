@@ -18,7 +18,8 @@ interface BrowserPage {
   url: () => string
   click: (selector: string) => Promise<void>
   fill: (selector: string, value: string) => Promise<void>
-  screenshot: () => Promise<Buffer>
+  locator: (selector: string) => unknown
+  screenshot: (opts?: { mask?: unknown[] }) => Promise<Buffer>
   getByText: (text: string) => {
     first: () => { waitFor: (o: { state: string; timeout: number }) => Promise<void> }
   }
@@ -138,13 +139,22 @@ export const browserScreenshot = nativeBlock(
     id: 'qa.browser.screenshot',
     name: 'Browser: Screenshot',
     version: '0.1.0',
-    description: 'Capture a screenshot and attach it to the run as an artifact.',
+    description:
+      'Capture a screenshot and attach it as an artifact. Pass `mask` (a list of ' +
+      'selectors) to black out secret-bearing fields — artifact contents are NOT redacted.',
     capabilities: ['browser'],
-    inputs: [{ name: 'name', type: 'string', required: true }],
+    inputs: [
+      { name: 'name', type: 'string', required: true },
+      { name: 'mask', type: 'array' },
+    ],
     outputs: [{ name: 'artifact', type: 'string' }],
   },
   async (ctx, inputs) => {
-    const buf = await page(ctx).screenshot()
+    const p = page(ctx)
+    const mask = Array.isArray(inputs.mask)
+      ? inputs.mask.map((s) => p.locator(String(s)))
+      : undefined
+    const buf = await p.screenshot(mask ? { mask } : undefined)
     const file = ctx.artifacts.attach(`${inputs.name}.png`, buf)
     return { artifact: file }
   },

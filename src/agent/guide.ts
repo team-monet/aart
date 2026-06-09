@@ -41,7 +41,10 @@ you can read and iterate on.
 - \`"{{secrets.NAME}}"\`    — interpolate a secret (e.g. a password). Use this for
   credentials — NEVER put a real secret in a step input literal or pass it as a
   plain input. Secret values are sourced from \`AART_SECRET_<NAME>\` env vars or
-  \`.aa/secrets.json\`, and are automatically REDACTED from the run report.
+  \`.aa/secrets.json\`, and are best-effort REDACTED from the run report. Caveat:
+  screenshot/artifact CONTENTS are not redacted — when screenshotting a page where
+  a secret was typed into a visible field, pass the screenshot block's \`mask\`
+  (a list of selectors) to black those fields out.
 
 ## Control flow (per step)
 

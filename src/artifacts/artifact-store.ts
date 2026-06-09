@@ -3,8 +3,12 @@ import path from 'node:path'
 
 /**
  * Where evidence lives. The core only knows about an opaque artifact store;
- * each pack decides what artifacts mean (the QA pack will write screenshots,
- * traces, HAR, console logs here). Files land under `.aa/runs/<runId>/artifacts/`.
+ * each pack decides what artifacts mean (the QA pack writes screenshots here).
+ * Files land under `.aa/runs/<runId>/artifacts/`.
+ *
+ * NOTE: artifact CONTENTS are written verbatim and are NOT passed through secret
+ * redaction — a screenshot of a secret typed into a visible field will contain
+ * it in cleartext. Use the screenshot block's `mask` option for such fields.
  */
 export class ArtifactStore {
   private dir: string

@@ -78,7 +78,10 @@ npx playwright install --with-deps chromium
   agent host uses.
 - **Secrets** — reference credentials in a workflow as `{{secrets.NAME}}`. Values
   come from `AART_SECRET_<NAME>` env vars or `<workspace>/.aa/secrets.json`, and
-  are **redacted** from the run report. Never put a real secret in an input.
+  are best-effort **redacted** from the run report (verbatim + JSON/URL-encoded
+  forms). Never put a real secret in an input. Caveat: artifact *contents* (e.g.
+  screenshots) are **not** scrubbed — mask secret fields via the screenshot
+  block's `mask` option. Treat the run dir as low-sensitivity, not secret-free.
 
 ## Concepts
 
