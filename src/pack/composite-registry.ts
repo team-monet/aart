@@ -15,12 +15,22 @@ export class CompositeRegistry implements Registry {
     private file: Registry,
     nativeBlocks: NativeBlock[] = [],
   ) {
-    for (const b of nativeBlocks) this.native.set(b.def.id, b)
+    for (const b of nativeBlocks) {
+      if (this.native.has(b.def.id)) {
+        throw new Error(`Duplicate native block id across packs: ${b.def.id}`)
+      }
+      this.native.set(b.def.id, b)
+    }
   }
 
   getBlock(id: string, version?: string): BlockDefinition | undefined {
     const n = this.native.get(id)
-    if (n) return n.def
+    // Honor a version pin: a pin that doesn't match the native block falls
+    // through to the file registry (and ultimately resolves to undefined),
+    // matching FileRegistry semantics so bad pins are rejected at validation.
+    if (n && (version === undefined || version === 'latest' || version === n.def.version)) {
+      return n.def
+    }
     return this.file.getBlock(id, version)
   }
 

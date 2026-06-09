@@ -111,11 +111,12 @@ export const browserTextVisible = nativeBlock(
     outputs: [{ name: 'visible', type: 'boolean' }],
   },
   async (ctx, inputs) => {
+    const text = String(inputs.text)
     const timeout = typeof inputs.timeoutMs === 'number' ? inputs.timeoutMs : 5000
     try {
-      await page(ctx).getByText(String(inputs.text)).first().waitFor({ state: 'visible', timeout })
+      await page(ctx).getByText(text).first().waitFor({ state: 'visible', timeout })
     } catch {
-      throw new Error(`Text not visible: ${inputs.text}`)
+      throw new Error(`Text not visible: ${text}`)
     }
     return { visible: true }
   },

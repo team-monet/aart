@@ -1,4 +1,14 @@
+import { isDeepStrictEqual } from 'node:util'
 import { nativeBlock } from '../../pack/types'
+
+/** Stringify for error messages without throwing on circular/odd values. */
+function show(v: unknown): string {
+  try {
+    return JSON.stringify(v) ?? String(v)
+  } catch {
+    return String(v)
+  }
+}
 
 export const assertEquals = nativeBlock(
   {
@@ -14,11 +24,11 @@ export const assertEquals = nativeBlock(
   },
   async (_ctx, inputs) => {
     const { actual, expected } = inputs
-    const equal = actual === expected || JSON.stringify(actual) === JSON.stringify(expected)
+    // Deep, order-insensitive equality. Handles NaN, undefined-vs-missing, and
+    // circular refs correctly (a JSON.stringify compare did not).
+    const equal = actual === expected || isDeepStrictEqual(actual, expected)
     if (!equal) {
-      throw new Error(
-        `Assertion failed: expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`,
-      )
+      throw new Error(`Assertion failed: expected ${show(expected)}, got ${show(actual)}`)
     }
     return { ok: true }
   },
@@ -45,9 +55,7 @@ export const assertContains = nativeBlock(
           ? value.includes(item)
           : false
     if (!ok) {
-      throw new Error(
-        `Assertion failed: ${JSON.stringify(value)} does not contain ${JSON.stringify(item)}`,
-      )
+      throw new Error(`Assertion failed: ${show(value)} does not contain ${show(item)}`)
     }
     return { ok: true }
   },

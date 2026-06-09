@@ -74,6 +74,15 @@ export class Engine {
     record: RunRecord,
     params?: Record<string, unknown>,
   ): Promise<Record<string, unknown>> {
+    // Enforce declared required inputs at the engine boundary, for every block
+    // type, so an omitted input fails fast with a precise message instead of
+    // surfacing as a downstream artifact (e.g. fetching "undefined").
+    for (const field of block.inputs) {
+      if (field.required && inputs[field.name] === undefined) {
+        throw new Error(`Missing required input "${field.name}" for block ${block.id}`)
+      }
+    }
+
     if (block.execution.type === 'node') {
       const res = await runNodeBlock(block.execution.code, inputs, ctx, {
         timeoutMs: this.opts.timeoutMs,

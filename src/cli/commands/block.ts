@@ -17,7 +17,12 @@ export async function addCommand(file: string): Promise<void> {
     for (const e of result.errors) console.error(`  - ${e}`)
     process.exit(1)
   }
-  runtime.registry.registerBlock(result.block)
+  try {
+    runtime.registry.registerBlock(result.block)
+  } catch (err) {
+    console.error(`✗ refused — ${err instanceof Error ? err.message : String(err)}`)
+    process.exit(1)
+  }
   const kind = result.block.execution.type === 'workflow' ? 'workflow' : 'block'
   console.log(`registered ${kind} ${result.block.id}@${result.block.version} (${result.block.name})`)
 }

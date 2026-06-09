@@ -51,9 +51,13 @@ export class Runtime {
       packs.flatMap((p) => p.blocks),
     )
     this.nativeHandlers = this.registry.nativeHandlers()
-    this.capabilities = new Map(
-      packs.flatMap((p) => p.capabilities).map((c) => [c.name, c]),
-    )
+    this.capabilities = new Map()
+    for (const c of packs.flatMap((p) => p.capabilities)) {
+      if (this.capabilities.has(c.name)) {
+        throw new Error(`Duplicate capability name across packs: ${c.name}`)
+      }
+      this.capabilities.set(c.name, c)
+    }
   }
 
   async run(
@@ -86,19 +90,34 @@ export class Runtime {
       const record = failedRecord(def, inputs, params, runId, ctx.artifacts.list(), `capability setup failed: ${
         err instanceof Error ? err.message : String(err)
       }`)
-      await writeRun(this.workspace, record)
+      await this.persist(record, ctx)
       return record
     }
 
-    // Engine.run catches block failures internally and returns a FAILED record.
-    const record = await new Engine(this.registry, {
-      nativeHandlers: this.nativeHandlers,
-      timeoutMs: opts.timeoutMs,
-    }).run(def, inputs, ctx, params)
+    // teardown in finally so a capability (e.g. a Chromium process) is always
+    // released, even if the engine path or persistence throws.
+    try {
+      // Engine.run catches block failures internally and returns a FAILED record.
+      const record = await new Engine(this.registry, {
+        nativeHandlers: this.nativeHandlers,
+        timeoutMs: opts.timeoutMs,
+      }).run(def, inputs, ctx, params)
+      await this.persist(record, ctx)
+      return record
+    } finally {
+      await this.teardown(active, ctx)
+    }
+  }
 
-    await this.teardown(active, ctx)
-    await writeRun(this.workspace, record)
-    return record
+  /** Persist the run record; a disk fault must not lose the in-memory evidence. */
+  private async persist(record: RunRecord, ctx: { logger: { warn: (m: string) => void } }): Promise<void> {
+    try {
+      await writeRun(this.workspace, record)
+    } catch (err) {
+      ctx.logger.warn(
+        `failed to persist run ${record.runId}: ${err instanceof Error ? err.message : String(err)}`,
+      )
+    }
   }
 
   private async teardown(active: Capability[], ctx: Parameters<Capability['teardown']>[1]): Promise<void> {

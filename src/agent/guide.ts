@@ -19,12 +19,18 @@ you can read and iterate on.
 
 ## The model
 
-- A **block** is the minimal unit of work. Its \`execution.type\` is either:
+- A **block** is the minimal unit of work. Its \`execution.type\` is one of:
   - \`node\` — JavaScript with a \`code\` body that may reference \`inputs\` and
-    \`ctx\` and \`return\`s an object matching its declared \`outputs\`; or
-  - \`workflow\` — an ordered list of \`steps\`, each invoking another block.
+    \`ctx\` and \`return\`s an object matching its declared \`outputs\`;
+  - \`workflow\` — an ordered list of \`steps\`, each invoking another block;
+  - \`native\` — a trusted primitive shipped by a pack (e.g. \`qa.api.request\`,
+    \`qa.browser.*\`). You compose these as steps but never author or re-register
+    them — they show up in the catalog / \`aart list\` tagged \`[native]\`, and
+    registering a block id that already exists as native is refused.
 - A **workflow IS a block** whose \`execution.type === 'workflow'\`. Same schema,
   same registry. Compose existing blocks; do not re-author primitives.
+- Some blocks declare \`capabilities\` (e.g. \`browser\`); the runtime sets those
+  up automatically for the run — you don't manage them.
 
 ## Wiring data between steps
 

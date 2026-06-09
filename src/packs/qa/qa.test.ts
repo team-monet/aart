@@ -30,6 +30,22 @@ describe('qa.assert', () => {
     expect(await assertContains.run(ctx, { value: [1, 2, 3], item: 2 })).toEqual({ ok: true })
     await expect(assertContains.run(ctx, { value: 'abc', item: 'z' })).rejects.toThrow(/does not contain/)
   })
+
+  it('equals is deep & order-insensitive (not stringify-based)', async () => {
+    // object key order should NOT matter
+    expect(await assertEquals.run(ctx, { actual: { a: 1, b: 2 }, expected: { b: 2, a: 1 } })).toEqual({ ok: true })
+    // NaN equals NaN; NaN must NOT equal null
+    expect(await assertEquals.run(ctx, { actual: NaN, expected: NaN })).toEqual({ ok: true })
+    await expect(assertEquals.run(ctx, { actual: NaN, expected: null })).rejects.toThrow(/Assertion failed/)
+    // {a:1, b:undefined} must NOT equal {a:1}
+    await expect(
+      assertEquals.run(ctx, { actual: { a: 1, b: undefined }, expected: { a: 1 } }),
+    ).rejects.toThrow(/Assertion failed/)
+    // circular input must not crash the comparison
+    const circular: Record<string, unknown> = {}
+    circular.self = circular
+    await expect(assertEquals.run(ctx, { actual: circular, expected: { other: 1 } })).rejects.toThrow(/Assertion failed/)
+  })
 })
 
 describe('qa.api + Runtime (native execution end to end)', () => {

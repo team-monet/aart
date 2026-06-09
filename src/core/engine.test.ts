@@ -98,6 +98,26 @@ describe('Engine', () => {
     expect(rec.trace[0]!.outputs).toEqual({ value: 'test-run' })
   })
 
+  it('fails fast when a required input is missing', async () => {
+    const needsInput: BlockDefinition = {
+      id: 'needs-input',
+      name: 'Needs Input',
+      version: '0.1.0',
+      inputs: [{ name: 'value', type: 'string', required: true }],
+      outputs: [],
+      execution: { type: 'node', code: 'return { value: inputs.value };' },
+    }
+    registry.registerBlock(needsInput)
+    const wf: BlockDefinition = {
+      ...workflow,
+      id: 'missing-input-wf',
+      execution: { type: 'workflow', steps: [{ id: 's', block: 'needs-input', inputs: {} }] },
+    }
+    const rec = await run(wf, {})
+    expect(rec.status).toBe('FAILED')
+    expect(rec.error).toMatch(/Missing required input "value"/)
+  })
+
   it('marks the run FAILED and records the failing step on error', async () => {
     const boom: BlockDefinition = {
       ...upper,

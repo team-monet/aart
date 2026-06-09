@@ -14,13 +14,18 @@ export class ArtifactStore {
     this.dir = path.join(runDirectory, 'artifacts')
   }
 
-  /** Persist a named artifact and return its path. */
+  /** Persist a named artifact and return its path. `name` is untrusted authoring
+   *  data, so it is reduced to a basename and confined to the store directory. */
   attach(name: string, data: Buffer | string): string {
     fs.mkdirSync(this.dir, { recursive: true })
-    const file = path.join(this.dir, name)
-    fs.writeFileSync(file, data)
-    this.items.push(file)
-    return file
+    const safe = path.basename(name)
+    const target = path.resolve(this.dir, safe)
+    if (!safe || !target.startsWith(path.resolve(this.dir) + path.sep)) {
+      throw new Error(`unsafe artifact name: ${name}`)
+    }
+    fs.writeFileSync(target, data)
+    this.items.push(target)
+    return target
   }
 
   list(): string[] {
