@@ -1,11 +1,8 @@
 import fs from 'node:fs'
 import path from 'node:path'
-import { randomUUID } from 'node:crypto'
 import YAML from 'yaml'
-import { Engine } from '../../core/engine'
-import { createContext, createLogger } from '../../core/context'
-import { ArtifactStore } from '../../artifacts/artifact-store'
-import { writeRun, renderReport, runDir } from '../../core/report'
+import { runDefinition } from '../../core/run-service'
+import { renderReport } from '../../core/report'
 import { BlockDefinitionSchema, type BlockDefinition } from '../../core/types'
 import { openRegistry, workspace } from '../workspace'
 
@@ -41,21 +38,12 @@ export async function runCommand(workflowRef: string, opts: RunOpts): Promise<vo
   const inputs = parseJson(opts.input, '--input')
   const params = parseJson(opts.param, '--param')
 
-  const runId = randomUUID()
-  const artifacts = new ArtifactStore(runDir(ws, runId))
-  const ctx = createContext({
-    runId,
-    workspace: ws,
-    artifacts,
-    logger: createLogger(opts.verbose),
+  const record = await runDefinition(ws, registry, wf, inputs, params, {
+    verbose: opts.verbose,
   })
 
-  const engine = new Engine(registry)
-  const record = await engine.run(wf, inputs, ctx, params)
-  await writeRun(ws, record)
-
   console.log(renderReport(record))
-  console.log(`\nreport: ${path.join('.aa', 'runs', runId, 'run.json')}`)
+  console.log(`\nreport: ${path.join('.aa', 'runs', record.runId, 'run.json')}`)
   if (record.status === 'FAILED') process.exit(1)
 }
 

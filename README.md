@@ -6,6 +6,12 @@
 A governed **block/workflow runtime for AI agents**. The core is generic; QA is
 the first pluggable pack (the dogfood wedge). CLI first, MCP second, no web UI.
 
+**Generation is done by the calling coding agent — aart never calls an LLM.**
+Your agent (Claude Code, Codex, …) authors blocks/workflows; aart makes it aware
+of what exists and how to author (`aart context` / the MCP server), validates the
+draft, runs it deterministically, and returns a structured report to iterate on.
+See [AGENTS.md](AGENTS.md).
+
 This is the ground-up rebuild of the legacy `../aa` prototype. See
 [docs/IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION_PLAN.md) for the full plan and
 the salvage decisions behind it.
@@ -19,11 +25,13 @@ QA pack are stubbed for later phases.
 |---|---|
 | Core types (zod), resolver, engine, report | ✅ working + tested |
 | Filesystem registry (semver, cached) | ✅ working + tested |
-| CLI (`run`, `block add/list`, `report`) | ✅ working |
+| CLI (`run`, `block add/list`, `validate`, `schema`, `context`, `report`) | ✅ working |
+| Agent interface (catalog + schema + guide + validate) | ✅ working |
+| MCP server (`aart mcp`, 7 tools) | ✅ working (verified over stdio) |
 | In-process executor | ⚠️ temporary (`node:vm`, **not a sandbox**) |
-| AI generation (`generate`) | 🚧 stub — Phase 4–5 |
-| QA pack (Playwright) | 🚧 stub — Phase 3 |
-| MCP server | 🚧 — Phase 6 |
+| Approval gate / governance | 🚧 Phase 4 |
+| QA pack (Playwright) | 🚧 Phase 3 |
+| Block-code static-analysis gate | 🚧 Phase 5 |
 
 ## Quick start
 
@@ -61,11 +69,18 @@ Once built (`npm run build && npm link`) the command is just `aart`.
 
 ```
 src/
-  core/        types, engine, context, resolver, report, executor
+  core/        types, engine, context, resolver, report, executor, run-service
   registry/    file-registry (YAML on disk)
   artifacts/   artifact-store (evidence)
+  agent/       guide, catalog, schema, validate (the "what & how" for coding agents)
+  mcp/         stdio MCP server (the agent-callable interface)
   cli/         commander entrypoint + commands
-  ai/          prompts, validators, generators (stubs)
   packs/qa/    QA pack (stub)
 examples/      runnable example blocks + workflows
 ```
+
+## Connecting a coding agent
+
+Point your agent's MCP config at `aart mcp` (run in the project dir). On connect
+it receives the authoring guide as `instructions` and the 7 `aa_*` tools. Or just
+run `aart context` and paste. See [AGENTS.md](AGENTS.md).

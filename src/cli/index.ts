@@ -3,7 +3,10 @@ import { Command } from 'commander'
 import { runCommand } from './commands/run'
 import { addCommand, listCommand } from './commands/block'
 import { reportCommand } from './commands/report'
-import { generateCommand } from './commands/generate'
+import { contextCommand } from './commands/context'
+import { schemaCommand } from './commands/schema'
+import { validateCommand } from './commands/validate'
+import { mcpCommand } from './commands/mcp'
 
 const program = new Command()
 
@@ -27,17 +30,35 @@ const block = program
 block
   .command('add')
   .argument('<file>', 'path to a block/workflow definition (.yaml)')
-  .description('register a definition into the local registry')
+  .description('validate and register a definition into the local registry')
   .action(addCommand)
 block
   .command('list')
+  .option('--json', 'machine-readable catalog', false)
   .description('list registered blocks & workflows')
   .action(listCommand)
 
 program
   .command('list')
+  .option('--json', 'machine-readable catalog', false)
   .description('alias of `block list`')
   .action(listCommand)
+
+program
+  .command('validate')
+  .argument('<file>', 'path to a draft definition (.yaml)')
+  .description('validate an agent-authored draft before registering')
+  .action(validateCommand)
+
+program
+  .command('schema')
+  .description('print the JSON Schema for a block/workflow definition')
+  .action(schemaCommand)
+
+program
+  .command('context')
+  .description('print everything a coding agent needs to author here (guide + catalog + schema)')
+  .action(contextCommand)
 
 program
   .command('report')
@@ -46,10 +67,9 @@ program
   .action(reportCommand)
 
 program
-  .command('generate')
-  .argument('[prompt...]', 'natural-language description of the workflow you want')
-  .description('AI-generate a workflow from natural language (Phase 4 — not yet implemented)')
-  .action(generateCommand)
+  .command('mcp')
+  .description('start the MCP server (stdio) so a coding agent can drive aart')
+  .action(mcpCommand)
 
 program.parseAsync().catch((err) => {
   console.error(err instanceof Error ? err.message : String(err))

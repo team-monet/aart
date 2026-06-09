@@ -19,10 +19,33 @@ Legend: `[ ]` proposed · `[/]` in progress · `[x]` done
 
 - Core is a **generic** automation runtime. **QA is the first pack**, not the core.
 - **CLI first, MCP second.** No web UI in the MVP.
-- **AI generation from day 1** — but AI produces *artifacts*; the runtime executes
-  *deterministically*. The two never mix.
+- **Generation is done by the calling CODING AGENT** (Claude Code, Codex,
+  OpenCode, …), **not by an embedded LLM.** aart never calls Ollama/OpenAI. The
+  agent is the author; aart makes it *aware of what & how* (catalog + schema +
+  guide), validates its drafts, governs approval, executes deterministically,
+  and returns a structured report the agent iterates on.
 - **Human approval is a first-class gate**, not an afterthought.
 - Filesystem state under `.aa/` — **no database**.
+
+### The generation model (important correction, 2026-06-09)
+
+The original report imagined `aart generate` calling a local LLM. That is **out**.
+Instead the loop is:
+
+```
+coding agent  → discovers blocks (aart blocks / aa_list_blocks)
+              → learns how to author (aart context / aa_get_schema + instructions)
+              → drafts a workflow/block (the agent IS the LLM)
+aart          → validates the draft (aa_validate)
+human         → approves
+aart          → registers (aa_register_block), runs deterministically (aa_run_workflow)
+              → returns the structured evidence report
+coding agent  → reads the report, revises, repeats
+```
+
+aart's surface for this: an **MCP server** (`aart mcp`) and equivalent **CLI
+affordances** (`blocks --json`, `schema`, `validate`, `context`). No LLM provider
+abstraction is needed anywhere.
 
 **Explicitly avoid** (these are what the legacy code became): building a UI first,
 a QA-only engine, hand-authored workflows, AI improvising execution each run,
@@ -45,6 +68,7 @@ untrusted code running in-process, an always-on server/daemon.
 | 9 | Trace | an **ordered array** with seq indices (not the legacy id-keyed Record) |
 | 10 | Conditions | a **safe comparator**, never `new Function`/`eval` |
 | 11 | Ids | `crypto.randomUUID()` (not legacy `shortid`) |
+| 12 | Generation | **done by the calling coding agent**, not an embedded LLM. aart exposes catalog/schema/guide + validate/run/report via CLI + MCP. No Ollama. |
 
 ---
 
@@ -54,10 +78,9 @@ untrusted code running in-process, an always-on server/daemon.
 |---|---|---|
 | **Sandbox tier** for `node` blocks | Phase 5 (block code gen) | `isolated-vm` vs restricted runtime vs Docker-optional. Today: `node:vm`, explicitly **not** a security boundary. This is the critical fork — the executor interface depends on it. |
 | **Determinism / dependency pinning** | Phase 3+ | Legacy did runtime `npm install` with `*` versions (non-deterministic + RCE). Decide: lockfile per block? prebuilt envs? vendored deps? |
-| **LLM provider + structured output** | Phase 4 | Real provider abstraction (legacy was hardwired Ollama-via-OpenAI-SDK). Native structured outputs vs a zod-repair loop. |
 | **Capability / Policy model scope** | Phase 3 | Minimal capability-gating that lets the QA pack run safely without stalling the dogfood. The whole *govern* pillar is greenfield. |
-| **Static-analyzer: harden vs replace** | Phase 5 | Legacy one is single-pass (false-positives on hoisted code) and was never called. Move to `ts.createProgram` + type checker, or replace. |
-| **Approval state model** | Phase 4 | Add `draft`/`approved`/`deprecated` to the registry now, or later? |
+| **Static-analyzer: harden vs replace** | Phase 5 | Legacy one is single-pass (false-positives on hoisted code) and was never called. Move to `ts.createProgram` + type checker, or replace. The coding agent authors the code, but aart must still vet it before it runs. |
+| **Approval gate mechanics** | Phase 4 | How does the human approve an agent's draft — a CLI `--yes`/interactive prompt, a registry `draft`/`approved` state, or both? `aa_register_block` currently registers on validate. |
 
 ---
 
@@ -70,9 +93,9 @@ untrusted code running in-process, an always-on server/daemon.
 | Snapshot + per-step trace = evidence report | `engine.ts`, `ExecutionResult` | port concept | `core/report.ts` + `types.ts` ✅ |
 | Filesystem YAML registry + versioning | `registry.ts` | reuse code (fix semver, add cache) | `registry/file-registry.ts` ✅ |
 | Block executor contract + `inputs/outputs.json` ABI | `executors/` | port concept (drop in-process dev path) | `core/executor.ts` (temp) |
-| AI plan→generate + JSON contracts | `llm-client.ts` | port concept (zod + retry, provider layer) | `ai/generators.ts`, `ai/prompts.ts` |
-| Static-analysis guardrail | `static-analyzer.ts` | port concept (harden; actually gate writes) | `ai/validators.ts` |
-| Builder FSM + approval gates | `chat-service.ts`, web `GlobalChat` | port concept (→ CLI y/N, MCP results) | `cli/commands/generate.ts` |
+| AI plan→generate + JSON contracts | `llm-client.ts` | **drop the embedded LLM** — the coding agent authors. Keep the JSON contracts as the agent's schema/guide. | `agent/guide.ts`, `agent/schema.ts` |
+| Static-analysis guardrail | `static-analyzer.ts` | port concept (harden; actually gate writes) | `agent/validate.ts` |
+| Builder FSM + approval gates | `chat-service.ts`, web `GlobalChat` | port concept (→ the agent loop + a human approval gate) | `agent/guide.ts`, MCP tools |
 | Triggers (cron/file-watch) | `trigger-engine.ts` | reference only (post-MVP) | — |
 | Docker compiler / omni-container | `compiler.ts`, `worker.ts` | reference only | — |
 | SQLite persistence | `db.ts` | **drop** | `.aa/runs/*.json` |
@@ -104,28 +127,34 @@ untrusted code running in-process, an always-on server/daemon.
 - [x] `artifacts/artifact-store.ts` under `.aa/runs/<id>/artifacts/`
 - [ ] artifact metadata in the run record (type, step, path) as first-class evidence
 
-### Phase 3 — QA pack `[ ]`
+### Phase 2.5 — Agent-author interface `[x]` (brought forward)
+The agent-callable surface that makes a coding agent "aware of what & how".
+- [x] `agent/guide.ts` — the authoring guide (single source; reused by CLI, MCP, docs)
+- [x] `agent/catalog.ts` — machine-readable block catalog from the registry
+- [x] `agent/schema.ts` — JSON Schema for a definition (via zod-to-json-schema)
+- [x] `agent/validate.ts` — schema + workflow-ref validation (the registration gate)
+- [x] CLI: `blocks --json`, `schema`, `validate`, `context`; `block add` validates before saving
+- [x] **MCP server** (`aart mcp`): `aa_list_blocks`, `aa_get_block`, `aa_get_schema`,
+      `aa_validate`, `aa_register_block`, `aa_run_workflow`, `aa_get_report`;
+      `instructions` = the authoring guide. Verified over stdio JSON-RPC.
+
+### Phase 3 — QA pack `[ ]` (next)
 - [ ] Capability model: packs register capabilities into `ctx.capabilities`
 - [ ] Playwright `browser` capability lifecycle (launch/teardown per run)
 - [ ] Primitive blocks: `qa.browser.goto/click/fill/text_visible/screenshot`, `qa.api.request`, `qa.assert.equals/contains`
 - [ ] QA artifacts (screenshot/trace/console/network) wired to the artifact store
-- [ ] First dogfood workflow runs green end to end
+- [ ] First dogfood workflow runs green end to end (a real coding agent authors it via MCP)
 
-### Phase 4 — AI workflow generation (L1) `[ ]`
-- [ ] `ai/provider.ts` — real provider abstraction (OpenAI / local Ollama / …)
-- [ ] `generateWorkflow(request)` — list blocks → draft → **zod-validate + repair loop**
-- [ ] `aart generate` — preview the plan, require explicit approval, then register + run
-- [ ] reject workflows referencing unknown blocks at generation time (legacy failed at run time)
+### Phase 4 — Governance: the approval gate `[ ]`
+- [ ] Human approval mechanic for agent-authored drafts (interactive `--yes`, and/or
+      a registry `draft`/`approved`/`deprecated` state)
+- [ ] `aa_register_block` requires/records approval; runs of unapproved defs are flagged
 
-### Phase 5 — AI block generation (L2/L3) `[ ]`
-- [ ] `generateBlockSpec` (L2) — spec only, human-confirmed
-- [ ] `generateBlockCode` (L3) — code draft **gated by a hardened static analyzer**
-- [ ] real sandbox tier replaces `node:vm` (see open decision)
-- [ ] approval state in the registry (`draft`/`approved`/`deprecated`)
-
-### Phase 6 — MCP `[ ]`
-- [ ] MCP server exposing `aa.list_blocks`, `aa.generate_workflow`, `aa.run_workflow`, `aa.get_report`, `aa.propose_block`
-- [ ] coding agents call the runtime and receive structured reports
+### Phase 5 — Block-code safety for agent-authored `node` blocks `[ ]`
+- [ ] Hardened static analyzer (port the legacy `static-analyzer` concept; use the
+      TS type checker) that **gates** registration of `node` blocks
+- [ ] real sandbox tier replaces `node:vm` (see open decision) before any
+      agent-authored code runs unattended
 
 ---
 
