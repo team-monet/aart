@@ -13,38 +13,41 @@ docs (`docs/`) are **not** published. Verify any time with:
 npm pack --dry-run
 ```
 
-## Before the first publish — decide three things
+## Settled
 
-1. **Name.** `aart` may be taken on npm. If so, scope it: set `"name":
-   "@yourname/aart"` (the `publishConfig.access: "public"` is already set so a
-   scoped package publishes publicly).
-2. **License.** Currently `"UNLICENSED"` (proprietary). For a public package set
-   a real license (e.g. `"MIT"`) or keep it private (see below).
-3. **Public vs private.** Public npm = anyone can `npx aart`. For private
-   distribution instead, see the bottom of this doc.
+- **Name:** `@team-monet/aart` (the `aart` bin/command is unchanged; only the npm
+  package id is scoped). `@team-monet/aart` is free on npm.
+- **License:** Apache-2.0 (`LICENSE` file at the repo root; `license` in
+  package.json). Public.
+- `publishConfig.access: "public"` is set, so the scoped package publishes
+  publicly (scoped packages default to restricted otherwise).
 
 ## Publish
 
+Run by a member of the **@team-monet** npm org with publish rights:
+
 ```bash
-npm login                 # once, with the account that owns the name
-npm version patch|minor   # bump (or edit "version" by hand)
+npm login                 # authenticate (an account in the @team-monet org)
 npm publish               # prepublishOnly runs typecheck+tests; prepare builds dist
+# later releases:
+npm version patch|minor   # bump, then `npm publish` again
 ```
 
 `prepublishOnly` (`typecheck && test`) and `prepare` (`build`) run automatically,
 so a broken build can't be published and `dist/` is always fresh in the tarball.
+First publish creates `@team-monet/aart@0.1.0`.
 
 ## How consumers use it
 
 ```bash
-npx aart --help
-npx playwright install chromium   # only for QA *browser* blocks
+npx @team-monet/aart --help          # the command is still `aart`
+npx playwright install chromium      # only for QA *browser* blocks
 ```
 
 MCP config for a coding-agent host:
 
 ```json
-{ "command": "npx", "args": ["-y", "aart", "mcp"],
+{ "command": "npx", "args": ["-y", "@team-monet/aart", "mcp"],
   "env": { "AART_WORKSPACE": "/path/to/their/project" } }
 ```
 

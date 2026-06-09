@@ -40,15 +40,15 @@ governance gate and a real `node`-code sandbox are the next phases.
 No clone needed — once published to npm:
 
 ```bash
-npx aart --help                 # run without installing
-# or:  npm i -g aart            # then `aart …`
-npx playwright install chromium # only needed for the QA *browser* blocks
+npx @team-monet/aart --help        # run without installing (the command is `aart`)
+# or:  npm i -g @team-monet/aart    # then `aart …`
+npx playwright install chromium    # only needed for the QA *browser* blocks
 ```
 
 Point a coding agent's MCP config at it:
 
 ```json
-{ "command": "npx", "args": ["-y", "aart", "mcp"],
+{ "command": "npx", "args": ["-y", "@team-monet/aart", "mcp"],
   "env": { "AART_WORKSPACE": "/path/to/your/project" } }
 ```
 
