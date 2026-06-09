@@ -1,7 +1,6 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod'
-import { BlockDefinitionSchema } from '../core/types'
 import { buildCatalog } from '../agent/catalog'
 import { definitionJsonSchema } from '../agent/schema'
 import { validateDraft } from '../agent/validate'
@@ -9,6 +8,7 @@ import { AUTHORING_GUIDE } from '../agent/guide'
 import { runDefinition } from '../core/run-service'
 import { renderReport, readRun } from '../core/report'
 import { openRegistry, workspace } from '../cli/workspace'
+import type { RunRecord } from '../core/types'
 
 /**
  * The agent-callable interface. A coding agent connects over stdio and uses
@@ -27,7 +27,58 @@ const fail = (message: string) => ({
   isError: true,
 })
 
+const statusEnum = z.enum(['PENDING', 'RUNNING', 'COMPLETED', 'FAILED'])
+
+/** Lean, self-describing view of a run for the wire (omits the heavy snapshot,
+ *  which stays on disk and is retrievable via aa_get_report). */
+const runViewShape = {
+  runId: z.string(),
+  blockId: z.string(),
+  status: statusEnum,
+  inputs: z.record(z.unknown()),
+  params: z.record(z.unknown()).optional(),
+  results: z.record(z.unknown()).optional(),
+  error: z.string().optional(),
+  trace: z.array(
+    z.object({
+      seq: z.number(),
+      stepId: z.string(),
+      block: z.string(),
+      status: statusEnum,
+      inputs: z.record(z.unknown()),
+      outputs: z.record(z.unknown()).optional(),
+      error: z.string().optional(),
+      startedAt: z.string(),
+      endedAt: z.string().optional(),
+    }),
+  ),
+  artifacts: z.array(z.string()),
+  startedAt: z.string(),
+  endedAt: z.string().optional(),
+}
+
+function runView(record: RunRecord) {
+  return {
+    runId: record.runId,
+    blockId: record.blockId,
+    status: record.status,
+    inputs: record.inputs,
+    params: record.params,
+    results: record.results,
+    error: record.error,
+    trace: record.trace,
+    artifacts: record.artifacts,
+    startedAt: record.startedAt,
+    endedAt: record.endedAt,
+  }
+}
+
 export async function startMcpServer(): Promise<void> {
+  // Resolve workspace + registry once; the registry's read cache then survives
+  // across tool calls (mutations update it; lists always re-read from disk).
+  const ws = workspace()
+  const registry = openRegistry(ws)
+
   const server = new McpServer(
     { name: 'aart', version: '0.0.1' },
     { instructions: AUTHORING_GUIDE },
@@ -39,7 +90,7 @@ export async function startMcpServer(): Promise<void> {
       title: 'List blocks',
       description: 'List all blocks & workflows in the local registry (the catalog to compose from).',
     },
-    async () => json(buildCatalog(openRegistry())),
+    async () => json(buildCatalog(registry)),
   )
 
   server.registerTool(
@@ -50,7 +101,7 @@ export async function startMcpServer(): Promise<void> {
       inputSchema: { id: z.string(), version: z.string().optional() },
     },
     async ({ id, version }) => {
-      const block = openRegistry().getBlock(id, version)
+      const block = registry.getBlock(id, version)
       return block ? json(block) : fail(`Block not found: ${id}`)
     },
   )
@@ -72,7 +123,7 @@ export async function startMcpServer(): Promise<void> {
       inputSchema: { definition: z.record(z.unknown()) },
     },
     async ({ definition }) => {
-      const result = validateDraft(definition, openRegistry())
+      const result = validateDraft(definition, registry)
       return json({ ok: result.ok, errors: result.errors })
     },
   )
@@ -85,12 +136,19 @@ export async function startMcpServer(): Promise<void> {
       inputSchema: { definition: z.record(z.unknown()) },
     },
     async ({ definition }) => {
-      const registry = openRegistry()
       const result = validateDraft(definition, registry)
       if (!result.ok || !result.block) {
         return fail(`Refused — invalid definition:\n- ${result.errors.join('\n- ')}`)
       }
-      registry.registerBlock(result.block)
+      try {
+        registry.registerBlock(result.block)
+      } catch (err) {
+        return fail(
+          `Failed to register ${result.block.id}@${result.block.version}: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        )
+      }
       return text(`registered ${result.block.id}@${result.block.version}`)
     },
   )
@@ -99,33 +157,35 @@ export async function startMcpServer(): Promise<void> {
     'aa_run_workflow',
     {
       title: 'Run a workflow',
-      description: 'Run a workflow by registry id or by inline definition, with inputs. Returns the structured run report.',
+      description: 'Run a workflow by registry id (optionally pinned to a version) or by inline definition, with inputs. Returns the structured run report.',
       inputSchema: {
         id: z.string().optional(),
+        version: z.string().optional(),
         definition: z.record(z.unknown()).optional(),
         input: z.record(z.unknown()).optional(),
         params: z.record(z.unknown()).optional(),
       },
+      outputSchema: runViewShape,
     },
-    async ({ id, definition, input, params }) => {
-      const registry = openRegistry()
+    async ({ id, version, definition, input, params }) => {
       let def
       if (definition) {
-        const parsed = BlockDefinitionSchema.safeParse(definition)
-        if (!parsed.success) {
-          return fail(`Invalid definition:\n- ${parsed.error.issues.map((i) => i.message).join('\n- ')}`)
+        // Same gate as registration: structure + referenced blocks must resolve.
+        const result = validateDraft(definition, registry)
+        if (!result.ok || !result.block) {
+          return fail(`Invalid definition:\n- ${result.errors.join('\n- ')}`)
         }
-        def = parsed.data
+        def = result.block
       } else if (id) {
-        def = registry.getBlock(id)
-        if (!def) return fail(`Workflow not found: ${id}`)
+        def = registry.getBlock(id, version)
+        if (!def) return fail(`Workflow not found: ${id}${version ? '@' + version : ''}`)
       } else {
         return fail('Provide either `id` or `definition`.')
       }
-      const record = await runDefinition(workspace(), registry, def, input ?? {}, params)
+      const record = await runDefinition(ws, registry, def, input ?? {}, params)
       return {
         content: [{ type: 'text' as const, text: renderReport(record) }],
-        structuredContent: record as unknown as Record<string, unknown>,
+        structuredContent: runView(record),
         isError: record.status === 'FAILED',
       }
     },
@@ -140,7 +200,7 @@ export async function startMcpServer(): Promise<void> {
     },
     async ({ runId }) => {
       try {
-        return json(await readRun(workspace(), runId))
+        return json(await readRun(ws, runId))
       } catch {
         return fail(`Run not found: ${runId}`)
       }

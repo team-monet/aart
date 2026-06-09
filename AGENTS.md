@@ -23,7 +23,7 @@ server's `instructions` carry the full authoring guide:
 **CLI (equivalent):**
 ```bash
 aart context                 # guide + live catalog + schema, all in one
-aart blocks --json           # machine-readable catalog
+aart list --json             # machine-readable catalog
 aart schema                  # definition JSON Schema
 aart validate <file>         # validate a draft before registering
 aart block add <file>        # validate + register
@@ -44,7 +44,8 @@ aart report <runId>          # replay a past report
 
 - A workflow **is** a block with `execution.type: workflow` and ordered `steps`.
 - Wire data: `"{{inputs.x}}"` (string interp), `"$stepId.out"` (typed ref, nestable),
-  `"{{ctx.secrets.x}}"`.
+  `"{{ctx.runId}}"`. (Secrets aren't wired into step interpolation yet — read
+  `ctx.secrets` inside `node` code only.)
 - Branch: a step's `if` is a **safe comparison** (`inputs.n > 3`), jumping to
   `then`/`else`; or use `next`; else steps fall through in order.
 - Reference only block ids that exist. Keep `node` code small and single-purpose.

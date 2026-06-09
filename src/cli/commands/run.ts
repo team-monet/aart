@@ -3,7 +3,8 @@ import path from 'node:path'
 import YAML from 'yaml'
 import { runDefinition } from '../../core/run-service'
 import { renderReport } from '../../core/report'
-import { BlockDefinitionSchema, type BlockDefinition } from '../../core/types'
+import { validateDraft } from '../../agent/validate'
+import type { BlockDefinition } from '../../core/types'
 import { openRegistry, workspace } from '../workspace'
 
 interface RunOpts {
@@ -25,7 +26,21 @@ export async function runCommand(workflowRef: string, opts: RunOpts): Promise<vo
       console.error(`File not found: ${workflowRef}`)
       process.exit(1)
     }
-    wf = BlockDefinitionSchema.parse(YAML.parse(fs.readFileSync(workflowRef, 'utf8')))
+    let parsed: unknown
+    try {
+      parsed = YAML.parse(fs.readFileSync(workflowRef, 'utf8'))
+    } catch (err) {
+      console.error(`Not valid YAML/JSON: ${err instanceof Error ? err.message : String(err)}`)
+      process.exit(1)
+    }
+    // Same gate as `block add`: structure + referenced blocks must resolve.
+    const result = validateDraft(parsed, registry)
+    if (!result.ok || !result.block) {
+      console.error('✗ refused — definition is invalid:')
+      for (const e of result.errors) console.error(`  - ${e}`)
+      process.exit(1)
+    }
+    wf = result.block
   } else {
     wf = registry.getBlock(workflowRef)
     if (!wf) {

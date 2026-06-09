@@ -31,7 +31,11 @@ you can read and iterate on.
 - \`"{{inputs.name}}"\`     — interpolate a workflow input into a string.
 - \`"$stepId.outputName"\`  — reference a previous step's output (keeps its type;
   nested paths like \`$stepId.user.id\` are allowed).
-- \`"{{ctx.secrets.x}}"\`   — interpolate a secret from the runtime context.
+- \`"{{ctx.runId}}"\`       — interpolate runtime context (runId, vars).
+
+(Secrets are not wired into step interpolation yet — see docs/IMPLEMENTATION_PLAN.md.
+Inside a \`node\` block's code you can read \`ctx.secrets\`, but do not reference
+secrets in step \`inputs\` for now.)
 
 ## Control flow (per step)
 
@@ -43,7 +47,7 @@ you can read and iterate on.
 
 ## The loop you should follow
 
-1. **Discover** — list available blocks (\`aart blocks --json\` or the
+1. **Discover** — list available blocks (\`aart list --json\` or the
    \`aa_list_blocks\` tool). Reuse before authoring new.
 2. **Draft** — write a definition (YAML/JSON) that matches the schema
    (\`aart schema\` / \`aa_get_schema\`), composing existing blocks.

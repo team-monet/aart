@@ -9,6 +9,12 @@ inputs:
   - name: appUrl
     type: string
     required: true
+  - name: email
+    type: string
+    required: true
+  - name: password
+    type: string
+    required: true
 execution:
   type: workflow
   steps:
@@ -20,12 +26,12 @@ execution:
       block: qa.browser.fill
       inputs:
         selector: "input[name=email]"
-        value: "{{ctx.secrets.email}}"
+        value: "{{inputs.email}}"
     - id: fill_password
       block: qa.browser.fill
       inputs:
         selector: "input[name=password]"
-        value: "{{ctx.secrets.password}}"
+        value: "{{inputs.password}}"
     - id: submit
       block: qa.browser.click
       inputs:

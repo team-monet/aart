@@ -138,6 +138,20 @@ The agent-callable surface that makes a coding agent "aware of what & how".
       `aa_validate`, `aa_register_block`, `aa_run_workflow`, `aa_get_report`;
       `instructions` = the authoring guide. Verified over stdio JSON-RPC.
 
+### Deferred from the 2026-06-09 adversarial review
+Fixed in that pass: `{{ctx.secrets.x}}` removed from the guide (engine `ctx` scope
+now consistent across step inputs / conditions / outputMapping); self-referencing
+& bad-version workflows rejected at validation; inline/file runs now go through the
+same ref-check gate as registration; MCP `aa_run_workflow` got an `outputSchema`, a
+`version` param, a lean snapshot-free wire view, and a guarded register write; the
+MCP registry is built once (cache survives calls). Still deferred:
+- [ ] **Secret wiring** — secrets are only readable inside `node` code via
+      `ctx.secrets`; step-input interpolation of secrets is intentionally absent
+      until a secrets source + leak-into-trace policy is decided (Phase 4).
+- [ ] **Snapshot completeness** — `buildSnapshot` silently skips an unresolved ref
+      on an untaken branch; low-risk now that runs are gated, but add a
+      `missing[]` evidence field when convenient.
+
 ### Phase 3 — QA pack `[ ]` (next)
 - [ ] Capability model: packs register capabilities into `ctx.capabilities`
 - [ ] Playwright `browser` capability lifecycle (launch/teardown per run)

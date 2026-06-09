@@ -82,6 +82,22 @@ describe('Engine', () => {
     expect(Object.keys(rec.snapshot.blocks).sort()).toEqual(['echo', 'upper'])
   })
 
+  it('resolves {{ctx.runId}} in step inputs and outputMapping', async () => {
+    const wf: BlockDefinition = {
+      ...workflow,
+      id: 'ctx-wf',
+      execution: {
+        type: 'workflow',
+        steps: [{ id: 'e', block: 'echo', inputs: { value: '{{ctx.runId}}' } }],
+        outputMapping: { rid: '{{ctx.runId}}' },
+      },
+    }
+    const rec = await run(wf, {})
+    expect(rec.status).toBe('COMPLETED')
+    expect(rec.results).toEqual({ rid: 'test-run' })
+    expect(rec.trace[0]!.outputs).toEqual({ value: 'test-run' })
+  })
+
   it('marks the run FAILED and records the failing step on error', async () => {
     const boom: BlockDefinition = {
       ...upper,
