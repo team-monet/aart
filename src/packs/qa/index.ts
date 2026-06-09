@@ -1,42 +1,32 @@
-import type { BlockDefinition } from '../../core/types'
+import type { Pack } from '../../pack/types'
+import { assertEquals, assertContains } from './assertions'
+import { apiRequest } from './api'
+import {
+  browserCapability,
+  browserGoto,
+  browserClick,
+  browserFill,
+  browserTextVisible,
+  browserScreenshot,
+} from './browser'
 
 /**
- * QA pack — the first dogfood pack (Phase 3). A pack is a set of built-in
- * blocks plus the capabilities they need (here: `browser` via Playwright, and
- * `http` for the api blocks). QA terminology lives ONLY inside the pack; the
- * core stays generic (no QABlock / TestContext / BrowserEngine in core).
- *
- * The initial primitive blocks (hand-written; AI composes workflows from them):
- *   qa.browser.goto      qa.browser.click      qa.browser.fill
- *   qa.browser.text_visible   qa.browser.screenshot
- *   qa.api.request       qa.assert.equals      qa.assert.contains
- *
- * These are declared here as a manifest; their executors land in browser.ts /
- * api.ts / assertions.ts once the capability/sandbox model is in place.
+ * QA pack — the first dogfood pack. Built-in primitive blocks an agent composes
+ * into verification workflows. QA terminology stays inside the pack; the core
+ * stays generic. The `browser` capability (Playwright) is set up per run only
+ * when a workflow actually uses a browser block.
  */
-
-export interface PackManifest {
-  name: string
-  capabilities: string[]
-  blockIds: string[]
-}
-
-export const qaPack: PackManifest = {
+export const qaPack: Pack = {
   name: 'qa',
-  capabilities: ['browser', 'http'],
-  blockIds: [
-    'qa.browser.goto',
-    'qa.browser.click',
-    'qa.browser.fill',
-    'qa.browser.text_visible',
-    'qa.browser.screenshot',
-    'qa.api.request',
-    'qa.assert.equals',
-    'qa.assert.contains',
+  blocks: [
+    assertEquals,
+    assertContains,
+    apiRequest,
+    browserGoto,
+    browserClick,
+    browserFill,
+    browserTextVisible,
+    browserScreenshot,
   ],
-}
-
-/** Phase 3: return the built-in QA block definitions for registration. */
-export function qaBlocks(): BlockDefinition[] {
-  throw new Error('qaBlocks not implemented — Phase 3 (requires Playwright + capability model)')
+  capabilities: [browserCapability],
 }

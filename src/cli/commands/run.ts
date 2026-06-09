@@ -1,11 +1,10 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import YAML from 'yaml'
-import { runDefinition } from '../../core/run-service'
 import { renderReport } from '../../core/report'
 import { validateDraft } from '../../agent/validate'
 import type { BlockDefinition } from '../../core/types'
-import { openRegistry, workspace } from '../workspace'
+import { openRuntime } from '../workspace'
 
 interface RunOpts {
   input: string
@@ -14,8 +13,7 @@ interface RunOpts {
 }
 
 export async function runCommand(workflowRef: string, opts: RunOpts): Promise<void> {
-  const ws = workspace()
-  const registry = openRegistry(ws)
+  const runtime = openRuntime()
 
   // Resolve the workflow: a file path, or an id in the registry.
   let wf: BlockDefinition | undefined
@@ -34,7 +32,7 @@ export async function runCommand(workflowRef: string, opts: RunOpts): Promise<vo
       process.exit(1)
     }
     // Same gate as `block add`: structure + referenced blocks must resolve.
-    const result = validateDraft(parsed, registry)
+    const result = validateDraft(parsed, runtime.registry)
     if (!result.ok || !result.block) {
       console.error('✗ refused — definition is invalid:')
       for (const e of result.errors) console.error(`  - ${e}`)
@@ -42,7 +40,7 @@ export async function runCommand(workflowRef: string, opts: RunOpts): Promise<vo
     }
     wf = result.block
   } else {
-    wf = registry.getBlock(workflowRef)
+    wf = runtime.registry.getBlock(workflowRef)
     if (!wf) {
       console.error(`Workflow not found in registry: ${workflowRef}`)
       console.error('List what is registered with:  aart list')
@@ -53,9 +51,7 @@ export async function runCommand(workflowRef: string, opts: RunOpts): Promise<vo
   const inputs = parseJson(opts.input, '--input')
   const params = parseJson(opts.param, '--param')
 
-  const record = await runDefinition(ws, registry, wf, inputs, params, {
-    verbose: opts.verbose,
-  })
+  const record = await runtime.run(wf, inputs, params, { verbose: opts.verbose })
 
   console.log(renderReport(record))
   console.log(`\nreport: ${path.join('.aa', 'runs', record.runId, 'run.json')}`)

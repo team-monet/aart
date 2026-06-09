@@ -1,7 +1,7 @@
 import { AUTHORING_GUIDE } from '../../agent/guide'
 import { buildCatalog } from '../../agent/catalog'
 import { definitionJsonSchema } from '../../agent/schema'
-import { openRegistry } from '../workspace'
+import { openRuntime } from '../workspace'
 
 /**
  * `aart context` — everything a coding agent needs to author for this workspace,
@@ -10,7 +10,7 @@ import { openRegistry } from '../workspace'
  * the same surface as tools.
  */
 export async function contextCommand(): Promise<void> {
-  const catalog = buildCatalog(openRegistry())
+  const catalog = buildCatalog(openRuntime().registry)
   const out = [
     AUTHORING_GUIDE,
     '## Available blocks (catalog)',

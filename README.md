@@ -28,9 +28,10 @@ QA pack are stubbed for later phases.
 | CLI (`run`, `block add/list`, `validate`, `schema`, `context`, `report`) | ✅ working |
 | Agent interface (catalog + schema + guide + validate) | ✅ working |
 | MCP server (`aart mcp`, 7 tools) | ✅ working (verified over stdio) |
-| In-process executor | ⚠️ temporary (`node:vm`, **not a sandbox**) |
+| Capability model + native pack blocks | ✅ working |
+| QA pack — `qa.api.*`, `qa.assert.*`, `qa.browser.*` (Playwright) | ✅ working (verified incl. real Chromium) |
+| `node` block executor | ⚠️ temporary (`node:vm`, **not a sandbox**) |
 | Approval gate / governance | 🚧 Phase 4 |
-| QA pack (Playwright) | 🚧 Phase 3 |
 | Block-code static-analysis gate | 🚧 Phase 5 |
 
 ## Quick start
@@ -75,7 +76,8 @@ src/
   agent/       guide, catalog, schema, validate (the "what & how" for coding agents)
   mcp/         stdio MCP server (the agent-callable interface)
   cli/         commander entrypoint + commands
-  packs/qa/    QA pack (stub)
+  pack/        pack model: capabilities, native blocks, composite registry
+  packs/qa/    QA pack — api.request, assert.*, browser.* (Playwright)
 examples/      runnable example blocks + workflows
 ```
 

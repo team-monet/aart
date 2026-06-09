@@ -5,9 +5,8 @@ import { buildCatalog } from '../agent/catalog'
 import { definitionJsonSchema } from '../agent/schema'
 import { validateDraft } from '../agent/validate'
 import { AUTHORING_GUIDE } from '../agent/guide'
-import { runDefinition } from '../core/run-service'
 import { renderReport, readRun } from '../core/report'
-import { openRegistry, workspace } from '../cli/workspace'
+import { openRuntime, workspace } from '../cli/workspace'
 import type { RunRecord } from '../core/types'
 
 /**
@@ -74,10 +73,11 @@ function runView(record: RunRecord) {
 }
 
 export async function startMcpServer(): Promise<void> {
-  // Resolve workspace + registry once; the registry's read cache then survives
-  // across tool calls (mutations update it; lists always re-read from disk).
+  // Build the runtime once; its registry cache survives across tool calls and
+  // its packs (QA, …) are available to every run.
   const ws = workspace()
-  const registry = openRegistry(ws)
+  const runtime = openRuntime(ws)
+  const registry = runtime.registry
 
   const server = new McpServer(
     { name: 'aart', version: '0.0.1' },
@@ -182,7 +182,7 @@ export async function startMcpServer(): Promise<void> {
       } else {
         return fail('Provide either `id` or `definition`.')
       }
-      const record = await runDefinition(ws, registry, def, input ?? {}, params)
+      const record = await runtime.run(def, input ?? {}, params)
       return {
         content: [{ type: 'text' as const, text: renderReport(record) }],
         structuredContent: runView(record),

@@ -5,7 +5,7 @@ import type { Field } from '../core/types'
 export interface CatalogEntry {
   id: string
   version: string
-  type: 'node' | 'workflow'
+  type: 'node' | 'workflow' | 'native'
   name: string
   description?: string
   capabilities?: string[]

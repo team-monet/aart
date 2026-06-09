@@ -1,7 +1,7 @@
 import fs from 'node:fs'
 import YAML from 'yaml'
 import { validateDraft } from '../../agent/validate'
-import { openRegistry } from '../workspace'
+import { openRuntime } from '../workspace'
 
 /** `aart validate <file>` — validate an agent-authored draft before registering. */
 export async function validateCommand(file: string): Promise<void> {
@@ -17,7 +17,7 @@ export async function validateCommand(file: string): Promise<void> {
     process.exit(1)
   }
 
-  const result = validateDraft(parsed, openRegistry())
+  const result = validateDraft(parsed, openRuntime().registry)
   if (result.ok && result.block) {
     const kind = result.block.execution.type === 'workflow' ? 'workflow' : 'block'
     console.log(`✓ valid ${kind}: ${result.block.id}@${result.block.version}`)

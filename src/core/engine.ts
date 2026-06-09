@@ -2,6 +2,7 @@ import { resolveInputs, resolveValue, evalCondition, type ResolveScope } from '.
 import { runNodeBlock } from './executor'
 import type { ExecutionContext } from './context'
 import type { Registry } from '../registry/file-registry'
+import type { NativeRunFn } from '../pack/types'
 import type {
   BlockDefinition,
   ExecutionSnapshot,
@@ -15,6 +16,8 @@ const STEP_LIMIT = 10_000
 
 export interface EngineOptions {
   timeoutMs?: number
+  /** Handlers for `native` (pack-provided) blocks, keyed by block id. */
+  nativeHandlers?: Map<string, NativeRunFn>
 }
 
 /**
@@ -77,6 +80,15 @@ export class Engine {
       })
       for (const line of res.logs) ctx.logger.debug(`[${block.id}] ${line}`)
       return res.output
+    }
+
+    if (block.execution.type === 'native') {
+      const handler = this.opts.nativeHandlers?.get(block.id)
+      if (!handler) {
+        throw new Error(`No native handler for block: ${block.id} (is its pack loaded?)`)
+      }
+      const out = await handler(ctx, inputs, params)
+      return out ?? {}
     }
 
     // execution.type === 'workflow'

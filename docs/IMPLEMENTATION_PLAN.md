@@ -152,12 +152,20 @@ MCP registry is built once (cache survives calls). Still deferred:
       on an untaken branch; low-risk now that runs are gated, but add a
       `missing[]` evidence field when convenient.
 
-### Phase 3 — QA pack `[ ]` (next)
-- [ ] Capability model: packs register capabilities into `ctx.capabilities`
-- [ ] Playwright `browser` capability lifecycle (launch/teardown per run)
-- [ ] Primitive blocks: `qa.browser.goto/click/fill/text_visible/screenshot`, `qa.api.request`, `qa.assert.equals/contains`
-- [ ] QA artifacts (screenshot/trace/console/network) wired to the artifact store
-- [ ] First dogfood workflow runs green end to end (a real coding agent authors it via MCP)
+### Phase 3 — QA pack `[x]`
+- [x] Capability model: packs register capabilities into `ctx.capabilities`,
+      set up/torn down per run, only when a run needs them (`collectCapabilities`)
+- [x] Native blocks + `CompositeRegistry` (pack blocks layered over the file
+      registry; discoverable in the catalog, not written to `.aa`)
+- [x] `Runtime` wires packs + capability lifecycle (CLI & MCP both use it)
+- [x] Playwright `browser` capability (lazy import; launch/teardown per run)
+- [x] Primitive blocks: `qa.browser.goto/click/fill/text_visible/screenshot`,
+      `qa.api.request`, `qa.assert.equals/contains`
+- [x] Screenshot artifacts wired to the artifact store + run report
+- [x] Verified: api→assert workflow green; real-Chromium browser workflow green
+      end to end via the CLI (screenshot artifact + report)
+- [ ] trace/console/network artifacts (later); a real coding agent authoring a QA
+      workflow via MCP is the live dogfood once an agent is pointed at `aart mcp`
 
 ### Phase 4 — Governance: the approval gate `[ ]`
 - [ ] Human approval mechanic for agent-authored drafts (interactive `--yes`, and/or

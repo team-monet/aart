@@ -56,9 +56,20 @@ export const WorkflowExecutionSchema = z.object({
   outputMapping: z.record(z.string()).optional(),
 })
 
+/**
+ * A built-in block provided by a pack. The definition is serializable (so it
+ * shows up in the catalog and can be referenced by id); the actual handler is
+ * supplied in code by the pack, looked up by block id at run time. Pack blocks
+ * are not written to the user's `.aa` registry — they ship with the runtime.
+ */
+export const NativeExecutionSchema = z.object({
+  type: z.literal('native'),
+})
+
 export const ExecutionSchema = z.discriminatedUnion('type', [
   NodeExecutionSchema,
   WorkflowExecutionSchema,
+  NativeExecutionSchema,
 ])
 export type Execution = z.infer<typeof ExecutionSchema>
 

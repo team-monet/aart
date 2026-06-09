@@ -1,0 +1,26 @@
+# Runnable QA workflow (no browser needed). Composes built-in QA pack blocks:
+#   qa.api.request -> qa.assert.equals
+# Try it:
+#   aart run examples/qa/api-smoke.workflow.yaml --input '{"url":"https://example.com"}'
+id: api-smoke
+name: API Smoke
+version: 0.1.0
+description: GET a URL and assert it returns HTTP 200.
+inputs:
+  - name: url
+    type: string
+    required: true
+execution:
+  type: workflow
+  steps:
+    - id: call
+      block: qa.api.request
+      inputs:
+        url: "{{inputs.url}}"
+    - id: assert_ok
+      block: qa.assert.equals
+      inputs:
+        actual: "$call.status"
+        expected: 200
+  outputMapping:
+    status: "$call.status"
