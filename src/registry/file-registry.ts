@@ -62,6 +62,12 @@ export class FileRegistry implements Registry {
     return versions.sort((a, b) => compareSemver(b, a))[0]
   }
 
+  private readDef(id: string, version: string): BlockDefinition | undefined {
+    const file = this.file(id, version)
+    if (!fs.existsSync(file)) return undefined
+    return BlockDefinitionSchema.parse(YAML.parse(fs.readFileSync(file, 'utf8')))
+  }
+
   // Read fresh each call (a single small file) so an external process
   // writing/approving a definition — e.g. `aart approve` while an `aart mcp`
   // server is running — is always seen. This is still far cheaper than the
@@ -69,16 +75,22 @@ export class FileRegistry implements Registry {
   getBlock(id: string, version = 'latest'): BlockDefinition | undefined {
     const resolved = version === 'latest' ? this.latestVersion(id) : version
     if (!resolved) return undefined
-    const file = this.file(id, resolved)
-    if (!fs.existsSync(file)) return undefined
-    return BlockDefinitionSchema.parse(YAML.parse(fs.readFileSync(file, 'utf8')))
+    return this.readDef(id, resolved)
   }
 
   listBlocks(): BlockDefinition[] {
-    const ids = [...new Set(this.entries().map((e) => e.id))]
-    return ids
-      .map((id) => this.getBlock(id))
-      .filter((b): b is BlockDefinition => b !== undefined)
+    // One directory snapshot; pick the latest version per id; read each once.
+    const latest = new Map<string, string>()
+    for (const { id, version } of this.entries()) {
+      const cur = latest.get(id)
+      if (!cur || compareSemver(version, cur) > 0) latest.set(id, version)
+    }
+    const out: BlockDefinition[] = []
+    for (const [id, version] of latest) {
+      const def = this.readDef(id, version)
+      if (def) out.push(def)
+    }
+    return out
   }
 
   deleteBlock(id: string): void {
