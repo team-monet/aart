@@ -34,7 +34,7 @@ interface ListOpts {
   json?: boolean
 }
 
-/** `aart block list` / `aart list` — human table, or `--json` machine catalog. */
+/** `aart block list` / `aart list` — readable table, or `--json` machine catalog. */
 export async function listCommand(opts: ListOpts = {}): Promise<void> {
   const catalog = buildCatalog(openRuntime().registry)
   if (opts.json) {

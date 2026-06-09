@@ -21,10 +21,47 @@ export async function readRun(workspace: string, runId: string): Promise<RunReco
   return JSON.parse(await fs.readFile(file, 'utf8')) as RunRecord
 }
 
+export interface RunSummary {
+  runId: string
+  blockId: string
+  status: RunStatus
+  approved?: boolean
+  startedAt: string
+  endedAt?: string
+}
+
+/** Recent run summaries (newest first) for the catalog of past runs. */
+export async function listRuns(workspace: string, limit = 20): Promise<RunSummary[]> {
+  const dir = path.join(workspace, '.aa', 'runs')
+  let ids: string[]
+  try {
+    ids = await fs.readdir(dir)
+  } catch {
+    return []
+  }
+  const out: RunSummary[] = []
+  for (const id of ids) {
+    try {
+      const r = JSON.parse(await fs.readFile(path.join(dir, id, 'run.json'), 'utf8')) as RunRecord
+      out.push({
+        runId: r.runId,
+        blockId: r.blockId,
+        status: r.status,
+        approved: r.approved,
+        startedAt: r.startedAt,
+        endedAt: r.endedAt,
+      })
+    } catch {
+      // skip an unreadable/partial run dir
+    }
+  }
+  return out.sort((a, b) => (a.startedAt < b.startedAt ? 1 : -1)).slice(0, limit)
+}
+
 const glyph = (s: RunStatus): string =>
   s === 'COMPLETED' ? '✓' : s === 'FAILED' ? '✗' : s === 'RUNNING' ? '…' : '○'
 
-/** Render a run record as human-readable text for the CLI. */
+/** Render a run record as readable text for the CLI. */
 export function renderReport(record: RunRecord): string {
   const lines: string[] = []
   lines.push(`${glyph(record.status)} ${record.blockId}  [${record.status}]  run ${record.runId}`)

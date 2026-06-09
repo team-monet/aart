@@ -53,14 +53,14 @@ export async function runCommand(workflowRef: string, opts: RunOpts): Promise<vo
   }
 
   // Approval gate: an ad-hoc file def is never pre-trusted (trustTop=false);
-  // a registry def's own approval is trusted. Either way the human can run an
+  // a registry def's own approval is trusted. Either way the user can run an
   // unapproved definition once with --yes.
   const pending = unapprovedInTree(wf, runtime.registry, !fromFile)
   const approved = pending.length === 0
   if (!approved && !opts.yes) {
     console.error(`✗ refused — not approved: ${pending.join(', ')}`)
     if (!fromFile) console.error(`approve with:  aart approve ${pending.join(' && aart approve ')}`)
-    console.error(`or run it once as the human with:  --yes`)
+    console.error(`or run it once as the user with:  --yes`)
     process.exit(1)
   }
 

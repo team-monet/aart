@@ -7,8 +7,9 @@ import { buildCatalog } from '../agent/catalog'
 import { definitionJsonSchema } from '../agent/schema'
 import { validateDraft } from '../agent/validate'
 import { unapprovedInTree } from '../core/approval'
+import { setApproval } from '../core/governance'
 import { AUTHORING_GUIDE } from '../agent/guide'
-import { renderReport, readRun } from '../core/report'
+import { renderReport, readRun, listRuns } from '../core/report'
 import { openRuntime, workspace } from '../cli/workspace'
 import type { RunRecord } from '../core/types'
 
@@ -92,7 +93,7 @@ export async function startMcpServer(): Promise<void> {
   )
 
   const server = new McpServer(
-    { name: 'aart', version: '0.1.0' },
+    { name: 'aart', version: '0.2.0' },
     { instructions: AUTHORING_GUIDE },
   )
 
@@ -143,8 +144,10 @@ export async function startMcpServer(): Promise<void> {
   server.registerTool(
     'aa_register_block',
     {
-      title: 'Register a block',
-      description: 'Validate and save a definition to the local registry. Get human approval before calling this.',
+      title: 'Register a block/workflow',
+      description:
+        'Save a validated definition to the registry. It lands as DRAFT (not yet runnable). ' +
+        'Next: ask the user to approve it, then call aa_approve. Re-registering after an edit resets it to draft.',
       inputSchema: { definition: z.record(z.unknown()) },
     },
     async ({ definition }) => {
@@ -152,7 +155,7 @@ export async function startMcpServer(): Promise<void> {
       if (!result.ok || !result.block) {
         return fail(`Refused — invalid definition:\n- ${result.errors.join('\n- ')}`)
       }
-      // Always lands as draft — only the human (`aart approve`) can approve.
+      // Always lands as draft — approval is a separate step.
       result.block.approval = 'draft'
       try {
         registry.registerBlock(result.block)
@@ -164,8 +167,8 @@ export async function startMcpServer(): Promise<void> {
         )
       }
       return text(
-        `registered ${result.block.id}@${result.block.version} as DRAFT — pending human approval. ` +
-          `Ask the human to review and run: aart approve ${result.block.id}`,
+        `registered ${result.block.id}@${result.block.version} as DRAFT. ` +
+          `Now ask the user to approve it; once they say yes, call aa_approve with id "${result.block.id}".`,
       )
     },
   )
@@ -174,7 +177,10 @@ export async function startMcpServer(): Promise<void> {
     'aa_run_workflow',
     {
       title: 'Run a workflow',
-      description: 'Run a workflow by registry id (optionally pinned to a version) or by inline definition, with inputs. Returns the structured run report.',
+      description:
+        'Run an APPROVED workflow by registry id (optionally a version), with inputs. ' +
+        'Returns the structured run report (per-step trace, outputs, artifacts). ' +
+        'If it refuses as not-approved, get the user to approve it (aa_approve), then run.',
       inputSchema: {
         id: z.string().optional(),
         version: z.string().optional(),
@@ -199,13 +205,13 @@ export async function startMcpServer(): Promise<void> {
       } else {
         return fail('Provide either `id` or `definition`.')
       }
-      // Governance gate: an agent may only run human-approved definitions. An
-      // inline definition is never pre-trusted; a registry id's status is.
+      // Governance gate: only run user-approved definitions. An inline
+      // definition is never pre-trusted; a registry id's status is.
       const pending = unapprovedInTree(def, registry, !definition)
       if (pending.length) {
         return fail(
-          `Refused — not approved: ${pending.join(', ')}. A human must review and run ` +
-            `\`aart approve ${pending.join(' ')}\` first (or run it once with \`aart run <id> --yes\`).`,
+          `Not approved: ${pending.join(', ')}. Ask the user to approve, then call ` +
+            `aa_approve for: ${pending.join(', ')} — then run again.`,
         )
       }
       const record = await runtime.run(def, input ?? {}, params, { approved: true })
@@ -232,6 +238,52 @@ export async function startMcpServer(): Promise<void> {
       }
     },
   )
+
+  server.registerTool(
+    'aa_list_runs',
+    {
+      title: 'List recent runs',
+      description: 'List recent runs (id, block, status). Use aa_get_report for the full report of one.',
+    },
+    async () => json(await listRuns(ws)),
+  )
+
+  // Conversational approval: the user approves in chat, you record it here.
+  // Set AART_STRICT_APPROVAL=1 to require the `aart approve` CLI instead.
+  if (!process.env.AART_STRICT_APPROVAL) {
+    server.registerTool(
+      'aa_approve',
+      {
+        title: 'Approve a definition',
+        description:
+          'Mark a registered block/workflow approved so it can run. ONLY call this after the user ' +
+          'has approved it in the conversation — never approve your own work unprompted.',
+        inputSchema: { id: z.string(), version: z.string().optional() },
+      },
+      async ({ id, version }) => {
+        const r = setApproval(registry, id, 'approved', version)
+        if (!r.ok) return fail(r.error ?? 'failed to approve')
+        let msg = `approved ${r.id}@${r.version} — it can now run.`
+        if (r.pending?.length) {
+          msg += ` Note: it still references unapproved blocks (${r.pending.join(', ')}); approve those too.`
+        }
+        return text(msg)
+      },
+    )
+
+    server.registerTool(
+      'aa_deprecate',
+      {
+        title: 'Deprecate a definition',
+        description: 'Mark a registered block/workflow deprecated (no longer approved to run).',
+        inputSchema: { id: z.string(), version: z.string().optional() },
+      },
+      async ({ id, version }) => {
+        const r = setApproval(registry, id, 'deprecated', version)
+        return r.ok ? text(`deprecated ${r.id}@${r.version}`) : fail(r.error ?? 'failed')
+      },
+    )
+  }
 
   await server.connect(new StdioServerTransport())
   // stderr is safe for logs; stdout is the JSON-RPC channel.

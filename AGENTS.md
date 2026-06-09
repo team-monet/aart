@@ -5,10 +5,10 @@ When the user wants an automation built, **you (the coding agent) are the author
 you discover what exists, draft the workflow/block, and aart validates, governs,
 runs it deterministically, and gives you a structured report to iterate on.
 
-## Two ways to drive aart
+## Drive aart entirely through MCP tools
 
-**MCP (preferred):** start `aart mcp` (stdio). You get these tools, and the
-server's `instructions` carry the full authoring guide:
+Start `aart mcp` (stdio). **Do everything via these tools — the user shouldn't
+type `aart` commands.** The server's `instructions` carry the full authoring guide.
 
 | tool | purpose |
 |---|---|
@@ -16,33 +16,25 @@ server's `instructions` carry the full authoring guide:
 | `aa_get_block` | inspect one definition |
 | `aa_get_schema` | the definition JSON Schema + authoring guide |
 | `aa_validate` | check a draft (schema + referenced blocks exist) |
-| `aa_register_block` | save a validated draft (lands as **draft** — pending human approval) |
-| `aa_run_workflow` | run an **approved** registry workflow → structured report |
-| `aa_get_report` | fetch a past run record |
-
-**CLI (equivalent):**
-```bash
-aart context                 # guide + live catalog + schema, all in one
-aart list --json             # machine-readable catalog (incl. approval status)
-aart schema                  # definition JSON Schema
-aart validate <file>         # validate a draft before registering
-aart block add <file>        # validate + register (lands as draft)
-aart show <id>               # print a definition (review before approving)
-aart approve <id>            # human-only: approve a definition for use
-aart run <id|file> -i '{…}'  # run an approved def (--yes to override once)
-aart report <runId>          # replay a past report
-```
+| `aa_register_block` | save a validated draft (lands as **draft**) |
+| `aa_approve` | mark a draft approved — **only after the user agrees in chat** |
+| `aa_run_workflow` | run an **approved** workflow → structured report |
+| `aa_get_report` / `aa_list_runs` | fetch a past report / list recent runs |
+| `aa_deprecate` | mark a definition deprecated |
 
 ## The loop
 
-1. **Discover** existing blocks — reuse before authoring new.
-2. **Draft** a definition that matches the schema (compose existing blocks).
-3. **Validate** — fix every error.
+1. **Discover** existing blocks (`aa_list_blocks`) — reuse before authoring new.
+2. **Draft** a definition that matches `aa_get_schema` (compose existing blocks).
+3. **Validate** (`aa_validate`) — fix every error.
 4. **Register** (`aa_register_block`) — it lands as **draft**.
-5. **Ask the human to approve** it (`aart approve <id>`). You can't run a draft,
-   and there is no approve tool for you — the human governs.
-6. **Run** (`aa_run_workflow`, once approved), then **read the report**; revise;
-   re-register (resets to draft) and repeat.
+5. **Ask the user to approve** it (tell them what it does). When they say yes,
+   call `aa_approve`. (Re-registering after an edit resets it to draft.)
+6. **Run** (`aa_run_workflow`), **read the report**, revise, repeat.
+
+The CLI mirrors all of this (`aart list/validate/block add/approve/run/report/
+doctor`) for when *you* need it, but prefer the tools so the user doesn't type
+commands.
 
 ## Authoring quick reference
 

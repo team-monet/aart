@@ -86,8 +86,8 @@ export const BlockDefinitionSchema = z.object({
   /** Provenance: which model drafted this artifact, if any. */
   generatedByModel: z.string().optional(),
   /**
-   * Governance state. Registration always lands as 'draft'; only a human
-   * (`aart approve`) promotes to 'approved'. Absent ⇒ treated as draft.
+   * Governance state. Registration always lands as 'draft'; only the user
+   * promotes to 'approved'. Absent ⇒ treated as draft.
    */
   approval: z.enum(['draft', 'approved', 'deprecated']).optional(),
 })
@@ -125,8 +125,8 @@ export interface RunRecord {
   runId: string
   blockId: string
   status: RunStatus
-  /** Whether the executed definition (and its refs) were human-approved. A
-   *  `false` here means the run was a one-time `--yes` human override. */
+  /** Whether the executed definition (and its refs) were user-approved. A
+   *  `false` here means the run was a one-time `--yes` user override. */
   approved?: boolean
   inputs: Record<string, unknown>
   params?: Record<string, unknown>

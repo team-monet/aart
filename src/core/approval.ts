@@ -8,14 +8,14 @@ export function isApproved(block: BlockDefinition): boolean {
   return block.execution.type === 'native' || block.approval === 'approved'
 }
 
-/** Human-facing status label for a block. */
+/** Status label for display. */
 export function statusLabel(block: BlockDefinition): ApprovalStatus | 'native' {
   if (block.execution.type === 'native') return 'native'
   return block.approval ?? 'draft'
 }
 
 /**
- * Ids in a definition's tree that are NOT approved (so a run would need human
+ * Ids in a definition's tree that are NOT approved (so a run would need user
  * sign-off). Referenced blocks are resolved from the registry, whose approval
  * field is trusted (only `aart approve` writes 'approved'). `trustTop` controls
  * whether the top-level def's own approval is trusted — false for an ad-hoc

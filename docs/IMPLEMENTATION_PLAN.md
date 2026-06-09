@@ -223,6 +223,20 @@ with real Chromium; secrets redacted; portable to macOS + WSL2.
   **optionalDependency + lazy-loaded**, so install never fails and QA-only usage
   works without it.
 
+### Post-dogfood UX (2026-06-09, from real usage) `[x]`
+First real MCP session surfaced friction; fixed:
+- **Conversational approval** — added `aa_approve` / `aa_deprecate` MCP tools so the
+  agent records approval after the **user agrees in chat** (no terminal). Default on;
+  `AART_STRICT_APPROVAL=1` restores the CLI-only out-of-band gate. (Supersedes the
+  Phase-4 "no MCP approve tool" stance — the user found that too heavy.)
+- **Agent does everything via tools** — added `aa_list_runs`; sharpened tool
+  descriptions; rewrote the guide as a directive recipe with a worked example so the
+  agent knows the register→approve→run loop (esp. registration). The user shouldn't
+  type `aart` commands.
+- **Onboarding** — `aart doctor` (checks Node/isolated-vm/Playwright with fix hints);
+  README leads with `npm i -g @team-monet/aart` (PATH) + "just ask the agent".
+- **Terminology** — "human" → "user" throughout user/agent-facing text.
+
 ### Distribution `[/]`
 - [x] **npx**: `files: ["dist","examples"]` (no src/docs leak), `prepare` builds dist,
       `prepublishOnly` runs typecheck+tests; isolated-vm optional → `npx aart mcp` works

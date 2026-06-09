@@ -8,6 +8,7 @@ import { schemaCommand } from './commands/schema'
 import { validateCommand } from './commands/validate'
 import { mcpCommand } from './commands/mcp'
 import { approveCommand, deprecateCommand, showCommand } from './commands/approve'
+import { doctorCommand } from './commands/doctor'
 import { setWorkspace } from './workspace'
 
 const program = new Command()
@@ -15,7 +16,7 @@ const program = new Command()
 program
   .name('aart')
   .description('Agentic Automation RunTime — a governed block/workflow runtime for AI agents')
-  .version('0.1.0')
+  .version('0.2.0')
   .option('-w, --workspace <dir>', 'workspace directory (default: $AART_WORKSPACE or cwd)')
   .hook('preAction', () => {
     const ws = program.opts().workspace
@@ -27,7 +28,7 @@ program
   .argument('<workflow>', 'workflow id in the registry, or a path to a .yaml file')
   .option('-i, --input <json>', 'inputs as a JSON object', '{}')
   .option('-p, --param <json>', 'params as a JSON object', '{}')
-  .option('--yes', 'approve this one run of an unapproved definition (human override)', false)
+  .option('--yes', 'approve this one run of an unapproved definition (user override)', false)
   .option('--verbose', 'print block logs', false)
   .description('run a workflow and write a structured run report')
   .action(runCommand)
@@ -69,7 +70,7 @@ program
   .command('approve')
   .argument('<id>', 'a registered block/workflow id')
   .option('--version <v>', 'a specific version (default: latest)')
-  .description('approve a definition for use (human governance gate)')
+  .description('approve a definition for use (the user governance gate)')
   .action(approveCommand)
 
 program
@@ -99,6 +100,11 @@ program
   .command('mcp')
   .description('start the MCP server (stdio) so a coding agent can drive aart')
   .action(mcpCommand)
+
+program
+  .command('doctor')
+  .description('check Node, sandbox, and browser setup with fix hints')
+  .action(doctorCommand)
 
 program.parseAsync().catch((err) => {
   console.error(err instanceof Error ? err.message : String(err))

@@ -1,6 +1,6 @@
 # aart — Agentic Automation RunTime
 
-> AI creates reusable automation blocks and workflows. Humans govern them.
+> AI creates reusable automation blocks and workflows. Users govern them.
 > A portable runtime executes them deterministically. Reports prove it.
 
 A governed **block/workflow runtime for AI agents**. The core is generic; QA is
@@ -31,26 +31,31 @@ governance gate and a real `node`-code sandbox are the next phases.
 | Capability model + native pack blocks | ✅ working |
 | QA pack — `qa.api.*`, `qa.assert.*`, `qa.browser.*` (Playwright) | ✅ working (verified incl. real Chromium) |
 | Secrets (`{{secrets.NAME}}`, redacted from reports) | ✅ working |
-| Approval gate (`draft`→`approved`, human-only) | ✅ working |
+| Approval gate (`draft`→`approved`; user approves, conversationally via MCP) | ✅ working |
 | `node` block sandbox (isolated-vm: own heap, memory cap, hard timeout) | ✅ working |
 | Static gate (node code must compile to register) | ✅ working |
 
 ## Install & run
 
-No clone needed — once published to npm:
+No clone needed. The agent drives everything through the MCP tools, so you rarely
+type a command yourself.
 
 ```bash
-npx @team-monet/aart --help        # run without installing (the command is `aart`)
-# or:  npm i -g @team-monet/aart    # then `aart …`
-npx playwright install chromium    # only needed for the QA *browser* blocks
+npm i -g @team-monet/aart           # installs the `aart` command on PATH
+aart doctor                         # checks Node, sandbox, and browser setup
+npx playwright install --with-deps chromium   # only for the QA *browser* blocks
 ```
 
-Point a coding agent's MCP config at it:
+Point a coding agent's MCP config at it (no global install needed for this):
 
 ```json
 { "command": "npx", "args": ["-y", "@team-monet/aart", "mcp"],
   "env": { "AART_WORKSPACE": "/path/to/your/project" } }
 ```
+
+Then just ask the agent — e.g. *"using aart, check my app at localhost:3000 shows
+the dashboard."* It discovers blocks, drafts a workflow, **asks you to approve it
+in chat**, runs it, and shows you the report.
 
 `isolated-vm` (the `node`-block sandbox) is an **optional** dependency: it ships
 prebuilt binaries for macOS (Apple Silicon), Linux (x64/arm64, incl. WSL2), and
@@ -99,27 +104,22 @@ npx playwright install --with-deps chromium
 
 ## Governance (the approval gate)
 
-"AI authors, humans govern." Every registration lands as **`draft`**; only a
-human can promote it:
+"AI authors, the user governs." Every registration lands as **`draft`** and can't
+run until approved. Approval happens **conversationally**: the agent shows you what
+a workflow does and asks; when you say yes, it calls `aa_approve`. You never have
+to touch a terminal.
 
-```bash
-aart show <id>        # review the definition
-aart approve <id>     # → approved (the only way to grant approval)
-aart deprecate <id>   # → deprecated
-```
-
-- **Agents cannot approve** — `aa_register_block` always writes `draft`, and there
-  is no MCP approve tool. An agent's `aa_run_workflow` refuses anything not
-  `approved` (and refuses inline definitions).
-- **You can override one run** with `aart run <id> --yes` (the report records it
-  as an unapproved run). Approved definitions run without `--yes`.
+- A draft can't run; `aa_run_workflow` refuses anything not `approved`.
 - Built-in **pack blocks are trusted** (`native`); referenced blocks must be
-  approved too (the gate is transitive). Re-registering an edited definition
-  resets it to `draft`.
-- **Honest scope:** this is a real boundary for an MCP-constrained agent and an
-  audit trail for everyone. A coding agent with *shell access* can run
-  `aart approve` itself — so treat the gate as deliberate-action governance, not
-  a hard security control against a shell-capable agent.
+  approved too (the gate is transitive). Editing + re-registering resets a
+  definition to `draft`, so the agent asks you again.
+- Prefer a **stricter, out-of-band gate?** Set `AART_STRICT_APPROVAL=1` — the
+  `aa_approve` tool is then removed and only the `aart approve <id>` CLI (run by
+  you) can approve. The CLI is always available: `aart show/approve/deprecate <id>`.
+- **Honest scope:** conversational approval keeps you in the loop and is an audit
+  trail, but it trusts the agent to ask before approving. Strict mode is the hard,
+  out-of-band boundary (though a shell-capable agent could still run `aart approve`
+  itself — so it's deliberate-action governance, not a security sandbox).
 
 ## Workspace & secrets
 
