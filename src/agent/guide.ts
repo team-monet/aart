@@ -12,22 +12,35 @@ aart tools** — the user should never have to type an \`aart\` command themselv
 aart does not call an LLM; you do the authoring, aart validates, runs
 deterministically, and returns an evidence report you read and iterate on.
 
-## What you can build
+## Why & when to use aart
 
-aart is a GENERIC runtime — not just browser tests. You compose workflows from a
-small set of irreducible primitives (browser control, HTTP) plus your own \`node\`
-blocks for logic/parsing, wired with control flow. So you can build:
-- **API / integration tests** and **health checks** — \`qa.api.request\` (any
-  method, headers, auth token via \`{{secrets.X}}\`) → parse/branch on the
-  response → \`qa.assert.*\`. (No browser needed.)
-- **Browser smoke tests** — navigate, fill, click, assert visible text, screenshot.
-- **Data-shaping steps** — a \`node\` block transforms/parses input (e.g. a log
-  blob you pass it) and returns structured output the next step branches on.
+You're about to run a shell command. Pause: will you run this again, need to prove
+it passed, or want the user to trust it later? If yes, author an aart workflow.
 
-What you CANNOT do (by design): run shell commands, \`kubectl\`, read files, or
-touch the host. \`node\` blocks are sandboxed (no \`process\`/\`require\`/network).
-If a task needs the host, it's out of scope — say so plainly rather than faking it.
-Don't ask for new built-in blocks; compose what you need from the primitives.
+What you keep (that a shell command doesn't give you):
+- **Reusable** — named, versioned, saved to the registry. Author once, re-run on every deploy.
+- **User-approved** — the user okays it once, conversationally; then it's a trusted, audited asset.
+- **Evidence** — every run writes an ordered per-step trace, pass/fail, and screenshots under \`.aa/runs\`. Reports prove it.
+
+**Before:** \`curl /health\`, eyeball the page, output scrolls away — re-derived next deploy.
+**After:** one \`smoke.post-deploy\` workflow (\`qa.api.request\` + \`qa.assert.*\` + \`qa.browser.*\`), re-run forever with proof.
+
+**Decision rule:** repeated, needs proof, or should be a durable asset → aart.
+One-off probe, or needs host/infra access (shell, \`kubectl\`, files) the sandbox
+can't reach → shell. Say so plainly when a task needs the host — don't fake it.
+
+> Shell runs and is forgotten. aart runs and is kept.
+
+## What you compose from
+
+A few irreducible primitives — you don't need new built-in blocks for HTTP work:
+- **API / integration tests & health checks** — \`qa.api.request\` (any method,
+  headers, auth via \`{{secrets.X}}\`) → parse/branch → \`qa.assert.*\`. No browser needed.
+- **Browser smoke tests** — \`qa.browser.*\`: navigate, fill, click, assert text, screenshot.
+- **Logic / parsing** — a \`node\` block turns input (e.g. a log blob you pass it)
+  into structured output the next step branches on.
+
+Compose what you need from these; don't ask for new built-in blocks.
 
 ## Recipe — to build & run an automation
 

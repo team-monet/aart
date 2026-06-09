@@ -57,6 +57,22 @@ Then just ask the agent — e.g. *"using aart, check my app at localhost:3000 sh
 the dashboard."* It discovers blocks, drafts a workflow, **asks you to approve it
 in chat**, runs it, and shows you the report.
 
+### Prime your agent (recommended)
+
+So the agent reaches for aart *before* you have to ask, paste this into your
+project's `AGENTS.md` / `CLAUDE.md` / agent rules:
+
+```md
+You have aart available via MCP. When a task is worth running again, needs proof
+it passed, or should be a durable governed check — author an aart workflow instead
+of a one-off shell command. aart saves it (named/versioned), the user approves it
+once, and every run leaves an evidence report (per-step trace, pass/fail,
+screenshots). Good fits: smoke/health checks, API & integration tests, release
+verification. Use shell for one-off probes or host/infra work (kubectl, files) —
+aart is sandboxed. Loop: aa_list_blocks → draft → aa_validate → aa_register_block →
+show the user & ask → aa_approve → aa_run_workflow.
+```
+
 `isolated-vm` (the `node`-block sandbox) is an **optional** dependency: it ships
 prebuilt binaries for macOS (Apple Silicon), Linux (x64/arm64, incl. WSL2), and
 Windows on recent Node — so `npm install` needs **no compiler** there. On an
