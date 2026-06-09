@@ -204,11 +204,22 @@ with real Chromium; secrets redacted; portable to macOS + WSL2.
   a *shell-capable* agent can call `aart approve` itself, so it is deliberate-action
   governance, not a hard security control. (Hardening it further ties into Phase 5.)
 
-### Phase 5 — Block-code safety for agent-authored `node` blocks `[ ]`
-- [ ] Hardened static analyzer (port the legacy `static-analyzer` concept; use the
-      TS type checker) that **gates** registration of `node` blocks
-- [ ] real sandbox tier replaces `node:vm` (see open decision) before any
-      agent-authored code runs unattended
+### Phase 5 — Block-code safety for agent-authored `node` blocks `[x]`
+- [x] **Real sandbox** — `node` blocks run in `isolated-vm` (a true V8 isolate:
+      own heap, NO host refs, so the `process`/`require` escape that defeats
+      `node:vm` is gone). Enforces a memory limit and a HARD timeout (a runaway
+      loop is terminated, not abandoned). Fresh isolate per run (no cross-block
+      contamination) + cross-isolate V8 compile cache for speed.
+- [x] node blocks are pure compute: `inputs` + `ctx`{runId,vars} in as copies,
+      JSON-serializable object out; NO capabilities/secrets (can't cross an
+      isolate — capability work stays in native pack blocks). Verified: the
+      secret-exfil-via-`process.env` block that worked under `node:vm` now fails.
+- [x] **Static gate** — a node block's code must compile (isolated-vm
+      `compileScriptSync`) to be registered (`validateDraft`).
+- decision settled: sandbox tier = `isolated-vm` (in-process, ms-scale, no Docker).
+  Cost: native addon (needs a C++ toolchain to `npm install`).
+- [ ] later: deeper static analysis (reference/output-type inference, the legacy
+      analyzer concept) — lower priority now that the sandbox is the hard boundary.
 
 ---
 

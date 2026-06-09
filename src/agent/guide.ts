@@ -20,8 +20,13 @@ you can read and iterate on.
 ## The model
 
 - A **block** is the minimal unit of work. Its \`execution.type\` is one of:
-  - \`node\` — JavaScript with a \`code\` body that may reference \`inputs\` and
-    \`ctx\` and \`return\`s an object matching its declared \`outputs\`;
+  - \`node\` — JavaScript that runs in a locked-down V8 isolate (no \`process\`,
+    \`require\`, fs, network, or timers). It is PURE COMPUTE: it may reference
+    \`inputs\` and \`ctx\` ({runId, vars}) and must \`return\` a JSON-serializable
+    object matching its \`outputs\`. It gets no capabilities/secrets — if you need
+    a browser or HTTP, compose the native \`qa.*\` blocks instead. Code must
+    compile to register, runs under a memory + time limit, and is killed if it
+    exceeds them;
   - \`workflow\` — an ordered list of \`steps\`, each invoking another block;
   - \`native\` — a trusted primitive shipped by a pack (e.g. \`qa.api.request\`,
     \`qa.browser.*\`). You compose these as steps but never author or re-register

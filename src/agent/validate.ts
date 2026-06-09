@@ -3,6 +3,7 @@ import {
   WorkflowExecutionSchema,
   type BlockDefinition,
 } from '../core/types'
+import { checkNodeSyntax } from '../core/executor'
 import type { Registry } from '../registry/file-registry'
 
 export interface ValidationResult {
@@ -64,8 +65,12 @@ export function validateWorkflowRefs(
 export function validateDraft(value: unknown, registry: Registry): ValidationResult {
   const structural = validateStructure(value)
   if (!structural.ok || !structural.block) return structural
-  const refErrors = validateWorkflowRefs(structural.block, registry)
-  return refErrors.length
-    ? { ok: false, errors: refErrors, block: structural.block }
-    : structural
+  const block = structural.block
+  // Static gate: a node block's code must compile (syntax-valid).
+  if (block.execution.type === 'node') {
+    const syntaxErr = checkNodeSyntax(block.execution.code)
+    if (syntaxErr) return { ok: false, errors: [`code: ${syntaxErr}`], block }
+  }
+  const refErrors = validateWorkflowRefs(block, registry)
+  return refErrors.length ? { ok: false, errors: refErrors, block } : structural
 }

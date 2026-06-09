@@ -32,8 +32,8 @@ governance gate and a real `node`-code sandbox are the next phases.
 | QA pack — `qa.api.*`, `qa.assert.*`, `qa.browser.*` (Playwright) | ✅ working (verified incl. real Chromium) |
 | Secrets (`{{secrets.NAME}}`, redacted from reports) | ✅ working |
 | Approval gate (`draft`→`approved`, human-only) | ✅ working |
-| `node` block executor | ⚠️ temporary (`node:vm`, **not a sandbox**) |
-| Block-code static-analysis gate | 🚧 Phase 5 |
+| `node` block sandbox (isolated-vm: own heap, memory cap, hard timeout) | ✅ working |
+| Static gate (node code must compile to register) | ✅ working |
 
 ## Quick start
 
@@ -55,7 +55,9 @@ with `aart report <id>`). (No `npm link`? Use `npm run dev -- <cmd>`.)
 
 ### Running on WSL2 / Linux
 
-The code is portable; two setup steps for the QA browser blocks:
+`isolated-vm` (the `node` sandbox) is a native addon, so `npm install` needs a
+C++ toolchain. On Ubuntu/WSL2: `sudo apt install -y build-essential python3`
+(macOS: Xcode Command Line Tools). Then, for the QA browser blocks:
 
 ```bash
 # Chromium + its system libraries (plain `install chromium` is NOT enough on Ubuntu/WSL2)
