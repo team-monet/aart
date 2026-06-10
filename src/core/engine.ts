@@ -1,6 +1,7 @@
 import { resolveInputs, resolveValue, evalCondition, type ResolveScope } from './resolver'
 import { runNodeBlock } from './executor'
 import { runHostNodeBlock } from './host-runner'
+import { runCommandBlock } from './command-runner'
 import { secretValues, redactText } from './secrets'
 import type { ExecutionContext } from './context'
 import type { Registry } from '../registry/file-registry'
@@ -102,6 +103,11 @@ export class Engine {
       // Mask secrets that a block may have printed before logging to stderr.
       const sv = res.logs.length ? secretValues(ctx.secrets) : []
       for (const line of res.logs) ctx.logger.debug(`[${block.id}] ${redactText(line, sv)}`)
+      return res.output
+    }
+
+    if (block.execution.type === 'command') {
+      const res = await runCommandBlock(block.execution, inputs, params, ctx)
       return res.output
     }
 

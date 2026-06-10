@@ -83,6 +83,11 @@ most web/HTTP work:
   workspace-scoped `file.read`/`file.write`, `http.download`, and
   `artifact.write` to attach generated reports to the run's evidence. `flow.sleep`
   + step jumps give you polling loops; `flow.fail` gives branches a clean exit.
+- **Governed host commands** — a `command` block wraps a CLI you'd otherwise
+  shell out to (`git`, `gh`, `kubectl`, builds). You approve the **exact
+  command shape** (fixed binary + argv template, spawned without a shell);
+  inputs fill argv slots only, and every execution lands in run history —
+  shell work becomes an audit trail instead of scrollback.
 - **Custom logic** — a sandboxed `node` block parses/transforms data
   between steps. Declare `dependencies` (npm packages / `node:` built-ins) and
   it runs as **real Node.js with those libraries** instead — approval-gated.

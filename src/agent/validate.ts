@@ -80,6 +80,19 @@ export function validateDraft(value: unknown, registry: Registry): ValidationRes
       : checkNodeSyntax(block.execution.code)
     if (syntaxErr) return { ok: false, errors: [`code: ${syntaxErr}`], block }
   }
+  // Command blocks: the binary and cwd are part of what the user approves —
+  // they must be fixed strings. Only argv slots and env values interpolate.
+  if (block.execution.type === 'command') {
+    const errors: string[] = []
+    if (!block.execution.command.trim()) errors.push('command: must not be empty')
+    if (block.execution.command.includes('{{')) {
+      errors.push('command: must be a fixed binary — no {{interpolation}} (put dynamic parts in args)')
+    }
+    if (block.execution.cwd?.includes('{{')) {
+      errors.push('cwd: must be a fixed workspace-relative path — no {{interpolation}}')
+    }
+    if (errors.length) return { ok: false, errors, block }
+  }
   const refErrors = validateWorkflowRefs(block, registry)
   return refErrors.length ? { ok: false, errors: refErrors, block } : structural
 }

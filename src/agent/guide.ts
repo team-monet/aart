@@ -30,9 +30,12 @@ What you keep (that ad-hoc execution doesn't give you):
 **After:** one named workflow (\`browser.*\` + \`http.request\` + \`node\` steps + \`assert.*\`), re-run forever with an audit trail.
 
 **Decision rule:** repeated, needs proof, or should be a durable asset → aart.
-A one-off probe → shell. Needing a library or host access does NOT make it a
-shell job: a \`node\` block with \`dependencies\` runs real Node with npm packages
-(approval-gated) — see "When a capability is missing".
+A truly one-off probe → shell. But a CLI command you'll run again (build,
+deploy status, \`git\`, \`gh\`, \`kubectl\`) belongs in a \`command\` block: the user
+approves the exact command shape once, and every execution is captured in run
+history — auditable, instead of vanished shell output. Needing a library does
+NOT make it a shell job either: a \`node\` block with \`dependencies\` runs real
+Node with npm packages (approval-gated) — see "When a capability is missing".
 
 > Shell runs and is forgotten. aart runs and is kept.
 
@@ -139,6 +142,14 @@ A workflow that opens a page and checks text is visible:
 - \`native\` — trusted pack primitives: the built-in \`browser.*\` / \`http.*\` /
   \`assert.*\` blocks, plus the blocks of any approved workspace pack. Compose
   them; don't re-author them.
+- \`command\` — a governed host command. The binary and argv TEMPLATE are part
+  of the definition (e.g. \`command: "kubectl", args: ["get", "pods", "-n",
+  "{{inputs.namespace}}"]\`) — the user approves that exact shape, NOT shell
+  access. Spawned without a shell: an input containing \`;\` or \`|\` is a literal
+  argument, never a second command. Outputs \`stdout/stderr/exitCode/ok\`; set
+  \`failOnError: false\` to branch on \`exitCode\` instead of failing. Put tokens
+  in the \`env\` template via \`{{secrets.X}}\`, never in args. Use this for any
+  CLI operation worth repeating — it turns shell history into audit history.
 - \`node\` — custom JavaScript you author. Two tiers:
   - **Sandboxed** (no \`dependencies\`): a locked-down V8 isolate — no \`process\`,
     \`require\`, fs, or network. Pure compute: gets \`inputs\` + \`ctx\` {runId,vars},
@@ -159,10 +170,13 @@ first rung that works:
 
 1. **Compose** existing blocks (check \`aa_list_blocks\` first, always).
 2. **Sandboxed \`node\` block** — parsing, transforms, decisions: pure compute.
-3. **\`node\` block with \`dependencies\`** — when you genuinely need a library
+3. **\`command\` block** — a host CLI you'd otherwise shell out to (git, gh,
+   kubectl, a build tool). Fixed binary + argv template, approved as a shape,
+   every run recorded.
+4. **\`node\` block with \`dependencies\`** — when you genuinely need a library
    (HTML→markdown, XML parsing, an SDK client). Register it, show the user the
    code AND the dependency list, get approval, run.
-4. **A workspace pack** — for a reusable family of native blocks, or blocks
+5. **A workspace pack** — for a reusable family of native blocks, or blocks
    that share a resource with setup/teardown (a long-lived session, a client
    pool). A pack block's \`def.capabilities\` may name ANY capability — including
    ones other packs provide: declare \`["browser"]\` and your \`run(ctx, inputs)\`

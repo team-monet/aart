@@ -31,6 +31,18 @@ export function renderDefinition(b: BlockDefinition): string {
           .join(', ')}`,
       )
     }
+  } else if (b.execution.type === 'command') {
+    if (b.outputs.length) lines.push(`  outputs: ${b.outputs.map((o) => `${o.name}:${o.type}`).join(', ')}`)
+    lines.push(`  command: $ ${[b.execution.command, ...b.execution.args].join(' ')}`)
+    if (b.execution.cwd) lines.push(`  cwd: ${b.execution.cwd}`)
+    if (b.execution.env && Object.keys(b.execution.env).length) {
+      lines.push(`  env: ${Object.entries(b.execution.env).map(([k, v]) => `${k}=${v}`).join(', ')}`)
+    }
+    if (b.execution.failOnError === false) lines.push('  failOnError: false (workflow branches on exitCode)')
+    lines.push(
+      '  ⚠ HOST COMMAND — approving runs exactly this command shape on this machine, ' +
+        'with inputs filling the {{slots}} shown above. Every run is recorded.',
+    )
   } else if (b.execution.type === 'node') {
     if (b.outputs.length) lines.push(`  outputs: ${b.outputs.map((o) => `${o.name}:${o.type}`).join(', ')}`)
     if (b.execution.dependencies?.length) {

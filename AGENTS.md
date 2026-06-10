@@ -50,6 +50,9 @@ tools so the user doesn't type commands.
 - Branch: a step's `if` is a **safe comparison** (`inputs.n > 3`), jumping to
   `then`/`else`; or use `next`; else steps fall through in order.
 - Reference only block ids that exist. Keep `node` code small and single-purpose.
+- A CLI you'd run more than once belongs in a `command` block: fixed binary +
+  argv template (inputs fill slots; no shell), approved as a shape, every
+  execution recorded in run history. Don't let repeat commands vanish into shell.
 - A `node` block is sandboxed pure compute — unless it declares `dependencies`
   (npm packages / `node:` built-ins): then it runs as a real Node process with
   `require`, **unsandboxed**, so the user must approve it knowing that. For

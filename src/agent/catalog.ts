@@ -6,7 +6,7 @@ import { statusLabel, type ApprovalStatus } from '../core/approval'
 export interface CatalogEntry {
   id: string
   version: string
-  type: 'node' | 'workflow' | 'native'
+  type: 'node' | 'workflow' | 'native' | 'command'
   /** Governance state: 'native' (trusted pack block) or draft/approved/deprecated. */
   status: ApprovalStatus | 'native'
   name: string

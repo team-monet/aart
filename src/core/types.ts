@@ -66,10 +66,33 @@ export const NativeExecutionSchema = z.object({
   type: z.literal('native'),
 })
 
+/**
+ * A governed host command. The binary and argv TEMPLATE are part of the
+ * definition the user approves — inputs interpolate into individual argv
+ * slots only (spawned without a shell), so what the user approved is a
+ * specific command SHAPE, not blanket shell access. Every execution lands
+ * in run history with stdout/stderr/exitCode for auditing.
+ */
+export const CommandExecutionSchema = z.object({
+  type: z.literal('command'),
+  /** The binary to run. Fixed — interpolation here is rejected at validation. */
+  command: z.string(),
+  /** Argv template; entries may use {{inputs.x}} / {{params.x}} / {{secrets.X}}. */
+  args: z.array(z.string()).default([]),
+  /** Working dir, workspace-relative. Fixed string (no interpolation). */
+  cwd: z.string().optional(),
+  /** Extra env vars; values may interpolate (e.g. TOKEN: "{{secrets.GH_TOKEN}}"). */
+  env: z.record(z.string()).optional(),
+  timeoutMs: z.number().optional(),
+  /** Default true: non-zero exit fails the step. Set false to branch on exitCode. */
+  failOnError: z.boolean().optional(),
+})
+
 export const ExecutionSchema = z.discriminatedUnion('type', [
   NodeExecutionSchema,
   WorkflowExecutionSchema,
   NativeExecutionSchema,
+  CommandExecutionSchema,
 ])
 export type Execution = z.infer<typeof ExecutionSchema>
 
