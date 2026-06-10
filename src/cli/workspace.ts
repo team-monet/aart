@@ -2,6 +2,7 @@ import path from 'node:path'
 import { FileRegistry } from '../registry/file-registry'
 import { Runtime } from '../core/runtime'
 import { builtinPacks } from '../packs'
+import { loadApprovedPacks, mergePacks } from '../pack/loader'
 
 let override: string | undefined
 
@@ -20,9 +21,17 @@ export function workspace(): string {
   return path.resolve(override ?? process.env.AART_WORKSPACE ?? process.cwd())
 }
 
-/** A Runtime with the built-in packs loaded (composite registry + capabilities). */
+/**
+ * A Runtime with the built-in packs plus the workspace's approved packs
+ * (`.aa/packs.json`). Pack problems (edited since approval, load errors,
+ * id collisions) never prevent startup — they are warned to stderr and the
+ * pack is skipped.
+ */
 export function openRuntime(ws = workspace()): Runtime {
-  return new Runtime(ws, builtinPacks)
+  const loaded = loadApprovedPacks(ws)
+  const merged = mergePacks(builtinPacks, loaded.packs)
+  for (const w of [...loaded.warnings, ...merged.warnings]) console.error(`warn  ${w}`)
+  return new Runtime(ws, merged.packs)
 }
 
 /** The bare file registry (user-authored blocks only); rarely needed directly. */

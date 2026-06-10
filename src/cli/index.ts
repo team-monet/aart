@@ -8,6 +8,7 @@ import { schemaCommand } from './commands/schema'
 import { validateCommand } from './commands/validate'
 import { mcpCommand } from './commands/mcp'
 import { approveCommand, deprecateCommand, showCommand } from './commands/approve'
+import { packApproveCommand, packListCommand, packRegisterCommand } from './commands/pack'
 import { doctorCommand } from './commands/doctor'
 import { setWorkspace } from './workspace'
 
@@ -79,6 +80,25 @@ program
   .option('--version <v>', 'a specific version (default: latest)')
   .description('mark a definition deprecated (no longer approved)')
   .action(deprecateCommand)
+
+const pack = program
+  .command('pack')
+  .description('manage workspace packs (.aa/packs — agent-authored native blocks)')
+pack
+  .command('register')
+  .argument('<name>', 'pack name (its dir: .aa/packs/<name>)')
+  .option('--path <dir>', 'pack dir relative to the workspace (default: .aa/packs/<name>)')
+  .description('record a pack as draft (does not execute or load it)')
+  .action(packRegisterCommand)
+pack
+  .command('approve')
+  .argument('<name>', 'a registered pack name')
+  .description('approve a pack so it loads into the runtime (it runs unsandboxed)')
+  .action(packApproveCommand)
+pack
+  .command('list')
+  .description('list registered packs and whether their content still matches approval')
+  .action(packListCommand)
 
 program
   .command('schema')

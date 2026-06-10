@@ -57,6 +57,19 @@ export class CompositeRegistry implements Registry {
     this.file.deleteBlock(id)
   }
 
+  /** Add a native block after construction (workspace pack hot-load). */
+  addNativeBlock(b: NativeBlock): void {
+    if (this.native.has(b.def.id)) {
+      throw new Error(`Duplicate native block id across packs: ${b.def.id}`)
+    }
+    this.native.set(b.def.id, b)
+  }
+
+  /** Remove a native block (workspace pack replacement on re-approval). */
+  removeNativeBlock(id: string): void {
+    this.native.delete(id)
+  }
+
   /** Map of native block id -> handler, for the engine. */
   nativeHandlers(): Map<string, NativeRunFn> {
     const m = new Map<string, NativeRunFn>()

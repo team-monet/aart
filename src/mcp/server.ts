@@ -9,6 +9,7 @@ import { validateDraft } from '../agent/validate'
 import { renderDefinition } from '../agent/render'
 import { unapprovedInTree } from '../core/approval'
 import { setApproval } from '../core/governance'
+import { approveWorkspacePack, loadWorkspacePack, registerWorkspacePack } from '../pack/loader'
 import { AUTHORING_GUIDE } from '../agent/guide'
 import { renderReport, readRun, listRuns } from '../core/report'
 import { openRuntime, workspace } from '../cli/workspace'
@@ -250,6 +251,33 @@ export async function startMcpServer(): Promise<void> {
     async () => json(await listRuns(ws)),
   )
 
+  server.registerTool(
+    'aa_register_pack',
+    {
+      title: 'Register a workspace pack',
+      description:
+        'Register a pack of native blocks you authored under <workspace>/.aa/packs/<name>/ ' +
+        '(CommonJS: module.exports = { name, blocks: [{ def, run }], capabilities? }). ' +
+        'Registration records a content hash as DRAFT and never executes the pack. ' +
+        'Next: show the user the returned summary and ask them to approve; pack code runs ' +
+        'unsandboxed inside the runtime once approved.',
+      inputSchema: { name: z.string(), path: z.string().optional() },
+    },
+    async ({ name, path: relPath }) => {
+      try {
+        const r = registerWorkspacePack(ws, name, relPath)
+        return text(
+          `Registered pack "${r.name}" (${r.path}) as DRAFT — not loaded yet.\n` +
+            `Files sealed by the approval hash: ${r.files.join(', ')}\n\n` +
+            `SHOW the user what they would be approving (unsandboxed runtime code):\n\n${r.preview}\n\n` +
+            `When the user agrees, call aa_approve_pack with name "${r.name}".`,
+        )
+      } catch (err) {
+        return fail(err instanceof Error ? err.message : String(err))
+      }
+    },
+  )
+
   // Conversational approval: the user approves in chat, you record it here.
   // Set AART_STRICT_APPROVAL=1 to require the `aart approve` CLI instead.
   if (!process.env.AART_STRICT_APPROVAL) {
@@ -270,6 +298,31 @@ export async function startMcpServer(): Promise<void> {
           msg += ` Note: it still references unapproved blocks (${r.pending.join(', ')}); approve those too.`
         }
         return text(msg)
+      },
+    )
+
+    server.registerTool(
+      'aa_approve_pack',
+      {
+        title: 'Approve a workspace pack',
+        description:
+          'Approve a registered pack and load it into the live runtime (its blocks become ' +
+          'usable immediately). ONLY call this after the user has approved the pack in the ' +
+          'conversation — pack code runs unsandboxed. Re-approval is needed after any edit.',
+        inputSchema: { name: z.string() },
+      },
+      async ({ name }) => {
+        try {
+          // Validate the pack loads BEFORE recording approval, so a broken pack
+          // is rejected outright instead of being approved-but-unloadable.
+          const pack = loadWorkspacePack(ws, name)
+          runtime.addPack(pack)
+          approveWorkspacePack(ws, name)
+          const ids = pack.blocks.map((b) => b.def.id).join(', ')
+          return text(`approved pack "${name}" — loaded ${pack.blocks.length} block(s): ${ids}. Ready to compose.`)
+        } catch (err) {
+          return fail(err instanceof Error ? err.message : String(err))
+        }
       },
     )
 

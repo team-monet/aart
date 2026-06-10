@@ -41,6 +41,9 @@ export class Runtime {
   readonly registry: CompositeRegistry
   private nativeHandlers: Map<string, NativeRunFn>
   private capabilities: Map<string, Capability>
+  /** What each loaded pack contributed (by pack name), for replacement on re-approval. */
+  private packBlocks = new Map<string, string[]>()
+  private packCaps = new Map<string, string[]>()
 
   constructor(
     private workspace: string,
@@ -59,6 +62,44 @@ export class Runtime {
       }
       this.capabilities.set(c.name, c)
     }
+    for (const p of packs) {
+      this.packBlocks.set(p.name, p.blocks.map((b) => b.def.id))
+      this.packCaps.set(p.name, p.capabilities.map((c) => c.name))
+    }
+  }
+
+  /**
+   * Hot-add a pack to a live Runtime (used when the user approves a workspace
+   * pack mid-session, so it is usable without a server restart). Re-adding a
+   * pack with the same name REPLACES its earlier contribution (re-approval
+   * after an edit); collisions with OTHER packs are validated up front so a
+   * partial add cannot happen.
+   */
+  addPack(pack: Pack): void {
+    const ownBlocks = new Set(this.packBlocks.get(pack.name) ?? [])
+    const ownCaps = new Set(this.packCaps.get(pack.name) ?? [])
+    for (const b of pack.blocks) {
+      if (!ownBlocks.has(b.def.id) && this.registry.getBlock(b.def.id)?.execution.type === 'native') {
+        throw new Error(`pack "${pack.name}": block id "${b.def.id}" is already provided by another pack`)
+      }
+    }
+    for (const c of pack.capabilities) {
+      if (!ownCaps.has(c.name) && this.capabilities.has(c.name)) {
+        throw new Error(`pack "${pack.name}": capability "${c.name}" is already provided by another pack`)
+      }
+    }
+    for (const id of ownBlocks) {
+      this.registry.removeNativeBlock(id)
+      this.nativeHandlers.delete(id)
+    }
+    for (const name of ownCaps) this.capabilities.delete(name)
+    for (const b of pack.blocks) {
+      this.registry.addNativeBlock(b)
+      this.nativeHandlers.set(b.def.id, b.run)
+    }
+    for (const c of pack.capabilities) this.capabilities.set(c.name, c)
+    this.packBlocks.set(pack.name, pack.blocks.map((b) => b.def.id))
+    this.packCaps.set(pack.name, pack.capabilities.map((c) => c.name))
   }
 
   async run(
