@@ -108,6 +108,14 @@ more powerful is **approval-gated, not impossible**: dependency-bearing blocks
 and workspace packs run unsandboxed — the approval summary says so in plain
 words, and nothing runs until you agree. aart never runs ad-hoc shell commands.
 
+## See what ran
+
+`aart dashboard` serves a **local, read-only** web UI (127.0.0.1 only): the
+block catalog with approval status, run history with per-step traces and
+inputs/outputs, inline screenshots and artifacts, and workspace-pack status.
+Approval and registration stay in the governed chat/CLI flows — the dashboard
+only shows evidence.
+
 ## Governance (the approval gate)
 
 Every registration lands as **`draft`** and can't run until approved. Approval is
@@ -144,6 +152,7 @@ aart show / approve <id>      review / approve a definition
 aart pack register|approve|list <name>   workspace packs (agent-authored native blocks)
 aart run <id|file> [--yes]    run a workflow → report
 aart report <runId>           replay a past report
+aart dashboard [--port 4400]  local read-only web UI: blocks, run history, artifacts
 aart doctor                   check setup
 aart mcp                      start the MCP server (stdio)
 ```

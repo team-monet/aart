@@ -9,6 +9,7 @@ import { validateCommand } from './commands/validate'
 import { mcpCommand } from './commands/mcp'
 import { approveCommand, deprecateCommand, showCommand } from './commands/approve'
 import { packApproveCommand, packListCommand, packRegisterCommand } from './commands/pack'
+import { dashboardCommand } from './commands/dashboard'
 import { doctorCommand } from './commands/doctor'
 import { setWorkspace } from './workspace'
 
@@ -120,6 +121,12 @@ program
   .command('mcp')
   .description('start the MCP server (stdio) so a coding agent can drive aart')
   .action(mcpCommand)
+
+program
+  .command('dashboard')
+  .option('--port <n>', 'port to listen on (127.0.0.1 only)', '4400')
+  .description('local read-only dashboard: blocks, run history, artifacts, packs')
+  .action(dashboardCommand)
 
 program
   .command('doctor')
