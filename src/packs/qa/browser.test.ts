@@ -5,6 +5,12 @@ import os from 'node:os'
 import path from 'node:path'
 import { chromium } from 'playwright'
 import { Runtime } from '../../core/runtime'
+import {
+  approveWorkspacePack,
+  loadApprovedPacks,
+  mergePacks,
+  registerWorkspacePack,
+} from '../../pack/loader'
 import { qaPack } from './index'
 import type { BlockDefinition } from '../../core/types'
 
@@ -129,6 +135,62 @@ suite('qa.browser via Runtime (real Chromium)', () => {
     const record = await new Runtime(dir, [qaPack]).run(wf, { url })
     expect(record.status).toBe('COMPLETED')
     expect(record.results).toEqual({ count: 1, attr: 'email' })
+    fs.rmSync(dir, { recursive: true, force: true })
+  }, 30000)
+
+  it('an agent-authored workspace pack block shares the built-in browser session', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'aart-br-'))
+    // The self-serve path: the agent writes its own browser block as a pack —
+    // declaring the BUILT-IN `browser` capability — registers it (no execution),
+    // the user approves, and it drives the same page qa.browser.goto opened.
+    const packDir = path.join(dir, '.aa', 'packs', 'mytools')
+    fs.mkdirSync(packDir, { recursive: true })
+    fs.writeFileSync(
+      path.join(packDir, 'index.js'),
+      `module.exports = {
+        name: 'mytools',
+        blocks: [{
+          def: {
+            id: 'mytools.heading',
+            name: 'Heading',
+            version: '0.1.0',
+            capabilities: ['browser'],
+            inputs: [],
+            outputs: [{ name: 'heading', type: 'string' }],
+          },
+          run: async (ctx) => ({
+            heading: await ctx.capabilities.browser.page.evaluate(
+              'document.querySelector("h1").textContent',
+            ),
+          }),
+        }],
+        capabilities: [],
+      }`,
+    )
+    registerWorkspacePack(dir, 'mytools')
+    approveWorkspacePack(dir, 'mytools')
+    const merged = mergePacks([qaPack], loadApprovedPacks(dir).packs)
+    expect(merged.warnings).toEqual([])
+
+    const wf: BlockDefinition = {
+      id: 'self-serve-read',
+      name: 'Self Serve Read',
+      version: '0.1.0',
+      inputs: [{ name: 'url', type: 'string' }],
+      outputs: [],
+      execution: {
+        type: 'workflow',
+        steps: [
+          { id: 'open', block: 'qa.browser.goto', inputs: { url: '{{inputs.url}}' } },
+          { id: 'read', block: 'mytools.heading', inputs: {} },
+        ],
+        outputMapping: { heading: '$read.heading' },
+      },
+    }
+    const record = await new Runtime(dir, merged.packs).run(wf, { url })
+    expect(record.status).toBe('COMPLETED')
+    // Same session: the pack block saw the page the BUILT-IN goto navigated.
+    expect(record.results?.heading).toBe('Dashboard')
     fs.rmSync(dir, { recursive: true, force: true })
   }, 30000)
 

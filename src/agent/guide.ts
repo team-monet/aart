@@ -148,8 +148,12 @@ first rung that works:
    code AND the dependency list, get approval, run.
 4. **A workspace pack** — for a reusable family of native blocks, or blocks
    that share a resource with setup/teardown (a long-lived session, a client
-   pool — like the built-in browser capability). Author CommonJS under
-   \`<workspace>/.aa/packs/<name>/\`:
+   pool). A pack block's \`def.capabilities\` may name ANY capability — including
+   ones other packs provide: declare \`["browser"]\` and your \`run(ctx, inputs)\`
+   gets the SAME live Playwright page the \`qa.browser.*\` steps drive, in
+   \`ctx.capabilities.browser.page\` — so you can build your own browser blocks
+   (custom extraction, table scraping, …) that interleave with built-in steps
+   in one session. Author CommonJS under \`<workspace>/.aa/packs/<name>/\`:
    \`module.exports = { name, blocks: [{ def, run }], capabilities: [] }\` —
    \`def\` like any block definition (no \`execution\`), \`run(ctx, inputs, params)\`
    an async function. Then \`aa_register_pack\` (records a content hash; never
