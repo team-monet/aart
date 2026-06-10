@@ -36,7 +36,7 @@ Verify it's working:
 
 ```bash
 aart --help
-aart list        # shows the built-in core blocks (browser.*, http.request, assert.*)
+aart list        # shows the built-in core blocks (browser.*, http.*, data.*, file.*, flow.*, assert.*)
 ```
 
 ## Use it with your coding agent (recommended)
@@ -79,7 +79,11 @@ most web/HTTP work:
   page as data (`extract_text`, `html`), query the live DOM (`eval`), screenshot.
 - **API workflows & integrations** — `http.request` (any method, headers, auth
   via `{{secrets.X}}`): chain calls, branch on responses with `if/then/else`.
-- **Data shaping & logic** — a sandboxed `node` block parses/transforms data
+- **Data, files & reports** — `data.parse`/`data.stringify` (JSON/YAML/CSV),
+  workspace-scoped `file.read`/`file.write`, `http.download`, and
+  `artifact.write` to attach generated reports to the run's evidence. `flow.sleep`
+  + step jumps give you polling loops; `flow.fail` gives branches a clean exit.
+- **Custom logic** — a sandboxed `node` block parses/transforms data
   between steps. Declare `dependencies` (npm packages / `node:` built-ins) and
   it runs as **real Node.js with those libraries** instead — approval-gated.
 - **QA & release verification** — the same primitives plus `assert.*` and

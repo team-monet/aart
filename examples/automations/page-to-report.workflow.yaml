@@ -1,0 +1,35 @@
+# An automation (not a test): read a rendered page, save its text as a
+# run artifact, and keep a screenshot alongside it. Run with:
+#   aart run examples/automations/page-to-report.workflow.yaml \
+#     -i '{"url":"https://example.com"}' --yes
+id: page-to-report
+name: Page to Report
+version: 0.1.0
+description: Capture a page's rendered text and screenshot as run artifacts.
+inputs:
+  - name: url
+    type: string
+    required: true
+outputs: []
+execution:
+  type: workflow
+  steps:
+    - id: open
+      block: browser.goto
+      inputs:
+        url: "{{inputs.url}}"
+    - id: text
+      block: browser.extract_text
+      inputs: {}
+    - id: save
+      block: artifact.write
+      inputs:
+        name: page.txt
+        content: "$text.text"
+    - id: shot
+      block: browser.screenshot
+      inputs:
+        name: page
+  outputMapping:
+    report: "$save.artifact"
+    screenshot: "$shot.artifact"

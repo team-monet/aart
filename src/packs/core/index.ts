@@ -1,6 +1,10 @@
 import type { Pack } from '../../pack/types'
 import { assertEquals, assertContains } from './assertions'
-import { apiRequest } from './api'
+import { apiRequest, httpDownload } from './api'
+import { dataParse, dataStringify } from './data'
+import { flowSleep, flowFail } from './flow'
+import { fileRead, fileWrite } from './file'
+import { artifactWrite } from './artifacts'
 import {
   browserCapability,
   browserGoto,
@@ -28,6 +32,14 @@ export const corePack: Pack = {
     assertEquals,
     assertContains,
     apiRequest,
+    httpDownload,
+    dataParse,
+    dataStringify,
+    flowSleep,
+    flowFail,
+    fileRead,
+    fileWrite,
+    artifactWrite,
     browserGoto,
     browserClick,
     browserFill,

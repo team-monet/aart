@@ -45,6 +45,12 @@ Start from the built-in primitives — most automations need no new code:
 - **Browser work** — \`browser.*\`: navigate, fill, click, assert text,
   screenshot, read the rendered page as data (\`extract_text\`, \`html\`), and
   query the live DOM with a JS expression (\`eval\` — counts, attributes, tables).
+- **Data & files** — \`data.parse\` / \`data.stringify\` (json/yaml/csv),
+  \`file.read\` / \`file.write\` (workspace-scoped durable state),
+  \`artifact.write\` (attach a produced report to the run), \`http.download\`
+  (binary fetch → artifact).
+- **Flow** — \`flow.sleep\` + a \`next\` jump back = a polling loop;
+  \`flow.fail\` ends an \`else\` branch with an intended, clear error.
 - **Logic / parsing** — a \`node\` block turns input (e.g. a log blob you pass it)
   into structured output the next step branches on.
 
@@ -56,9 +62,10 @@ composition can't get there.
 
 1. **Discover.** Call \`aa_list_blocks\` to see what you can compose. The core
    pack is built in: \`browser.goto/click/fill/text_visible/extract_text/html/eval/screenshot\`,
-   \`http.request\`, \`assert.equals/contains\` (these are \`native\` = trusted,
-   ready to use), plus any approved workspace packs. (Pre-0.4 \`qa.*\` ids still
-   resolve to the same blocks.) Reuse before authoring new.
+   \`http.request/download\`, \`data.parse/stringify\`, \`file.read/write\`,
+   \`artifact.write\`, \`flow.sleep/fail\`, \`assert.equals/contains\` (these are
+   \`native\` = trusted, ready to use), plus any approved workspace packs.
+   (Pre-0.4 \`qa.*\` ids still resolve to the same blocks.) Reuse before authoring new.
 2. **Draft.** Write a workflow definition (a JSON object) that composes those
    blocks. Get the exact shape from \`aa_get_schema\`. A workflow is a block with
    \`execution.type: "workflow"\` and an ordered \`steps\` array.
@@ -115,6 +122,8 @@ A workflow that opens a page and checks text is visible:
 - \`if\` — a safe boolean expression (\`inputs.n > 3\`, \`$s1.ok === true\`); on true
   go to \`then\`, else \`else\`.
 - \`next\` — explicit next step id; otherwise steps run in order.
+- Polling: check → \`if\` not ready → \`flow.sleep\` → \`next\` back to the check.
+  Dead-end branches: finish with \`flow.fail\` so the run fails with intent.
 
 ## Approval (it's the user's call, made in chat)
 

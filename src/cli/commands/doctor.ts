@@ -33,5 +33,5 @@ export async function doctorCommand(): Promise<void> {
     bad('playwright not available — browser.* disabled', 'npx playwright install --with-deps chromium')
   }
 
-  console.log('\nCore pack (browser.*, http.request, assert.*) is built in — no registration needed. Legacy qa.* ids still resolve.')
+  console.log('\nCore pack (browser.*, http.*, data.*, file.*, flow.*, artifact.write, assert.*) is built in — no registration needed. Legacy qa.* ids still resolve.')
 }

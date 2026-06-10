@@ -1,9 +1,64 @@
 import { nativeBlock } from '../../pack/types'
 
+const MAX_DOWNLOAD_BYTES = 25_000_000
+
+export const httpDownload = nativeBlock(
+  {
+    id: 'http.download',
+    name: 'HTTP Download',
+    version: '0.1.0',
+    description:
+      'Download a URL (binary-safe) and attach it as a named run artifact — a PDF, ' +
+      'image, archive, dataset. Fails on non-2xx. `maxBytes` caps the size ' +
+      `(default ${MAX_DOWNLOAD_BYTES}).`,
+    inputs: [
+      { name: 'url', type: 'string', required: true },
+      { name: 'name', type: 'string', required: true },
+      { name: 'headers', type: 'object' },
+      { name: 'maxBytes', type: 'number' },
+      { name: 'timeoutMs', type: 'number' },
+    ],
+    outputs: [
+      { name: 'artifact', type: 'string' },
+      { name: 'bytes', type: 'number' },
+      { name: 'status', type: 'number' },
+    ],
+  },
+  async (ctx, inputs) => {
+    const url = String(inputs.url)
+    const timeoutMs = typeof inputs.timeoutMs === 'number' ? inputs.timeoutMs : 60_000
+    const maxBytes =
+      typeof inputs.maxBytes === 'number' && inputs.maxBytes > 0 ? inputs.maxBytes : MAX_DOWNLOAD_BYTES
+    let res: Response
+    try {
+      res = await fetch(url, {
+        headers: new Headers((inputs.headers as Record<string, string> | undefined) ?? undefined),
+        signal: AbortSignal.timeout(timeoutMs),
+      })
+    } catch (err) {
+      if (err instanceof Error && err.name === 'TimeoutError') {
+        throw new Error(`download of ${url} timed out after ${timeoutMs}ms`)
+      }
+      throw err
+    }
+    if (!res.ok) throw new Error(`download failed: HTTP ${res.status} for ${url}`)
+    const declared = Number(res.headers.get('content-length') ?? 0)
+    if (declared > maxBytes) {
+      throw new Error(`download too large: ${declared} bytes > maxBytes ${maxBytes}`)
+    }
+    const buf = Buffer.from(await res.arrayBuffer())
+    if (buf.byteLength > maxBytes) {
+      throw new Error(`download too large: ${buf.byteLength} bytes > maxBytes ${maxBytes}`)
+    }
+    const artifact = ctx.artifacts.attach(String(inputs.name), buf)
+    return { artifact, bytes: buf.byteLength, status: res.status }
+  },
+)
+
 export const apiRequest = nativeBlock(
   {
     id: 'http.request',
-    name: 'API Request',
+    name: 'HTTP Request',
     version: '0.1.0',
     description: 'Make an HTTP request and return status, ok and parsed body.',
     inputs: [
