@@ -59,9 +59,10 @@ it passed, or should be a durable governed check — author an aart workflow ins
 of a one-off shell command. aart saves it (named/versioned), the user approves it
 once, and every run leaves an evidence report (per-step trace, pass/fail,
 screenshots). Good fits: smoke/health checks, API & integration tests, release
-verification. Use shell for one-off probes or host/infra work (kubectl, files) —
-aart is sandboxed. Loop: aa_list_blocks → draft → aa_validate → aa_register_block →
-show the user & ask → aa_approve → aa_run_workflow.
+verification. Use shell for one-off probes; a durable automation that needs a
+library can declare npm `dependencies` (approval-gated). Loop: aa_list_blocks →
+draft → aa_validate → aa_register_block → show the user & ask → aa_approve →
+aa_run_workflow.
 ```
 
 ## What you can build
@@ -72,14 +73,22 @@ HTTP/browser work:
 - **Health & smoke checks** — `qa.api.request` (any method, headers, auth via
   `{{secrets.X}}`) → `qa.assert.*`. Re-run on every deploy with a pass/fail report.
 - **Browser acceptance tests** — `qa.browser.*`: navigate, fill, click, assert
-  visible text, screenshot.
+  visible text, screenshot, and extract the rendered page's text/HTML as data.
 - **API / integration tests** — chain requests, branch on responses with
   `if/then/else`, assert.
-- **Custom logic** — a sandboxed `node` block parses/transforms data for the next
-  step.
+- **Custom logic** — a sandboxed `node` block parses/transforms data for the
+  next step. Declare `dependencies` (npm packages / `node:` built-ins) and it
+  runs as **real Node.js with those libraries** instead — approval-gated.
+- **Your own native blocks** — agents can author **workspace packs**
+  (`.aa/packs/<name>`): families of trusted blocks plus shared capabilities
+  (long-lived sessions, clients). Registering a pack records a content hash and
+  **never executes it**; it loads only after you approve, and any edit breaks
+  the seal until re-approved.
 
-aart is sandboxed by design: it does **not** run shell commands, `kubectl`, or
-touch the host — it's for repeatable, governed automations, not ad-hoc scripting.
+Custom code is sandboxed by default (a pure-compute V8 isolate). Everything
+more powerful is **approval-gated, not impossible**: dependency-bearing blocks
+and workspace packs run unsandboxed — the approval summary says so in plain
+words, and nothing runs until you agree. aart never runs ad-hoc shell commands.
 
 ## Governance (the approval gate)
 
@@ -114,6 +123,7 @@ aart context                  the full authoring guide + catalog + schema
 aart validate <file>          validate a draft definition
 aart block add <file>         register a definition (lands as draft)
 aart show / approve <id>      review / approve a definition
+aart pack register|approve|list <name>   workspace packs (agent-authored native blocks)
 aart run <id|file> [--yes]    run a workflow → report
 aart report <runId>           replay a past report
 aart doctor                   check setup

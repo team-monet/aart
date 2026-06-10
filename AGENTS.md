@@ -21,6 +21,8 @@ type `aart` commands.** The server's `instructions` carry the full authoring gui
 | `aa_run_workflow` | run an **approved** workflow → structured report |
 | `aa_get_report` / `aa_list_runs` | fetch a past report / list recent runs |
 | `aa_deprecate` | mark a definition deprecated |
+| `aa_register_pack` | record a workspace pack (`.aa/packs/<name>`) as draft — never executes it |
+| `aa_approve_pack` | after the user agrees: load the pack live; its blocks become `native` |
 
 ## The loop
 
@@ -33,8 +35,8 @@ type `aart` commands.** The server's `instructions` carry the full authoring gui
 6. **Run** (`aa_run_workflow`), **read the report**, revise, repeat.
 
 The CLI mirrors all of this (`aart list/validate/block add/approve/run/report/
-doctor`) for when *you* need it, but prefer the tools so the user doesn't type
-commands.
+pack register|approve|list/doctor`) for when *you* need it, but prefer the
+tools so the user doesn't type commands.
 
 ## Authoring quick reference
 
@@ -48,6 +50,13 @@ commands.
 - Branch: a step's `if` is a **safe comparison** (`inputs.n > 3`), jumping to
   `then`/`else`; or use `next`; else steps fall through in order.
 - Reference only block ids that exist. Keep `node` code small and single-purpose.
+- A `node` block is sandboxed pure compute — unless it declares `dependencies`
+  (npm packages / `node:` built-ins): then it runs as a real Node process with
+  `require`, **unsandboxed**, so the user must approve it knowing that. For
+  reusable native blocks or shared resources (sessions, pools), author a
+  **workspace pack** under `.aa/packs/<name>/` — registering never executes it;
+  approval loads it. When a capability is missing, build the block — don't
+  fake it with workarounds or declare it impossible.
 
 Run `aart context` for the canonical, always-current version of this guide plus
 the live block catalog. Project conventions & roadmap: `docs/IMPLEMENTATION_PLAN.md`.

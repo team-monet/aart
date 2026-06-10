@@ -26,28 +26,32 @@ What you keep (that a shell command doesn't give you):
 **After:** one \`smoke.post-deploy\` workflow (\`qa.api.request\` + \`qa.assert.*\` + \`qa.browser.*\`), re-run forever with proof.
 
 **Decision rule:** repeated, needs proof, or should be a durable asset → aart.
-One-off probe, or needs host/infra access (shell, \`kubectl\`, files) the sandbox
-can't reach → shell. Say so plainly when a task needs the host — don't fake it.
+A one-off probe → shell. Needing a library or host access does NOT make it a
+shell job: a \`node\` block with \`dependencies\` runs real Node with npm packages
+(approval-gated) — see "When a capability is missing".
 
 > Shell runs and is forgotten. aart runs and is kept.
 
 ## What you compose from
 
-A few irreducible primitives — you don't need new built-in blocks for HTTP work:
+Start from the built-in primitives — most automations need no new code:
 - **API / integration tests & health checks** — \`qa.api.request\` (any method,
   headers, auth via \`{{secrets.X}}\`) → parse/branch → \`qa.assert.*\`. No browser needed.
-- **Browser smoke tests** — \`qa.browser.*\`: navigate, fill, click, assert text, screenshot.
+- **Browser work** — \`qa.browser.*\`: navigate, fill, click, assert text,
+  screenshot, and read the rendered page as data (\`extract_text\`, \`html\`).
 - **Logic / parsing** — a \`node\` block turns input (e.g. a log blob you pass it)
   into structured output the next step branches on.
 
-Compose what you need from these; don't ask for new built-in blocks.
+When no block does what you need, you can BUILD one — any block, with any npm
+library — see "When a capability is missing". Compose first; author when
+composition can't get there.
 
 ## Recipe — to build & run an automation
 
 1. **Discover.** Call \`aa_list_blocks\` to see what you can compose. The QA pack
-   is built in: \`qa.browser.goto/click/fill/text_visible/screenshot\`,
+   is built in: \`qa.browser.goto/click/fill/text_visible/extract_text/html/screenshot\`,
    \`qa.api.request\`, \`qa.assert.equals/contains\` (these are \`native\` = trusted,
-   ready to use). Reuse before authoring anything new.
+   ready to use), plus any approved workspace packs. Reuse before authoring new.
 2. **Draft.** Write a workflow definition (a JSON object) that composes those
    blocks. Get the exact shape from \`aa_get_schema\`. A workflow is a block with
    \`execution.type: "workflow"\` and an ordered \`steps\` array.
@@ -116,12 +120,44 @@ A workflow that opens a page and checks text is visible:
 ## Block types
 
 - \`workflow\` — composes other blocks (what you'll usually write).
-- \`native\` — trusted pack primitives (the \`qa.*\` blocks). Compose them; don't
-  re-author them.
-- \`node\` — custom JavaScript, run in a locked-down sandbox (no \`process\`,
-  \`require\`, fs, network). Pure compute: gets \`inputs\` + \`ctx\` {runId,vars},
-  returns a JSON object. No capabilities/secrets — for a browser or HTTP, use the
-  \`qa.*\` blocks instead. Prefer composing existing blocks over writing node code.
+- \`native\` — trusted pack primitives: the built-in \`qa.*\` blocks, plus the
+  blocks of any approved workspace pack. Compose them; don't re-author them.
+- \`node\` — custom JavaScript you author. Two tiers:
+  - **Sandboxed** (no \`dependencies\`): a locked-down V8 isolate — no \`process\`,
+    \`require\`, fs, or network. Pure compute: gets \`inputs\` + \`ctx\` {runId,vars},
+    returns a JSON object. No capabilities/secrets. For plain HTTP or simple
+    browser steps, prefer the \`qa.*\` blocks.
+  - **With \`dependencies\`** (e.g. \`["turndown@^7.1.0", "node:crypto"]\`): a real
+    Node.js process with those npm packages installed and \`require\` available.
+    UNSANDBOXED — full access to the user's machine — which is exactly why it
+    needs the user's explicit approval; name the packages when you ask. Entries
+    are registry packages (\`name\` / \`name@range\` / \`@scope/name@range\`) or
+    \`node:\` built-ins. Secrets still arrive only via wired inputs
+    (\`{{secrets.X}}\`), never ambient env vars.
+
+## When a capability is missing
+
+You are not limited to the built-ins — climb this ladder, stopping at the
+first rung that works:
+
+1. **Compose** existing blocks (check \`aa_list_blocks\` first, always).
+2. **Sandboxed \`node\` block** — parsing, transforms, decisions: pure compute.
+3. **\`node\` block with \`dependencies\`** — when you genuinely need a library
+   (HTML→markdown, XML parsing, an SDK client). Register it, show the user the
+   code AND the dependency list, get approval, run.
+4. **A workspace pack** — for a reusable family of native blocks, or blocks
+   that share a resource with setup/teardown (a long-lived session, a client
+   pool — like the built-in browser capability). Author CommonJS under
+   \`<workspace>/.aa/packs/<name>/\`:
+   \`module.exports = { name, blocks: [{ def, run }], capabilities: [] }\` —
+   \`def\` like any block definition (no \`execution\`), \`run(ctx, inputs, params)\`
+   an async function. Then \`aa_register_pack\` (records a content hash; never
+   executes your code) → show the user → \`aa_approve_pack\` (loads it live; its
+   blocks join the catalog as \`native\`). Editing a pack after approval breaks
+   its seal: it won't load until re-registered and re-approved.
+
+Don't fake a missing capability with brittle workarounds — build the block,
+get it approved, keep it forever.
 
 ## Rules
 
