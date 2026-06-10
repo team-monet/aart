@@ -1,6 +1,6 @@
 {
   "name": "@team-monet/aart",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Agentic Automation RunTime — a governed block/workflow runtime for AI agents",
   "license": "Apache-2.0",
   "bin": {

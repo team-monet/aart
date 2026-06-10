@@ -61,5 +61,14 @@ tools so the user doesn't type commands.
   approval loads it. When a capability is missing, build the block — don't
   fake it with workarounds or declare it impossible.
 
+## Releasing
+
+The user publishes to npm manually (possibly between your sessions). Before
+committing a feature, run `npm view @team-monet/aart version` — if it equals
+the local package.json version, that version is TAKEN: bump the minor in the
+same commit, in all three spots (package.json, `src/cli/index.ts` `.version()`,
+`src/mcp/server.ts` server version) plus `npm i --package-lock-only`. Never
+stack features on an already-published version number.
+
 Run `aart context` for the canonical, always-current version of this guide plus
 the live block catalog. Project conventions & roadmap: `docs/IMPLEMENTATION_PLAN.md`.
