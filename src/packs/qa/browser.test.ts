@@ -100,6 +100,60 @@ suite('qa.browser via Runtime (real Chromium)', () => {
     fs.rmSync(dir, { recursive: true, force: true })
   }, 30000)
 
+  it('evaluates expressions in the page context (counts, attributes)', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'aart-br-'))
+    const wf: BlockDefinition = {
+      id: 'browser-eval',
+      name: 'Browser Eval',
+      version: '0.1.0',
+      inputs: [{ name: 'url', type: 'string' }],
+      outputs: [],
+      execution: {
+        type: 'workflow',
+        steps: [
+          { id: 'open', block: 'qa.browser.goto', inputs: { url: '{{inputs.url}}' } },
+          {
+            id: 'count',
+            block: 'qa.browser.eval',
+            inputs: { expression: 'document.querySelectorAll("h1").length' },
+          },
+          {
+            id: 'attr',
+            block: 'qa.browser.eval',
+            inputs: { expression: 'document.querySelector("input").getAttribute("name")' },
+          },
+        ],
+        outputMapping: { count: '$count.result', attr: '$attr.result' },
+      },
+    }
+    const record = await new Runtime(dir, [qaPack]).run(wf, { url })
+    expect(record.status).toBe('COMPLETED')
+    expect(record.results).toEqual({ count: 1, attr: 'email' })
+    fs.rmSync(dir, { recursive: true, force: true })
+  }, 30000)
+
+  it('caps oversized eval results with a clear error', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'aart-br-'))
+    const wf: BlockDefinition = {
+      id: 'browser-eval-big',
+      name: 'Browser Eval Big',
+      version: '0.1.0',
+      inputs: [{ name: 'url', type: 'string' }],
+      outputs: [],
+      execution: {
+        type: 'workflow',
+        steps: [
+          { id: 'open', block: 'qa.browser.goto', inputs: { url: '{{inputs.url}}' } },
+          { id: 'big', block: 'qa.browser.eval', inputs: { expression: '"x".repeat(300000)' } },
+        ],
+      },
+    }
+    const record = await new Runtime(dir, [qaPack]).run(wf, { url })
+    expect(record.status).toBe('FAILED')
+    expect(record.error).toMatch(/result too large/)
+    fs.rmSync(dir, { recursive: true, force: true })
+  }, 30000)
+
   it('fails the run when expected text is not visible', async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'aart-br-'))
     const wf: BlockDefinition = {

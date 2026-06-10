@@ -38,7 +38,8 @@ Start from the built-in primitives — most automations need no new code:
 - **API / integration tests & health checks** — \`qa.api.request\` (any method,
   headers, auth via \`{{secrets.X}}\`) → parse/branch → \`qa.assert.*\`. No browser needed.
 - **Browser work** — \`qa.browser.*\`: navigate, fill, click, assert text,
-  screenshot, and read the rendered page as data (\`extract_text\`, \`html\`).
+  screenshot, read the rendered page as data (\`extract_text\`, \`html\`), and
+  query the live DOM with a JS expression (\`eval\` — counts, attributes, tables).
 - **Logic / parsing** — a \`node\` block turns input (e.g. a log blob you pass it)
   into structured output the next step branches on.
 
@@ -49,7 +50,7 @@ composition can't get there.
 ## Recipe — to build & run an automation
 
 1. **Discover.** Call \`aa_list_blocks\` to see what you can compose. The QA pack
-   is built in: \`qa.browser.goto/click/fill/text_visible/extract_text/html/screenshot\`,
+   is built in: \`qa.browser.goto/click/fill/text_visible/extract_text/html/eval/screenshot\`,
    \`qa.api.request\`, \`qa.assert.equals/contains\` (these are \`native\` = trusted,
    ready to use), plus any approved workspace packs. Reuse before authoring new.
 2. **Draft.** Write a workflow definition (a JSON object) that composes those

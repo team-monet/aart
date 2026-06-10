@@ -23,6 +23,7 @@ interface BrowserPage {
   innerText: (selector: string) => Promise<string>
   innerHTML: (selector: string) => Promise<string>
   content: () => Promise<string>
+  evaluate: (expression: string) => Promise<unknown>
   getByText: (text: string) => {
     first: () => { waitFor: (o: { state: string; timeout: number }) => Promise<void> }
   }
@@ -195,6 +196,38 @@ export const browserHtml = nativeBlock(
     const raw = inputs.selector ? await p.innerHTML(String(inputs.selector)) : await p.content()
     const { text, truncated } = clamp(raw, inputs.maxChars)
     return { html: text, truncated }
+  },
+)
+
+export const browserEval = nativeBlock(
+  {
+    id: 'qa.browser.eval',
+    name: 'Browser: Eval',
+    version: '0.1.0',
+    description:
+      'Evaluate a JavaScript expression in the live page and return its JSON-serializable ' +
+      'result — element counts, attribute values, table data, anything the DOM knows. ' +
+      'For plain page text/markup, prefer extract_text / html. The expression is part of ' +
+      'the definition the user approves.',
+    capabilities: ['browser'],
+    inputs: [{ name: 'expression', type: 'string', required: true }],
+    outputs: [{ name: 'result', type: 'any' }],
+  },
+  async (ctx, inputs) => {
+    const raw = await page(ctx).evaluate(String(inputs.expression))
+    let json: string | undefined
+    try {
+      json = JSON.stringify(raw === undefined ? null : raw)
+    } catch {
+      json = undefined
+    }
+    if (json === undefined) {
+      throw new Error('expression returned a non-JSON-serializable value')
+    }
+    if (json.length > 200_000) {
+      throw new Error(`expression result too large (${json.length} chars > 200000) — narrow the query`)
+    }
+    return { result: JSON.parse(json) as unknown }
   },
 )
 
