@@ -140,7 +140,7 @@ describe('mergePacks + Runtime.addPack', () => {
       blocks: [
         {
           def: {
-            id: 'qa.browser.goto',
+            id: 'browser.goto',
             name: 'X',
             version: '0.1.0',
             inputs: [],
@@ -153,6 +153,29 @@ describe('mergePacks + Runtime.addPack', () => {
       capabilities: [],
     }
     const { packs, warnings } = mergePacks(builtinPacks, [colliding])
+    expect(packs).toHaveLength(builtinPacks.length)
+    expect(warnings.join(' ')).toMatch(/browser\.goto/)
+  })
+
+  it('treats legacy qa.* alias ids as taken', () => {
+    const shadowing = {
+      name: 'tools',
+      blocks: [
+        {
+          def: {
+            id: 'qa.browser.goto',
+            name: 'X',
+            version: '0.1.0',
+            inputs: [],
+            outputs: [],
+            execution: { type: 'native' as const },
+          },
+          run: async () => ({}),
+        },
+      ],
+      capabilities: [],
+    }
+    const { packs, warnings } = mergePacks(builtinPacks, [shadowing])
     expect(packs).toHaveLength(builtinPacks.length)
     expect(warnings.join(' ')).toMatch(/qa\.browser\.goto/)
   })

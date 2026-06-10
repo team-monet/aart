@@ -4,7 +4,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { loadSecrets, redactRecord } from './secrets'
 import { Runtime } from './runtime'
-import { qaPack } from '../packs/qa'
+import { corePack } from '../packs/core'
 import type { BlockDefinition, RunRecord } from './types'
 
 describe('loadSecrets', () => {
@@ -96,12 +96,12 @@ describe('secrets in a workflow (resolve at run time, redact in report)', () => 
         type: 'workflow',
         steps: [
           // assert passes ONLY if the real secret value flowed into the block
-          { id: 'check', block: 'qa.assert.equals', inputs: { actual: '{{secrets.password}}', expected: 'supersecret123' } },
+          { id: 'check', block: 'assert.equals', inputs: { actual: '{{secrets.password}}', expected: 'supersecret123' } },
         ],
         outputMapping: { pw: '{{secrets.password}}' },
       },
     }
-    const rec = await new Runtime(dir, [qaPack]).run(wf, {})
+    const rec = await new Runtime(dir, [corePack]).run(wf, {})
     expect(rec.status).toBe('COMPLETED') // real value reached the assertion
     expect(rec.results).toEqual({ pw: '***' }) // but it's redacted in the report
     expect(JSON.stringify(rec)).not.toContain('supersecret123')

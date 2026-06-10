@@ -3,14 +3,18 @@
 > AI creates reusable automation blocks and workflows. Users govern them.
 > A runtime executes them deterministically. Reports prove it.
 
-`aart` turns a coding agent's one-off checks into **reusable, user-approved,
-evidence-producing workflows**. Your agent (Claude Code, Codex, …) authors a
-workflow; aart validates it, you approve it once in chat, and every run leaves a
-structured report (per-step trace, pass/fail, screenshots). aart never calls an
-LLM — the agent does the authoring; aart is the governed runtime.
+`aart` is a **workflow & automation framework for AI agents**: it turns an
+agent's one-off work into **reusable, user-approved, evidence-producing
+automations** — web tasks, API workflows, data pulls, recurring checks, and
+(as one flagship use case) QA and release verification. Your agent (Claude
+Code, Codex, …) authors a workflow; aart validates it, you approve it once in
+chat, and every run leaves a structured report (per-step trace, pass/fail,
+screenshots). aart never calls an LLM — the agent does the authoring; aart is
+the governed runtime.
 
-Ships with a **QA pack** (browser automation, HTTP, assertions). Drive it from
-your agent over **MCP**, or from the **CLI**.
+Ships with a **core pack** (browser, HTTP, assertions) — and agents can extend
+it with their own blocks: npm-powered `node` blocks and workspace packs. Drive
+it from your agent over **MCP**, or from the **CLI**.
 
 ## Install
 
@@ -18,7 +22,7 @@ your agent over **MCP**, or from the **CLI**.
 npm i -g @team-monet/aart      # installs the `aart` command
 aart doctor                    # checks Node + sandbox + browser, with fix hints
 
-# for the browser blocks (qa.browser.*), download Chromium + its system libs:
+# for the browser blocks (browser.*), download Chromium + its system libs:
 npx playwright install --with-deps chromium
 ```
 
@@ -32,7 +36,7 @@ Verify it's working:
 
 ```bash
 aart --help
-aart list        # shows the built-in QA blocks (qa.browser.*, qa.api.request, qa.assert.*)
+aart list        # shows the built-in core blocks (browser.*, http.request, assert.*)
 ```
 
 ## Use it with your coding agent (recommended)
@@ -54,36 +58,41 @@ So the agent reaches for aart *before* you have to ask, paste this into your
 project's `AGENTS.md` / `CLAUDE.md` / agent rules:
 
 ```md
-You have aart available via MCP. When a task is worth running again, needs proof
-it passed, or should be a durable governed check — author an aart workflow instead
-of a one-off shell command. aart saves it (named/versioned), the user approves it
-once, and every run leaves an evidence report (per-step trace, pass/fail,
-screenshots). Good fits: smoke/health checks, API & integration tests, release
-verification. Use shell for one-off probes; a durable automation that needs a
-library can declare npm `dependencies` (approval-gated). Loop: aa_list_blocks →
-draft → aa_validate → aa_register_block → show the user & ask → aa_approve →
-aa_run_workflow.
+You have aart available via MCP — a workflow/automation framework, not just a
+test runner. When a task is worth running again, should be trustworthy, or
+should become a durable asset — author an aart workflow instead of a one-off
+shell command. aart saves it (named/versioned), the user approves it once, and
+every run leaves an evidence report (per-step trace, pass/fail, screenshots).
+Good fits: recurring web/API automations, data pulls, report generation,
+smoke/health checks, release verification. Use shell for one-off probes; a
+durable automation that needs a library can declare npm `dependencies`
+(approval-gated). Loop: aa_list_blocks → draft → aa_validate →
+aa_register_block → show the user & ask → aa_approve → aa_run_workflow.
 ```
 
 ## What you can build
 
-Compose workflows from a few built-in primitives — no custom code needed for
-HTTP/browser work:
+Compose workflows from the built-in primitives — no custom code needed for
+most web/HTTP work:
 
-- **Health & smoke checks** — `qa.api.request` (any method, headers, auth via
-  `{{secrets.X}}`) → `qa.assert.*`. Re-run on every deploy with a pass/fail report.
-- **Browser acceptance tests** — `qa.browser.*`: navigate, fill, click, assert
-  visible text, screenshot, and extract the rendered page's text/HTML as data.
-- **API / integration tests** — chain requests, branch on responses with
-  `if/then/else`, assert.
-- **Custom logic** — a sandboxed `node` block parses/transforms data for the
-  next step. Declare `dependencies` (npm packages / `node:` built-ins) and it
-  runs as **real Node.js with those libraries** instead — approval-gated.
+- **Web automations** — `browser.*`: navigate, fill, click, read the rendered
+  page as data (`extract_text`, `html`), query the live DOM (`eval`), screenshot.
+- **API workflows & integrations** — `http.request` (any method, headers, auth
+  via `{{secrets.X}}`): chain calls, branch on responses with `if/then/else`.
+- **Data shaping & logic** — a sandboxed `node` block parses/transforms data
+  between steps. Declare `dependencies` (npm packages / `node:` built-ins) and
+  it runs as **real Node.js with those libraries** instead — approval-gated.
+- **QA & release verification** — the same primitives plus `assert.*` and
+  evidence reports make smoke tests, acceptance checks, and post-deploy
+  verification a flagship use case (re-run on every deploy with proof).
 - **Your own native blocks** — agents can author **workspace packs**
   (`.aa/packs/<name>`): families of trusted blocks plus shared capabilities
   (long-lived sessions, clients). Registering a pack records a content hash and
   **never executes it**; it loads only after you approve, and any edit breaks
   the seal until re-approved.
+
+(Until 0.4 the core blocks were namespaced `qa.*` — those ids resolve forever,
+so existing workflows keep running.)
 
 Custom code is sandboxed by default (a pure-compute V8 isolate). Everything
 more powerful is **approval-gated, not impossible**: dependency-bearing blocks

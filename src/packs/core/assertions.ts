@@ -12,7 +12,7 @@ function show(v: unknown): string {
 
 export const assertEquals = nativeBlock(
   {
-    id: 'qa.assert.equals',
+    id: 'assert.equals',
     name: 'Assert Equals',
     version: '0.1.0',
     description: 'Fail unless `actual` equals `expected`.',
@@ -36,7 +36,7 @@ export const assertEquals = nativeBlock(
 
 export const assertContains = nativeBlock(
   {
-    id: 'qa.assert.contains',
+    id: 'assert.contains',
     name: 'Assert Contains',
     version: '0.1.0',
     description: 'Fail unless `value` (a string or array) contains `item`.',

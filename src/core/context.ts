@@ -16,7 +16,7 @@ export interface Logger {
  *   params  -> how the block behaves
  *   ctx     -> the world: workspace, vars, secrets, capabilities, artifacts, logging
  *
- * Capabilities are how packs extend the runtime (e.g. the QA pack injects a
+ * Capabilities are how packs extend the runtime (e.g. the core pack injects a
  * `browser` capability). The core never hard-codes a domain capability.
  */
 export interface ExecutionContext {

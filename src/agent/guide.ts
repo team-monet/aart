@@ -14,16 +14,20 @@ deterministically, and returns an evidence report you read and iterate on.
 
 ## Why & when to use aart
 
-You're about to run a shell command. Pause: will you run this again, need to prove
-it passed, or want the user to trust it later? If yes, author an aart workflow.
+aart is a general workflow & automation framework — web tasks, API chores,
+data pulls, recurring checks. QA/testing is one strong use case, not the boundary.
 
-What you keep (that a shell command doesn't give you):
-- **Reusable** — named, versioned, saved to the registry. Author once, re-run on every deploy.
+You're about to do something by hand or via a one-off script. Pause: will this
+be done again, should its result be trustworthy, or should the user own it as
+an asset? If yes, author an aart workflow.
+
+What you keep (that ad-hoc execution doesn't give you):
+- **Reusable** — named, versioned, saved to the registry. Author once, re-run on demand, on every deploy, or on a schedule.
 - **User-approved** — the user okays it once, conversationally; then it's a trusted, audited asset.
 - **Evidence** — every run writes an ordered per-step trace, pass/fail, and screenshots under \`.aa/runs\`. Reports prove it.
 
-**Before:** \`curl /health\`, eyeball the page, output scrolls away — re-derived next deploy.
-**After:** one \`smoke.post-deploy\` workflow (\`qa.api.request\` + \`qa.assert.*\` + \`qa.browser.*\`), re-run forever with proof.
+**Before:** \`curl\` something, eyeball a page, paste into a scratch script — output scrolls away, redone next time.
+**After:** one named workflow (\`browser.*\` + \`http.request\` + \`node\` steps + \`assert.*\`), re-run forever with an audit trail.
 
 **Decision rule:** repeated, needs proof, or should be a durable asset → aart.
 A one-off probe → shell. Needing a library or host access does NOT make it a
@@ -35,9 +39,10 @@ shell job: a \`node\` block with \`dependencies\` runs real Node with npm packag
 ## What you compose from
 
 Start from the built-in primitives — most automations need no new code:
-- **API / integration tests & health checks** — \`qa.api.request\` (any method,
-  headers, auth via \`{{secrets.X}}\`) → parse/branch → \`qa.assert.*\`. No browser needed.
-- **Browser work** — \`qa.browser.*\`: navigate, fill, click, assert text,
+- **HTTP / APIs** — \`http.request\` (any method, headers, auth via
+  \`{{secrets.X}}\`) → parse/branch with \`node\` steps → optionally \`assert.*\`.
+  Data pulls, integrations, health checks — no browser needed.
+- **Browser work** — \`browser.*\`: navigate, fill, click, assert text,
   screenshot, read the rendered page as data (\`extract_text\`, \`html\`), and
   query the live DOM with a JS expression (\`eval\` — counts, attributes, tables).
 - **Logic / parsing** — a \`node\` block turns input (e.g. a log blob you pass it)
@@ -49,10 +54,11 @@ composition can't get there.
 
 ## Recipe — to build & run an automation
 
-1. **Discover.** Call \`aa_list_blocks\` to see what you can compose. The QA pack
-   is built in: \`qa.browser.goto/click/fill/text_visible/extract_text/html/eval/screenshot\`,
-   \`qa.api.request\`, \`qa.assert.equals/contains\` (these are \`native\` = trusted,
-   ready to use), plus any approved workspace packs. Reuse before authoring new.
+1. **Discover.** Call \`aa_list_blocks\` to see what you can compose. The core
+   pack is built in: \`browser.goto/click/fill/text_visible/extract_text/html/eval/screenshot\`,
+   \`http.request\`, \`assert.equals/contains\` (these are \`native\` = trusted,
+   ready to use), plus any approved workspace packs. (Pre-0.4 \`qa.*\` ids still
+   resolve to the same blocks.) Reuse before authoring new.
 2. **Draft.** Write a workflow definition (a JSON object) that composes those
    blocks. Get the exact shape from \`aa_get_schema\`. A workflow is a block with
    \`execution.type: "workflow"\` and an ordered \`steps\` array.
@@ -81,9 +87,9 @@ A workflow that opens a page and checks text is visible:
   "execution": {
     "type": "workflow",
     "steps": [
-      { "id": "open", "block": "qa.browser.goto", "inputs": { "url": "{{inputs.url}}" } },
-      { "id": "see", "block": "qa.browser.text_visible", "inputs": { "text": "Dashboard" } },
-      { "id": "shot", "block": "qa.browser.screenshot", "inputs": { "name": "dashboard" } }
+      { "id": "open", "block": "browser.goto", "inputs": { "url": "{{inputs.url}}" } },
+      { "id": "see", "block": "browser.text_visible", "inputs": { "text": "Dashboard" } },
+      { "id": "shot", "block": "browser.screenshot", "inputs": { "name": "dashboard" } }
     ],
     "outputMapping": { "screenshot": "$shot.artifact" }
   }
@@ -121,13 +127,14 @@ A workflow that opens a page and checks text is visible:
 ## Block types
 
 - \`workflow\` — composes other blocks (what you'll usually write).
-- \`native\` — trusted pack primitives: the built-in \`qa.*\` blocks, plus the
-  blocks of any approved workspace pack. Compose them; don't re-author them.
+- \`native\` — trusted pack primitives: the built-in \`browser.*\` / \`http.*\` /
+  \`assert.*\` blocks, plus the blocks of any approved workspace pack. Compose
+  them; don't re-author them.
 - \`node\` — custom JavaScript you author. Two tiers:
   - **Sandboxed** (no \`dependencies\`): a locked-down V8 isolate — no \`process\`,
     \`require\`, fs, or network. Pure compute: gets \`inputs\` + \`ctx\` {runId,vars},
     returns a JSON object. No capabilities/secrets. For plain HTTP or simple
-    browser steps, prefer the \`qa.*\` blocks.
+    browser steps, prefer the built-in blocks.
   - **With \`dependencies\`** (e.g. \`["turndown@^7.1.0", "node:crypto"]\`): a real
     Node.js process with those npm packages installed and \`require\` available.
     UNSANDBOXED — full access to the user's machine — which is exactly why it
@@ -150,7 +157,7 @@ first rung that works:
    that share a resource with setup/teardown (a long-lived session, a client
    pool). A pack block's \`def.capabilities\` may name ANY capability — including
    ones other packs provide: declare \`["browser"]\` and your \`run(ctx, inputs)\`
-   gets the SAME live Playwright page the \`qa.browser.*\` steps drive, in
+   gets the SAME live Playwright page the \`browser.*\` steps drive, in
    \`ctx.capabilities.browser.page\` — so you can build your own browser blocks
    (custom extraction, table scraping, …) that interleave with built-in steps
    in one session. Author CommonJS under \`<workspace>/.aa/packs/<name>/\`:

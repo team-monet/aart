@@ -6,7 +6,7 @@ import path from 'node:path'
 import { createContext } from '../../core/context'
 import { ArtifactStore } from '../../artifacts/artifact-store'
 import { Runtime } from '../../core/runtime'
-import { qaPack } from './index'
+import { corePack } from './index'
 import { assertEquals, assertContains } from './assertions'
 import { apiRequest } from './api'
 import type { BlockDefinition } from '../../core/types'
@@ -19,7 +19,7 @@ function ctxIn(dir: string) {
   })
 }
 
-describe('qa.assert', () => {
+describe('assert.*', () => {
   const ctx = ctxIn(os.tmpdir())
   it('equals passes on equal values and throws otherwise', async () => {
     expect(await assertEquals.run(ctx, { actual: 200, expected: 200 })).toEqual({ ok: true })
@@ -48,7 +48,7 @@ describe('qa.assert', () => {
   })
 })
 
-describe('qa.api + Runtime (native execution end to end)', () => {
+describe('http.request + Runtime (native execution end to end)', () => {
   let server: http.Server
   let url: string
   let dir: string
@@ -86,16 +86,37 @@ describe('qa.api + Runtime (native execution end to end)', () => {
       execution: {
         type: 'workflow',
         steps: [
-          { id: 'call', block: 'qa.api.request', inputs: { url: '{{inputs.url}}' } },
-          { id: 'check', block: 'qa.assert.equals', inputs: { actual: '$call.status', expected: 200 } },
+          { id: 'call', block: 'http.request', inputs: { url: '{{inputs.url}}' } },
+          { id: 'check', block: 'assert.equals', inputs: { actual: '$call.status', expected: 200 } },
         ],
         outputMapping: { status: '$call.status', hello: '$call.body.hello' },
       },
     }
-    const record = await new Runtime(dir, [qaPack]).run(wf, { url })
+    const record = await new Runtime(dir, [corePack]).run(wf, { url })
     expect(record.status).toBe('COMPLETED')
     expect(record.results).toEqual({ status: 200, hello: 'world' })
     expect(record.trace.map((t) => t.status)).toEqual(['COMPLETED', 'COMPLETED'])
+  })
+
+  it('legacy qa.* ids still resolve and run (permanent aliases)', async () => {
+    const wf: BlockDefinition = {
+      id: 'legacy-ids',
+      name: 'Legacy Ids',
+      version: '0.1.0',
+      inputs: [{ name: 'url', type: 'string' }],
+      outputs: [],
+      execution: {
+        type: 'workflow',
+        steps: [
+          { id: 'call', block: 'qa.api.request', inputs: { url: '{{inputs.url}}' } },
+          { id: 'check', block: 'qa.assert.equals', inputs: { actual: '$call.status', expected: 200 } },
+        ],
+        outputMapping: { status: '$call.status' },
+      },
+    }
+    const record = await new Runtime(dir, [corePack]).run(wf, { url })
+    expect(record.status).toBe('COMPLETED')
+    expect(record.results).toEqual({ status: 200 })
   })
 
   it('fails the run (not crash) when an assertion fails', async () => {
@@ -108,12 +129,12 @@ describe('qa.api + Runtime (native execution end to end)', () => {
       execution: {
         type: 'workflow',
         steps: [
-          { id: 'call', block: 'qa.api.request', inputs: { url: '{{inputs.url}}' } },
-          { id: 'check', block: 'qa.assert.equals', inputs: { actual: '$call.status', expected: 500 } },
+          { id: 'call', block: 'http.request', inputs: { url: '{{inputs.url}}' } },
+          { id: 'check', block: 'assert.equals', inputs: { actual: '$call.status', expected: 500 } },
         ],
       },
     }
-    const record = await new Runtime(dir, [qaPack]).run(wf, { url })
+    const record = await new Runtime(dir, [corePack]).run(wf, { url })
     expect(record.status).toBe('FAILED')
     expect(record.error).toMatch(/Assertion failed/)
     expect(record.trace[1]!.status).toBe('FAILED')

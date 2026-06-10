@@ -10,11 +10,15 @@ import type { NativeBlock, NativeRunFn } from './types'
  */
 export class CompositeRegistry implements Registry {
   private native = new Map<string, NativeBlock>()
+  /** Legacy id → current id (e.g. the pre-rename `qa.*` ids). Never removed. */
+  private aliases: Map<string, string>
 
   constructor(
     private file: Registry,
     nativeBlocks: NativeBlock[] = [],
+    aliases: Map<string, string> = new Map(),
   ) {
+    this.aliases = aliases
     for (const b of nativeBlocks) {
       if (this.native.has(b.def.id)) {
         throw new Error(`Duplicate native block id across packs: ${b.def.id}`)
@@ -24,7 +28,7 @@ export class CompositeRegistry implements Registry {
   }
 
   getBlock(id: string, version?: string): BlockDefinition | undefined {
-    const n = this.native.get(id)
+    const n = this.native.get(id) ?? this.native.get(this.aliases.get(id) ?? '')
     // Honor a version pin: a pin that doesn't match the native block falls
     // through to the file registry (and ultimately resolves to undefined),
     // matching FileRegistry semantics so bad pins are rejected at validation.
@@ -47,6 +51,10 @@ export class CompositeRegistry implements Registry {
     if (this.native.has(block.id)) {
       throw new Error(`Cannot overwrite built-in pack block: ${block.id}`)
     }
+    const target = this.aliases.get(block.id)
+    if (target && this.native.has(target)) {
+      throw new Error(`Cannot register ${block.id}: it is a legacy alias of ${target}`)
+    }
     this.file.registerBlock(block)
   }
 
@@ -61,6 +69,10 @@ export class CompositeRegistry implements Registry {
   addNativeBlock(b: NativeBlock): void {
     if (this.native.has(b.def.id)) {
       throw new Error(`Duplicate native block id across packs: ${b.def.id}`)
+    }
+    const target = this.aliases.get(b.def.id)
+    if (target && this.native.has(target)) {
+      throw new Error(`Block id ${b.def.id} is a legacy alias of ${target}`)
     }
     this.native.set(b.def.id, b)
   }

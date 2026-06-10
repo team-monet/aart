@@ -53,6 +53,7 @@ export class Runtime {
     this.registry = new CompositeRegistry(
       this.fileRegistry,
       packs.flatMap((p) => p.blocks),
+      new Map(packs.flatMap((p) => Object.entries(p.aliases ?? {}))),
     )
     this.nativeHandlers = this.registry.nativeHandlers()
     this.capabilities = new Map()

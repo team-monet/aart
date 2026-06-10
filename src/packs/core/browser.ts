@@ -63,7 +63,7 @@ function page(ctx: ExecutionContext): BrowserPage {
 
 export const browserGoto = nativeBlock(
   {
-    id: 'qa.browser.goto',
+    id: 'browser.goto',
     name: 'Browser: Goto',
     version: '0.1.0',
     description: 'Navigate the browser to a URL.',
@@ -80,7 +80,7 @@ export const browserGoto = nativeBlock(
 
 export const browserClick = nativeBlock(
   {
-    id: 'qa.browser.click',
+    id: 'browser.click',
     name: 'Browser: Click',
     version: '0.1.0',
     description: 'Click the element matching a selector.',
@@ -96,7 +96,7 @@ export const browserClick = nativeBlock(
 
 export const browserFill = nativeBlock(
   {
-    id: 'qa.browser.fill',
+    id: 'browser.fill',
     name: 'Browser: Fill',
     version: '0.1.0',
     description: 'Fill an input matching a selector with a value.',
@@ -115,7 +115,7 @@ export const browserFill = nativeBlock(
 
 export const browserTextVisible = nativeBlock(
   {
-    id: 'qa.browser.text_visible',
+    id: 'browser.text_visible',
     name: 'Browser: Text Visible',
     version: '0.1.0',
     description: 'Fail unless the given text becomes visible on the page.',
@@ -148,7 +148,7 @@ function clamp(raw: string, maxChars: unknown): { text: string; truncated: boole
 
 export const browserExtractText = nativeBlock(
   {
-    id: 'qa.browser.extract_text',
+    id: 'browser.extract_text',
     name: 'Browser: Extract Text',
     version: '0.1.0',
     description:
@@ -175,7 +175,7 @@ export const browserExtractText = nativeBlock(
 
 export const browserHtml = nativeBlock(
   {
-    id: 'qa.browser.html',
+    id: 'browser.html',
     name: 'Browser: HTML',
     version: '0.1.0',
     description:
@@ -201,7 +201,7 @@ export const browserHtml = nativeBlock(
 
 export const browserEval = nativeBlock(
   {
-    id: 'qa.browser.eval',
+    id: 'browser.eval',
     name: 'Browser: Eval',
     version: '0.1.0',
     description:
@@ -233,7 +233,7 @@ export const browserEval = nativeBlock(
 
 export const browserScreenshot = nativeBlock(
   {
-    id: 'qa.browser.screenshot',
+    id: 'browser.screenshot',
     name: 'Browser: Screenshot',
     version: '0.1.0',
     description:

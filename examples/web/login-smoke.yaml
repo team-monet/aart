@@ -14,28 +14,28 @@ execution:
   type: workflow
   steps:
     - id: open_login
-      block: qa.browser.goto
+      block: browser.goto
       inputs:
         url: "{{inputs.appUrl}}/login"
     - id: fill_email
-      block: qa.browser.fill
+      block: browser.fill
       inputs:
         selector: "input[name=email]"
         value: "{{secrets.email}}"
     - id: fill_password
-      block: qa.browser.fill
+      block: browser.fill
       inputs:
         selector: "input[name=password]"
         value: "{{secrets.password}}"
     - id: submit
-      block: qa.browser.click
+      block: browser.click
       inputs:
         selector: "button[type=submit]"
     - id: assert_dashboard
-      block: qa.browser.text_visible
+      block: browser.text_visible
       inputs:
         text: "Dashboard"
     - id: screenshot
-      block: qa.browser.screenshot
+      block: browser.screenshot
       inputs:
         name: "dashboard-after-login"

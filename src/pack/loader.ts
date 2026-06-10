@@ -109,8 +109,8 @@ export interface RegisterPackResult {
 }
 
 const PACK_NAME_RE = /^[a-z0-9][a-z0-9-_]*$/
-/** Built-in pack names can't be shadowed (qa, …). */
-const RESERVED_PACK_NAMES = new Set(['qa'])
+/** Built-in pack names can't be shadowed ('core', plus its pre-rename name 'qa'). */
+const RESERVED_PACK_NAMES = new Set(['core', 'qa'])
 
 /**
  * Record a pack as a draft in the manifest. Does NOT load or execute any of
@@ -254,7 +254,10 @@ export function loadApprovedPacks(ws: string): LoadedPacks {
  * with a warning, instead of letting the Runtime constructor throw.
  */
 export function mergePacks(base: Pack[], extra: Pack[]): LoadedPacks {
-  const blockIds = new Set(base.flatMap((p) => p.blocks.map((b) => b.def.id)))
+  // Legacy alias ids count as taken too — a workspace pack must not shadow them.
+  const blockIds = new Set(
+    base.flatMap((p) => [...p.blocks.map((b) => b.def.id), ...Object.keys(p.aliases ?? {})]),
+  )
   const capNames = new Set(base.flatMap((p) => p.capabilities.map((c) => c.name)))
   const packs = [...base]
   const warnings: string[] = []

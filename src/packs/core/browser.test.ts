@@ -11,7 +11,7 @@ import {
   mergePacks,
   registerWorkspacePack,
 } from '../../pack/loader'
-import { qaPack } from './index'
+import { corePack } from './index'
 import type { BlockDefinition } from '../../core/types'
 
 // Self-skip when the Chromium binary isn't installed, so the suite stays green
@@ -24,7 +24,7 @@ try {
 }
 const suite = hasBrowser ? describe : describe.skip
 
-suite('qa.browser via Runtime (real Chromium)', () => {
+suite('browser.* via Runtime (real Chromium)', () => {
   let server: http.Server
   let url: string
 
@@ -59,14 +59,14 @@ suite('qa.browser via Runtime (real Chromium)', () => {
       execution: {
         type: 'workflow',
         steps: [
-          { id: 'open', block: 'qa.browser.goto', inputs: { url: '{{inputs.url}}' } },
-          { id: 'see', block: 'qa.browser.text_visible', inputs: { text: 'Dashboard' } },
-          { id: 'shot', block: 'qa.browser.screenshot', inputs: { name: 'dash' } },
+          { id: 'open', block: 'browser.goto', inputs: { url: '{{inputs.url}}' } },
+          { id: 'see', block: 'browser.text_visible', inputs: { text: 'Dashboard' } },
+          { id: 'shot', block: 'browser.screenshot', inputs: { name: 'dash' } },
         ],
         outputMapping: { artifact: '$shot.artifact' },
       },
     }
-    const record = await new Runtime(dir, [qaPack]).run(wf, { url })
+    const record = await new Runtime(dir, [corePack]).run(wf, { url })
     expect(record.status).toBe('COMPLETED')
     expect(record.artifacts.length).toBe(1)
     expect(fs.existsSync(record.artifacts[0]!)).toBe(true)
@@ -84,9 +84,9 @@ suite('qa.browser via Runtime (real Chromium)', () => {
       execution: {
         type: 'workflow',
         steps: [
-          { id: 'open', block: 'qa.browser.goto', inputs: { url: '{{inputs.url}}' } },
-          { id: 'text', block: 'qa.browser.extract_text', inputs: {} },
-          { id: 'html', block: 'qa.browser.html', inputs: { maxChars: 10 } },
+          { id: 'open', block: 'browser.goto', inputs: { url: '{{inputs.url}}' } },
+          { id: 'text', block: 'browser.extract_text', inputs: {} },
+          { id: 'html', block: 'browser.html', inputs: { maxChars: 10 } },
         ],
         outputMapping: {
           text: '$text.text',
@@ -96,7 +96,7 @@ suite('qa.browser via Runtime (real Chromium)', () => {
         },
       },
     }
-    const record = await new Runtime(dir, [qaPack]).run(wf, { url: `${url}js` })
+    const record = await new Runtime(dir, [corePack]).run(wf, { url: `${url}js` })
     expect(record.status).toBe('COMPLETED')
     // The text exists only after the page's script ran — proves we read the rendered DOM.
     expect(record.results?.text).toContain('Hydrated Content')
@@ -117,22 +117,22 @@ suite('qa.browser via Runtime (real Chromium)', () => {
       execution: {
         type: 'workflow',
         steps: [
-          { id: 'open', block: 'qa.browser.goto', inputs: { url: '{{inputs.url}}' } },
+          { id: 'open', block: 'browser.goto', inputs: { url: '{{inputs.url}}' } },
           {
             id: 'count',
-            block: 'qa.browser.eval',
+            block: 'browser.eval',
             inputs: { expression: 'document.querySelectorAll("h1").length' },
           },
           {
             id: 'attr',
-            block: 'qa.browser.eval',
+            block: 'browser.eval',
             inputs: { expression: 'document.querySelector("input").getAttribute("name")' },
           },
         ],
         outputMapping: { count: '$count.result', attr: '$attr.result' },
       },
     }
-    const record = await new Runtime(dir, [qaPack]).run(wf, { url })
+    const record = await new Runtime(dir, [corePack]).run(wf, { url })
     expect(record.status).toBe('COMPLETED')
     expect(record.results).toEqual({ count: 1, attr: 'email' })
     fs.rmSync(dir, { recursive: true, force: true })
@@ -142,7 +142,7 @@ suite('qa.browser via Runtime (real Chromium)', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'aart-br-'))
     // The self-serve path: the agent writes its own browser block as a pack —
     // declaring the BUILT-IN `browser` capability — registers it (no execution),
-    // the user approves, and it drives the same page qa.browser.goto opened.
+    // the user approves, and it drives the same page browser.goto opened.
     const packDir = path.join(dir, '.aa', 'packs', 'mytools')
     fs.mkdirSync(packDir, { recursive: true })
     fs.writeFileSync(
@@ -169,7 +169,7 @@ suite('qa.browser via Runtime (real Chromium)', () => {
     )
     registerWorkspacePack(dir, 'mytools')
     approveWorkspacePack(dir, 'mytools')
-    const merged = mergePacks([qaPack], loadApprovedPacks(dir).packs)
+    const merged = mergePacks([corePack], loadApprovedPacks(dir).packs)
     expect(merged.warnings).toEqual([])
 
     const wf: BlockDefinition = {
@@ -181,7 +181,7 @@ suite('qa.browser via Runtime (real Chromium)', () => {
       execution: {
         type: 'workflow',
         steps: [
-          { id: 'open', block: 'qa.browser.goto', inputs: { url: '{{inputs.url}}' } },
+          { id: 'open', block: 'browser.goto', inputs: { url: '{{inputs.url}}' } },
           { id: 'read', block: 'mytools.heading', inputs: {} },
         ],
         outputMapping: { heading: '$read.heading' },
@@ -205,12 +205,12 @@ suite('qa.browser via Runtime (real Chromium)', () => {
       execution: {
         type: 'workflow',
         steps: [
-          { id: 'open', block: 'qa.browser.goto', inputs: { url: '{{inputs.url}}' } },
-          { id: 'big', block: 'qa.browser.eval', inputs: { expression: '"x".repeat(300000)' } },
+          { id: 'open', block: 'browser.goto', inputs: { url: '{{inputs.url}}' } },
+          { id: 'big', block: 'browser.eval', inputs: { expression: '"x".repeat(300000)' } },
         ],
       },
     }
-    const record = await new Runtime(dir, [qaPack]).run(wf, { url })
+    const record = await new Runtime(dir, [corePack]).run(wf, { url })
     expect(record.status).toBe('FAILED')
     expect(record.error).toMatch(/result too large/)
     fs.rmSync(dir, { recursive: true, force: true })
@@ -227,12 +227,12 @@ suite('qa.browser via Runtime (real Chromium)', () => {
       execution: {
         type: 'workflow',
         steps: [
-          { id: 'open', block: 'qa.browser.goto', inputs: { url: '{{inputs.url}}' } },
-          { id: 'see', block: 'qa.browser.text_visible', inputs: { text: 'Nope', timeoutMs: 1000 } },
+          { id: 'open', block: 'browser.goto', inputs: { url: '{{inputs.url}}' } },
+          { id: 'see', block: 'browser.text_visible', inputs: { text: 'Nope', timeoutMs: 1000 } },
         ],
       },
     }
-    const record = await new Runtime(dir, [qaPack]).run(wf, { url })
+    const record = await new Runtime(dir, [corePack]).run(wf, { url })
     expect(record.status).toBe('FAILED')
     expect(record.error).toMatch(/Text not visible/)
     fs.rmSync(dir, { recursive: true, force: true })

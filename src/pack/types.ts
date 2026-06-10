@@ -31,6 +31,8 @@ export interface Pack {
   name: string
   blocks: NativeBlock[]
   capabilities: Capability[]
+  /** Legacy id → current id. Old ids keep resolving after a rename. */
+  aliases?: Record<string, string>
 }
 
 /** Helper to declare a native block with a `native` execution type. */

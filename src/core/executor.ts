@@ -1,7 +1,7 @@
 import type { ExecutionContext } from './context'
 
 // isolated-vm is an OPTIONAL dependency (a native addon). It is only needed to
-// run/validate `node` blocks — the QA pack's native browser/api/assert blocks
+// run/validate `node` blocks — the core pack's native browser/api/assert blocks
 // never touch it. Load it lazily so installing aart never fails on a platform
 // without a prebuilt binary, and so QA-only usage works without it.
 type Ivm = typeof import('isolated-vm')

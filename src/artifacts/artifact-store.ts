@@ -3,7 +3,7 @@ import path from 'node:path'
 
 /**
  * Where evidence lives. The core only knows about an opaque artifact store;
- * each pack decides what artifacts mean (the QA pack writes screenshots here).
+ * each pack decides what artifacts mean (the core pack writes screenshots here).
  * Files land under `.aa/runs/<runId>/artifacts/`.
  *
  * NOTE: artifact CONTENTS are written verbatim and are NOT passed through secret

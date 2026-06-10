@@ -2,7 +2,7 @@ import { nativeBlock } from '../../pack/types'
 
 export const apiRequest = nativeBlock(
   {
-    id: 'qa.api.request',
+    id: 'http.request',
     name: 'API Request',
     version: '0.1.0',
     description: 'Make an HTTP request and return status, ok and parsed body.',

@@ -95,7 +95,7 @@ export async function startMcpServer(): Promise<void> {
   )
 
   const server = new McpServer(
-    { name: 'aart', version: '0.3.1' },
+    { name: 'aart', version: '0.4.0' },
     { instructions: AUTHORING_GUIDE },
   )
 
