@@ -40,7 +40,13 @@ suite('browser.* via Runtime (real Chromium)', () => {
         )
         return
       }
-      res.end('<html><body><h1>Dashboard</h1><input name="email" /></body></html>')
+      res.end(
+        '<html><body><h1>Dashboard</h1>' +
+          '<nav><a href="/js">Docs</a></nav>' +
+          '<input name="email" placeholder="Email" />' +
+          '<button id="go">Submit</button>' +
+          '</body></html>',
+      )
     })
     await new Promise<void>((r) => server.listen(0, '127.0.0.1', r))
     const addr = server.address()
@@ -191,6 +197,53 @@ suite('browser.* via Runtime (real Chromium)', () => {
     expect(record.status).toBe('COMPLETED')
     // Same session: the pack block saw the page the BUILT-IN goto navigated.
     expect(record.results?.heading).toBe('Dashboard')
+    fs.rmSync(dir, { recursive: true, force: true })
+  }, 30000)
+
+  it('snapshot maps the page; its selectors drive click → navigate → back', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'aart-br-'))
+    const wf: BlockDefinition = {
+      id: 'browser-navigate',
+      name: 'Browser Navigate',
+      version: '0.1.0',
+      inputs: [{ name: 'url', type: 'string' }],
+      outputs: [],
+      execution: {
+        type: 'workflow',
+        steps: [
+          { id: 'open', block: 'browser.goto', inputs: { url: '{{inputs.url}}' } },
+          { id: 'map', block: 'browser.snapshot', inputs: {} },
+          // Use exactly the selector shape snapshot returns for the Docs link.
+          { id: 'go', block: 'browser.click', inputs: { selector: 'text="Docs"' } },
+          { id: 'read', block: 'browser.extract_text', inputs: {} },
+          { id: 'back', block: 'browser.back', inputs: {} },
+        ],
+        outputMapping: {
+          elements: '$map.elements',
+          total: '$map.total',
+          text: '$read.text',
+          backUrl: '$back.url',
+        },
+      },
+    }
+    const record = await new Runtime(dir, [corePack]).run(wf, { url })
+    expect(record.status).toBe('COMPLETED')
+
+    const elements = record.results?.elements as Array<{
+      role: string
+      name: string
+      selector: string
+      href?: string
+    }>
+    const byName = (n: string) => elements.find((e) => e.name === n)
+    expect(byName('Docs')).toMatchObject({ role: 'link', selector: 'text="Docs"', href: '/js' })
+    expect(byName('Email')).toMatchObject({ role: 'textbox', selector: 'input[name="email"]' })
+    expect(byName('Submit')).toMatchObject({ role: 'button', selector: '#go' })
+    expect(record.results?.total).toBe(3)
+    // The snapshot selector actually navigated us to the JS-rendered page…
+    expect(record.results?.text).toContain('Hydrated Content')
+    // …and back returns to the original page.
+    expect(record.results?.backUrl).toBe(url)
     fs.rmSync(dir, { recursive: true, force: true })
   }, 30000)
 

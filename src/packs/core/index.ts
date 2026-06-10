@@ -14,6 +14,8 @@ import {
   browserExtractText,
   browserHtml,
   browserEval,
+  browserSnapshot,
+  browserBack,
   browserScreenshot,
 } from './browser'
 
@@ -47,6 +49,8 @@ export const corePack: Pack = {
     browserExtractText,
     browserHtml,
     browserEval,
+    browserSnapshot,
+    browserBack,
     browserScreenshot,
   ],
   capabilities: [browserCapability],

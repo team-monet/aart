@@ -45,9 +45,13 @@ Start from the built-in primitives — most automations need no new code:
 - **HTTP / APIs** — \`http.request\` (any method, headers, auth via
   \`{{secrets.X}}\`) → parse/branch with \`node\` steps → optionally \`assert.*\`.
   Data pulls, integrations, health checks — no browser needed.
-- **Browser work** — \`browser.*\`: navigate, fill, click, assert text,
-  screenshot, read the rendered page as data (\`extract_text\`, \`html\`), and
-  query the live DOM with a JS expression (\`eval\` — counts, attributes, tables).
+- **Browser work** — \`browser.*\`: navigate (\`goto\`/\`back\`), act (\`click\`/\`fill\`
+  — CSS or \`text=\` selectors), assert (\`text_visible\`), capture (\`screenshot\`),
+  read the rendered page as data (\`extract_text\`, \`html\`), query the live DOM
+  (\`eval\`), and MAP the page (\`snapshot\` — every interactive element with a
+  ready-to-use selector). To navigate an unfamiliar page: \`snapshot\` first,
+  pick the element by role/name, use its \`selector\` in \`click\`/\`fill\` — never
+  guess selectors from raw HTML.
 - **Data & files** — \`data.parse\` / \`data.stringify\` (json/yaml/csv),
   \`file.read\` / \`file.write\` (workspace-scoped durable state),
   \`artifact.write\` (attach a produced report to the run), \`http.download\`
@@ -64,7 +68,7 @@ composition can't get there.
 ## Recipe — to build & run an automation
 
 1. **Discover.** Call \`aa_list_blocks\` to see what you can compose. The core
-   pack is built in: \`browser.goto/click/fill/text_visible/extract_text/html/eval/screenshot\`,
+   pack is built in: \`browser.goto/back/click/fill/text_visible/extract_text/html/eval/snapshot/screenshot\`,
    \`http.request/download\`, \`data.parse/stringify\`, \`file.read/write\`,
    \`artifact.write\`, \`flow.sleep/fail\`, \`assert.equals/contains\` (these are
    \`native\` = trusted, ready to use), plus any approved workspace packs.

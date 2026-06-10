@@ -24,6 +24,8 @@ interface BrowserPage {
   innerHTML: (selector: string) => Promise<string>
   content: () => Promise<string>
   evaluate: (expression: string) => Promise<unknown>
+  title: () => Promise<string>
+  goBack: () => Promise<unknown>
   getByText: (text: string) => {
     first: () => { waitFor: (o: { state: string; timeout: number }) => Promise<void> }
   }
@@ -83,7 +85,9 @@ export const browserClick = nativeBlock(
     id: 'browser.click',
     name: 'Browser: Click',
     version: '0.1.0',
-    description: 'Click the element matching a selector.',
+    description:
+      'Click the element matching a selector — CSS (`#login`, `nav a`) or Playwright ' +
+      'text engine (`text=Sign in`). Get ready-to-use selectors from browser.snapshot.',
     capabilities: ['browser'],
     inputs: [{ name: 'selector', type: 'string', required: true }],
     outputs: [{ name: 'clicked', type: 'string' }],
@@ -99,7 +103,9 @@ export const browserFill = nativeBlock(
     id: 'browser.fill',
     name: 'Browser: Fill',
     version: '0.1.0',
-    description: 'Fill an input matching a selector with a value.',
+    description:
+      'Fill an input matching a selector (CSS or `text=`) with a value. ' +
+      'Get ready-to-use selectors from browser.snapshot.',
     capabilities: ['browser'],
     inputs: [
       { name: 'selector', type: 'string', required: true },
@@ -228,6 +234,130 @@ export const browserEval = nativeBlock(
       throw new Error(`expression result too large (${json.length} chars > 200000) — narrow the query`)
     }
     return { result: JSON.parse(json) as unknown }
+  },
+)
+
+/**
+ * In-page enumerator for browser.snapshot. Finds visible interactive elements
+ * and derives, for each, a human-readable role/name and a selector that the
+ * click/fill blocks accept directly (id > name attr > Playwright `text=` >
+ * a short CSS path as last resort).
+ */
+const SNAPSHOT_SCRIPT = `(() => {
+  const SELECTOR = 'a[href], button, input, select, textarea, summary, ' +
+    '[role="button"], [role="link"], [role="tab"], [role="menuitem"], [role="checkbox"], [onclick]'
+  const visible = (el) => {
+    const r = el.getBoundingClientRect()
+    if (r.width <= 0 || r.height <= 0) return false
+    const s = getComputedStyle(el)
+    return s.visibility !== 'hidden' && s.display !== 'none'
+  }
+  const roleOf = (el) => {
+    const aria = el.getAttribute('role')
+    if (aria) return aria
+    const tag = el.tagName.toLowerCase()
+    if (tag === 'a') return 'link'
+    if (tag === 'button' || tag === 'summary') return 'button'
+    if (tag === 'select') return 'combobox'
+    if (tag === 'textarea') return 'textbox'
+    if (tag === 'input') {
+      const t = (el.getAttribute('type') || 'text').toLowerCase()
+      if (t === 'checkbox' || t === 'radio' || t === 'submit' || t === 'button') return t
+      return 'textbox'
+    }
+    return tag
+  }
+  const nameOf = (el) =>
+    (el.getAttribute('aria-label') || (el.innerText || '').trim() || el.value ||
+      el.getAttribute('placeholder') || el.getAttribute('name') || el.getAttribute('title') || '')
+      .trim().replace(/\\s+/g, ' ').slice(0, 80)
+  const cssPath = (el) => {
+    const parts = []
+    let cur = el
+    while (cur && cur.nodeType === 1 && parts.length < 4) {
+      let part = cur.tagName.toLowerCase()
+      const parent = cur.parentElement
+      if (parent) {
+        const same = Array.from(parent.children).filter((c) => c.tagName === cur.tagName)
+        if (same.length > 1) part += ':nth-of-type(' + (same.indexOf(cur) + 1) + ')'
+      }
+      parts.unshift(part)
+      cur = parent
+    }
+    return parts.join(' > ')
+  }
+  const selectorFor = (el) => {
+    if (el.id) return '#' + CSS.escape(el.id)
+    const nm = el.getAttribute('name')
+    if (nm && /^[\\w-]+$/.test(nm)) return el.tagName.toLowerCase() + '[name="' + nm + '"]'
+    const txt = (el.innerText || '').trim().replace(/\\s+/g, ' ')
+    if (txt && txt.length <= 40 && !txt.includes('"')) return 'text="' + txt + '"'
+    return cssPath(el)
+  }
+  const all = Array.from(document.querySelectorAll(SELECTOR)).filter(visible)
+  const elements = all.map((el) => {
+    const out = { role: roleOf(el), name: nameOf(el), selector: selectorFor(el) }
+    const href = el.getAttribute && el.getAttribute('href')
+    if (href) out.href = href
+    return out
+  })
+  return { url: location.href, title: document.title, elements, total: elements.length }
+})()`
+
+export const browserSnapshot = nativeBlock(
+  {
+    id: 'browser.snapshot',
+    name: 'Browser: Snapshot',
+    version: '0.1.0',
+    description:
+      'Map the current page for navigation: url, title, and every visible ' +
+      'interactive element as { role, name, selector, href? } — each selector is ' +
+      'directly usable with browser.click / browser.fill. Run this instead of ' +
+      'guessing selectors from raw HTML; cap the list with `maxElements` (default 100).',
+    capabilities: ['browser'],
+    inputs: [{ name: 'maxElements', type: 'number' }],
+    outputs: [
+      { name: 'url', type: 'string' },
+      { name: 'title', type: 'string' },
+      { name: 'elements', type: 'array' },
+      { name: 'total', type: 'number' },
+      { name: 'truncated', type: 'boolean' },
+    ],
+  },
+  async (ctx, inputs) => {
+    const raw = (await page(ctx).evaluate(SNAPSHOT_SCRIPT)) as {
+      url: string
+      title: string
+      elements: unknown[]
+      total: number
+    }
+    const limit =
+      typeof inputs.maxElements === 'number' && inputs.maxElements > 0 ? inputs.maxElements : 100
+    const truncated = raw.elements.length > limit
+    return {
+      url: raw.url,
+      title: raw.title,
+      elements: truncated ? raw.elements.slice(0, limit) : raw.elements,
+      total: raw.total,
+      truncated,
+    }
+  },
+)
+
+export const browserBack = nativeBlock(
+  {
+    id: 'browser.back',
+    name: 'Browser: Back',
+    version: '0.1.0',
+    description: 'Go back one entry in the browser history; returns the resulting URL.',
+    capabilities: ['browser'],
+    inputs: [],
+    outputs: [{ name: 'url', type: 'string' }],
+  },
+  async (ctx) => {
+    const p = page(ctx)
+    await p.goBack()
+    return { url: p.url() }
   },
 )
 
