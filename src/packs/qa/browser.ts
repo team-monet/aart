@@ -20,6 +20,9 @@ interface BrowserPage {
   fill: (selector: string, value: string) => Promise<void>
   locator: (selector: string) => unknown
   screenshot: (opts?: { mask?: unknown[] }) => Promise<Buffer>
+  innerText: (selector: string) => Promise<string>
+  innerHTML: (selector: string) => Promise<string>
+  content: () => Promise<string>
   getByText: (text: string) => {
     first: () => { waitFor: (o: { state: string; timeout: number }) => Promise<void> }
   }
@@ -131,6 +134,67 @@ export const browserTextVisible = nativeBlock(
       throw new Error(`Text not visible: ${text}`)
     }
     return { visible: true }
+  },
+)
+
+/** Clamp extracted page content so a huge page can't balloon the run report. */
+function clamp(raw: string, maxChars: unknown): { text: string; truncated: boolean } {
+  const limit = typeof maxChars === 'number' && maxChars > 0 ? maxChars : 50_000
+  return raw.length > limit
+    ? { text: raw.slice(0, limit), truncated: true }
+    : { text: raw, truncated: false }
+}
+
+export const browserExtractText = nativeBlock(
+  {
+    id: 'qa.browser.extract_text',
+    name: 'Browser: Extract Text',
+    version: '0.1.0',
+    description:
+      'Return the rendered (post-JavaScript) text of the page — or of one element via ' +
+      '`selector` — as a string output for later steps to parse or assert on. ' +
+      'Truncated at `maxChars` (default 50000); `truncated` reports if clipping happened.',
+    capabilities: ['browser'],
+    inputs: [
+      { name: 'selector', type: 'string' },
+      { name: 'maxChars', type: 'number' },
+    ],
+    outputs: [
+      { name: 'text', type: 'string' },
+      { name: 'truncated', type: 'boolean' },
+    ],
+  },
+  async (ctx, inputs) => {
+    const selector = inputs.selector ? String(inputs.selector) : 'body'
+    const raw = await page(ctx).innerText(selector)
+    const { text, truncated } = clamp(raw, inputs.maxChars)
+    return { text, truncated }
+  },
+)
+
+export const browserHtml = nativeBlock(
+  {
+    id: 'qa.browser.html',
+    name: 'Browser: HTML',
+    version: '0.1.0',
+    description:
+      'Return the rendered HTML of the page — or of one element via `selector` — as a ' +
+      'string output (e.g. for a node block to parse). Truncated at `maxChars` (default 50000).',
+    capabilities: ['browser'],
+    inputs: [
+      { name: 'selector', type: 'string' },
+      { name: 'maxChars', type: 'number' },
+    ],
+    outputs: [
+      { name: 'html', type: 'string' },
+      { name: 'truncated', type: 'boolean' },
+    ],
+  },
+  async (ctx, inputs) => {
+    const p = page(ctx)
+    const raw = inputs.selector ? await p.innerHTML(String(inputs.selector)) : await p.content()
+    const { text, truncated } = clamp(raw, inputs.maxChars)
+    return { html: text, truncated }
   },
 )
 

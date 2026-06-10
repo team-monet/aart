@@ -23,8 +23,17 @@ suite('qa.browser via Runtime (real Chromium)', () => {
   let url: string
 
   beforeAll(async () => {
-    server = http.createServer((_req, res) => {
+    server = http.createServer((req, res) => {
       res.setHeader('content-type', 'text/html')
+      if (req.url === '/js') {
+        // Content that exists only after JavaScript runs — what extract_text must see.
+        res.end(
+          '<html><body><div id="app"></div>' +
+            "<script>document.getElementById('app').textContent = 'Hydrated Content'</script>" +
+            '</body></html>',
+        )
+        return
+      }
       res.end('<html><body><h1>Dashboard</h1><input name="email" /></body></html>')
     })
     await new Promise<void>((r) => server.listen(0, '127.0.0.1', r))
@@ -55,6 +64,39 @@ suite('qa.browser via Runtime (real Chromium)', () => {
     expect(record.status).toBe('COMPLETED')
     expect(record.artifacts.length).toBe(1)
     expect(fs.existsSync(record.artifacts[0]!)).toBe(true)
+    fs.rmSync(dir, { recursive: true, force: true })
+  }, 30000)
+
+  it('extracts rendered (post-JavaScript) text and HTML into the data flow', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'aart-br-'))
+    const wf: BlockDefinition = {
+      id: 'browser-read',
+      name: 'Browser Read',
+      version: '0.1.0',
+      inputs: [{ name: 'url', type: 'string' }],
+      outputs: [],
+      execution: {
+        type: 'workflow',
+        steps: [
+          { id: 'open', block: 'qa.browser.goto', inputs: { url: '{{inputs.url}}' } },
+          { id: 'text', block: 'qa.browser.extract_text', inputs: {} },
+          { id: 'html', block: 'qa.browser.html', inputs: { maxChars: 10 } },
+        ],
+        outputMapping: {
+          text: '$text.text',
+          textTruncated: '$text.truncated',
+          html: '$html.html',
+          htmlTruncated: '$html.truncated',
+        },
+      },
+    }
+    const record = await new Runtime(dir, [qaPack]).run(wf, { url: `${url}js` })
+    expect(record.status).toBe('COMPLETED')
+    // The text exists only after the page's script ran — proves we read the rendered DOM.
+    expect(record.results?.text).toContain('Hydrated Content')
+    expect(record.results?.textTruncated).toBe(false)
+    expect(String(record.results?.html)).toHaveLength(10)
+    expect(record.results?.htmlTruncated).toBe(true)
     fs.rmSync(dir, { recursive: true, force: true })
   }, 30000)
 

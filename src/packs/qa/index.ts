@@ -7,6 +7,8 @@ import {
   browserClick,
   browserFill,
   browserTextVisible,
+  browserExtractText,
+  browserHtml,
   browserScreenshot,
 } from './browser'
 
@@ -26,6 +28,8 @@ export const qaPack: Pack = {
     browserClick,
     browserFill,
     browserTextVisible,
+    browserExtractText,
+    browserHtml,
     browserScreenshot,
   ],
   capabilities: [browserCapability],
