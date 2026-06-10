@@ -12,7 +12,11 @@ export function renderDefinition(b: BlockDefinition): string {
   const lines: string[] = []
   lines.push(`${b.id} (${b.execution.type}) v${b.version}${b.description ? ` — ${b.description}` : ''}`)
   if (b.inputs.length) {
-    lines.push(`  inputs: ${b.inputs.map((i) => `${i.name}${i.required ? '*' : ''}:${i.type}`).join(', ')}`)
+    const field = (i: (typeof b.inputs)[number]) => {
+      const constraint = i.enum ? ` ∈ {${i.enum.join(', ')}}` : i.pattern ? ` ~ /${i.pattern}/` : ''
+      return `${i.name}${i.required ? '*' : ''}:${i.type}${constraint}`
+    }
+    lines.push(`  inputs: ${b.inputs.map(field).join(', ')}`)
   }
 
   if (b.execution.type === 'workflow') {

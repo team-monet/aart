@@ -79,12 +79,28 @@ export class Engine {
     record: RunRecord,
     params?: Record<string, unknown>,
   ): Promise<Record<string, unknown>> {
-    // Enforce declared required inputs at the engine boundary, for every block
-    // type, so an omitted input fails fast with a precise message instead of
-    // surfacing as a downstream artifact (e.g. fetching "undefined").
+    // Enforce declared required inputs and safe-interface constraints at the
+    // engine boundary, for every block type, so an omitted input fails fast
+    // and a constrained input (enum/pattern) can never reach the block with a
+    // value the user didn't approve the shape of.
     for (const field of block.inputs) {
-      if (field.required && inputs[field.name] === undefined) {
+      const value = inputs[field.name]
+      if (field.required && value === undefined) {
         throw new Error(`Missing required input "${field.name}" for block ${block.id}`)
+      }
+      if (value === undefined) continue
+      if (field.enum && !field.enum.includes(value as string | number)) {
+        throw new Error(
+          `Input "${field.name}" for block ${block.id} must be one of: ${field.enum.join(', ')} (got ${JSON.stringify(value)})`,
+        )
+      }
+      if (field.pattern && typeof value === 'string') {
+        // Full match — a partial hit must not pass a gate like "^[a-z-]+$".
+        if (!new RegExp(`^(?:${field.pattern})$`).test(value)) {
+          throw new Error(
+            `Input "${field.name}" for block ${block.id} must match pattern ${field.pattern} (got ${JSON.stringify(value)})`,
+          )
+        }
       }
     }
 

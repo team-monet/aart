@@ -150,6 +150,10 @@ A workflow that opens a page and checks text is visible:
   \`failOnError: false\` to branch on \`exitCode\` instead of failing. Put tokens
   in the \`env\` template via \`{{secrets.X}}\`, never in args. Use this for any
   CLI operation worth repeating — it turns shell history into audit history.
+  Make the interface SAFE, not just audited: declare \`enum\` / \`pattern\` on
+  inputs (\`{ "name": "namespace", "type": "string", "enum": ["dev", "staging"] }\`)
+  and the engine rejects out-of-range values on every run — a block that
+  cannot reach prod is better than one that logs that it did.
 - \`node\` — custom JavaScript you author. Two tiers:
   - **Sandboxed** (no \`dependencies\`): a locked-down V8 isolate — no \`process\`,
     \`require\`, fs, or network. Pure compute: gets \`inputs\` + \`ctx\` {runId,vars},

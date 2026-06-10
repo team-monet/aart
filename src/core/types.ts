@@ -20,6 +20,14 @@ export const FieldSchema = z.object({
   type: z.string().default('any'),
   description: z.string().optional(),
   required: z.boolean().optional(),
+  /**
+   * Safe-interface constraints, enforced by the engine on every run. They make
+   * unsafe values unrepresentable — e.g. a kubectl block whose `namespace`
+   * input has `enum: ["dev", "staging"]` cannot be pointed at prod, no matter
+   * what calls it. `pattern` is a full-match regex applied to string values.
+   */
+  enum: z.array(z.union([z.string(), z.number()])).optional(),
+  pattern: z.string().optional(),
 })
 export type Field = z.infer<typeof FieldSchema>
 

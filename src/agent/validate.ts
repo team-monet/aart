@@ -80,6 +80,24 @@ export function validateDraft(value: unknown, registry: Registry): ValidationRes
       : checkNodeSyntax(block.execution.code)
     if (syntaxErr) return { ok: false, errors: [`code: ${syntaxErr}`], block }
   }
+  // Input constraints must be well-formed: a pattern that doesn't compile
+  // would otherwise fail every future run instead of failing registration.
+  for (const field of block.inputs) {
+    if (field.pattern !== undefined) {
+      try {
+        new RegExp(`^(?:${field.pattern})$`)
+      } catch (err) {
+        return {
+          ok: false,
+          errors: [`inputs.${field.name}.pattern: invalid regex — ${err instanceof Error ? err.message : String(err)}`],
+          block,
+        }
+      }
+    }
+    if (field.enum !== undefined && field.enum.length === 0) {
+      return { ok: false, errors: [`inputs.${field.name}.enum: must not be empty`], block }
+    }
+  }
   // Command blocks: the binary and cwd are part of what the user approves —
   // they must be fixed strings. Only argv slots and env values interpolate.
   if (block.execution.type === 'command') {
