@@ -4,6 +4,7 @@ import {
   type BlockDefinition,
 } from '../core/types'
 import { checkNodeSyntax } from '../core/executor'
+import { checkDependencies, checkHostNodeSyntax } from '../core/host-runner'
 import type { Registry } from '../registry/file-registry'
 
 export interface ValidationResult {
@@ -66,9 +67,17 @@ export function validateDraft(value: unknown, registry: Registry): ValidationRes
   const structural = validateStructure(value)
   if (!structural.ok || !structural.block) return structural
   const block = structural.block
-  // Static gate: a node block's code must compile (syntax-valid).
+  // Static gates for node blocks: dependency entries must be well-formed
+  // (registry name@range or node: built-ins only), and the code must compile.
+  // Dependency-bearing blocks compile against the host signature (and don't
+  // need isolated-vm); sandboxed blocks compile in the isolate.
   if (block.execution.type === 'node') {
-    const syntaxErr = checkNodeSyntax(block.execution.code)
+    const deps = block.execution.dependencies ?? []
+    const depErrors = checkDependencies(deps)
+    if (depErrors.length) return { ok: false, errors: depErrors, block }
+    const syntaxErr = deps.length
+      ? checkHostNodeSyntax(block.execution.code)
+      : checkNodeSyntax(block.execution.code)
     if (syntaxErr) return { ok: false, errors: [`code: ${syntaxErr}`], block }
   }
   const refErrors = validateWorkflowRefs(block, registry)

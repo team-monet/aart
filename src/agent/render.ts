@@ -33,6 +33,13 @@ export function renderDefinition(b: BlockDefinition): string {
     }
   } else if (b.execution.type === 'node') {
     if (b.outputs.length) lines.push(`  outputs: ${b.outputs.map((o) => `${o.name}:${o.type}`).join(', ')}`)
+    if (b.execution.dependencies?.length) {
+      lines.push(`  dependencies: ${b.execution.dependencies.join(', ')}`)
+      lines.push(
+        '  ⚠ UNSANDBOXED — approving this runs it as a real Node.js process with the npm ' +
+          'packages above and full access to this machine.',
+      )
+    }
     const code = b.execution.code.trim()
     lines.push('  code:')
     for (const line of (code.length > 400 ? code.slice(0, 400) + '\n…' : code).split('\n')) {

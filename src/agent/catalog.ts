@@ -12,6 +12,8 @@ export interface CatalogEntry {
   name: string
   description?: string
   capabilities?: string[]
+  /** For `node` blocks: declared npm deps — present means it runs unsandboxed on the host. */
+  dependencies?: string[]
   inputs: Field[]
   outputs: Field[]
 }
@@ -25,6 +27,7 @@ export function buildCatalog(registry: Registry): CatalogEntry[] {
     name: b.name,
     description: b.description,
     capabilities: b.capabilities,
+    dependencies: b.execution.type === 'node' ? b.execution.dependencies : undefined,
     inputs: b.inputs,
     outputs: b.outputs,
   }))

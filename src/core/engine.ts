@@ -1,5 +1,6 @@
 import { resolveInputs, resolveValue, evalCondition, type ResolveScope } from './resolver'
 import { runNodeBlock } from './executor'
+import { runHostNodeBlock } from './host-runner'
 import { secretValues, redactText } from './secrets'
 import type { ExecutionContext } from './context'
 import type { Registry } from '../registry/file-registry'
@@ -87,10 +88,17 @@ export class Engine {
     }
 
     if (block.execution.type === 'node') {
-      const res = await runNodeBlock(block.execution.code, inputs, ctx, {
-        timeoutMs: this.opts.timeoutMs,
-        memoryMb: this.opts.memoryMb,
-      })
+      // Two tiers: declared dependencies → real Node subprocess with those npm
+      // packages (approval-gated, unsandboxed); otherwise the pure-compute isolate.
+      const deps = block.execution.dependencies
+      const res = deps?.length
+        ? await runHostNodeBlock(block.execution.code, deps, inputs, ctx, {
+            timeoutMs: this.opts.timeoutMs,
+          })
+        : await runNodeBlock(block.execution.code, inputs, ctx, {
+            timeoutMs: this.opts.timeoutMs,
+            memoryMb: this.opts.memoryMb,
+          })
       // Mask secrets that a block may have printed before logging to stderr.
       const sv = res.logs.length ? secretValues(ctx.secrets) : []
       for (const line of res.logs) ctx.logger.debug(`[${block.id}] ${redactText(line, sv)}`)
