@@ -1,4 +1,5 @@
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import { FileRegistry } from '../registry/file-registry'
 import { Runtime } from '../core/runtime'
@@ -12,7 +13,7 @@ export function setWorkspace(dir?: string): void {
   override = dir ? path.resolve(dir) : undefined
 }
 
-export type WorkspaceSource = 'flag' | 'env' | 'discovered' | 'cwd'
+export type WorkspaceSource = 'flag' | 'env' | 'discovered' | 'default'
 
 /** Nearest ancestor of `start` (inclusive) that contains a `.aa` dir, else undefined. */
 export function findWorkspaceRoot(start: string): string | undefined {
@@ -33,11 +34,13 @@ export function findWorkspaceRoot(start: string): string | undefined {
 
 /**
  * The workspace holds all state under `<workspace>/.aa`. Resolution order:
- *   --workspace flag  >  $AART_WORKSPACE  >  nearest ancestor containing `.aa`  >  process.cwd()
- * The upward `.aa` discovery (step 3) means `aart dashboard` and the CLI can be
- * run from anywhere inside a project tree and converge on the same `.aa` the MCP
- * server uses. Set AART_WORKSPACE in your MCP server config to pin the workspace
- * explicitly, regardless of the cwd the agent host launches the server from.
+ *   --workspace flag  >  $AART_WORKSPACE  >  nearest ancestor containing `.aa`  >  ~/.aart
+ * Upward `.aa` discovery (step 3) means once a project has a workspace, `aart
+ * dashboard` and the CLI find it from anywhere inside the tree. With nothing
+ * pinned and no `.aa` nearby, aart uses a per-user default (`~/.aart`) rather
+ * than the cwd — so it never lands in a stray or unwritable directory (an MCP
+ * host controls the cwd it launches the server from). Set AART_WORKSPACE (or
+ * --workspace) to scope a workspace to a project; `.aa` is created on first run.
  */
 
 /** Resolve the workspace AND report how it was resolved (for startup messages). */
@@ -47,7 +50,14 @@ export function resolveWorkspace(): { dir: string; source: WorkspaceSource } {
   if (env) return { dir: path.resolve(env), source: 'env' } // ignore an empty/whitespace value
   const found = findWorkspaceRoot(process.cwd())
   if (found) return { dir: found, source: 'discovered' }
-  return { dir: path.resolve(process.cwd()), source: 'cwd' }
+  // Nothing pinned and no .aa nearby — use the per-user default. Its `.aa` is
+  // created on first run by openRuntime (recursive mkdir), like any workspace.
+  return { dir: defaultWorkspace(), source: 'default' }
+}
+
+/** The per-user default workspace (`~/.aart`), used when nothing else resolves. */
+export function defaultWorkspace(): string {
+  return path.join(os.homedir(), '.aart')
 }
 
 export function workspace(): string {
@@ -59,7 +69,7 @@ export function workspaceSourceLabel(source: WorkspaceSource): string {
   return source === 'flag' ? 'via --workspace'
     : source === 'env' ? 'via $AART_WORKSPACE'
     : source === 'discovered' ? 'discovered .aa in a parent directory'
-    : 'current directory, no .aa found'
+    : 'default workspace (~/.aart)'
 }
 
 /**

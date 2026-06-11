@@ -44,6 +44,15 @@ aart list        # shows the built-in core blocks (browser.*, http.*, data.*, fi
 Point your agent's MCP config at aart (no global install needed for this path):
 
 ```json
+{ "command": "npx", "args": ["-y", "@team-monet/aart", "mcp"] }
+```
+
+No configuration is required to start — with nothing set, aart uses a per-user
+default workspace (`~/.aart`), created on first run. To scope a project's blocks,
+runs, and approvals to **that project** (its own registry/approvals/secrets),
+point it at the project directory:
+
+```json
 { "command": "npx", "args": ["-y", "@team-monet/aart", "mcp"],
   "env": { "AART_WORKSPACE": "/path/to/your/project" } }
 ```
@@ -130,11 +139,12 @@ say yes it records the approval. You never have to touch a terminal.
 
 ## Secrets & workspace
 
-- **Workspace** — state lives under `<workspace>/.aa`. Resolution:
-  `--workspace <dir>` → `$AART_WORKSPACE` → nearest ancestor directory containing `.aa` → cwd.
-  The upward `.aa` discovery means you can run `aart dashboard` (and any CLI command) from
-  anywhere inside your project tree and hit the same workspace the MCP server uses. Set
-  **`AART_WORKSPACE`** in your MCP config to pin the workspace explicitly.
+- **Workspace** — state lives under `<workspace>/.aa` (created on first run). Resolution:
+  `--workspace <dir>` → `$AART_WORKSPACE` → nearest ancestor directory containing `.aa` →
+  a per-user default `~/.aart`. Upward `.aa` discovery means once a project has a workspace,
+  `aart dashboard` and the CLI find it from anywhere inside the tree. With nothing pinned and
+  no `.aa` nearby, aart uses `~/.aart` (not the cwd), so it never writes a stray workspace into
+  the wrong place. Set **`AART_WORKSPACE`** (or `--workspace`) to scope a workspace to a project.
 - **Secrets** — reference credentials as `{{secrets.NAME}}`, sourced from
   `AART_SECRET_<NAME>` env vars or `<workspace>/.aa/secrets.json`. They're
   best-effort **redacted** from reports — never put a real secret in an input.

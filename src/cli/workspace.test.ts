@@ -2,7 +2,13 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { findWorkspaceRoot, resolveWorkspace, workspaceSourceLabel, setWorkspace } from './workspace'
+import {
+  findWorkspaceRoot,
+  resolveWorkspace,
+  workspaceSourceLabel,
+  setWorkspace,
+  defaultWorkspace,
+} from './workspace'
 
 // On macOS /tmp is a symlink to /private/tmp, so we must realpath temp dirs
 // before comparing paths to avoid spurious mismatches.
@@ -135,10 +141,26 @@ describe('resolveWorkspace precedence', () => {
     }
   })
 
+  it('falls back to the per-user default (~/.aart) when nothing else resolves — source is default', () => {
+    const bare = mktmp('aart-bare-') // a fresh dir with no .aa anywhere above it
+    try {
+      delete process.env.AART_WORKSPACE
+      setWorkspace(undefined)
+      process.chdir(bare)
+      const result = resolveWorkspace()
+      expect(result.source).toBe('default')
+      expect(result.dir).toBe(defaultWorkspace())
+      expect(result.dir).toBe(path.join(os.homedir(), '.aart'))
+    } finally {
+      process.chdir(origCwd)
+      fs.rmSync(bare, { recursive: true, force: true })
+    }
+  })
+
   it('workspaceSourceLabel returns correct strings for all sources', () => {
     expect(workspaceSourceLabel('flag')).toBe('via --workspace')
     expect(workspaceSourceLabel('env')).toBe('via $AART_WORKSPACE')
     expect(workspaceSourceLabel('discovered')).toBe('discovered .aa in a parent directory')
-    expect(workspaceSourceLabel('cwd')).toBe('current directory, no .aa found')
+    expect(workspaceSourceLabel('default')).toBe('default workspace (~/.aart)')
   })
 })

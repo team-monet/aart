@@ -247,7 +247,7 @@ async function renderRuns() {
     const ws = esc(overview.workspace || '')
     const msg = overview.initialized
       ? 'No runs yet — run a workflow and it appears here, e.g. <span class="mono">aart run examples/workflows/echo-smoke.workflow.yaml --yes</span>.'
-      : 'This directory has no <span class="mono">.aa</span> workspace yet — you may be running aart from the wrong folder. Pass <span class="mono">--workspace &lt;dir&gt;</span>, or run a workflow here to create one.'
+      : 'No runs in this workspace yet — run a workflow to populate it, or set <span class="mono">--workspace</span> / <span class="mono">$AART_WORKSPACE</span> to point at a specific project.'
     $('#content').innerHTML = '<div class="empty">' + msg + '<div class="mono" style="margin-top:8px">workspace: ' + ws + '</div></div>'
     return
   }
