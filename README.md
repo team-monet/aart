@@ -26,7 +26,8 @@ aart doctor                    # checks Node + sandbox + browser, with fix hints
 npx playwright install --with-deps chromium
 ```
 
-- **Node ≥ 20** required.
+- **Node ≥ 20** required at runtime; the `node`-block sandbox (`isolated-vm`)
+  and building from source need **Node ≥ 22**.
 - The `node`-block sandbox (`isolated-vm`) is an **optional, prebuilt** native
   addon — install needs **no compiler** on macOS (Apple Silicon), Linux x64/arm64
   (including WSL2), or Windows x64. If it can't install, aart still works; only
