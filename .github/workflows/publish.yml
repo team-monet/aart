@@ -1,0 +1,45 @@
+name: Publish
+
+# Publishes the current package.json version to npm when you publish a GitHub
+# Release — via npm Trusted Publishing (OIDC), so there is NO NPM_TOKEN secret.
+#
+# One-time setup on npmjs.com: @team-monet/aart -> Settings -> Trusted Publisher
+# -> GitHub Actions, with organization `team-monet`, repository `aart`, and
+# workflow filename `publish.yml`.
+#
+# Release flow: bump the version (package.json + src/cli/index.ts + src/mcp/
+# server.ts, per AGENTS.md) -> merge to main -> draft a Release tagged vX.Y.Z ->
+# Publish it.
+on:
+  release:
+    types: [published]
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # OIDC — authenticates the publish to npm (no token needed)
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+          cache: npm
+
+      # Trusted publishing needs npm >= 11.5.1; Node 22 ships npm 10.x.
+      - name: Update npm for trusted publishing
+        run: npm install -g npm@latest
+
+      - run: npm ci
+
+      # `npm publish` runs prepublishOnly (typecheck + the full test suite, which
+      # drives real Chromium) and `prepare` (build) before publishing.
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+
+      # OIDC authenticates the publish; provenance is generated automatically.
+      - name: Publish to npm
+        run: npm publish
