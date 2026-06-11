@@ -4,7 +4,8 @@ import path from 'node:path'
 import { buildCatalog } from '../../agent/catalog'
 import { listRuns, readRun, runDir } from '../../core/report'
 import { hashPackDir, readPackManifest } from '../../pack/loader'
-import { openRuntime, workspace } from '../workspace'
+import { builtinPacks } from '../../packs'
+import { openRuntime, resolveWorkspace, workspaceSourceLabel } from '../workspace'
 
 /**
  * `aart dashboard` — a local, READ-ONLY view of the workspace: block catalog,
@@ -18,6 +19,12 @@ import { openRuntime, workspace } from '../workspace'
 const RUN_ID = /^[A-Za-z0-9-]{1,64}$/
 
 export function startDashboard(ws: string, port: number): Promise<http.Server> {
+  // Whether this was already an aart workspace BEFORE we touch it. openRuntime
+  // (next line) eagerly creates .aa/registry, so we must snapshot first — this
+  // is what lets the empty state tell a wrong-directory launch from a real
+  // workspace that simply has no runs yet (e.g. blocks registered, none run).
+  const aa = path.join(ws, '.aa')
+  const wasWorkspace = fs.existsSync(aa) && fs.statSync(aa).isDirectory()
   const runtime = openRuntime(ws)
 
   const server = http.createServer(async (req, res) => {
@@ -31,7 +38,7 @@ export function startDashboard(ws: string, port: number): Promise<http.Server> {
 
       if (url.pathname === '/') return send(200, PAGE, 'text/html; charset=utf-8')
       if (url.pathname === '/api/overview') {
-        return send(200, JSON.stringify({ workspace: ws }))
+        return send(200, JSON.stringify({ workspace: ws, initialized: wasWorkspace }))
       }
       if (url.pathname === '/api/blocks') {
         return send(200, JSON.stringify(buildCatalog(runtime.registry)))
@@ -52,8 +59,20 @@ export function startDashboard(ws: string, port: number): Promise<http.Server> {
         }
       }
       if (url.pathname === '/api/packs') {
+        // Built-in packs ship with the runtime and are always loaded — surface
+        // them so the catalog's `native` blocks have a visible home (the "core"
+        // pack, formerly "qa"). Workspace packs (.aa/packs.json) follow, with
+        // their draft/approved/changed/missing seal status.
+        const builtin = builtinPacks.map((p) => ({
+          name: p.name,
+          kind: 'built-in',
+          status: 'native',
+          blocks: p.blocks.length,
+          capabilities: p.capabilities.map((c) => c.name),
+          aliases: Object.keys(p.aliases ?? {}),
+        }))
         const manifest = readPackManifest(ws)
-        const packs = Object.entries(manifest.packs).map(([name, entry]) => {
+        const workspacePacks = Object.entries(manifest.packs).map(([name, entry]) => {
           let status = entry.approved ? 'approved' : 'draft'
           if (entry.approved) {
             try {
@@ -62,9 +81,9 @@ export function startDashboard(ws: string, port: number): Promise<http.Server> {
               status = 'missing'
             }
           }
-          return { name, path: entry.path, status, registeredAt: entry.registeredAt }
+          return { name, kind: 'workspace', path: entry.path, status, registeredAt: entry.registeredAt }
         })
-        return send(200, JSON.stringify(packs))
+        return send(200, JSON.stringify([...builtin, ...workspacePacks]))
       }
       if (url.pathname === '/artifact') {
         const id = url.searchParams.get('run') ?? ''
@@ -97,19 +116,19 @@ export function startDashboard(ws: string, port: number): Promise<http.Server> {
 }
 
 export async function dashboardCommand(opts: { port?: string }): Promise<void> {
-  const ws = workspace()
+  const { dir: ws, source } = resolveWorkspace()
   const port = opts.port ? Number(opts.port) : 4400
   const server = await startDashboard(ws, port)
   const addr = server.address()
   const actual = typeof addr === 'object' && addr ? addr.port : port
-  console.log(`aart dashboard — http://127.0.0.1:${actual}  (workspace: ${ws})`)
+  console.log(`aart dashboard — http://127.0.0.1:${actual}  (workspace: ${ws} — ${workspaceSourceLabel(source)})`)
   console.log('read-only; Ctrl-C to stop')
 }
 
 // ---------------------------------------------------------------------------
 // The page. One file, no framework. Data comes from the JSON endpoints above.
 // ---------------------------------------------------------------------------
-const PAGE = `<!doctype html>
+export const PAGE = `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -143,6 +162,9 @@ const PAGE = `<!doctype html>
   .art img { max-width: 480px; border: 1px solid #ddd; display: block; margin: 6px 0; }
   .err { color: var(--bad); }
   .empty { color: var(--mut); padding: 24px; text-align: center; }
+  .bar { display: flex; gap: 10px; align-items: center; margin-bottom: 10px; }
+  .bar input { padding: 5px 9px; border: 1px solid #ddd; border-radius: 6px; font: inherit; min-width: 280px; }
+  .mut { color: var(--mut); font-size: 12px; }
 </style>
 </head>
 <body>
@@ -155,34 +177,105 @@ const PAGE = `<!doctype html>
 <main><div id="content"></div><div id="detail" hidden></div></main>
 <script>
 const $ = (s) => document.querySelector(s)
+// Escapes & < > " — enough for element text and DOUBLE-quoted attributes, which
+// is the only way values are interpolated below. It does NOT escape ' — so never
+// build a single-quoted attribute or drop a raw value into a JS string from data;
+// keep dynamic JS args constrained (runId is RUN_ID-validated, showBlock takes an index).
 const esc = (v) => String(v ?? '').replace(/[&<>"]/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))
 const pill = (s) => '<span class="pill ' + esc(s) + '">' + esc(s) + '</span>'
 const j = async (u) => { const r = await fetch(u); if (!r.ok) throw new Error(await r.text()); return r.json() }
 let tab = 'runs'
+let overview = {}
+let blocksCache = []
+const filters = { runs: '', blocks: '' }
+const NOUN = { runs: 'runs', blocks: 'blocks' }
+
+// "3m ago" style relative time; the absolute timestamp goes in the cell title.
+function ago(iso) {
+  const s = (Date.now() - Date.parse(iso)) / 1000
+  if (!isFinite(s)) return ''
+  if (s < 60) return Math.max(0, Math.floor(s)) + 's ago'
+  if (s < 3600) return Math.floor(s / 60) + 'm ago'
+  if (s < 86400) return Math.floor(s / 3600) + 'h ago'
+  return Math.floor(s / 86400) + 'd ago'
+}
+
+// Reusable client-side filter: a search box that hides non-matching rows (each
+// row carries a lowercased data-k key) WITHOUT re-fetching, so it survives the
+// 5s auto-refresh. wireFilter restores the typed text and re-applies after each
+// full re-render.
+function filterBar(kind, placeholder, extra) {
+  return '<div class="bar"><input id="filter-' + kind + '" placeholder="' + esc(placeholder) + '">' +
+    '<span class="mut" id="count-' + kind + '"></span>' + (extra || '') + '</div>'
+}
+function applyFilter(kind) {
+  const f = filters[kind].trim().toLowerCase()
+  const rows = document.querySelectorAll('#tbl-' + kind + ' tr.frow')
+  let shown = 0
+  rows.forEach((tr) => {
+    const hit = !f || (tr.getAttribute('data-k') || '').indexOf(f) >= 0
+    tr.style.display = hit ? '' : 'none'
+    if (hit) shown++
+  })
+  const c = $('#count-' + kind)
+  if (c) c.textContent = (f ? shown + ' / ' + rows.length : rows.length) + ' ' + NOUN[kind]
+}
+function wireFilter(kind) {
+  const fi = $('#filter-' + kind)
+  if (!fi) return
+  fi.value = filters[kind]
+  applyFilter(kind)
+  fi.oninput = () => { filters[kind] = fi.value; applyFilter(kind) }
+}
 
 function setTab(t) { tab = t; $('#detail').hidden = true; render() }
 
 async function render() {
   for (const t of ['runs', 'blocks', 'packs']) $('#tab-' + t).className = t === tab ? 'on' : ''
-  if (tab === 'runs') return renderRuns()
-  if (tab === 'blocks') return renderBlocks()
-  return renderPacks()
+  try {
+    if (tab === 'runs') await renderRuns()
+    else if (tab === 'blocks') await renderBlocks()
+    else await renderPacks()
+  } catch (e) {
+    $('#content').innerHTML = '<div class="empty err">Could not load ' + esc(tab) + ': ' + esc((e && e.message) || e) + '</div>'
+  }
 }
 
 async function renderRuns() {
   const runs = await j('/api/runs')
-  if (!runs.length) { $('#content').innerHTML = '<div class="empty">No runs yet — run a workflow and it appears here.</div>'; return }
-  $('#content').innerHTML = '<table><tr><th>started</th><th>block</th><th>status</th><th>duration</th><th>run</th></tr>' +
+  if (!runs.length) {
+    const ws = esc(overview.workspace || '')
+    const msg = overview.initialized
+      ? 'No runs yet — run a workflow and it appears here, e.g. <span class="mono">aart run examples/workflows/echo-smoke.workflow.yaml --yes</span>.'
+      : 'This directory has no <span class="mono">.aa</span> workspace yet — you may be running aart from the wrong folder. Pass <span class="mono">--workspace &lt;dir&gt;</span>, or run a workflow here to create one.'
+    $('#content').innerHTML = '<div class="empty">' + msg + '<div class="mono" style="margin-top:8px">workspace: ' + ws + '</div></div>'
+    return
+  }
+  const by = {}
+  runs.forEach((r) => { by[r.status] = (by[r.status] || 0) + 1 })
+  const summary = '<span class="mut">' +
+    [['COMPLETED', 'completed'], ['FAILED', 'failed'], ['RUNNING', 'running'], ['PENDING', 'pending']]
+      .filter(([s]) => by[s]).map(([s, label]) => ' · ' + by[s] + ' ' + label).join('') + '</span>'
+  $('#content').innerHTML = filterBar('runs', 'filter by block or status…', summary) +
+    '<table id="tbl-runs"><tr><th>started</th><th>block</th><th>status</th><th>duration</th><th>run</th></tr>' +
     runs.map((r) => {
-      const dur = r.endedAt ? (Date.parse(r.endedAt) - Date.parse(r.startedAt)) + 'ms' : ''
-      return '<tr class="row" onclick="showRun(\\'' + esc(r.runId) + '\\')"><td>' + esc(r.startedAt.replace('T', ' ').slice(0, 19)) +
-        '</td><td class="mono">' + esc(r.blockId) + '</td><td>' + pill(r.status) +
+      const ms = r.endedAt ? Date.parse(r.endedAt) - Date.parse(r.startedAt) : NaN
+      const dur = Number.isFinite(ms) ? ms + 'ms' : ''
+      // Defensive: a partial/hand-edited run.json may lack startedAt — degrade
+      // this one row rather than throwing and blanking the whole list.
+      const abs = r.startedAt ? esc(r.startedAt.replace('T', ' ').slice(0, 19)) : ''
+      const k = esc((r.blockId + ' ' + r.status + (r.approved === false ? ' unapproved' : '')).toLowerCase())
+      return '<tr class="row frow" data-k="' + k + '" onclick="showRun(\\'' + esc(r.runId) + '\\')">' +
+        '<td title="' + abs + '">' + esc(ago(r.startedAt)) + '</td>' +
+        '<td class="mono">' + esc(r.blockId) + '</td><td>' + pill(r.status) +
         (r.approved === false ? ' <span class="err">unapproved</span>' : '') +
         '</td><td>' + dur + '</td><td class="mono">' + esc(r.runId.slice(0, 8)) + '</td></tr>'
     }).join('') + '</table>'
+  wireFilter('runs')
 }
 
 async function showRun(id) {
+  try {
   const r = await j('/api/run?id=' + encodeURIComponent(id))
   const steps = r.trace.map((t) =>
     '<div class="step">' + pill(t.status) + ' <b>' + esc(t.stepId) + '</b> → <span class="mono">' + esc(t.block) + '</span>' +
@@ -205,27 +298,85 @@ async function showRun(id) {
     '<h4>steps</h4>' + (steps || '<span class="empty">no steps</span>') +
     (arts ? '<h4>artifacts</h4>' + arts : '')
   $('#detail').scrollIntoView({ behavior: 'smooth' })
+  } catch (e) {
+    $('#detail').hidden = false
+    $('#detail').innerHTML = '<div class="err">Could not load run ' + esc(id) + ': ' + esc((e && e.message) || e) + '</div>'
+  }
 }
 
 async function renderBlocks() {
   const blocks = await j('/api/blocks')
-  $('#content').innerHTML = '<table><tr><th>id</th><th>type</th><th>status</th><th>inputs</th><th>description</th></tr>' +
-    blocks.map((b) => '<tr><td class="mono">' + esc(b.id) + '</td><td>' + esc(b.type) + '</td><td>' + pill(b.status) +
-      '</td><td class="mono">' + esc(b.inputs.map((i) => i.name + (i.required ? '*' : '')).join(', ')) +
-      '</td><td>' + esc(b.description || '') + '</td></tr>').join('') + '</table>'
+  blocksCache = blocks
+  $('#content').innerHTML = filterBar('blocks', 'filter by id, type, or capability…') +
+    '<table id="tbl-blocks"><tr><th>id</th><th>type</th><th>status</th><th>capabilities</th><th>inputs</th><th>description</th></tr>' +
+    blocks.map((b, i) => {
+      const caps = (b.capabilities || []).join(', ')
+      const k = esc((b.id + ' ' + b.type + ' ' + b.status + ' ' + caps).toLowerCase())
+      return '<tr class="row frow" data-k="' + k + '" onclick="showBlock(' + i + ')"><td class="mono">' + esc(b.id) + '</td><td>' + esc(b.type) +
+        '</td><td>' + pill(b.status) + '</td><td class="mono">' + esc(caps) +
+        '</td><td class="mono">' + esc(b.inputs.map((f) => f.name + (f.required ? '*' : '')).join(', ')) +
+        '</td><td>' + esc(b.description || '') + '</td></tr>'
+    }).join('') + '</table>'
+  wireFilter('blocks')
+}
+
+// One field (input/output) table for the block detail panel.
+function fieldTable(arr) {
+  if (!arr || !arr.length) return '<span class="mut">none</span>'
+  return '<table><tr><th>name</th><th>type</th><th>required</th><th>constraints</th></tr>' +
+    arr.map((f) => {
+      const cons = [f.enum ? 'enum: ' + f.enum.join(' | ') : '', f.pattern ? 'pattern: ' + f.pattern : '']
+        .filter(Boolean).join('; ')
+      return '<tr><td class="mono">' + esc(f.name) + '</td><td class="mono">' + esc(f.type || 'any') + '</td><td>' +
+        (f.required ? '✓' : '') + '</td><td class="mono">' + esc(cons) +
+        (f.description ? '<div class="mut">' + esc(f.description) + '</div>' : '') + '</td></tr>'
+    }).join('') + '</table>'
+}
+
+function showBlock(i) {
+  const b = blocksCache[i]
+  if (!b) return
+  const meta = 'type: ' + esc(b.type) +
+    (b.capabilities && b.capabilities.length ? ' · capabilities: ' + esc(b.capabilities.join(', ')) : '') +
+    (b.dependencies && b.dependencies.length ? ' · deps: ' + esc(b.dependencies.join(', ')) : '')
+  $('#detail').hidden = false
+  $('#detail').innerHTML = '<h3>' + pill(b.status) + ' <span class="mono">' + esc(b.id) + '</span> ' +
+    '<span class="mut">' + esc(b.name || '') + (b.version ? ' v' + esc(b.version) : '') + '</span></h3>' +
+    (b.description ? '<p>' + esc(b.description) + '</p>' : '') +
+    '<div class="mut" style="margin-bottom:8px">' + meta + '</div>' +
+    '<h4>inputs</h4>' + fieldTable(b.inputs) +
+    '<h4>outputs</h4>' + fieldTable(b.outputs)
+  $('#detail').scrollIntoView({ behavior: 'smooth' })
 }
 
 async function renderPacks() {
   const packs = await j('/api/packs')
-  if (!packs.length) { $('#content').innerHTML = '<div class="empty">No workspace packs registered.</div>'; return }
-  $('#content').innerHTML = '<table><tr><th>name</th><th>path</th><th>status</th><th>registered</th></tr>' +
-    packs.map((p) => '<tr><td class="mono">' + esc(p.name) + '</td><td class="mono">' + esc(p.path) +
-      '</td><td>' + pill(p.status) + '</td><td>' + esc((p.registeredAt || '').slice(0, 19)) + '</td></tr>').join('') + '</table>'
+  if (!packs.length) { $('#content').innerHTML = '<div class="empty">No packs.<div class="mono" style="margin-top:8px">workspace: ' + esc(overview.workspace || '') + '</div></div>'; return }
+  $('#content').innerHTML = '<table><tr><th>name</th><th>kind</th><th>status</th><th>provides</th><th>source</th></tr>' +
+    packs.map((p) => {
+      const provides = p.kind === 'built-in'
+        ? esc(p.blocks + ' blocks' +
+            (p.capabilities && p.capabilities.length ? ' · caps: ' + p.capabilities.join(', ') : '') +
+            (p.aliases && p.aliases.length ? ' · ' + p.aliases.length + ' legacy ids' : ''))
+        : ''
+      const source = p.kind === 'built-in'
+        ? 'built-in'
+        : '<span class="mono">' + esc(p.path || '') + '</span>' + (p.registeredAt ? ' ' + esc(p.registeredAt.slice(0, 19)) : '')
+      return '<tr><td class="mono">' + esc(p.name) + '</td><td>' + esc(p.kind) + '</td><td>' + pill(p.status) +
+        '</td><td>' + provides + '</td><td>' + source + '</td></tr>'
+    }).join('') + '</table>'
 }
 
-j('/api/overview').then((o) => { $('#ws').textContent = o.workspace })
-render()
-setInterval(() => { if (tab === 'runs' && $('#detail').hidden && !document.hidden) render() }, 5000)
+;(async () => {
+  try { overview = await j('/api/overview') } catch (e) { overview = {} }
+  $('#ws').textContent = overview.workspace || ''
+  render()
+})()
+setInterval(() => {
+  const el = document.activeElement
+  const typing = el && typeof el.id === 'string' && el.id.indexOf('filter-') === 0
+  if (tab === 'runs' && $('#detail').hidden && !document.hidden && !typing) render()
+}, 5000)
 </script>
 </body>
 </html>`

@@ -12,7 +12,7 @@ import { setApproval } from '../core/governance'
 import { approveWorkspacePack, loadWorkspacePack, registerWorkspacePack } from '../pack/loader'
 import { AUTHORING_GUIDE } from '../agent/guide'
 import { renderReport, readRun, listRuns } from '../core/report'
-import { openRuntime, workspace } from '../cli/workspace'
+import { openRuntime, resolveWorkspace, workspaceSourceLabel } from '../cli/workspace'
 import type { RunRecord } from '../core/types'
 
 /**
@@ -83,7 +83,7 @@ function runView(record: RunRecord) {
 export async function startMcpServer(): Promise<void> {
   // Build the runtime once so its packs (QA, …) are available to every run;
   // registry reads are fresh, so an out-of-band `aart approve` is seen.
-  const ws = workspace()
+  const { dir: ws, source } = resolveWorkspace()
   const runtime = openRuntime(ws)
   const registry = runtime.registry
 
@@ -91,7 +91,7 @@ export async function startMcpServer(): Promise<void> {
   // footgun (it silently shows only native blocks and writes a stray .aa).
   const hasRegistry = fs.existsSync(path.join(ws, '.aa', 'registry'))
   console.error(
-    `aart MCP server — workspace: ${ws}${hasRegistry ? '' : '  (no .aa/registry here yet)'}`,
+    `aart MCP server — workspace: ${ws}  (${workspaceSourceLabel(source)})${hasRegistry ? '' : '  (no .aa/registry here yet)'}`,
   )
 
   const server = new McpServer(

@@ -131,8 +131,10 @@ say yes it records the approval. You never have to touch a terminal.
 ## Secrets & workspace
 
 - **Workspace** — state lives under `<workspace>/.aa`. Resolution:
-  `--workspace <dir>` → `$AART_WORKSPACE` → cwd. Set **`AART_WORKSPACE`** in your
-  MCP config so `.aa` lands in your project.
+  `--workspace <dir>` → `$AART_WORKSPACE` → nearest ancestor directory containing `.aa` → cwd.
+  The upward `.aa` discovery means you can run `aart dashboard` (and any CLI command) from
+  anywhere inside your project tree and hit the same workspace the MCP server uses. Set
+  **`AART_WORKSPACE`** in your MCP config to pin the workspace explicitly.
 - **Secrets** — reference credentials as `{{secrets.NAME}}`, sourced from
   `AART_SECRET_<NAME>` env vars or `<workspace>/.aa/secrets.json`. They're
   best-effort **redacted** from reports — never put a real secret in an input.

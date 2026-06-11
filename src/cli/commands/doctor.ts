@@ -1,6 +1,6 @@
 import fs from 'node:fs'
 import path from 'node:path'
-import { workspace } from '../workspace'
+import { resolveWorkspace, workspaceSourceLabel } from '../workspace'
 
 /** `aart doctor` — check that everything needed is in place, with fix hints. */
 export async function doctorCommand(): Promise<void> {
@@ -11,9 +11,10 @@ export async function doctorCommand(): Promise<void> {
   if (major >= 20) ok(`Node ${process.versions.node}`)
   else bad(`Node ${process.versions.node} (need ≥ 20)`, 'upgrade Node to 20 or newer')
 
-  const ws = workspace()
+  const { dir: ws, source } = resolveWorkspace()
   const hasReg = fs.existsSync(path.join(ws, '.aa', 'registry'))
-  ok(`workspace ${ws}`, hasReg ? '' : '(no .aa yet — created on first use)')
+  const detail = workspaceSourceLabel(source) + (hasReg ? '' : '; no .aa yet — created on first use')
+  ok(`workspace ${ws}`, detail)
 
   // isolated-vm — only needed for sandboxed `node` blocks (core pack doesn't use it)
   try {

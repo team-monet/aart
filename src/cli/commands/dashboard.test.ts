@@ -44,8 +44,9 @@ describe('aart dashboard (read-only local server)', () => {
     const page = await fetch(base + '/')
     expect(page.status).toBe(200)
     expect(await page.text()).toContain('aart dashboard')
-    const overview = (await (await fetch(base + '/api/overview')).json()) as { workspace: string }
+    const overview = (await (await fetch(base + '/api/overview')).json()) as { workspace: string; initialized: boolean }
     expect(overview.workspace).toBe(ws)
+    expect(overview.initialized).toBe(true)
   })
 
   it('lists blocks and runs', async () => {
@@ -77,5 +78,45 @@ describe('aart dashboard (read-only local server)', () => {
     expect((await fetch(`${base}/api/run?id=../../etc`)).status).toBe(400)
     expect((await fetch(`${base}/api/run?id=00000000-aaaa-bbbb-cccc-000000000000`)).status).toBe(404)
     expect((await fetch(base + '/', { method: 'POST' })).status).toBe(405)
+  })
+
+  it('surfaces built-in packs in /api/packs', async () => {
+    const packs = (await (await fetch(base + '/api/packs')).json()) as Array<{
+      name: string
+      kind: string
+      status: string
+      blocks: number
+      capabilities: string[]
+      aliases: string[]
+    }>
+    expect(packs.length).toBeGreaterThan(0)
+    const core = packs.find((p) => p.name === 'core')
+    expect(core).toBeDefined()
+    expect(core!.kind).toBe('built-in')
+    expect(core!.status).toBe('native')
+    expect(core!.blocks).toBeGreaterThan(0)
+    expect(core!.capabilities).toContain('browser')
+    expect(core!.aliases.length).toBeGreaterThan(0)
+  })
+
+  it('reports initialized:false and empty runs for a fresh workspace', async () => {
+    const emptyWs = fs.mkdtempSync(path.join(os.tmpdir(), 'aart-dash-empty-'))
+    let emptyServer: http.Server | undefined
+    try {
+      emptyServer = await startDashboard(emptyWs, 0)
+      const emptyAddr = emptyServer.address()
+      const emptyBase = `http://127.0.0.1:${typeof emptyAddr === 'object' && emptyAddr ? emptyAddr.port : 0}`
+      const overview = (await (await fetch(emptyBase + '/api/overview')).json()) as {
+        workspace: string
+        initialized: boolean
+      }
+      expect(overview.workspace).toBe(emptyWs)
+      expect(overview.initialized).toBe(false)
+      const runs = (await (await fetch(emptyBase + '/api/runs')).json()) as unknown[]
+      expect(runs).toEqual([])
+    } finally {
+      if (emptyServer) await new Promise<void>((r) => emptyServer!.close(() => r()))
+      fs.rmSync(emptyWs, { recursive: true, force: true })
+    }
   })
 })
