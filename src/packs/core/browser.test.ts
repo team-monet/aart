@@ -74,8 +74,11 @@ suite('browser.* via Runtime (real Chromium)', () => {
     }
     const record = await new Runtime(dir, [corePack]).run(wf, { url })
     expect(record.status).toBe('COMPLETED')
-    expect(record.artifacts.length).toBe(1)
-    expect(fs.existsSync(record.artifacts[0]!.path)).toBe(true)
+    // Browser runs now always produce console.json + network.json in addition to
+    // user-requested screenshots; find the screenshot by name rather than by index.
+    const shot = record.artifacts.find((a) => a.name === 'dash.png')
+    expect(shot).toBeDefined()
+    expect(fs.existsSync(shot!.path)).toBe(true)
     fs.rmSync(dir, { recursive: true, force: true })
   }, 30000)
 

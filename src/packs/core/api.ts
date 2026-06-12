@@ -50,7 +50,14 @@ export const httpDownload = nativeBlock(
     if (buf.byteLength > maxBytes) {
       throw new Error(`download too large: ${buf.byteLength} bytes > maxBytes ${maxBytes}`)
     }
-    const artifact = ctx.artifacts.attach(String(inputs.name), buf)
+    // Use the response Content-Type as the mime (strip ;charset=... qualifiers).
+    // Fall back to extension inference (via the store's default) when absent.
+    const rawCt = res.headers.get('content-type')
+    const mime = rawCt ? rawCt.split(';')[0]!.trim() : undefined
+    const artifact = ctx.artifacts.attach(String(inputs.name), buf, {
+      ...(mime ? { mime } : {}),
+      kind: 'download',
+    })
     return { artifact, bytes: buf.byteLength, status: res.status }
   },
 )

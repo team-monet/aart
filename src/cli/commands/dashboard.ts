@@ -97,11 +97,21 @@ export function startDashboard(ws: string, port: number): Promise<http.Server> {
           return send(404, JSON.stringify({ error: 'not found' }))
         }
         const ext = path.extname(file).toLowerCase()
+        if (ext === '.zip') {
+          res.writeHead(200, {
+            'content-type': 'application/zip',
+            'content-disposition': `attachment; filename="${name}"`,
+            'cache-control': 'no-store',
+          })
+          res.end(fs.readFileSync(file))
+          return
+        }
         const type =
           ext === '.png' ? 'image/png'
           : ext === '.jpg' || ext === '.jpeg' ? 'image/jpeg'
           : ext === '.gif' ? 'image/gif'
           : ext === '.svg' ? 'image/svg+xml'
+          : ext === '.json' ? 'application/json'
           : 'text/plain; charset=utf-8'
         return send(200, fs.readFileSync(file), type)
       }

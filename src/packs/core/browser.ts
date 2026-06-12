@@ -6,10 +6,27 @@ import type { ExecutionContext } from '../../core/context'
  * loads (and api/assert blocks run) even if the browser binaries aren't present;
  * a browser block only needs them when it actually runs.
  */
+
+/** A single captured console message. */
+interface ConsoleEntry {
+  type: string
+  text: string
+}
+
+/** A single captured network event. */
+interface NetworkEntry {
+  phase: 'request' | 'response'
+  method?: string
+  url: string
+  status?: number
+}
+
 interface BrowserCap {
   browser: { close: () => Promise<void> }
   context: unknown
   page: BrowserPage
+  consoleLog: ConsoleEntry[]
+  network: NetworkEntry[]
 }
 
 // A minimal structural view of the Playwright Page methods we use.
@@ -29,11 +46,27 @@ interface BrowserPage {
   getByText: (text: string) => {
     first: () => { waitFor: (o: { state: string; timeout: number }) => Promise<void> }
   }
+  on(event: 'console', handler: (msg: { type: () => string; text: () => string }) => void): void
+  on(event: 'request', handler: (req: { method: () => string; url: () => string }) => void): void
+  on(event: 'response', handler: (res: { status: () => number; url: () => string }) => void): void
+}
+
+/** Maximum number of events kept in each capture buffer (drop oldest beyond this). */
+const BUFFER_CAP = 500
+/** Maximum characters kept per console message text. */
+const TEXT_CAP = 2000
+/** Maximum characters kept per network URL. */
+const URL_CAP = 2000
+
+/** Push an item to a capped buffer, dropping the oldest when full. */
+function cappedPush<T>(buf: T[], item: T): void {
+  buf.push(item)
+  if (buf.length > BUFFER_CAP) buf.shift()
 }
 
 export const browserCapability: Capability = {
   name: 'browser',
-  async setup() {
+  async setup(ctx: ExecutionContext) {
     const { chromium } = await import('playwright')
     let browser
     try {
@@ -47,13 +80,73 @@ export const browserCapability: Capability = {
           '  npx playwright install --with-deps chromium',
       )
     }
-    const context = await browser.newContext()
-    const page = await context.newPage()
-    return { browser, context, page } as unknown as BrowserCap
+
+    // Everything after launch is wrapped so that if it throws, the browser is
+    // closed before rethrowing — runtime teardown cannot clean a cap whose setup
+    // never returned, so a leaked Chromium process would otherwise result.
+    let context: unknown
+    let page: BrowserPage
+    const consoleLog: ConsoleEntry[] = []
+    const network: NetworkEntry[] = []
+    try {
+      context = await (browser as unknown as { newContext: () => Promise<{ newPage: () => Promise<BrowserPage> }> }).newContext()
+      page = await (context as { newPage: () => Promise<BrowserPage> }).newPage()
+
+      page.on('console', (msg) => {
+        cappedPush(consoleLog, {
+          type: msg.type(),
+          text: msg.text().slice(0, TEXT_CAP),
+        })
+      })
+      page.on('request', (req) => {
+        cappedPush(network, {
+          phase: 'request',
+          method: req.method(),
+          url: req.url().slice(0, URL_CAP),
+        })
+      })
+      page.on('response', (res) => {
+        cappedPush(network, {
+          phase: 'response',
+          status: res.status(),
+          url: res.url().slice(0, URL_CAP),
+        })
+      })
+    } catch (err) {
+      await browser.close()
+      throw err
+    }
+
+    void ctx // ctx available in teardown; stored on value, not needed in setup body
+    return { browser, context, page, consoleLog, network } as unknown as BrowserCap
   },
-  async teardown(value) {
+  async teardown(value, ctx) {
     const cap = value as BrowserCap | undefined
-    if (cap?.browser) await cap.browser.close()
+    if (!cap?.browser) return
+
+    // Attach capture buffers as run artifacts BEFORE closing the browser.
+    // Each attach is wrapped independently — an attach failure must never prevent
+    // the browser.close() that follows (no leaked Chromium).
+    try {
+      ctx.artifacts.attach(
+        'console.json',
+        JSON.stringify(cap.consoleLog ?? [], null, 2),
+        { mime: 'application/json', kind: 'console' },
+      )
+    } catch {
+      // ignore — artifact failure must not block browser close
+    }
+    try {
+      ctx.artifacts.attach(
+        'network.json',
+        JSON.stringify(cap.network ?? [], null, 2),
+        { mime: 'application/json', kind: 'network' },
+      )
+    } catch {
+      // ignore — artifact failure must not block browser close
+    }
+
+    await cap.browser.close()
   },
 }
 
@@ -382,7 +475,7 @@ export const browserScreenshot = nativeBlock(
       ? inputs.mask.map((s) => p.locator(String(s)))
       : undefined
     const buf = await p.screenshot(mask ? { mask } : undefined)
-    const file = ctx.artifacts.attach(`${inputs.name}.png`, buf)
+    const file = ctx.artifacts.attach(`${inputs.name}.png`, buf, { kind: 'screenshot' })
     return { artifact: file }
   },
 )

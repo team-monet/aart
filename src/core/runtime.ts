@@ -150,6 +150,7 @@ export class Runtime {
 
     // teardown in finally so a capability (e.g. a Chromium process) is always
     // released, even if the engine path or persistence throws.
+    let record: RunRecord | undefined
     try {
       // Engine.run catches block failures internally and returns a FAILED record.
       const raw = await new Engine(this.registry, {
@@ -158,12 +159,23 @@ export class Runtime {
       }).run(def, inputs, ctx, params)
       raw.approved = approved
       // Mask secret values before anything is persisted, printed, or returned.
-      const record = redactRecord(raw, secrets)
+      record = redactRecord(raw, secrets)
       await this.persist(record, ctx)
-      return record
     } finally {
+      // Teardown may attach artifacts (e.g. browser console/network JSON). Run
+      // it unconditionally; only a capability's teardown can add artifacts, so
+      // re-snapshot + re-persist only when one was active. Re-REDACT, since an
+      // artifact name can carry a secret value (e.g. a user-named screenshot).
       await this.teardown(active, ctx)
+      if (record && active.length) {
+        record = redactRecord({ ...record, artifacts: ctx.artifacts.list() }, secrets)
+        await this.persist(record, ctx)
+      }
     }
+    // record is always set here: Engine.run either completes or fails (never
+    // throws past the engine boundary); if it did throw, teardown still ran and
+    // we'd have thrown out of the finally — so reaching here means record is set.
+    return record!
   }
 
   /** Persist the run record; a disk fault must not lose the in-memory evidence. */
