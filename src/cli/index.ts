@@ -9,6 +9,12 @@ import { validateCommand } from './commands/validate'
 import { mcpCommand } from './commands/mcp'
 import { approveCommand, deprecateCommand, showCommand } from './commands/approve'
 import { packApproveCommand, packListCommand, packRegisterCommand } from './commands/pack'
+import {
+  scheduleAddCommand,
+  scheduleListCommand,
+  scheduleRemoveCommand,
+  scheduleRunCommand,
+} from './commands/schedule'
 import { dashboardCommand } from './commands/dashboard'
 import { doctorCommand } from './commands/doctor'
 import { setWorkspace } from './workspace'
@@ -101,6 +107,33 @@ pack
   .command('list')
   .description('list registered packs and whether their content still matches approval')
   .action(packListCommand)
+
+const schedule = program
+  .command('schedule')
+  .description('manage OS-delegated schedules (.aa/schedules — aart holds no long-lived process)')
+schedule
+  .command('add')
+  .argument('<workflowId>', 'workflow id in the registry')
+  .requiredOption('--cron <expr>', 'cron(5) expression, e.g. "0 9 * * 1-5" (minute hour dom month dow)')
+  .option('-i, --input <json>', 'inputs as a JSON object', '{}')
+  .option('-p, --param <json>', 'params as a JSON object', '{}')
+  .option('--version <v>', 'pin a specific version (default: latest resolved version)')
+  .description('record a schedule and print the crontab line to install')
+  .action(scheduleAddCommand)
+schedule
+  .command('list')
+  .description('list schedules with live unapproved? status')
+  .action(scheduleListCommand)
+schedule
+  .command('remove')
+  .argument('<scheduleId>', 'a schedule id from `aart schedule list`')
+  .description('delete a schedule record (also remove the crontab/launchd entry manually)')
+  .action(scheduleRemoveCommand)
+schedule
+  .command('run')
+  .argument('<scheduleId>', 'a schedule id — the OS scheduler calls this on each tick')
+  .description('execute a scheduled workflow (the OS-cron tick entry point)')
+  .action(scheduleRunCommand)
 
 program
   .command('schema')
