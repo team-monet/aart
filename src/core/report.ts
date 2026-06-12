@@ -1,7 +1,7 @@
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
-import type { ArtifactMeta, RunRecord, RunStatus } from './types'
-import { ArtifactSchema } from './types'
+import type { ArtifactMeta, BlockDefinition, RunRecord, RunStatus } from './types'
+import { ArtifactSchema, RunRecordSchema } from './types'
 
 /**
  * Normalize the on-disk artifacts field to ArtifactMeta[]. Legacy run.json
@@ -39,21 +39,58 @@ export function runDir(workspace: string, runId: string): string {
   return path.join(workspace, '.aa', 'runs', runId)
 }
 
-/** Persist the run record. (Phase 1 writes once; a two-phase RUNNING→terminal
- *  write for crash-visibility is a planned refinement — see the plan.) */
+/**
+ * Persist the run record ATOMICALLY — write a sibling `.tmp`, then rename over
+ * `run.json` (rename is atomic within the run dir). A reader never sees a torn
+ * file, and the two-phase RUNNING→terminal overwrite can't leave a partial.
+ */
 export async function writeRun(workspace: string, record: RunRecord): Promise<string> {
   const dir = runDir(workspace, record.runId)
   await fs.mkdir(dir, { recursive: true })
   const file = path.join(dir, 'run.json')
-  await fs.writeFile(file, JSON.stringify(record, null, 2))
+  const tmp = path.join(dir, 'run.json.tmp')
+  await fs.writeFile(tmp, JSON.stringify(record, null, 2))
+  await fs.rename(tmp, file)
   return file
 }
 
+/**
+ * Read a run record. A missing run dir/file propagates (ENOENT = not found),
+ * but a malformed or PARTIAL run.json — a RUNNING record left by a crash, or a
+ * truncated/hand-edited file — DEGRADES to a minimal one-row stub instead of
+ * throwing, so a reader can always show that a run existed.
+ */
 export async function readRun(workspace: string, runId: string): Promise<RunRecord> {
   const file = path.join(runDir(workspace, runId), 'run.json')
-  const raw = JSON.parse(await fs.readFile(file, 'utf8')) as RunRecord
-  raw.artifacts = coerceArtifacts((raw as unknown as Record<string, unknown>).artifacts)
-  return raw
+  const text = await fs.readFile(file, 'utf8') // ENOENT propagates to the caller
+  let raw: unknown
+  try {
+    raw = JSON.parse(text)
+  } catch {
+    return degradedStub(runId, undefined)
+  }
+  if (!RunRecordSchema.safeParse(raw).success) return degradedStub(runId, raw)
+  const rec = raw as RunRecord
+  rec.artifacts = coerceArtifacts((raw as Record<string, unknown>).artifacts)
+  return rec
+}
+
+/** A best-effort one-row record for a malformed/partial run.json — never throws. */
+function degradedStub(runId: string, raw: unknown): RunRecord {
+  const r = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>
+  const status = r.status
+  return {
+    runId,
+    blockId: typeof r.blockId === 'string' ? r.blockId : 'unknown',
+    status:
+      status === 'COMPLETED' || status === 'RUNNING' || status === 'PENDING' ? status : 'FAILED',
+    inputs: {},
+    error: 'run record was unreadable or incomplete',
+    trace: [],
+    snapshot: { root: {} as unknown as BlockDefinition, blocks: {} },
+    artifacts: [],
+    startedAt: typeof r.startedAt === 'string' ? r.startedAt : new Date().toISOString(),
+  }
 }
 
 export interface RunSummary {

@@ -121,6 +121,12 @@ export class Runtime {
       logger: createLogger(opts.verbose),
     })
 
+    // Phase 1: persist a redacted RUNNING record BEFORE capability setup (the
+    // Chromium-launch step is the most crash-prone), so a hard crash mid-run
+    // still leaves visible evidence the run started. The terminal record below
+    // overwrites it; a phase-1 disk fault must not abort the run (persist warns).
+    await this.persist(redactRecord(initialRecord(def, inputs, params, runId, approved), secrets), ctx)
+
     const needed = collectCapabilities(def, this.registry)
     const active: Capability[] = []
 
@@ -179,6 +185,28 @@ export class Runtime {
         ctx.logger.warn(`teardown of "${cap.name}" failed: ${err instanceof Error ? err.message : String(err)}`)
       }
     }
+  }
+}
+
+/** The phase-1 RUNNING record, written before the engine runs (crash visibility). */
+function initialRecord(
+  def: BlockDefinition,
+  inputs: Record<string, unknown>,
+  params: Record<string, unknown> | undefined,
+  runId: string,
+  approved: boolean,
+): RunRecord {
+  return {
+    runId,
+    blockId: def.id,
+    status: 'RUNNING',
+    approved,
+    inputs,
+    params,
+    trace: [],
+    snapshot: { root: def, blocks: {} },
+    artifacts: [],
+    startedAt: nowIso(),
   }
 }
 
