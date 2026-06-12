@@ -1,5 +1,6 @@
 import { nativeBlock, type Capability } from '../../pack/types'
 import type { ExecutionContext } from '../../core/context'
+import { secretValues, redactText } from '../../core/secrets'
 
 /**
  * The `browser` capability. Playwright is imported lazily in setup() so the pack
@@ -124,13 +125,16 @@ export const browserCapability: Capability = {
     const cap = value as BrowserCap | undefined
     if (!cap?.browser) return
 
-    // Attach capture buffers as run artifacts BEFORE closing the browser.
-    // Each attach is wrapped independently — an attach failure must never prevent
-    // the browser.close() that follows (no leaked Chromium).
+    // Attach capture buffers as run artifacts BEFORE closing the browser. Each
+    // attach is wrapped independently — an attach failure must never prevent the
+    // browser.close() that follows (no leaked Chromium). Known secret values are
+    // masked from the captured text/URLs first: a query-string token or a
+    // console.log of a secret would otherwise land on disk in cleartext.
+    const mask = secretValues(ctx.secrets)
     try {
       ctx.artifacts.attach(
         'console.json',
-        JSON.stringify(cap.consoleLog ?? [], null, 2),
+        redactText(JSON.stringify(cap.consoleLog ?? [], null, 2), mask),
         { mime: 'application/json', kind: 'console' },
       )
     } catch {
@@ -139,7 +143,7 @@ export const browserCapability: Capability = {
     try {
       ctx.artifacts.attach(
         'network.json',
-        JSON.stringify(cap.network ?? [], null, 2),
+        redactText(JSON.stringify(cap.network ?? [], null, 2), mask),
         { mime: 'application/json', kind: 'network' },
       )
     } catch {
