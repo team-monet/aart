@@ -120,12 +120,12 @@ untrusted code running in-process, an always-on server/daemon.
 - [x] `core/engine.ts` — recursive interpreter, control flow, snapshot, trace (+ e2e test)
 - [x] `core/executor.ts` — in-process `node:vm` executor with a real timeout *(temporary)*
 - [x] `core/report.ts` + `.aa/runs/<id>/run.json` writer + `aart report`
-- [ ] two-phase write (RUNNING on start → terminal on completion) for crash-visibility
+- [x] two-phase write (RUNNING on start → terminal on completion) for crash-visibility
 - [ ] `aart run` resolves a top-level run as authoritative (no sibling run rows — legacy bug)
 
-### Phase 2 — Artifact store `[/]`
+### Phase 2 — Artifact store `[x]`
 - [x] `artifacts/artifact-store.ts` under `.aa/runs/<id>/artifacts/`
-- [ ] artifact metadata in the run record (type, step, path) as first-class evidence
+- [x] structured first-class artifact metadata (`type`, `stepId`, `path`) in the run record
 
 ### Phase 2.5 — Agent-author interface `[x]` (brought forward)
 The agent-callable surface that makes a coding agent "aware of what & how".
@@ -137,6 +137,7 @@ The agent-callable surface that makes a coding agent "aware of what & how".
 - [x] **MCP server** (`aart mcp`): `aa_list_blocks`, `aa_get_block`, `aa_get_schema`,
       `aa_validate`, `aa_register_block`, `aa_run_workflow`, `aa_get_report`;
       `instructions` = the authoring guide. Verified over stdio JSON-RPC.
+- [x] `aart run --json` — machine-readable run output for scripting/agent loops
 
 ### Deferred from the 2026-06-09 adversarial review
 Fixed in that pass: `{{ctx.secrets.x}}` removed from the guide (engine `ctx` scope
@@ -164,29 +165,41 @@ MCP registry is built once (cache survives calls). Still deferred:
 - [x] Screenshot artifacts wired to the artifact store + run report
 - [x] Verified: api→assert workflow green; real-Chromium browser workflow green
       end to end via the CLI (screenshot artifact + report)
-- [ ] trace/console/network artifacts (later); a real coding agent authoring a QA
-      workflow via MCP is the live dogfood once an agent is pointed at `aart mcp`
+- [x] Browser console and network request artifacts captured per step
+- [ ] Playwright trace.zip capture — **deferred** (heavyweight; per-step
+      screenshot + console/network already cover the primary evidence need)
+- [ ] a real coding agent authoring a QA workflow via MCP is the live dogfood
 
 ### Pre-dogfood hardening `[x]` (2026-06-09)
 From the dogfood-readiness audit (flow trace + WSL2 portability + capability gap):
-- [x] **Workspace override** — `--workspace` flag + `$AART_WORKSPACE` (→ cwd); `aart mcp`
-      logs the resolved workspace on startup (kills the silent wrong-cwd footgun)
+- [x] **Workspace override** — `--workspace` flag + `$AART_WORKSPACE`; resolution order:
+      `--workspace` → `$AART_WORKSPACE` → nearest ancestor `.aa` → `~/.aart`
+      (implemented in `src/cli/workspace.ts`; `aart mcp` logs the resolved path on startup)
 - [x] **`aart` available** — `prepare` builds `dist/` on install; clean build drops stale files
 - [x] **Secrets** — `{{secrets.NAME}}` from `AART_SECRET_*` / `.aa/secrets.json`, resolved at
       run time and **redacted** from the report (no plaintext credentials on disk) — login is now safe
 - [x] **WSL2** — README section (`playwright install --with-deps chromium`, networking/URL
       guidance, keep repo off `/mnt/c`); friendlier Chromium-launch error pointing at the fix
-- [ ] nice-to-have: per-step artifact metadata (`{type, stepId, path}`); headed/visible mode
-      (WSLg or CDP-connect to a Windows browser); `wait_for_url`/`selector_visible` blocks
+- [ ] nice-to-have: headed/visible mode (WSLg or CDP-connect to a Windows browser);
+      `wait_for_url`/`selector_visible` blocks
 
 **Secret redaction is best-effort defense-in-depth, not a hard boundary** (hardened in the
 review pass: masks verbatim + JSON/URL-encoded forms, longest-first, node-block logs redacted,
 raw `ctx.secrets` no longer handed to `node:vm` code). Residual, documented limitations:
 - artifact CONTENTS (screenshots) are not scrubbed — use the screenshot `mask` option;
+  browser console/network artifact **contents** are now also secret-masked.
 - other transforms (base64/hash/partial reflections) can still slip through.
-- [ ] future hardening: reference-aware redaction (mask exactly the values resolved from
-      `{{secrets.X}}`) so there's zero over-/under-redaction; never let raw secret values enter
-      the RunRecord. Until then, treat the run dir as low-sensitivity, not secret-free.
+
+**Decision: reference-aware secret redaction was evaluated and decided against.** The
+all-secrets mask is safer than reference-tracking (which could under-redact if a value is
+aliased). Instead, console and network artifact contents are now masked using the same
+all-secrets pass. Treat the run dir as low-sensitivity, not secret-free.
+
+**OS-delegated scheduling** — `aart schedule` registers recurring runs via the host OS
+scheduler (launchd on macOS, cron on Linux). No embedded daemon or always-on server.
+
+**Opt-in failure notifications** — configure `.aa/notify.json` to receive OS or webhook
+alerts when a run fails.
 
 **Dogfood status: GO** — full author→validate→register→run→report loop verified live on CLI + MCP
 with real Chromium; secrets redacted; portable to macOS + WSL2.
@@ -222,6 +235,14 @@ with real Chromium; secrets redacted; portable to macOS + WSL2.
   compiler there (only Intel mac / odd ABIs build from source). Made an
   **optionalDependency + lazy-loaded**, so install never fails and QA-only usage
   works without it.
+- **Node-policy decision** — `package.json` `engines: >=20` is accurate: the
+  published `dist/` runs on Node 20 (sandbox absent, `node` blocks unavailable).
+  Building from source also works on Node 20, because the build resolves
+  isolated-vm types from a **vendored stub** (`src/types/isolated-vm.d.ts`) rather
+  than the real addon's `.d.ts` (which requires node>=22 to install). The stub
+  shadows the real types on all platforms; runtime correctness on Node 22 is
+  verified by the test suite. CI has a dedicated `build-node20` job that proves
+  the Node-20 build path.
 
 ### Post-dogfood UX (2026-06-09, from real usage) `[x]`
 First real MCP session surfaced friction; fixed:
@@ -236,16 +257,28 @@ First real MCP session surfaced friction; fixed:
 - **Onboarding** — `aart doctor` (checks Node/isolated-vm/Playwright with fix hints);
   README leads with `npm i -g @team-monet/aart` (PATH) + "just ask the agent".
 - **Terminology** — "human" → "user" throughout user/agent-facing text.
+- **Read-only dashboard** — `aart dashboard` serves a local read-only web UI
+  (127.0.0.1 only): block catalog with approval status, run history, per-step
+  traces, artifacts, and workspace-pack status. **Scoped exception** to the
+  "no web UI in MVP" guardrail: it is read-only inspection only (no authoring,
+  no approval — those remain in the governed chat/CLI flows). It does not
+  contradict the guardrail against building an authoring UI.
 
-### Distribution `[/]`
-- [x] **npx**: `files: ["dist","examples"]` (no src/docs leak), `prepare` builds dist,
+### Distribution `[x]`
+- [x] **npx / npm**: `files: ["dist","examples"]` (no src/docs leak), `prepare` builds dist,
       `prepublishOnly` runs typecheck+tests; isolated-vm optional → `npx aart mcp` works
       with no clone and no toolchain on common platforms. Verified: pack contents clean,
-      bin runs, QA path works without isolated-vm. See docs/PUBLISHING.md. (Not yet published.)
-- [ ] later: Docker image (GHCR) for zero-toolchain "any laptop with Docker"; deeper
-      static analysis (reference/output-type inference).
+      bin runs, QA path works without isolated-vm. See docs/PUBLISHING.md.
+- [x] **Published**: `@team-monet/aart` is live on npm (0.6.0 shipped; 0.7.0 in progress).
+- [x] **CI/CD + OIDC trusted-publish**: `.github/workflows/publish.yml` publishes
+      automatically on GitHub Release via npm Trusted Publishing (OIDC, `id-token: write`
+      permission). **No `NPM_TOKEN` secret** is stored anywhere. CI has two jobs:
+      `build-node20` (proves build-from-source on Node 20 via the isolated-vm stub) and
+      `test` (full suite on Node 22 with the real isolated-vm addon). See docs/PUBLISHING.md.
+- [ ] later: Docker image (GHCR) for zero-toolchain "any laptop with Docker".
 - [ ] later: deeper static analysis (reference/output-type inference, the legacy
       analyzer concept) — lower priority now that the sandbox is the hard boundary.
+- [ ] later: marketplace GitHub Action — deferred.
 
 ---
 

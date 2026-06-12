@@ -6,6 +6,29 @@ on:
   pull_request:
 
 jobs:
+  # Proves that building from source works on Node 20 (the lower bound in
+  # package.json `engines`). isolated-vm is skipped by npm on Node 20 (its own
+  # engines field requires >=22), so the build must resolve its types from the
+  # vendored stub in src/types/isolated-vm.d.ts — this job guards that stub.
+  build-node20:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 20
+          cache: npm
+
+      # isolated-vm is skipped (engines>=22); tsc resolves its types from the
+      # vendored stub — if the stub is missing or incomplete, this step fails.
+      - run: npm ci
+
+      - run: npm run build
+
+  # Full test suite on Node 22: isolated-vm installs and the real sandbox is
+  # exercised. Node 22+ is required for this job because the node-block test
+  # suite runs the real isolated-vm addon (engines>=22).
   test:
     runs-on: ubuntu-latest
     steps:
@@ -16,10 +39,6 @@ jobs:
           node-version: 22
           cache: npm
 
-      # `npm ci` runs `prepare` -> `npm run build`, so a build failure fails CI
-      # too. Node 22+ is required: the node-block sandbox dep `isolated-vm` needs
-      # >=22 and the build references its types. (Node 20 consumers use the
-      # prebuilt `dist` at runtime, with the sandbox disabled.)
       - run: npm ci
 
       # The browser.* blocks drive real Chromium, so the test suite needs it.
