@@ -181,6 +181,8 @@ export class Engine {
       }
       record.trace.push(trace)
 
+      const prevStep = ctx.artifacts.currentStep
+      ctx.artifacts.setStep(step.id)
       try {
         const out = await this.execute(child, stepInputs, ctx, record, stepParams)
         stepOutputs[step.id] = out
@@ -192,6 +194,8 @@ export class Engine {
         trace.error = err instanceof Error ? err.message : String(err)
         trace.endedAt = nowIso()
         throw err
+      } finally {
+        ctx.artifacts.setStep(prevStep)
       }
 
       current = this.nextStep(step, index, steps, {

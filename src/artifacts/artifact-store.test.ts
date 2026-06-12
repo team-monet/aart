@@ -16,7 +16,9 @@ describe('ArtifactStore', () => {
     const file = store.attach('shot.png', Buffer.from('x'))
     expect(fs.existsSync(file)).toBe(true)
     expect(file.startsWith(path.join(dir, 'artifacts'))).toBe(true)
-    expect(store.list()).toEqual([file])
+    expect(store.list()).toEqual([
+      { name: 'shot.png', path: file, mime: 'image/png', bytes: 1, kind: 'file', stepId: undefined },
+    ])
   })
 
   it('confines path-traversal names to the store directory', () => {

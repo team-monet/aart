@@ -75,7 +75,7 @@ suite('browser.* via Runtime (real Chromium)', () => {
     const record = await new Runtime(dir, [corePack]).run(wf, { url })
     expect(record.status).toBe('COMPLETED')
     expect(record.artifacts.length).toBe(1)
-    expect(fs.existsSync(record.artifacts[0]!)).toBe(true)
+    expect(fs.existsSync(record.artifacts[0]!.path)).toBe(true)
     fs.rmSync(dir, { recursive: true, force: true })
   }, 30000)
 

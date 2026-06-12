@@ -1,6 +1,39 @@
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
-import type { RunRecord, RunStatus } from './types'
+import type { ArtifactMeta, RunRecord, RunStatus } from './types'
+import { ArtifactSchema } from './types'
+
+/**
+ * Normalize the on-disk artifacts field to ArtifactMeta[]. Legacy run.json
+ * files stored artifacts as string[] (bare paths); new records store objects.
+ * This function is idempotent: already-normalized objects pass through unchanged.
+ */
+export function coerceArtifacts(raw: unknown): ArtifactMeta[] {
+  if (!Array.isArray(raw)) return []
+  return raw.map((entry): ArtifactMeta => {
+    if (typeof entry === 'string') {
+      return {
+        name: path.basename(entry),
+        path: entry,
+        mime: 'application/octet-stream',
+        bytes: 0,
+        kind: 'file',
+      }
+    }
+    const parsed = ArtifactSchema.safeParse(entry)
+    if (parsed.success) return parsed.data
+    // Partial object — salvage what we can.
+    const e = entry as Record<string, unknown>
+    return {
+      name: typeof e.name === 'string' ? e.name : 'unknown',
+      path: typeof e.path === 'string' ? e.path : '',
+      mime: typeof e.mime === 'string' ? e.mime : 'application/octet-stream',
+      bytes: typeof e.bytes === 'number' ? e.bytes : 0,
+      kind: 'file',
+      stepId: typeof e.stepId === 'string' ? e.stepId : undefined,
+    }
+  })
+}
 
 export function runDir(workspace: string, runId: string): string {
   return path.join(workspace, '.aa', 'runs', runId)
@@ -18,7 +51,9 @@ export async function writeRun(workspace: string, record: RunRecord): Promise<st
 
 export async function readRun(workspace: string, runId: string): Promise<RunRecord> {
   const file = path.join(runDir(workspace, runId), 'run.json')
-  return JSON.parse(await fs.readFile(file, 'utf8')) as RunRecord
+  const raw = JSON.parse(await fs.readFile(file, 'utf8')) as RunRecord
+  raw.artifacts = coerceArtifacts((raw as unknown as Record<string, unknown>).artifacts)
+  return raw
 }
 
 export interface RunSummary {
@@ -84,7 +119,13 @@ export function renderReport(record: RunRecord): string {
   if (record.results) lines.push(`  results: ${JSON.stringify(record.results)}`)
   if (record.artifacts.length) {
     lines.push('  artifacts:')
-    for (const a of record.artifacts) lines.push(`    - ${a}`)
+    for (const a of record.artifacts) {
+      if (typeof a === 'string') {
+        lines.push(`    - ${a}`)
+      } else {
+        lines.push(`    - ${a.path} (${a.kind}, ${a.bytes}B)`)
+      }
+    }
   }
   return lines.join('\n')
 }

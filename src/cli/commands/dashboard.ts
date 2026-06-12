@@ -52,7 +52,9 @@ export function startDashboard(ws: string, port: number): Promise<http.Server> {
         try {
           const record = await readRun(ws, id)
           // Ship artifact basenames so the page can link them through /artifact.
-          const artifacts = record.artifacts.map((a) => path.basename(a))
+          const artifacts = record.artifacts.map((a) =>
+            typeof a === 'string' ? path.basename(a) : a.name,
+          )
           return send(200, JSON.stringify({ ...record, artifacts }))
         } catch {
           return send(404, JSON.stringify({ error: 'run not found' }))

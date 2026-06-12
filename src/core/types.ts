@@ -124,35 +124,86 @@ export const BlockDefinitionSchema = z.object({
 })
 export type BlockDefinition = z.infer<typeof BlockDefinitionSchema>
 
-export type RunStatus = 'PENDING' | 'RUNNING' | 'COMPLETED' | 'FAILED'
+// ---------------------------------------------------------------------------
+// Run-record schemas (zod). Type aliases are re-exported via z.infer so all
+// `import type` sites compile unchanged.
+// ---------------------------------------------------------------------------
 
-/** One entry in the ordered execution trace. */
-export interface StepTrace {
-  seq: number
-  stepId: string
-  block: string
-  status: RunStatus
-  inputs: Record<string, unknown>
-  outputs?: Record<string, unknown>
-  error?: string
-  startedAt: string
-  endedAt?: string
-}
+export const RunStatusSchema = z.enum(['PENDING', 'RUNNING', 'COMPLETED', 'FAILED'])
+export type RunStatus = z.infer<typeof RunStatusSchema>
+
+export const StepTraceSchema = z.object({
+  seq: z.number(),
+  stepId: z.string(),
+  block: z.string(),
+  status: RunStatusSchema,
+  inputs: z.record(z.unknown()),
+  outputs: z.record(z.unknown()).optional(),
+  error: z.string().optional(),
+  startedAt: z.string(),
+  endedAt: z.string().optional(),
+})
+export type StepTrace = z.infer<typeof StepTraceSchema>
 
 /**
  * Pinned, self-contained copy of every definition used by a run, so the run
  * record stays reproducible/inspectable even after the live blocks change.
+ *
+ * root/blocks are typed z.unknown() — NOT BlockDefinitionSchema — so validating
+ * a record on read never applies BlockDefinitionSchema's .default()s and
+ * silently rewrites the on-disk snapshot.
  */
-export interface ExecutionSnapshot {
+export const ExecutionSnapshotSchema = z.object({
+  root: z.unknown(),
+  blocks: z.record(z.unknown()),
+})
+export type ExecutionSnapshot = {
   root: BlockDefinition
   blocks: Record<string, BlockDefinition>
 }
 
 /**
+ * First-class artifact metadata. kind enum:
+ *   file        — generic written file (artifact.write)
+ *   screenshot  — browser.screenshot PNG
+ *   download    — http.download result
+ *   trace       — Playwright trace.zip (opt-in)
+ *   console     — browser console log JSON (always-on)
+ *   network     — browser network log JSON (always-on)
+ */
+export const ArtifactSchema = z.object({
+  name: z.string(),
+  mime: z.string(),
+  path: z.string(),
+  bytes: z.number(),
+  kind: z.enum(['file', 'screenshot', 'download', 'trace', 'console', 'network']),
+  stepId: z.string().optional(),
+})
+export type ArtifactMeta = z.infer<typeof ArtifactSchema>
+
+/**
  * The authoritative run record == the structured evidence report.
  * Persisted to `.aa/runs/<runId>/run.json`. "Reports prove it."
+ *
+ * artifacts uses a union on the schema boundary so legacy run.json files with
+ * artifacts:string[] still validate; coerceArtifacts() normalises to ArtifactMeta[].
  */
-export interface RunRecord {
+export const RunRecordSchema = z.object({
+  runId: z.string(),
+  blockId: z.string(),
+  status: RunStatusSchema,
+  approved: z.boolean().optional(),
+  inputs: z.record(z.unknown()),
+  params: z.record(z.unknown()).optional(),
+  results: z.record(z.unknown()).optional(),
+  error: z.string().optional(),
+  trace: z.array(StepTraceSchema),
+  snapshot: ExecutionSnapshotSchema,
+  artifacts: z.array(z.union([z.string(), ArtifactSchema])),
+  startedAt: z.string(),
+  endedAt: z.string().optional(),
+})
+export type RunRecord = {
   runId: string
   blockId: string
   status: RunStatus
@@ -165,7 +216,7 @@ export interface RunRecord {
   error?: string
   trace: StepTrace[]
   snapshot: ExecutionSnapshot
-  artifacts: string[]
+  artifacts: ArtifactMeta[]
   startedAt: string
   endedAt?: string
 }

@@ -74,7 +74,9 @@ function runView(record: RunRecord) {
     results: record.results,
     error: record.error,
     trace: record.trace,
-    artifacts: record.artifacts,
+    // Normalise to string paths on the wire so the outputSchema (z.array(z.string()))
+    // validates correctly and agents receive consistent path strings.
+    artifacts: record.artifacts.map((a) => (typeof a === 'string' ? a : a.path)),
     startedAt: record.startedAt,
     endedAt: record.endedAt,
   }
@@ -95,7 +97,7 @@ export async function startMcpServer(): Promise<void> {
   )
 
   const server = new McpServer(
-    { name: 'aart', version: '0.6.0' },
+    { name: 'aart', version: '0.7.0' },
     { instructions: AUTHORING_GUIDE },
   )
 

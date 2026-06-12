@@ -207,7 +207,7 @@ describe('http.download + artifact.write + report-generation e2e', () => {
     const record = await new Runtime(dir, [corePack]).run(wf, { url })
     expect(record.status).toBe('COMPLETED')
     const artifact = String(record.results?.artifact)
-    expect(record.artifacts).toContain(artifact)
+    expect(record.artifacts.map((a) => a.path)).toContain(artifact)
     expect(fs.readFileSync(artifact, 'utf8')).toBe('name\nalpha\nbeta')
   })
 })

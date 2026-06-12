@@ -8,7 +8,7 @@ import { loadSecrets, redactRecord } from './secrets'
 import { FileRegistry, type Registry } from '../registry/file-registry'
 import { CompositeRegistry } from '../pack/composite-registry'
 import type { Capability, NativeRunFn, Pack } from '../pack/types'
-import type { BlockDefinition, RunRecord } from './types'
+import type { ArtifactMeta, BlockDefinition, RunRecord } from './types'
 
 const nowIso = () => new Date().toISOString()
 
@@ -187,7 +187,7 @@ function failedRecord(
   inputs: Record<string, unknown>,
   params: Record<string, unknown> | undefined,
   runId: string,
-  artifacts: string[],
+  artifacts: ArtifactMeta[],
   error: string,
 ): RunRecord {
   const now = nowIso()
