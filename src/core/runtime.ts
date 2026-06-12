@@ -5,6 +5,7 @@ import { createContext, createLogger } from './context'
 import { ArtifactStore } from '../artifacts/artifact-store'
 import { writeRun, runDir } from './report'
 import { loadSecrets, redactRecord } from './secrets'
+import { notify } from './notify'
 import { FileRegistry, type Registry } from '../registry/file-registry'
 import { CompositeRegistry } from '../pack/composite-registry'
 import type { Capability, NativeRunFn, Pack } from '../pack/types'
@@ -145,6 +146,9 @@ export class Runtime {
       failed.approved = approved
       const record = redactRecord(failed, secrets)
       await this.persist(record, ctx)
+      try { await notify(this.workspace, record, secrets, ctx.logger) } catch (e) {
+        ctx.logger.warn(`aart notify: unexpected error: ${e instanceof Error ? e.message : String(e)}`)
+      }
       return record
     }
 
@@ -175,6 +179,13 @@ export class Runtime {
     // record is always set here: Engine.run either completes or fails (never
     // throws past the engine boundary); if it did throw, teardown still ran and
     // we'd have thrown out of the finally — so reaching here means record is set.
+    //
+    // Fire the notification AFTER the record is final and persisted. Do NOT put
+    // this inside the finally (it must not interfere with teardown). Belt-and-
+    // suspenders try/catch even though notify() is internally guarded.
+    try { await notify(this.workspace, record!, secrets, ctx.logger) } catch (e) {
+      ctx.logger.warn(`aart notify: unexpected error: ${e instanceof Error ? e.message : String(e)}`)
+    }
     return record!
   }
 
