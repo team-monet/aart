@@ -32,6 +32,7 @@ program
   .option('-p, --param <json>', 'params as a JSON object', '{}')
   .option('--yes', 'approve this one run of an unapproved definition (user override)', false)
   .option('--verbose', 'print block logs', false)
+  .option('--json', 'print one machine-readable JSON line instead of the report (for CI/cron)', false)
   .description('run a workflow and write a structured run report')
   .action(runCommand)
 

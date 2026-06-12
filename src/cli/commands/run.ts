@@ -12,6 +12,7 @@ interface RunOpts {
   param: string
   verbose: boolean
   yes: boolean
+  json: boolean
 }
 
 export async function runCommand(workflowRef: string, opts: RunOpts): Promise<void> {
@@ -68,9 +69,29 @@ export async function runCommand(workflowRef: string, opts: RunOpts): Promise<vo
   const params = parseJson(opts.param, '--param')
 
   const record = await runtime.run(wf, inputs, params, { verbose: opts.verbose, approved })
+  const reportPath = path.join('.aa', 'runs', record.runId, 'run.json')
 
-  console.log(renderReport(record))
-  console.log(`\nreport: ${path.join('.aa', 'runs', record.runId, 'run.json')}`)
+  if (opts.json) {
+    // A single machine-readable line on stdout (and nothing else), for CI/cron
+    // wrappers — both the report and the trailing `report:` line are suppressed.
+    const ms = record.endedAt ? Date.parse(record.endedAt) - Date.parse(record.startedAt) : NaN
+    console.log(
+      JSON.stringify({
+        runId: record.runId,
+        blockId: record.blockId,
+        status: record.status,
+        approved: record.approved,
+        error: record.error,
+        startedAt: record.startedAt,
+        endedAt: record.endedAt,
+        durationMs: Number.isFinite(ms) ? ms : undefined,
+        reportPath,
+      }),
+    )
+  } else {
+    console.log(renderReport(record))
+    console.log(`\nreport: ${reportPath}`)
+  }
   if (record.status === 'FAILED') process.exit(1)
 }
 
