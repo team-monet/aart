@@ -141,12 +141,12 @@ say yes it records the approval. You never have to touch a terminal.
 
 ## Secrets & workspace
 
-- **Workspace** — state lives under `<workspace>/.aa` (created on first run). Resolution:
-  `--workspace <dir>` → `$AART_WORKSPACE` → nearest ancestor directory containing `.aa` →
-  a per-user default `~/.aart`. Upward `.aa` discovery means once a project has a workspace,
-  `aart dashboard` and the CLI find it from anywhere inside the tree. With nothing pinned and
-  no `.aa` nearby, aart uses `~/.aart` (not the cwd), so it never writes a stray workspace into
-  the wrong place. Set **`AART_WORKSPACE`** (or `--workspace`) to scope a workspace to a project.
+- **Workspace** — state lives under `<workspace>/.aa` (created on first run). Resolution is
+  explicit, with **no cwd magic**, so the CLI, `aart dashboard`, and the MCP server always agree
+  on where state lives: `--workspace <dir>` → `$AART_WORKSPACE` → the per-user default `~/.aart`.
+  To scope a project, set **`AART_WORKSPACE`** — and set it in **both** your MCP config **and your
+  shell** so the agent, the CLI, and the dashboard all point at the same place (or pass
+  `--workspace`). Otherwise everything uses `~/.aart`.
 - **Secrets** — reference credentials as `{{secrets.NAME}}`, sourced from
   `AART_SECRET_<NAME>` env vars or `<workspace>/.aa/secrets.json`. They're
   best-effort **redacted** from reports — never put a real secret in an input.

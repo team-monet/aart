@@ -172,9 +172,11 @@ MCP registry is built once (cache survives calls). Still deferred:
 
 ### Pre-dogfood hardening `[x]` (2026-06-09)
 From the dogfood-readiness audit (flow trace + WSL2 portability + capability gap):
-- [x] **Workspace override** — `--workspace` flag + `$AART_WORKSPACE`; resolution order:
-      `--workspace` → `$AART_WORKSPACE` → nearest ancestor `.aa` → `~/.aart`
-      (implemented in `src/cli/workspace.ts`; `aart mcp` logs the resolved path on startup)
+- [x] **Workspace override** — `--workspace` flag + `$AART_WORKSPACE`; resolution is explicit
+      (no cwd magic): `--workspace` → `$AART_WORKSPACE` → per-user default `~/.aart`. (Upward
+      `.aa` discovery was tried in 0.6.0 but removed — it made the CLI/dashboard/MCP diverge and
+      let a stray `.aa` hijack resolution; 0.7.0 keeps it simple so all entry points agree.)
+      (in `src/cli/workspace.ts`; `aart mcp` logs the resolved path on startup)
 - [x] **`aart` available** — `prepare` builds `dist/` on install; clean build drops stale files
 - [x] **Secrets** — `{{secrets.NAME}}` from `AART_SECRET_*` / `.aa/secrets.json`, resolved at
       run time and **redacted** from the report (no plaintext credentials on disk) — login is now safe
