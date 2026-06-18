@@ -5,6 +5,10 @@ import { dataParse, dataStringify } from './data'
 import { flowSleep, flowFail } from './flow'
 import { fileRead, fileWrite } from './file'
 import { artifactWrite } from './artifacts'
+import { httpCheck } from './http-check'
+import { assertJsonpath } from './assert-jsonpath'
+import { reportSummarize } from './report-summarize'
+import { httpHealthCheck } from './workflows'
 import {
   browserCapability,
   browserGoto,
@@ -42,6 +46,9 @@ export const corePack: Pack = {
     fileRead,
     fileWrite,
     artifactWrite,
+    httpCheck,
+    assertJsonpath,
+    reportSummarize,
     browserGoto,
     browserClick,
     browserFill,
@@ -54,6 +61,7 @@ export const corePack: Pack = {
     browserScreenshot,
   ],
   capabilities: [browserCapability],
+  workflows: [httpHealthCheck],
   aliases: {
     'qa.api.request': 'http.request',
     'qa.assert.equals': 'assert.equals',

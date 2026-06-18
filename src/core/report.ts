@@ -148,7 +148,8 @@ export function renderReport(record: RunRecord): string {
     lines.push(`  inputs: ${JSON.stringify(record.inputs)}`)
   }
   for (const t of record.trace) {
-    lines.push(`  ${glyph(t.status)} ${t.stepId} → ${t.block}`)
+    const label = t.iteration !== undefined ? `${t.stepId}[${t.iteration}]` : t.stepId
+    lines.push(`  ${glyph(t.status)} ${label} → ${t.block}`)
     if (t.error) lines.push(`      error: ${t.error}`)
     else if (t.outputs) lines.push(`      out: ${JSON.stringify(t.outputs)}`)
   }

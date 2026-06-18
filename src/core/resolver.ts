@@ -20,6 +20,13 @@ export interface ResolveScope {
   secrets?: Record<string, string>
   /** stepId -> that step's output object. */
   steps: Record<string, Record<string, unknown>>
+  /**
+   * Active forEach loop variable. Shadows any input of the same name while
+   * inside a forEach iteration (lexical shadowing — expected by design).
+   */
+  loopVar?: { name: string; value: unknown }
+  /** Zero-based index of the current forEach iteration. */
+  loopIndex?: number
 }
 
 const INTERP = /\{\{\s*([\w$.]+)\s*\}\}/g
@@ -36,8 +43,25 @@ export function getPath(obj: unknown, segments: string[]): unknown {
 /** Resolve a single reference expression (no braces / leading $ already stripped logic). */
 function resolveRef(expr: string, scope: ResolveScope): unknown {
   if (expr.startsWith('$')) {
-    const [stepId, ...rest] = expr.slice(1).split('.')
-    const out = scope.steps[stepId as string]
+    const [first, ...rest] = expr.slice(1).split('.')
+    // forEach loop variable: $item.field (or whatever name `as` gave it).
+    // Lexically shadows a step output of the same name while inside a forEach.
+    if (scope.loopVar && first === scope.loopVar.name) {
+      return getPath(scope.loopVar.value, rest)
+    }
+    // $loop.index — the zero-based iteration counter (only active inside a forEach).
+    if (scope.loopVar && first === 'loop') {
+      return getPath({ index: scope.loopIndex ?? 0 }, rest)
+    }
+    // Reserved roots — type-preserving ($root.path keeps the original type;
+    // {{root.path}} stringifies — these are the typed analogs of the {{ }} switch below).
+    if (first === 'inputs') return getPath(scope.inputs, rest)
+    if (first === 'params') return getPath(scope.params ?? {}, rest)
+    if (first === 'ctx') return getPath(scope.ctx ?? {}, rest)
+    if (first === 'secrets') return getPath(scope.secrets ?? {}, rest)
+    if (first === 'steps') return getPath(scope.steps, rest)
+    // Fall through to the normal step-output lookup.
+    const out = scope.steps[first as string]
     if (out === undefined) throw new Error(`Unknown step reference: ${expr}`)
     return getPath(out, rest)
   }
@@ -55,7 +79,15 @@ function resolveRef(expr: string, scope: ResolveScope): unknown {
       return getPath(scope.secrets ?? {}, rest)
     case 'steps':
       return getPath(scope.steps, rest)
+    // forEach loop variable ({{item.field}} syntax).
+    // Checked before the `default` fallback so it shadows bare input names.
     default:
+      if (scope.loopVar && root === scope.loopVar.name) {
+        return getPath(scope.loopVar.value, rest)
+      }
+      if (scope.loopVar && root === 'loop') {
+        return getPath({ index: scope.loopIndex ?? 0 }, rest)
+      }
       // bare name -> look in inputs
       return getPath(scope.inputs, segs)
   }
@@ -85,6 +117,34 @@ export function resolveValue(value: unknown, scope: ResolveScope): unknown {
   }
 
   return value
+}
+
+/**
+ * Resolve an expression to its typed value, preserving the original type.
+ *
+ * Used for expressions that MUST return a non-string type, such as the
+ * `forEach` array expression. Supports:
+ *   - `$stepId.path`   — same as resolveValue (already type-preserving)
+ *   - `{{root.path}}`  — a whole-string single-template: returns the typed
+ *     value rather than stringifying it (unlike normal `{{ }}` interpolation).
+ *
+ * This is intentionally NOT used for regular step `inputs` resolution, where
+ * `{{ }}` always stringifies (that contract is preserved everywhere else).
+ */
+export function resolveTyped(value: string, scope: ResolveScope): unknown {
+  // $ref is already type-preserving in resolveValue.
+  if (value.startsWith('$')) {
+    return resolveValue(value, scope)
+  }
+  // A whole-string single-template: return the typed value, not a string.
+  const singleMatch = value.match(/^\{\{\s*([\w$.]+)\s*\}\}$/)
+  if (singleMatch) {
+    const v = resolveRef(singleMatch[1]!, scope)
+    if (v === undefined) throw new Error(`Unresolved forEach expression: {{ ${singleMatch[1]} }}`)
+    return v
+  }
+  // Multi-token or complex expression: fall through to resolveValue (string).
+  return resolveValue(value, scope)
 }
 
 export function resolveInputs(

@@ -61,4 +61,246 @@ describe('validateDraft', () => {
   it('rejects structurally invalid input', () => {
     expect(validateDraft({ id: 'x' }, registry).ok).toBe(false)
   })
+
+  // -------------------------------------------------------------------------
+  // input default validation
+  // -------------------------------------------------------------------------
+
+  it('accepts a field with a valid default (no enum/pattern)', () => {
+    const b: unknown = { ...node('with-default'), inputs: [{ name: 'x', type: 'string', default: 'hello' }] }
+    const r = validateDraft(b, registry)
+    expect(r.ok).toBe(true)
+    expect(r.warnings).toEqual([])
+  })
+
+  it('emits a WARNING (not error) when a field has both required:true and a default', () => {
+    const b: unknown = {
+      ...node('req-default'),
+      inputs: [{ name: 'x', type: 'string', required: true, default: 'hello' }],
+    }
+    const r = validateDraft(b, registry)
+    expect(r.ok).toBe(true)
+    expect(r.warnings.length).toBeGreaterThan(0)
+    expect(r.warnings.join()).toMatch(/required.*default|default.*required/)
+  })
+
+  it('rejects a default that violates its own enum constraint', () => {
+    const b: unknown = {
+      ...node('bad-default-enum'),
+      inputs: [{ name: 'env', type: 'string', default: 'prod', enum: ['dev', 'staging'] }],
+    }
+    const r = validateDraft(b, registry)
+    expect(r.ok).toBe(false)
+    expect(r.errors.join()).toMatch(/default.*prod|prod.*enum/)
+  })
+
+  it('rejects a default that violates its own pattern constraint', () => {
+    const b: unknown = {
+      ...node('bad-default-pattern'),
+      inputs: [{ name: 'tag', type: 'string', default: 'bad tag!', pattern: '[a-z-]+' }],
+    }
+    const r = validateDraft(b, registry)
+    expect(r.ok).toBe(false)
+    expect(r.errors.join()).toMatch(/default.*pattern|does not match/)
+  })
+
+  it('accepts a default that satisfies its own enum constraint', () => {
+    const b: unknown = {
+      ...node('good-default-enum'),
+      inputs: [{ name: 'env', type: 'string', default: 'dev', enum: ['dev', 'staging'] }],
+    }
+    const r = validateDraft(b, registry)
+    expect(r.ok).toBe(true)
+    expect(r.errors).toEqual([])
+  })
+
+  it('accepts a default that satisfies its own pattern constraint', () => {
+    const b: unknown = {
+      ...node('good-default-pattern'),
+      inputs: [{ name: 'tag', type: 'string', default: 'my-tag', pattern: '[a-z-]+' }],
+    }
+    const r = validateDraft(b, registry)
+    expect(r.ok).toBe(true)
+    expect(r.errors).toEqual([])
+  })
+
+  // -------------------------------------------------------------------------
+  // forEach validation
+  // -------------------------------------------------------------------------
+
+  const forEachWf = (overrides: Record<string, unknown>): unknown => ({
+    id: 'fe-wf',
+    name: 'fe-wf',
+    version: '0.1.0',
+    execution: {
+      type: 'workflow',
+      steps: [
+        {
+          id: 's1',
+          block: 'echo',
+          forEach: '{{inputs.items}}',
+          ...overrides,
+          inputs: {},
+        },
+      ],
+    },
+  })
+
+  it('accepts a valid forEach step', () => {
+    const r = validateDraft(forEachWf({}), registry)
+    expect(r.ok).toBe(true)
+    expect(r.errors).toEqual([])
+  })
+
+  it('rejects forEach combined with `if`', () => {
+    const r = validateDraft(forEachWf({ if: 'inputs.x === 1', then: 's1' }), registry)
+    expect(r.ok).toBe(false)
+    expect(r.errors.join()).toMatch(/forEach.*if|if.*forEach/)
+  })
+
+  it('rejects forEach combined with `next`', () => {
+    const r = validateDraft(forEachWf({ next: 's1' }), registry)
+    expect(r.ok).toBe(false)
+    expect(r.errors.join()).toMatch(/forEach.*next|next.*forEach/)
+  })
+
+  it('rejects forEach combined with `then`', () => {
+    const r = validateDraft(forEachWf({ then: 's1' }), registry)
+    expect(r.ok).toBe(false)
+    expect(r.errors.join()).toMatch(/forEach.*then|then.*forEach/)
+  })
+
+  it('rejects forEach combined with `else`', () => {
+    const r = validateDraft(forEachWf({ else: 's1' }), registry)
+    expect(r.ok).toBe(false)
+    expect(r.errors.join()).toMatch(/forEach.*else|else.*forEach/)
+  })
+
+  it('rejects an empty-string forEach', () => {
+    const b: unknown = {
+      id: 'fe-empty',
+      name: 'fe-empty',
+      version: '0.1.0',
+      execution: {
+        type: 'workflow',
+        steps: [{ id: 's1', block: 'echo', forEach: '', inputs: {} }],
+      },
+    }
+    const r = validateDraft(b, registry)
+    expect(r.ok).toBe(false)
+    expect(r.errors.join()).toMatch(/forEach.*empty|empty.*forEach/)
+  })
+
+  it('emits a warning when `as` is set without `forEach`', () => {
+    const b: unknown = {
+      id: 'as-no-foreach',
+      name: 'as-no-foreach',
+      version: '0.1.0',
+      execution: {
+        type: 'workflow',
+        steps: [{ id: 's1', block: 'echo', as: 'item', inputs: {} }],
+      },
+    }
+    const r = validateDraft(b, registry)
+    expect(r.ok).toBe(true)
+    expect(r.warnings.join()).toMatch(/"as".*"forEach"|forEach.*as/)
+  })
+
+  // -------------------------------------------------------------------------
+  // Fix #3: reserved names — 'loop' as step id or as `as` binding
+  // -------------------------------------------------------------------------
+
+  it('rejects a step with id "loop" (reserved for $loop.index builtin)', () => {
+    const b: unknown = {
+      id: 'reserved-loop-id',
+      name: 'reserved-loop-id',
+      version: '0.1.0',
+      execution: {
+        type: 'workflow',
+        steps: [{ id: 'loop', block: 'echo', inputs: {} }],
+      },
+    }
+    const r = validateDraft(b, registry)
+    expect(r.ok).toBe(false)
+    expect(r.errors.join()).toMatch(/loop.*reserved|reserved.*loop/)
+  })
+
+  it('rejects a step with as: "loop" (collides with $loop builtin)', () => {
+    const b: unknown = {
+      id: 'reserved-loop-as',
+      name: 'reserved-loop-as',
+      version: '0.1.0',
+      execution: {
+        type: 'workflow',
+        steps: [{ id: 's1', block: 'echo', forEach: '{{inputs.items}}', as: 'loop', inputs: {} }],
+      },
+    }
+    const r = validateDraft(b, registry)
+    expect(r.ok).toBe(false)
+    expect(r.errors.join()).toMatch(/loop.*reserved|reserved.*loop/)
+  })
+
+  it('does NOT reject a step with id "item" (shadowing is documented behavior)', () => {
+    const b: unknown = {
+      id: 'item-id-ok',
+      name: 'item-id-ok',
+      version: '0.1.0',
+      execution: {
+        type: 'workflow',
+        steps: [{ id: 'item', block: 'echo', inputs: {} }],
+      },
+    }
+    const r = validateDraft(b, registry)
+    // 'item' is not reserved; only 'loop' is.
+    expect(r.errors.filter((e) => /reserved/.test(e))).toHaveLength(0)
+  })
+
+  // -------------------------------------------------------------------------
+  // Fix: reserve typed $-ref root names as step ids
+  // -------------------------------------------------------------------------
+
+  it('rejects a step with id "inputs" (collides with $inputs typed-ref root)', () => {
+    const b: unknown = {
+      id: 'reserved-inputs-id',
+      name: 'reserved-inputs-id',
+      version: '0.1.0',
+      execution: {
+        type: 'workflow',
+        steps: [{ id: 'inputs', block: 'echo', inputs: {} }],
+      },
+    }
+    const r = validateDraft(b, registry)
+    expect(r.ok).toBe(false)
+    expect(r.errors.join()).toMatch(/inputs.*reserved|reserved.*inputs/)
+  })
+
+  it('rejects a step with id "steps" (collides with $steps typed-ref root)', () => {
+    const b: unknown = {
+      id: 'reserved-steps-id',
+      name: 'reserved-steps-id',
+      version: '0.1.0',
+      execution: {
+        type: 'workflow',
+        steps: [{ id: 'steps', block: 'echo', inputs: {} }],
+      },
+    }
+    const r = validateDraft(b, registry)
+    expect(r.ok).toBe(false)
+    expect(r.errors.join()).toMatch(/steps.*reserved|reserved.*steps/)
+  })
+
+  it('rejects a step with id "params" (collides with $params typed-ref root)', () => {
+    const b: unknown = {
+      id: 'reserved-params-id',
+      name: 'reserved-params-id',
+      version: '0.1.0',
+      execution: {
+        type: 'workflow',
+        steps: [{ id: 'params', block: 'echo', inputs: {} }],
+      },
+    }
+    const r = validateDraft(b, registry)
+    expect(r.ok).toBe(false)
+    expect(r.errors.join()).toMatch(/params.*reserved|reserved.*params/)
+  })
 })

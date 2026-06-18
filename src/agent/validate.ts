@@ -10,6 +10,7 @@ import type { Registry } from '../registry/file-registry'
 export interface ValidationResult {
   ok: boolean
   errors: string[]
+  warnings: string[]
   block?: BlockDefinition
 }
 
@@ -22,9 +23,10 @@ export function validateStructure(value: unknown): ValidationResult {
       errors: parsed.error.issues.map(
         (i) => `${i.path.join('.') || '(root)'}: ${i.message}`,
       ),
+      warnings: [],
     }
   }
-  return { ok: true, errors: [], block: parsed.data }
+  return { ok: true, errors: [], warnings: [], block: parsed.data }
 }
 
 /**
@@ -42,16 +44,41 @@ export function validateWorkflowRefs(
   if (!exec.success) return [] // not a workflow; nothing to check
   const errors: string[] = []
   const seen = new Set<string>()
+  // Reserved step ids: these collide with typed $-ref roots or loop builtins.
+  // 'item' is excluded — loop-variable shadowing is documented behavior.
+  const RESERVED_STEP_IDS = new Set(['loop', 'inputs', 'params', 'ctx', 'secrets', 'steps'])
   for (const step of exec.data.steps) {
-    const ref = step.version ? `${step.block}@${step.version}` : step.block
-    if (seen.has(ref)) continue
-    seen.add(ref)
-    if (step.block === block.id) {
-      errors.push(`references itself (${step.block}) — a workflow cannot invoke itself`)
-      continue
+    if (RESERVED_STEP_IDS.has(step.id)) {
+      errors.push(
+        `step "${step.id}": "${step.id}" is a reserved id — it collides with the $${step.id} typed-reference root (or loop builtin); use a different step id`,
+      )
     }
-    if (!registry.getBlock(step.block, step.version)) {
-      errors.push(`references unknown block: ${ref}`)
+    // Reserve 'loop' as an `as` binding name: it would shadow the $loop builtin.
+    if (step.as === 'loop') {
+      errors.push(
+        `step "${step.id}": as: "loop" is reserved — "loop" is the $loop.index builtin name; use a different binding name`,
+      )
+    }
+    const ref = step.version ? `${step.block}@${step.version}` : step.block
+    if (!seen.has(ref)) {
+      seen.add(ref)
+      if (step.block === block.id) {
+        errors.push(`references itself (${step.block}) — a workflow cannot invoke itself`)
+      } else if (!registry.getBlock(step.block, step.version)) {
+        errors.push(`references unknown block: ${ref}`)
+      }
+    }
+    // forEach + if/then/else/next is ambiguous control flow.
+    if (step.forEach !== undefined) {
+      const conflicts = (['if', 'then', 'else', 'next'] as const).filter((k) => step[k] !== undefined)
+      if (conflicts.length) {
+        errors.push(
+          `step "${step.id}": forEach cannot be combined with ${conflicts.join('/')} — control flow is ambiguous`,
+        )
+      }
+      if (step.forEach === '') {
+        errors.push(`step "${step.id}": forEach must not be an empty string`)
+      }
     }
   }
   return errors
@@ -67,6 +94,7 @@ export function validateDraft(value: unknown, registry: Registry): ValidationRes
   const structural = validateStructure(value)
   if (!structural.ok || !structural.block) return structural
   const block = structural.block
+  const warnings: string[] = []
   // Static gates for node blocks: dependency entries must be well-formed
   // (registry name@range or node: built-ins only), and the code must compile.
   // Dependency-bearing blocks compile against the host signature (and don't
@@ -74,11 +102,11 @@ export function validateDraft(value: unknown, registry: Registry): ValidationRes
   if (block.execution.type === 'node') {
     const deps = block.execution.dependencies ?? []
     const depErrors = checkDependencies(deps)
-    if (depErrors.length) return { ok: false, errors: depErrors, block }
+    if (depErrors.length) return { ok: false, errors: depErrors, warnings, block }
     const syntaxErr = deps.length
       ? checkHostNodeSyntax(block.execution.code)
       : checkNodeSyntax(block.execution.code)
-    if (syntaxErr) return { ok: false, errors: [`code: ${syntaxErr}`], block }
+    if (syntaxErr) return { ok: false, errors: [`code: ${syntaxErr}`], warnings, block }
   }
   // Input constraints must be well-formed: a pattern that doesn't compile
   // would otherwise fail every future run instead of failing registration.
@@ -90,12 +118,47 @@ export function validateDraft(value: unknown, registry: Registry): ValidationRes
         return {
           ok: false,
           errors: [`inputs.${field.name}.pattern: invalid regex — ${err instanceof Error ? err.message : String(err)}`],
+          warnings,
           block,
         }
       }
     }
     if (field.enum !== undefined && field.enum.length === 0) {
-      return { ok: false, errors: [`inputs.${field.name}.enum: must not be empty`], block }
+      return { ok: false, errors: [`inputs.${field.name}.enum: must not be empty`], warnings, block }
+    }
+    if (field.default !== undefined) {
+      // A field with both required:true and a default is contradictory — the
+      // default makes required moot. Emit a warning, not an error, so authors
+      // who are being extra-explicit don't get blocked.
+      if (field.required === true) {
+        warnings.push(
+          `inputs.${field.name}: has both "required: true" and a "default" — the default makes required moot`,
+        )
+      }
+      // Validate the default against enum/pattern at registration time so
+      // a default that would always fail at run time is caught early.
+      if (field.enum !== undefined && !field.enum.includes(field.default as string | number)) {
+        return {
+          ok: false,
+          errors: [
+            `inputs.${field.name}.default: value ${JSON.stringify(field.default)} is not in enum [${field.enum.join(', ')}]`,
+          ],
+          warnings,
+          block,
+        }
+      }
+      if (field.pattern !== undefined && typeof field.default === 'string') {
+        if (!new RegExp(`^(?:${field.pattern})$`).test(field.default)) {
+          return {
+            ok: false,
+            errors: [
+              `inputs.${field.name}.default: value ${JSON.stringify(field.default)} does not match pattern ${field.pattern}`,
+            ],
+            warnings,
+            block,
+          }
+        }
+      }
     }
   }
   // Command blocks: the binary and cwd are part of what the user approves —
@@ -109,8 +172,20 @@ export function validateDraft(value: unknown, registry: Registry): ValidationRes
     if (block.execution.cwd?.includes('{{')) {
       errors.push('cwd: must be a fixed workspace-relative path — no {{interpolation}}')
     }
-    if (errors.length) return { ok: false, errors, block }
+    if (errors.length) return { ok: false, errors, warnings, block }
+  }
+  // Workflow-level forEach warnings: `as` set without `forEach` is a no-op.
+  if (block.execution.type === 'workflow') {
+    for (const step of block.execution.steps) {
+      if (step.as !== undefined && step.forEach === undefined) {
+        warnings.push(
+          `step "${step.id}": "as" is set but "forEach" is absent — "as" has no effect`,
+        )
+      }
+    }
   }
   const refErrors = validateWorkflowRefs(block, registry)
-  return refErrors.length ? { ok: false, errors: refErrors, block } : structural
+  return refErrors.length
+    ? { ok: false, errors: refErrors, warnings, block }
+    : { ...structural, warnings }
 }

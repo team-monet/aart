@@ -290,7 +290,7 @@ async function showRun(id) {
   try {
   const r = await j('/api/run?id=' + encodeURIComponent(id))
   const steps = r.trace.map((t) =>
-    '<div class="step">' + pill(t.status) + ' <b>' + esc(t.stepId) + '</b> → <span class="mono">' + esc(t.block) + '</span>' +
+    '<div class="step">' + pill(t.status) + ' <b>' + esc(t.iteration !== undefined ? t.stepId + '[' + t.iteration + ']' : t.stepId) + '</b> → <span class="mono">' + esc(t.block) + '</span>' +
     (t.error ? '<div class="err">' + esc(t.error) + '</div>' : '') +
     '<details><summary>in / out</summary><pre>' + esc(JSON.stringify(t.inputs, null, 2)) + '</pre>' +
     (t.outputs ? '<pre>' + esc(JSON.stringify(t.outputs, null, 2)) + '</pre>' : '') + '</details></div>'

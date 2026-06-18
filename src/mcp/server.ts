@@ -141,7 +141,7 @@ export async function startMcpServer(): Promise<void> {
     },
     async ({ definition }) => {
       const result = validateDraft(definition, registry)
-      return json({ ok: result.ok, errors: result.errors })
+      return json({ ok: result.ok, errors: result.errors, warnings: result.warnings })
     },
   )
 
@@ -170,8 +170,11 @@ export async function startMcpServer(): Promise<void> {
           }`,
         )
       }
+      const warningLines = result.warnings.length
+        ? `\nValidation warnings (advisory):\n${result.warnings.map((w) => `  ⚠ ${w}`).join('\n')}\n`
+        : ''
       return text(
-        `Registered ${result.block.id}@${result.block.version} as DRAFT.\n\n` +
+        `Registered ${result.block.id}@${result.block.version} as DRAFT.${warningLines}\n\n` +
           `SHOW the user exactly what they're approving:\n\n${renderDefinition(result.block)}\n\n` +
           `Then ask them to approve it. Once they say yes, call aa_approve with id "${result.block.id}".`,
       )
