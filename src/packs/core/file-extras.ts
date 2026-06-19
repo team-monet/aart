@@ -12,11 +12,42 @@ import type { ExecutionContext } from '../../core/context'
 function resolveInWorkspace(ctx: ExecutionContext, p: string): string {
   const abs = path.resolve(ctx.workspace, p)
   const root = path.resolve(ctx.workspace)
+  // Syntactic check: reject obvious path-traversal without touching the filesystem.
   if (abs !== root && !abs.startsWith(root + path.sep)) {
     throw new Error(`path escapes the workspace: ${p}`)
   }
   const rel = path.relative(root, abs)
   if (rel === '.aa' || rel.startsWith('.aa' + path.sep)) {
+    throw new Error(`path is inside .aa (runtime state, includes secrets) — not allowed: ${p}`)
+  }
+  // Symlink check: resolve the real path of the deepest existing ancestor
+  // (the target file may not exist yet for write/append ops) and verify it
+  // still lives inside the workspace's real path. This catches symlinks like
+  // `logs -> /tmp/outside` that pass the syntactic check above.
+  const realRoot = fs.realpathSync(root)
+  // Walk up from abs to find the deepest existing ancestor directory.
+  let existing = abs
+  while (existing !== path.dirname(existing)) {
+    try {
+      fs.accessSync(existing)
+      break
+    } catch {
+      existing = path.dirname(existing)
+    }
+  }
+  let realExisting: string
+  try {
+    realExisting = fs.realpathSync(existing)
+  } catch {
+    // If even the ancestor can't be resolved, fall back to the root check already done.
+    realExisting = realRoot
+  }
+  if (realExisting !== realRoot && !realExisting.startsWith(realRoot + path.sep)) {
+    throw new Error(`path escapes the workspace (via symlink): ${p}`)
+  }
+  // Re-check .aa against the real path so a symlink pointing into .aa is also caught.
+  const realRel = path.relative(realRoot, realExisting)
+  if (realRel === '.aa' || realRel.startsWith('.aa' + path.sep)) {
     throw new Error(`path is inside .aa (runtime state, includes secrets) — not allowed: ${p}`)
   }
   return abs
@@ -102,6 +133,9 @@ export const dirList = nativeBlock(
     } catch {
       throw new Error(`dir.list: cannot read directory: ${String(inputs.path ?? '.')}`)
     }
+    // Sort before filtering so the result is deterministic regardless of the
+    // underlying filesystem's readdir order (ext4, APFS, etc. differ).
+    names.sort((a, b) => a.localeCompare(b))
     if (inputs.glob !== undefined && inputs.glob !== null && String(inputs.glob) !== '') {
       const glob = String(inputs.glob)
       names = names.filter((n) => matchGlob(n, glob))

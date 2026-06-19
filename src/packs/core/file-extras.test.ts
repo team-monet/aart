@@ -9,6 +9,7 @@ import path from 'node:path'
 import { createContext } from '../../core/context'
 import { ArtifactStore } from '../../artifacts/artifact-store'
 import { fileExists, dirList, fileAppend } from './file-extras'
+import { fileWrite } from './file'
 import type { ExecutionContext } from '../../core/context'
 
 let dir: string
@@ -106,6 +107,23 @@ describe('dir.list', () => {
   it('rejects workspace escapes', async () => {
     await expect(dirList.run(ctx, { path: '../..' })).rejects.toThrow(/escapes the workspace/)
   })
+
+  // Fix F: entries are sorted deterministically
+  it('returns entries in locale-sorted order (deterministic)', async () => {
+    const out = await dirList.run(ctx, { path: '.' })
+    const entries = out.entries as string[]
+    const sorted = [...entries].sort((a, b) => a.localeCompare(b))
+    expect(entries).toEqual(sorted)
+  })
+
+  it('sorted order is preserved after glob filter', async () => {
+    const out = await dirList.run(ctx, { path: '.', glob: '*.json' })
+    const entries = out.entries as string[]
+    const sorted = [...entries].sort((a, b) => a.localeCompare(b))
+    expect(entries).toEqual(sorted)
+    // alpha < beta
+    expect(entries.indexOf('alpha.json')).toBeLessThan(entries.indexOf('beta.json'))
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -148,5 +166,49 @@ describe('file.append', () => {
     await expect(
       fileAppend.run(ctx, { path: '.aa/injected.json', content: '{}' })
     ).rejects.toThrow(/not allowed/)
+  })
+
+  // Fix E: symlink confinement — symlinks pointing outside the workspace or into .aa
+  it('rejects a symlink in the workspace pointing to an external directory (file.append)', async () => {
+    // Create a symlink logs -> /tmp (outside workspace)
+    fs.symlinkSync(os.tmpdir(), path.join(dir, 'escape-link'))
+    await expect(
+      fileAppend.run(ctx, { path: 'escape-link/pwned.txt', content: 'x' })
+    ).rejects.toThrow(/symlink/)
+  })
+
+  it('rejects a symlink pointing into .aa (file.append)', async () => {
+    // Create .aa dir, then symlink state -> .aa
+    fs.mkdirSync(path.join(dir, '.aa'), { recursive: true })
+    fs.symlinkSync(path.join(dir, '.aa'), path.join(dir, 'state-link'))
+    await expect(
+      fileAppend.run(ctx, { path: 'state-link/secrets.json', content: 'x' })
+    ).rejects.toThrow(/\.aa|symlink/)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Fix E: symlink confinement for file.write
+// ---------------------------------------------------------------------------
+
+describe('file.write symlink confinement', () => {
+  it('rejects a symlink pointing outside the workspace', async () => {
+    fs.symlinkSync(os.tmpdir(), path.join(dir, 'escape-link'))
+    await expect(
+      fileWrite.run(ctx, { path: 'escape-link/pwned.txt', content: 'x' })
+    ).rejects.toThrow(/symlink/)
+  })
+
+  it('rejects a symlink pointing into .aa', async () => {
+    fs.mkdirSync(path.join(dir, '.aa'), { recursive: true })
+    fs.symlinkSync(path.join(dir, '.aa'), path.join(dir, 'state-link'))
+    await expect(
+      fileWrite.run(ctx, { path: 'state-link/evil.json', content: '{}' })
+    ).rejects.toThrow(/\.aa|symlink/)
+  })
+
+  it('non-symlink writes are unaffected', async () => {
+    await fileWrite.run(ctx, { path: 'out.txt', content: 'ok' })
+    expect(fs.readFileSync(path.join(dir, 'out.txt'), 'utf8')).toBe('ok')
   })
 })

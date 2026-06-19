@@ -180,6 +180,35 @@ describe('mergePacks + Runtime.addPack', () => {
     expect(warnings.join(' ')).toMatch(/qa\.browser\.goto/)
   })
 
+  // Fix G: built-in COMMAND ids must also be in the taken-id set so a workspace
+  // pack block that collides with one is skipped gracefully (warning) instead of
+  // crashing CompositeRegistry construction at startup.
+  it('drops a workspace pack whose block id collides with a builtin command id (e.g. git.status)', () => {
+    const collidingCommandId = {
+      name: 'tools',
+      blocks: [
+        {
+          def: {
+            id: 'git.status', // collides with the built-in command
+            name: 'X',
+            version: '0.1.0',
+            inputs: [],
+            outputs: [],
+            execution: { type: 'native' as const },
+          },
+          run: async () => ({}),
+        },
+      ],
+      capabilities: [],
+    }
+    const { packs, warnings } = mergePacks(builtinPacks, [collidingCommandId])
+    // Pack must be skipped — same count as without the extra pack
+    expect(packs).toHaveLength(builtinPacks.length)
+    expect(warnings.join(' ')).toMatch(/git\.status/)
+    // Runtime construction must not throw
+    expect(() => new Runtime(ws, packs)).not.toThrow()
+  })
+
   // Fix #7: built-in WORKFLOW ids must be in the taken-id set so a workspace
   // pack block that collides with one is skipped gracefully (warning) instead of
   // crashing CompositeRegistry / Runtime construction.

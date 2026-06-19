@@ -113,4 +113,35 @@ describe('assert.range', () => {
       assertRange.run(ctx, { value: 3000, max: 2000 })
     ).rejects.toThrow(/3000/)
   })
+
+  // Fix D: NaN / non-finite inputs must throw, not silently pass
+  it('throws when value is NaN (e.g. Number("12ms") → NaN)', async () => {
+    await expect(
+      assertRange.run(ctx, { value: NaN, max: 2000 })
+    ).rejects.toThrow(/finite number/)
+  })
+
+  it('throws when value coerces to NaN via string like "12ms"', async () => {
+    await expect(
+      assertRange.run(ctx, { value: '12ms' as unknown as number, max: 2000 })
+    ).rejects.toThrow(/finite number/)
+  })
+
+  it('throws when value is Infinity', async () => {
+    await expect(
+      assertRange.run(ctx, { value: Infinity, max: 2000 })
+    ).rejects.toThrow(/finite number/)
+  })
+
+  it('throws when min is NaN (bad assertion config)', async () => {
+    await expect(
+      assertRange.run(ctx, { value: 100, min: NaN })
+    ).rejects.toThrow(/finite number/)
+  })
+
+  it('throws when max is Infinity (bad assertion config)', async () => {
+    await expect(
+      assertRange.run(ctx, { value: 100, max: Infinity })
+    ).rejects.toThrow(/finite number/)
+  })
 })

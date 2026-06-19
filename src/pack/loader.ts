@@ -292,14 +292,16 @@ export function loadApprovedPacks(ws: string): LoadedPacks {
  */
 export function mergePacks(base: Pack[], extra: Pack[]): LoadedPacks {
   // Legacy alias ids count as taken too — a workspace pack must not shadow them.
-  // Built-in workflow ids (pack.workflows[].id) are also reserved so a workspace
-  // pack block that collides with one is skipped here rather than crashing at
-  // CompositeRegistry construction.
+  // Built-in workflow ids (pack.workflows[].id) AND built-in command ids
+  // (pack.commands[].id) are also reserved so a workspace pack block that
+  // collides with either is skipped here rather than crashing at CompositeRegistry
+  // construction (which would cause a hard startup failure).
   const blockIds = new Set(
     base.flatMap((p) => [
       ...p.blocks.map((b) => b.def.id),
       ...Object.keys(p.aliases ?? {}),
       ...(p.workflows ?? []).map((w) => w.id),
+      ...(p.commands ?? []).map((c) => c.id),
     ]),
   )
   const capNames = new Set(base.flatMap((p) => p.capabilities.map((c) => c.name)))
