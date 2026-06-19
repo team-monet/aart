@@ -316,6 +316,23 @@ describe('validateDraft', () => {
     expect(r.errors.filter((e) => /reserved/.test(e))).toHaveLength(0)
   })
 
+  // Round-3 fix #5: `as` must be a valid resolver identifier — a hyphenated name
+  // passes the reserved-name check but {{endpoint-item.url}} never resolves.
+  it('rejects as: "endpoint-item" (not a valid resolver identifier)', () => {
+    const b: unknown = {
+      id: 'bad-as-name',
+      name: 'bad-as-name',
+      version: '0.1.0',
+      execution: {
+        type: 'workflow',
+        steps: [{ id: 's1', block: 'echo', forEach: '{{inputs.items}}', as: 'endpoint-item', inputs: {} }],
+      },
+    }
+    const r = validateDraft(b, registry)
+    expect(r.ok).toBe(false)
+    expect(r.errors.join()).toMatch(/valid binding name/)
+  })
+
   it('does NOT reject a step with id "item" (shadowing is documented behavior)', () => {
     const b: unknown = {
       id: 'item-id-ok',

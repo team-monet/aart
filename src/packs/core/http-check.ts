@@ -45,12 +45,27 @@ export const httpCheck = nativeBlock(
         headers: new Headers(rawHeaders),
         signal: controller.signal,
       })
-      // Read the body under the same timer. ANY body-read failure — the timeout
-      // abort, a premature connection close, or a content-decoding error —
-      // propagates to the catch below and yields ok:false. A response whose body
-      // we could not read must not be reported as healthy.
-      const raw = await res.text()
-      const body = raw.length > BODY_TRUNCATE ? raw.slice(0, BODY_TRUNCATE) : raw
+      // Read the body under the same timer, but only up to BODY_TRUNCATE — stream
+      // and stop at the cap instead of buffering a huge/streaming response (which
+      // could exhaust memory or burn the whole timeout). ANY body-read failure —
+      // the timeout abort, a premature close, or a decode error — propagates to the
+      // catch below and yields ok:false; a body we cannot read is not "healthy".
+      let body = ''
+      const reader = res.body?.getReader()
+      if (reader) {
+        const decoder = new TextDecoder()
+        try {
+          while (body.length < BODY_TRUNCATE) {
+            const { done, value } = await reader.read()
+            if (done) break
+            body += decoder.decode(value, { stream: true })
+          }
+          body += decoder.decode()
+        } finally {
+          await reader.cancel().catch(() => {})
+        }
+        if (body.length > BODY_TRUNCATE) body = body.slice(0, BODY_TRUNCATE)
+      }
       const latencyMs = Date.now() - t0
       return { ok: res.status === expectStatus, status: res.status, latencyMs, body, error: '', url }
     } catch (err) {

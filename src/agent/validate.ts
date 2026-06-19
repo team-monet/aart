@@ -64,6 +64,15 @@ export function validateWorkflowRefs(
         `step "${step.id}": as: "${step.as}" is reserved — it would shadow the $${step.as} typed-reference root (or loop builtin); use a different binding name`,
       )
     }
+    // `as` becomes a reference root ({{<as>.field}} / $<as>.field), so it must be a
+    // valid identifier in the resolver's interpolation grammar (letters/digits/_ ).
+    // A name like "endpoint-item" passes the checks above but {{endpoint-item.url}}
+    // never matches the interpolation regex and is silently left as a literal.
+    if (step.as !== undefined && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(step.as)) {
+      errors.push(
+        `step "${step.id}": as: "${step.as}" is not a valid binding name — use letters, digits and underscores only (start with a letter or underscore) so {{${step.as}.field}} resolves`,
+      )
+    }
     const ref = step.version ? `${step.block}@${step.version}` : step.block
     if (!seen.has(ref)) {
       seen.add(ref)

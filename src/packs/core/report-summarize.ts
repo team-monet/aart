@@ -1,4 +1,5 @@
 import { nativeBlock } from '../../pack/types'
+import { secretValues, redactText } from '../../core/secrets'
 
 export const reportSummarize = nativeBlock(
   {
@@ -35,15 +36,31 @@ export const reportSummarize = nativeBlock(
       rawResults = (rawResults as Record<string, unknown>).items
     }
 
-    const items: unknown[] = Array.isArray(rawResults) ? rawResults : []
+    // Reject a non-array results shape (a plain object, string, etc.) rather than
+    // silently coercing it to an empty array — otherwise a wiring bug becomes a
+    // false "0 failures" pass. (A forEach {items:[...]} shape was unwrapped above.)
+    if (!Array.isArray(rawResults)) {
+      throw new Error(
+        `report.summarize: 'results' must be an array or a forEach {items:[...]} shape (got ${
+          rawResults === null ? 'null' : typeof rawResults
+        })`,
+      )
+    }
+    const items: unknown[] = rawResults
     const okKey = typeof inputs.okKey === 'string' && inputs.okKey ? inputs.okKey : 'ok'
     const title = typeof inputs.title === 'string' && inputs.title ? inputs.title : 'Report'
     const writeArtifact = inputs.writeArtifact !== false
 
+    // A result passes only if its okKey is boolean true (or the string "true",
+    // common when a command block produced the value). A bare truthy check would
+    // count the string "false" as a pass and under-report failures.
+    const isPass = (v: unknown): boolean =>
+      v === true || (typeof v === 'string' && v.toLowerCase() === 'true')
+
     const total = items.length
     let passed = 0
     for (const item of items) {
-      if (item !== null && typeof item === 'object' && (item as Record<string, unknown>)[okKey]) {
+      if (item !== null && typeof item === 'object' && isPass((item as Record<string, unknown>)[okKey])) {
         passed++
       }
     }
@@ -61,7 +78,7 @@ export const reportSummarize = nativeBlock(
         continue
       }
       const r = item as Record<string, unknown>
-      const pass = Boolean(r[okKey])
+      const pass = isPass(r[okKey])
       const statusMark = pass ? 'PASS' : 'FAIL'
       // Include any key detail if present: url, status, error, name.
       const detail: string[] = []
@@ -71,7 +88,11 @@ export const reportSummarize = nativeBlock(
       if (r.name !== undefined) detail.push(`name=${r.name}`)
       lines.push(`  [${statusMark}] ${detail.join('  ')}`)
     }
-    const summary = lines.join('\n')
+    // Redact secret values before the summary is written to disk or returned.
+    // Artifact file CONTENTS are NOT covered by the run-record redaction, so a
+    // secret embedded in a probe URL or error would otherwise leak verbatim into
+    // health-summary.md.
+    const summary = redactText(lines.join('\n'), secretValues(ctx.secrets ?? {}))
 
     if (writeArtifact) {
       ctx.artifacts.attach('health-summary.md', summary, { mime: 'text/markdown', kind: 'report' })

@@ -167,6 +167,9 @@ describe('Engine', () => {
     const rec = await engine.run(withDefault, {}, ctx)
     expect(rec.status).toBe('COMPLETED')
     expect(rec.results).toEqual({ value: 'fallback' })
+    // Round-3 fix #6: the run record's inputs reflect the effective (defaulted)
+    // inputs for a direct run, not the caller's raw {} — preserving the audit trail.
+    expect(rec.inputs).toEqual({ value: 'fallback' })
   })
 
   it('caller-provided value overrides a declared default', async () => {

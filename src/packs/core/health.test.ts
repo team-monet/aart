@@ -201,6 +201,27 @@ describe('http.check', () => {
     expect(String(out!.error)).not.toMatch(/timeout/) // and it was NOT the abort/timeout path
     expect(out!.url).toBe(brokenUrl)
   })
+
+  // Round-3 fix #1: a large body is streamed and truncated at the cap (10000),
+  // not buffered whole.
+  it('truncates a large response body to the cap (does not buffer the whole body)', async () => {
+    const big = 'x'.repeat(50_000)
+    const bigServer = http.createServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/plain' })
+      res.end(big)
+    })
+    await new Promise<void>((r) => bigServer.listen(0, '127.0.0.1', r))
+    const addr = bigServer.address()
+    const port = typeof addr === 'object' && addr ? addr.port : 0
+    let out: Record<string, unknown>
+    try {
+      out = await httpCheck.run(ctx, { url: `http://127.0.0.1:${port}/big` })
+    } finally {
+      await new Promise<void>((r) => bigServer.close(() => r()))
+    }
+    expect(out!.ok).toBe(true)
+    expect((out!.body as string).length).toBe(10_000)
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -376,6 +397,38 @@ describe('report.summarize', () => {
     const failLines = summary.split('\n').filter((l) => l.includes('[FAIL]'))
     expect(failLines).toHaveLength(2)
     expect(failLines[0]).not.toBe(failLines[1])
+  })
+
+  // Round-3 fix #4: a string "false" must count as a failure, not a pass.
+  it('counts a string "false" okKey as a failure (strict boolean pass)', async () => {
+    const results = [{ ok: 'false' }, { ok: true }, { ok: 'true' }]
+    const out = await reportSummarize.run(ctx, { results, writeArtifact: false })
+    expect(out.total).toBe(3)
+    expect(out.passed).toBe(2) // boolean true + string "true"; the string "false" fails
+    expect(out.failed).toBe(1)
+    expect(out.ok).toBe(false)
+  })
+
+  // Round-3 fix #7: a non-array results shape must fail loudly, not coerce to an
+  // empty (zero-failure) success.
+  it('throws on a non-array results shape (no false "0 failures" pass)', async () => {
+    await expect(reportSummarize.run(ctx, { results: { not: 'an array' } })).rejects.toThrow(/must be an array/)
+  })
+
+  // Round-3 fix #3: secret values must be redacted from the summary AND the
+  // artifact file (artifact contents are not covered by run-record redaction).
+  it('redacts secret values from the summary and artifact', async () => {
+    const secretCtx = createContext({
+      workspace: dir,
+      artifacts: new ArtifactStore(path.join(dir, 'secret-run')),
+      secrets: { token: 'SUPERSECRET' },
+    })
+    const results = [{ ok: false, url: 'https://api/health?token=SUPERSECRET', status: 500, error: '' }]
+    const out = await reportSummarize.run(secretCtx, { results })
+    expect(String(out.summary)).not.toContain('SUPERSECRET')
+    const report = secretCtx.artifacts.list().find((a) => a.name === 'health-summary.md')
+    expect(report).toBeDefined()
+    expect(fs.readFileSync(report!.path, 'utf8')).not.toContain('SUPERSECRET')
   })
 })
 

@@ -46,11 +46,15 @@ export class Engine {
     ctx: ExecutionContext,
     params?: Record<string, unknown>,
   ): Promise<RunRecord> {
+    // Record the EFFECTIVE root inputs (with the root block's declared defaults
+    // applied), so a direct run of a defaulted block shows what actually ran —
+    // not the caller's pre-default inputs. execute() re-applies idempotently.
+    const rootInputs = this.applyDefaults(root, inputs)
     const record: RunRecord = {
       runId: ctx.runId,
       blockId: root.id,
       status: 'RUNNING',
-      inputs,
+      inputs: rootInputs,
       params,
       trace: [],
       snapshot: this.buildSnapshot(root),
@@ -59,7 +63,7 @@ export class Engine {
     }
 
     try {
-      record.results = await this.execute(root, inputs, ctx, record, params)
+      record.results = await this.execute(root, rootInputs, ctx, record, params)
       record.status = 'COMPLETED'
     } catch (err) {
       record.status = 'FAILED'

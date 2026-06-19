@@ -11,10 +11,17 @@ export const httpHealthCheck: BlockDefinition = {
   name: 'HTTP Health Check',
   version: '0.1.0',
   description:
-    'Probe each endpoint in `endpoints` with http.check and return a pass/fail ' +
-    'summary. Writes a health-summary.md artifact for the run record.',
+    'Probe each endpoint in `endpoints` (each an object with a `url`) using http.check ' +
+    '(GET, expecting HTTP 200) and return a pass/fail summary plus a health-summary.md ' +
+    'artifact. v1 forwards only the endpoint url and the workflow-level timeoutMs; ' +
+    'per-endpoint method/expectStatus/headers overrides are not supported yet.',
   inputs: [
-    { name: 'endpoints', type: 'array', required: true },
+    {
+      name: 'endpoints',
+      type: 'array',
+      required: true,
+      description: 'Array of { url } objects to probe (each checked with GET, expecting HTTP 200).',
+    },
     { name: 'timeoutMs', type: 'number', default: 5000 },
   ],
   outputs: [
