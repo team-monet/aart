@@ -85,8 +85,19 @@ export class Runtime {
     const ownCaps = new Set(this.packCaps.get(pack.name) ?? [])
     const ownWfs = new Set(this.packWfs.get(pack.name) ?? [])
     for (const b of pack.blocks) {
-      if (!ownBlocks.has(b.def.id) && this.registry.getBlock(b.def.id)?.execution.type === 'native') {
-        throw new Error(`pack "${pack.name}": block id "${b.def.id}" is already provided by another pack`)
+      if (ownBlocks.has(b.def.id)) continue
+      // Reject a block that collides with an existing native block OR a built-in
+      // pack workflow. Without the pack-workflow check a native block named like
+      // a built-in workflow (e.g. http.health-check) would be accepted here and
+      // shadow that workflow in the live runtime (getBlock resolves native first)
+      // until a restart, where mergePacks would skip it — an inconsistency.
+      if (
+        this.registry.getBlock(b.def.id)?.execution.type === 'native' ||
+        this.registry.isPackWorkflow(b.def.id)
+      ) {
+        throw new Error(
+          `pack "${pack.name}": block id "${b.def.id}" is already provided by a built-in block or workflow`,
+        )
       }
     }
     for (const c of pack.capabilities) {

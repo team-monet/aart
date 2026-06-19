@@ -68,7 +68,10 @@ export class CompositeRegistry implements Registry {
     // Pack workflows: same version-pin semantics.
     const pw = this.packWorkflows.get(id)
     if (pw && (version === undefined || version === 'latest' || version === pw.version)) {
-      return pw
+      // Return a copy: a caller that mutates the result (e.g. setApproval/deprecate
+      // before registerBlock rejects the write) must not be able to corrupt the
+      // stored built-in workflow, which would otherwise persist until restart.
+      return { ...pw }
     }
     return this.file.getBlock(id, version)
   }
@@ -136,6 +139,12 @@ export class CompositeRegistry implements Registry {
   /** Remove a pack workflow (workspace pack replacement on re-approval). */
   removePackWorkflow(id: string): void {
     this.packWorkflows.delete(id)
+  }
+
+  /** True if id is a built-in pack workflow — reserved; a workspace native block
+   *  must not shadow it, and it cannot be overwritten via registerBlock. */
+  isPackWorkflow(id: string): boolean {
+    return this.packWorkflows.has(id)
   }
 
   /** Map of native block id -> handler, for the engine. */

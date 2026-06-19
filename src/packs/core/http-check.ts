@@ -45,9 +45,11 @@ export const httpCheck = nativeBlock(
         headers: new Headers(rawHeaders),
         signal: controller.signal,
       })
-      // Propagate abort from a stalled body: if the controller fired during the
-      // body read, re-throw so we fall into the catch path below.
-      const raw = await res.text().catch((e) => { if (controller.signal.aborted) throw e; return '' })
+      // Read the body under the same timer. ANY body-read failure — the timeout
+      // abort, a premature connection close, or a content-decoding error —
+      // propagates to the catch below and yields ok:false. A response whose body
+      // we could not read must not be reported as healthy.
+      const raw = await res.text()
       const body = raw.length > BODY_TRUNCATE ? raw.slice(0, BODY_TRUNCATE) : raw
       const latencyMs = Date.now() - t0
       return { ok: res.status === expectStatus, status: res.status, latencyMs, body, error: '', url }

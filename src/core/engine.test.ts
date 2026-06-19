@@ -256,6 +256,10 @@ describe('Engine', () => {
     const rec = await run(wf, {})
     expect(rec.status).toBe('COMPLETED')
     expect(rec.results).toEqual({ value: 'child-default' })
+    // Round-2 fix: the step trace records the EFFECTIVE inputs (incl. the child's
+    // default), not the pre-default step inputs ({}) — so run evidence matches
+    // what the block actually ran with.
+    expect(rec.trace[0]!.inputs).toEqual({ value: 'child-default' })
   })
 
   it('workflow {{inputs.x}} resolves to default when workflow-level input has a default', async () => {

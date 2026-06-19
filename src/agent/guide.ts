@@ -165,13 +165,13 @@ one object per iteration, in order. A later step accesses the typed array via
     "steps": [
       {
         "id": "probe",
-        "block": "http.request",
+        "block": "http.check",
         "forEach": "{{inputs.endpoints}}",
         "as": "endpoint",
         "inputs": {
           "url": "{{endpoint.url}}",
           "method": "GET",
-          "expectedStatus": "$endpoint.expectedStatus"
+          "expectStatus": "$endpoint.expectedStatus"
         }
       },
       {

@@ -173,6 +173,34 @@ describe('http.check', () => {
     expect(String(out!.error)).toMatch(/timeout/)
     expect(out!.url).toBe(stalledUrl)
   })
+
+  // Round-2 fix: a NON-timeout body-read failure (premature connection close)
+  // must also yield ok:false — a response whose body we cannot read is not healthy.
+  it('body read failure (premature close, not a timeout) → ok:false', async () => {
+    const brokenServer = http.createServer((_req, res) => {
+      // Promise 100 bytes, send a few, then abruptly destroy the socket so
+      // res.text() rejects with a premature-close error (not an abort).
+      res.writeHead(200, { 'content-type': 'text/plain', 'content-length': '100' })
+      res.write('partial')
+      res.socket?.destroy()
+    })
+    await new Promise<void>((r) => brokenServer.listen(0, '127.0.0.1', r))
+    const addr = brokenServer.address()
+    const port = typeof addr === 'object' && addr ? addr.port : 0
+    const brokenUrl = `http://127.0.0.1:${port}/broken`
+
+    let out: Record<string, unknown>
+    try {
+      // Generous timeout so the failure is the body read, not the abort timer.
+      out = await httpCheck.run(ctx, { url: brokenUrl, timeoutMs: 5000 })
+    } finally {
+      await new Promise<void>((r) => brokenServer.close(() => r()))
+    }
+    expect(out!.ok).toBe(false)
+    expect(String(out!.error)).not.toBe('') // a body error was recorded
+    expect(String(out!.error)).not.toMatch(/timeout/) // and it was NOT the abort/timeout path
+    expect(out!.url).toBe(brokenUrl)
+  })
 })
 
 // ---------------------------------------------------------------------------

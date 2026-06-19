@@ -72,6 +72,27 @@ export class Engine {
   }
 
   /** Execute one block (recursively for workflows). Returns its outputs. */
+  /** Apply a block's declared field defaults to inputs. Object/array defaults are
+   *  structuredCloned so a handler that mutates inputs cannot corrupt the
+   *  registry-held default. Idempotent: a value already present is left untouched.
+   *  Used both when executing a block and when recording the parent step trace, so
+   *  the trace reflects the effective inputs the block actually ran with. */
+  private applyDefaults(
+    block: BlockDefinition,
+    inputs: Record<string, unknown>,
+  ): Record<string, unknown> {
+    const out: Record<string, unknown> = { ...inputs }
+    for (const field of block.inputs) {
+      if (out[field.name] === undefined && field.default !== undefined) {
+        out[field.name] =
+          field.default !== null && typeof field.default === 'object'
+            ? structuredClone(field.default)
+            : field.default
+      }
+    }
+    return out
+  }
+
   private async execute(
     block: BlockDefinition,
     inputs: Record<string, unknown>,
@@ -79,22 +100,10 @@ export class Engine {
     record: RunRecord,
     params?: Record<string, unknown>,
   ): Promise<Record<string, unknown>> {
-    // Apply declared defaults: for each Field that declares a `default`, fill
-    // it in when the caller's value is absent (undefined). Explicitly-provided
-    // values — including falsy ones like null, false, 0, "" — are NOT touched.
-    // Defaults are literal values; they are NOT run through the resolver.
-    const resolvedInputs: Record<string, unknown> = { ...inputs }
-    for (const field of block.inputs) {
-      if (resolvedInputs[field.name] === undefined && field.default !== undefined) {
-        // Clone object/array defaults so a handler that mutates inputs in place
-        // cannot corrupt the registry-held field.default for future runs.
-        // Primitives (string, number, boolean) are values — no clone needed.
-        resolvedInputs[field.name] =
-          field.default !== null && typeof field.default === 'object'
-            ? structuredClone(field.default)
-            : field.default
-      }
-    }
+    // Apply declared defaults (object/array defaults cloned) before the required/
+    // enum/pattern checks below. Routed through applyDefaults so a parent workflow
+    // records the SAME effective inputs in the step trace (see the trace sites).
+    const resolvedInputs = this.applyDefaults(block, inputs)
 
     // Enforce declared required inputs and safe-interface constraints at the
     // engine boundary, for every block type, so an omitted input fails fast
@@ -207,7 +216,10 @@ export class Engine {
             loopVar: { name: loopName, value: arrayVal[i] },
             loopIndex: i,
           }
-          const iterInputs = resolveInputs(step.inputs, iterScope)
+          // Apply the child block's defaults here too so the recorded step trace
+          // reflects the effective inputs the child runs with (execute re-applies
+          // idempotently). Without this the trace would show pre-default inputs.
+          const iterInputs = this.applyDefaults(child, resolveInputs(step.inputs, iterScope))
           const iterParams = step.params ? resolveInputs(step.params, iterScope) : undefined
 
           const trace: StepTrace = {
@@ -264,7 +276,9 @@ export class Engine {
         secrets,
         steps: stepOutputs,
       }
-      const stepInputs = resolveInputs(step.inputs, scope)
+      // Apply the child block's defaults so the step trace records the effective
+      // inputs (incl. defaults), matching what the child actually executes with.
+      const stepInputs = this.applyDefaults(child, resolveInputs(step.inputs, scope))
       const stepParams = step.params ? resolveInputs(step.params, scope) : undefined
 
       const trace: StepTrace = {
