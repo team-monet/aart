@@ -1,11 +1,11 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { FileRegistry } from '../registry/file-registry'
 import { CompositeRegistry } from '../pack/composite-registry'
 import { nativeBlock } from '../pack/types'
-import { isApproved, statusLabel, unapprovedInTree } from './approval'
+import { isApproved, statusLabel, unapprovedInTree, approvalEnforced } from './approval'
 import type { BlockDefinition } from './types'
 
 const node = (id: string, approval?: 'draft' | 'approved' | 'deprecated'): BlockDefinition => ({
@@ -45,6 +45,36 @@ describe('isApproved / statusLabel', () => {
     expect(isApproved(node('a', 'deprecated'))).toBe(false)
     expect(isApproved(node('a'))).toBe(false)
     expect(statusLabel(node('a'))).toBe('draft')
+  })
+})
+
+describe('approvalEnforced', () => {
+  const original = process.env.AART_REQUIRE_APPROVAL
+  afterEach(() => {
+    if (original === undefined) {
+      delete process.env.AART_REQUIRE_APPROVAL
+    } else {
+      process.env.AART_REQUIRE_APPROVAL = original
+    }
+  })
+
+  it('is off by default (env var unset)', () => {
+    delete process.env.AART_REQUIRE_APPROVAL
+    expect(approvalEnforced()).toBe(false)
+  })
+
+  it('is off when set to any value other than "1"', () => {
+    process.env.AART_REQUIRE_APPROVAL = '0'
+    expect(approvalEnforced()).toBe(false)
+    process.env.AART_REQUIRE_APPROVAL = 'true'
+    expect(approvalEnforced()).toBe(false)
+    process.env.AART_REQUIRE_APPROVAL = ''
+    expect(approvalEnforced()).toBe(false)
+  })
+
+  it('is on when AART_REQUIRE_APPROVAL=1', () => {
+    process.env.AART_REQUIRE_APPROVAL = '1'
+    expect(approvalEnforced()).toBe(true)
   })
 })
 

@@ -3,6 +3,18 @@ import type { Registry } from '../registry/file-registry'
 
 export type ApprovalStatus = 'draft' | 'approved' | 'deprecated'
 
+/**
+ * Whether approval enforcement is on. Off by default — agent-authored blocks
+ * run immediately without requiring `aart approve`. Set AART_REQUIRE_APPROVAL=1
+ * to enable the governance gate (register → user approves → run).
+ *
+ * Distinct from AART_STRICT_APPROVAL, which only controls whether the MCP
+ * approve tools are registered.
+ */
+export function approvalEnforced(): boolean {
+  return process.env.AART_REQUIRE_APPROVAL === '1'
+}
+
 /** Native (pack) blocks are trusted runtime code; otherwise only 'approved' counts. */
 export function isApproved(block: BlockDefinition): boolean {
   return block.execution.type === 'native' || block.approval === 'approved'

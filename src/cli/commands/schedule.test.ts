@@ -64,6 +64,7 @@ beforeEach(() => {
 })
 afterEach(() => {
   delete process.env.AART_WORKSPACE
+  delete process.env.AART_REQUIRE_APPROVAL
   fs.rmSync(ws, { recursive: true, force: true })
 })
 
@@ -122,7 +123,8 @@ describe('scheduleAddCommand', () => {
     expect(stderrLines.some((l) => l.includes('not found'))).toBe(true)
   })
 
-  it('refuses an unapproved (draft) workflow (exit 1)', async () => {
+  it('refuses an unapproved (draft) workflow when approval is enforced (exit 1)', async () => {
+    process.env.AART_REQUIRE_APPROVAL = '1'
     const runtime = new Runtime(ws, [corePack])
     registerWorkflow(runtime, false /* draft */)
 
@@ -136,6 +138,21 @@ describe('scheduleAddCommand', () => {
     expect(exited).toBe(true)
     expect(exitCode).toBe(1)
     expect(stderrLines.some((l) => l.includes('not fully approved'))).toBe(true)
+  })
+
+  it('schedules a DRAFT workflow when approval enforcement is off (the default)', async () => {
+    const runtime = new Runtime(ws, [corePack])
+    registerWorkflow(runtime, false /* draft */)
+
+    const { exited } = await run(() =>
+      scheduleAddCommand('test.schedule.workflow', {
+        cron: '0 9 * * 1-5',
+        input: '{}',
+        param: '{}',
+      }),
+    )
+    expect(exited).toBe(false)
+    expect(await listSchedules(ws)).toHaveLength(1)
   })
 
   it('writes a schedule record and prints a crontab line containing schedule run <id>', async () => {
@@ -199,7 +216,8 @@ describe('scheduleRunCommand', () => {
     expect(stderrLines.some((l) => l.includes('not found'))).toBe(true)
   })
 
-  it('re-checks approval and refuses (exit 1) when the pinned workflow is now draft', async () => {
+  it('re-checks approval and refuses (exit 1) when the pinned workflow is now draft (enforced)', async () => {
+    process.env.AART_REQUIRE_APPROVAL = '1'
     // Step 1: register as approved and create the schedule.
     const runtime = new Runtime(ws, [corePack])
     const wf = registerWorkflow(runtime, true)
@@ -225,7 +243,8 @@ describe('scheduleRunCommand', () => {
     expect(stderrLines.some((l) => l.includes('not approved'))).toBe(true)
   })
 
-  it('re-checks approval and refuses when the workflow is deprecated', async () => {
+  it('re-checks approval and refuses when the workflow is deprecated (enforced)', async () => {
+    process.env.AART_REQUIRE_APPROVAL = '1'
     const runtime = new Runtime(ws, [corePack])
     const wf = registerWorkflow(runtime, true)
 
@@ -245,6 +264,26 @@ describe('scheduleRunCommand', () => {
     expect(exited).toBe(true)
     expect(exitCode).toBe(1)
     expect(stderrLines.some((l) => l.includes('not approved'))).toBe(true)
+  })
+
+  it('fires a now-draft workflow when approval enforcement is off (the default)', async () => {
+    const runtime = new Runtime(ws, [corePack])
+    const wf = registerWorkflow(runtime, true)
+    await run(() =>
+      scheduleAddCommand('test.schedule.workflow', {
+        cron: '0 9 * * 1-5',
+        input: '{"msg":"hi"}',
+        param: '{}',
+      }),
+    )
+    const scheduleId = (await listSchedules(ws))[0]!.scheduleId
+    // Degrade to draft — would be refused if enforcement were on.
+    runtime.fileRegistry.registerBlock({ ...wf, approval: 'draft' as const })
+
+    const { exited } = await run(() => scheduleRunCommand(scheduleId))
+    expect(exited).toBe(false) // runs anyway — approval not enforced by default
+    const updated = (await listSchedules(ws)).find((s) => s.scheduleId === scheduleId)!
+    expect(updated.lastStatus).toBe('COMPLETED')
   })
 
   it('exits 1 without throwing when the workflow is deleted (getBlock returns undefined)', async () => {

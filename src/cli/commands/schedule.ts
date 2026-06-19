@@ -1,6 +1,6 @@
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
-import { unapprovedInTree } from '../../core/approval'
+import { unapprovedInTree, approvalEnforced } from '../../core/approval'
 import { openRuntime, resolveWorkspace } from '../workspace'
 import {
   writeSchedule,
@@ -57,7 +57,7 @@ export async function scheduleAddCommand(workflowId: string, opts: AddOpts): Pro
   // Approval gate: a scheduled workflow must have standing approval — no --yes.
   // Unattended runs cannot prompt the user, so draft/deprecated means refuse.
   const pending = unapprovedInTree(wf, runtime.registry, true)
-  if (pending.length > 0) {
+  if (approvalEnforced() && pending.length > 0) {
     console.error(`✗ refused — workflow is not fully approved: ${pending.join(', ')}`)
     console.error(
       `Approve it first with:  aart approve ${pending.join(' && aart approve ')}`,
@@ -259,7 +259,7 @@ export async function scheduleRunCommand(scheduleId: string): Promise<void> {
 
   // Re-check approval at fire time. No --yes for unattended runs.
   const pending = unapprovedInTree(wf, runtime.registry, true)
-  if (pending.length > 0) {
+  if (approvalEnforced() && pending.length > 0) {
     console.error(
       `schedule ${scheduleId}: refused — workflow is not approved: ${pending.join(', ')}`,
     )
@@ -280,7 +280,7 @@ export async function scheduleRunCommand(scheduleId: string): Promise<void> {
     wf,
     schedule.inputs,
     schedule.params,
-    { approved: true },
+    { approved: pending.length === 0 },
   )
 
   // Update the schedule record with the outcome.

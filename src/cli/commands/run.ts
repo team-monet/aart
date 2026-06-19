@@ -3,7 +3,7 @@ import path from 'node:path'
 import YAML from 'yaml'
 import { renderReport } from '../../core/report'
 import { validateDraft } from '../../agent/validate'
-import { unapprovedInTree } from '../../core/approval'
+import { unapprovedInTree, approvalEnforced } from '../../core/approval'
 import type { BlockDefinition } from '../../core/types'
 import { openRuntime } from '../workspace'
 
@@ -57,9 +57,13 @@ export async function runCommand(workflowRef: string, opts: RunOpts): Promise<vo
   // Approval gate: an ad-hoc file def is never pre-trusted (trustTop=false);
   // a registry def's own approval is trusted. Either way the user can run an
   // unapproved definition once with --yes.
+  //
+  // Enforcement is opt-in: when AART_REQUIRE_APPROVAL is unset (the default),
+  // the gate is skipped and the run proceeds immediately. The approved flag
+  // in the run record always reflects true approval status regardless.
   const pending = unapprovedInTree(wf, runtime.registry, !fromFile)
   const approved = pending.length === 0
-  if (!approved && !opts.yes) {
+  if (approvalEnforced() && !approved && !opts.yes) {
     console.error(`✗ refused — not approved: ${pending.join(', ')}`)
     if (!fromFile) console.error(`approve with:  aart approve ${pending.join(' && aart approve ')}`)
     console.error(`or run it once as the user with:  --yes`)

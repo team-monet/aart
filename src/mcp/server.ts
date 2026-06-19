@@ -7,7 +7,7 @@ import { buildCatalog, filterCatalog } from '../agent/catalog'
 import { definitionJsonSchema } from '../agent/schema'
 import { validateDraft } from '../agent/validate'
 import { renderDefinition } from '../agent/render'
-import { unapprovedInTree } from '../core/approval'
+import { unapprovedInTree, approvalEnforced } from '../core/approval'
 import { setApproval } from '../core/governance'
 import { approveWorkspacePack, loadWorkspacePack, registerWorkspacePack } from '../pack/loader'
 import { AUTHORING_GUIDE } from '../agent/guide'
@@ -231,14 +231,18 @@ export async function startMcpServer(): Promise<void> {
       }
       // Governance gate: only run user-approved definitions. An inline
       // definition is never pre-trusted; a registry id's status is.
+      //
+      // Enforcement is opt-in (AART_REQUIRE_APPROVAL=1). When unset (the
+      // default), unapproved/draft blocks run immediately. The approved field
+      // in the run record always reflects true approval status regardless.
       const pending = unapprovedInTree(def, registry, !definition)
-      if (pending.length) {
+      if (approvalEnforced() && pending.length) {
         return fail(
-          `Not approved: ${pending.join(', ')}. Ask the user to approve, then call ` +
-            `aa_approve for: ${pending.join(', ')} — then run again.`,
+          `Not approved: ${pending.join(', ')}. Approval enforcement is on (AART_REQUIRE_APPROVAL=1); ` +
+            `ask the user to approve, then call aa_approve for: ${pending.join(', ')}.`,
         )
       }
-      const record = await runtime.run(def, input ?? {}, params, { approved: true })
+      const record = await runtime.run(def, input ?? {}, params, { approved: pending.length === 0 })
       return {
         content: [{ type: 'text' as const, text: renderReport(record) }],
         structuredContent: runView(record),

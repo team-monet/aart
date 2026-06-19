@@ -103,12 +103,8 @@ composition can't get there.
    blocks. Get the exact shape from \`aa_get_schema\`. A workflow is a block with
    \`execution.type: "workflow"\` and an ordered \`steps\` array.
 3. **Validate.** Call \`aa_validate\` with your draft. Fix every error it reports.
-4. **Register.** Call \`aa_register_block\`. It saves as **draft** (not yet runnable).
-5. **Get the user's approval.** SHOW the user exactly what they're approving —
-   \`aa_register_block\` returns a readable summary of the workflow's steps; present
-   it (don't just say "approve?"). When they say yes, call \`aa_approve\` with its
-   id. (If you edit and re-register it, it returns to draft — show it and ask again.)
-6. **Run.** Call \`aa_run_workflow\` with the id and any \`input\`. Read the report
+4. **Register.** Call \`aa_register_block\`. It saves as **draft**.
+5. **Run.** Call \`aa_run_workflow\` with the id and any \`input\`. Read the report
    it returns (per-step trace, outputs, screenshots/artifacts, pass/fail). If it
    failed, revise the draft and loop.
 
@@ -136,8 +132,8 @@ A workflow that opens a page and checks text is visible:
 }
 \`\`\`
 
-→ \`aa_validate\` it → \`aa_register_block\` it → ask the user to approve →
-\`aa_approve\` → \`aa_run_workflow\` { id: "dashboard-check", input: { url: "..." } }.
+→ \`aa_validate\` it → \`aa_register_block\` it →
+\`aa_run_workflow\` { id: "dashboard-check", input: { url: "..." } }.
 
 ## Wiring data between steps
 
@@ -217,13 +213,20 @@ one object per iteration, in order. A later step accesses the typed array via
 - \`{{loop.index}}\` gives "0", "1", … as a string.
 - \`$probe.items\` in a later step is the typed array of per-iteration outputs.
 
-## Approval (it's the user's call, made in chat)
+## Approval (opt-in governance)
 
-- Every registration is **draft**. A draft can't run until approved.
-- **You ask; the user decides.** Present what it does, and approve via
-  \`aa_approve\` only once the user agrees — never approve unprompted.
+- Approval is **off by default**. Agent-authored blocks and workflows run
+  immediately after registration — no user sign-off required.
 - The catalog shows each block's \`status\`: \`native\` (trusted, always usable),
-  \`draft\`, \`approved\`, \`deprecated\`.
+  \`draft\`, \`approved\`, \`deprecated\`. Every new registration starts as \`draft\`.
+  The run record's \`approved\` field always reflects true approval status, even
+  when enforcement is off.
+- **To turn governance ON:** the user sets \`AART_REQUIRE_APPROVAL=1\`. With
+  enforcement on, the flow becomes: Register → user reviews → \`aa_approve\` →
+  Run. In that mode, present what it does before calling \`aa_approve\`, and only
+  approve once the user says yes — never approve unprompted.
+- \`aart approve\` / \`aa_approve\` / the dashboard status all remain available
+  regardless of the enforcement setting.
 
 ## Block types
 
