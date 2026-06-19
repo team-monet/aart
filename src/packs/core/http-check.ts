@@ -23,6 +23,7 @@ export const httpCheck = nativeBlock(
       { name: 'latencyMs', type: 'number' },
       { name: 'body', type: 'string' },
       { name: 'error', type: 'string' },
+      { name: 'url', type: 'string' },
     ],
   },
   async (_ctx, inputs) => {
@@ -33,30 +34,29 @@ export const httpCheck = nativeBlock(
     const rawHeaders = (inputs.headers as Record<string, string> | undefined) ?? {}
 
     const controller = new AbortController()
+    // Keep the timer armed through the body read, not just through the headers.
+    // A server that sends headers then stalls the body would hang forever if we
+    // cleared the timer after fetch() resolved.
     const timer = setTimeout(() => controller.abort(), timeoutMs)
     const t0 = Date.now()
-
     try {
-      let res: Response
-      try {
-        res = await fetch(url, {
-          method,
-          headers: new Headers(rawHeaders),
-          signal: controller.signal,
-        })
-      } catch (err) {
-        const latencyMs = Date.now() - t0
-        const msg = err instanceof Error ? err.message : String(err)
-        return { ok: false, status: 0, latencyMs, body: '', error: msg }
-      } finally {
-        clearTimeout(timer)
-      }
-
-      const latencyMs = Date.now() - t0
-      const raw = await res.text().catch(() => '')
+      const res = await fetch(url, {
+        method,
+        headers: new Headers(rawHeaders),
+        signal: controller.signal,
+      })
+      // Propagate abort from a stalled body: if the controller fired during the
+      // body read, re-throw so we fall into the catch path below.
+      const raw = await res.text().catch((e) => { if (controller.signal.aborted) throw e; return '' })
       const body = raw.length > BODY_TRUNCATE ? raw.slice(0, BODY_TRUNCATE) : raw
-      const ok = res.status === expectStatus
-      return { ok, status: res.status, latencyMs, body, error: '' }
+      const latencyMs = Date.now() - t0
+      return { ok: res.status === expectStatus, status: res.status, latencyMs, body, error: '', url }
+    } catch (err) {
+      const latencyMs = Date.now() - t0
+      const msg = controller.signal.aborted
+        ? `timeout after ${timeoutMs}ms`
+        : (err instanceof Error ? err.message : String(err))
+      return { ok: false, status: 0, latencyMs, body: '', error: msg, url }
     } finally {
       clearTimeout(timer)
     }

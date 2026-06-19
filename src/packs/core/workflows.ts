@@ -14,7 +14,7 @@ export const httpHealthCheck: BlockDefinition = {
     'Probe each endpoint in `endpoints` with http.check and return a pass/fail ' +
     'summary. Writes a health-summary.md artifact for the run record.',
   inputs: [
-    { name: 'endpoints', type: 'object', required: true },
+    { name: 'endpoints', type: 'array', required: true },
     { name: 'timeoutMs', type: 'number', default: 5000 },
   ],
   outputs: [

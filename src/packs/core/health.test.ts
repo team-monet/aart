@@ -116,6 +116,63 @@ describe('http.check', () => {
     const out = await httpCheck.run(ctx, { url: `${baseUrl}/ok` })
     expect(out.ok).toBe(true)
   })
+
+  // Fix #3: output must include the probed `url` field so two failures with the
+  // same status are distinguishable in report.summarize.
+  it('output includes the input url on a successful probe', async () => {
+    const out = await httpCheck.run(ctx, { url: `${baseUrl}/ok` })
+    expect(out.url).toBe(`${baseUrl}/ok`)
+  })
+
+  it('output includes the input url when the probe fails (bad status)', async () => {
+    const out = await httpCheck.run(ctx, { url: `${baseUrl}/error` })
+    expect(out.ok).toBe(false)
+    expect(out.url).toBe(`${baseUrl}/error`)
+  })
+
+  it('output includes the input url when the probe fails (unreachable)', async () => {
+    const out = await httpCheck.run(ctx, { url: 'http://127.0.0.1:1', timeoutMs: 1000 })
+    expect(out.ok).toBe(false)
+    expect(out.url).toBe('http://127.0.0.1:1')
+  })
+
+  // Fix #2: the abort timer must stay armed through the body read.
+  // A server that sends headers then stalls the body must yield ok:false with a
+  // timeout error — NOT hang forever.
+  it('stalled body (headers sent but body never finishes) → ok:false timeout error within timeoutMs', async () => {
+    // Create a server that sends headers AND a partial body chunk, then hangs
+    // without ever calling res.end().  This causes fetch() to resolve (headers
+    // received) while res.text() blocks on the unfinished body — so only an
+    // armed abort controller can unblock it.  A test that used writeHead-only
+    // without flushing any bytes would let fetch() itself hang (never resolving),
+    // and the abort would land on fetch() rather than on res.text() — meaning
+    // it would pass even if the timer were cleared right after fetch().
+    const stalledServer = http.createServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/plain', 'content-length': '100' })
+      res.write('partial')
+      // Deliberately never call res.end() — body read blocks here forever.
+    })
+    await new Promise<void>((r) => stalledServer.listen(0, '127.0.0.1', r))
+    const addr = stalledServer.address()
+    const port = typeof addr === 'object' && addr ? addr.port : 0
+    const stalledUrl = `http://127.0.0.1:${port}/stall`
+
+    const timeoutMs = 300 // short timeout so the test completes quickly
+    const t0 = Date.now()
+    let out: Record<string, unknown>
+    try {
+      out = await httpCheck.run(ctx, { url: stalledUrl, timeoutMs })
+    } finally {
+      await new Promise<void>((r) => stalledServer.close(() => r()))
+    }
+    const elapsed = Date.now() - t0
+
+    // Must resolve (not hang), and within a reasonable bound of the timeout.
+    expect(elapsed).toBeLessThan(timeoutMs + 1500)
+    expect(out!.ok).toBe(false)
+    expect(String(out!.error)).toMatch(/timeout/)
+    expect(out!.url).toBe(stalledUrl)
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -274,6 +331,24 @@ describe('report.summarize', () => {
     expect(out.passed).toBe(2)
     expect(out.failed).toBe(1)
   })
+
+  // Fix #3: two failures with the same status must produce DISTINCT summary lines
+  // when http.check now includes `url` in its output.  This verifies that
+  // report.summarize renders url= per row and the two rows are distinguishable.
+  it('two same-status failures produce distinct lines (url discriminates them)', async () => {
+    const results = [
+      { ok: false, url: 'https://a.example.com', status: 503, error: '' },
+      { ok: false, url: 'https://b.example.com', status: 503, error: '' },
+    ]
+    const out = await reportSummarize.run(ctx, { results, writeArtifact: false })
+    const summary = String(out.summary)
+    expect(summary).toContain('url=https://a.example.com')
+    expect(summary).toContain('url=https://b.example.com')
+    // Ensure the two lines are distinct (the url field makes them different)
+    const failLines = summary.split('\n').filter((l) => l.includes('[FAIL]'))
+    expect(failLines).toHaveLength(2)
+    expect(failLines[0]).not.toBe(failLines[1])
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -414,6 +489,15 @@ describe('http.health-check workflow (e2e)', () => {
     expect(rendered).toContain('summary')
     // Log it for the required return value in the task spec:
     console.log('\n=== renderDefinition(http.health-check) ===\n' + rendered + '\n===\n')
+  })
+
+  // Fix #4: endpoints input must be declared as type 'array', not 'object'.
+  // The forEach expression resolves the array and would fail a type-check or
+  // mislead callers who read the catalog.
+  it('http.health-check declares endpoints input type as "array"', () => {
+    const endpointsField = httpHealthCheck.inputs.find((f) => f.name === 'endpoints')
+    expect(endpointsField).toBeDefined()
+    expect(endpointsField!.type).toBe('array')
   })
 })
 

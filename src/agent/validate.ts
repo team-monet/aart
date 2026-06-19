@@ -53,10 +53,15 @@ export function validateWorkflowRefs(
         `step "${step.id}": "${step.id}" is a reserved id — it collides with the $${step.id} typed-reference root (or loop builtin); use a different step id`,
       )
     }
-    // Reserve 'loop' as an `as` binding name: it would shadow the $loop builtin.
-    if (step.as === 'loop') {
+    // Reserve all typed $-ref root names as `as` binding names.
+    // A step with `as: inputs` (for example) makes `$inputs.x` resolve to the
+    // loop item (the resolver checks loopVar before typed roots for the $-syntax),
+    // while `{{inputs.x}}` still resolves to the workflow input — silent divergence
+    // between the two syntaxes.  Reject all six reserved roots here so authors
+    // discover the collision at registration time, not at run time.
+    if (step.as !== undefined && RESERVED_STEP_IDS.has(step.as)) {
       errors.push(
-        `step "${step.id}": as: "loop" is reserved — "loop" is the $loop.index builtin name; use a different binding name`,
+        `step "${step.id}": as: "${step.as}" is reserved — it would shadow the $${step.as} typed-reference root (or loop builtin); use a different binding name`,
       )
     }
     const ref = step.version ? `${step.block}@${step.version}` : step.block

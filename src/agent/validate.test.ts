@@ -240,6 +240,82 @@ describe('validateDraft', () => {
     expect(r.errors.join()).toMatch(/loop.*reserved|reserved.*loop/)
   })
 
+  // Fix #1: all typed $-ref root names must be rejected as `as` binding names.
+  // `as: inputs` would make `$inputs.x` resolve to the loop item while
+  // `{{inputs.x}}` still resolves to the workflow input — silent divergence.
+  it('rejects as: "inputs" (would shadow $inputs typed-ref root)', () => {
+    const b: unknown = {
+      id: 'reserved-inputs-as',
+      name: 'reserved-inputs-as',
+      version: '0.1.0',
+      execution: {
+        type: 'workflow',
+        steps: [{ id: 's1', block: 'echo', forEach: '{{inputs.items}}', as: 'inputs', inputs: {} }],
+      },
+    }
+    const r = validateDraft(b, registry)
+    expect(r.ok).toBe(false)
+    expect(r.errors.join()).toMatch(/inputs.*reserved|reserved.*inputs/)
+  })
+
+  it('rejects as: "params" (would shadow $params typed-ref root)', () => {
+    const b: unknown = {
+      id: 'reserved-params-as',
+      name: 'reserved-params-as',
+      version: '0.1.0',
+      execution: {
+        type: 'workflow',
+        steps: [{ id: 's1', block: 'echo', forEach: '{{inputs.items}}', as: 'params', inputs: {} }],
+      },
+    }
+    const r = validateDraft(b, registry)
+    expect(r.ok).toBe(false)
+    expect(r.errors.join()).toMatch(/params.*reserved|reserved.*params/)
+  })
+
+  it('rejects as: "secrets" (would shadow $secrets typed-ref root)', () => {
+    const b: unknown = {
+      id: 'reserved-secrets-as',
+      name: 'reserved-secrets-as',
+      version: '0.1.0',
+      execution: {
+        type: 'workflow',
+        steps: [{ id: 's1', block: 'echo', forEach: '{{inputs.items}}', as: 'secrets', inputs: {} }],
+      },
+    }
+    const r = validateDraft(b, registry)
+    expect(r.ok).toBe(false)
+    expect(r.errors.join()).toMatch(/secrets.*reserved|reserved.*secrets/)
+  })
+
+  it('accepts as: "item" (the default loop variable — not reserved)', () => {
+    const b: unknown = {
+      id: 'item-as-ok',
+      name: 'item-as-ok',
+      version: '0.1.0',
+      execution: {
+        type: 'workflow',
+        steps: [{ id: 's1', block: 'echo', forEach: '{{inputs.items}}', as: 'item', inputs: {} }],
+      },
+    }
+    const r = validateDraft(b, registry)
+    expect(r.errors.filter((e) => /reserved/.test(e))).toHaveLength(0)
+  })
+
+  it('accepts as: "ep" (an arbitrary non-reserved name)', () => {
+    const b: unknown = {
+      id: 'ep-as-ok',
+      name: 'ep-as-ok',
+      version: '0.1.0',
+      execution: {
+        type: 'workflow',
+        steps: [{ id: 's1', block: 'echo', forEach: '{{inputs.items}}', as: 'ep', inputs: {} }],
+      },
+    }
+    const r = validateDraft(b, registry)
+    expect(r.errors.filter((e) => /reserved/.test(e))).toHaveLength(0)
+  })
+
   it('does NOT reject a step with id "item" (shadowing is documented behavior)', () => {
     const b: unknown = {
       id: 'item-id-ok',
