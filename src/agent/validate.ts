@@ -161,8 +161,11 @@ export function validateDraft(value: unknown, registry: Registry): ValidationRes
           block,
         }
       }
-      if (field.pattern !== undefined && typeof field.default === 'string') {
-        if (!new RegExp(`^(?:${field.pattern})$`).test(field.default)) {
+      if (field.pattern !== undefined) {
+        // Mirror the engine: test String(value) so numeric/boolean defaults are
+        // checked too. A block with e.g. numeric default 0 and pattern ^[1-9]...$
+        // would fail every run — catch it at registration instead.
+        if (!new RegExp(`^(?:${field.pattern})$`).test(String(field.default))) {
           return {
             ok: false,
             errors: [

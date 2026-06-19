@@ -114,24 +114,9 @@ describe('runCommandBlock', () => {
     ).rejects.toThrow(/Unresolved/)
   })
 
-  // Fix C2: GH_TOKEN, GITHUB_TOKEN, KUBECONFIG pass through from process.env.
-  it('env: GH_TOKEN from process.env is inherited by child when no block env override', async () => {
-    const prev = process.env.GH_TOKEN
-    process.env.GH_TOKEN = 'ambient-gh-token'
-    try {
-      const res = await runCommandBlock(
-        node({ args: ['-e', 'console.log(process.env.GH_TOKEN ?? "absent")'] }),
-        {},
-        undefined,
-        ctx,
-      )
-      expect((res.output.stdout as string).trim()).toBe('ambient-gh-token')
-    } finally {
-      if (prev === undefined) delete process.env.GH_TOKEN
-      else process.env.GH_TOKEN = prev
-    }
-  })
-
+  // Fix C2: KUBECONFIG passes through from process.env (config-file path, not a secret).
+  // GH_TOKEN and GITHUB_TOKEN are intentionally NOT in the whitelist — passing them
+  // to every child would leak CI tokens unredacted into run reports.
   it('env: KUBECONFIG from process.env is inherited by child', async () => {
     const prev = process.env.KUBECONFIG
     process.env.KUBECONFIG = '/tmp/kube.yaml'
@@ -149,22 +134,17 @@ describe('runCommandBlock', () => {
     }
   })
 
-  it('env: block env override takes precedence over ambient GH_TOKEN', async () => {
+  it('env: GH_TOKEN is NOT passed through from process.env (would leak unredacted into reports)', async () => {
     const prev = process.env.GH_TOKEN
-    process.env.GH_TOKEN = 'ambient'
+    process.env.GH_TOKEN = 'ambient-gh-token'
     try {
       const res = await runCommandBlock(
-        node({
-          args: ['-e', 'console.log(process.env.GH_TOKEN ?? "absent")'],
-          // This resolves to the TOKEN secret set in ctx ('hunter2')
-          env: { GH_TOKEN: '{{secrets.TOKEN}}' },
-        }),
+        node({ args: ['-e', 'console.log(process.env.GH_TOKEN ?? "absent")'] }),
         {},
         undefined,
         ctx,
       )
-      // The block's env override ('hunter2') wins over ambient ('ambient')
-      expect((res.output.stdout as string).trim()).toBe('hunter2')
+      expect((res.output.stdout as string).trim()).toBe('absent')
     } finally {
       if (prev === undefined) delete process.env.GH_TOKEN
       else process.env.GH_TOKEN = prev

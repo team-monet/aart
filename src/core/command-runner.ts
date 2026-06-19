@@ -102,15 +102,21 @@ export async function runCommandBlock(
   }
 
   // Build the child env in two phases:
-  // 1. Whitelist ambient vars (standard PATH/HOME/etc. plus well-known CLI auth vars).
-  //    GH_TOKEN / GITHUB_TOKEN let `gh` use ambient auth when no gh_token secret is
-  //    set; KUBECONFIG lets `kubectl` find the cluster config from the host env.
-  // 2. Apply block-declared `env` overrides (resolved secrets/inputs) on top — these
-  //    take precedence so an explicit {{secrets.gh_token}} wins over ambient GH_TOKEN.
+  // 1. Whitelist ambient vars (standard PATH/HOME/etc. plus KUBECONFIG for
+  //    kubectl cluster-config discovery).
+  //    GH_TOKEN/GITHUB_TOKEN are NOT whitelisted here — passing them to every
+  //    command would leak a CI token unredacted into run reports (redaction
+  //    only masks secrets declared in .aa/secrets.json / AART_SECRET_*).
+  //    GitHub auth for gh.api works via two safe paths instead:
+  //      (a) declare `AART_SECRET_GH_TOKEN=$GITHUB_TOKEN` → secret is redacted;
+  //      (b) the host has run `gh auth login` → gh reads ~/.config/gh (HOME is
+  //          whitelisted) without needing any token env var.
+  // 2. Apply block-declared `env` overrides (resolved secrets/inputs) on top —
+  //    these take precedence over anything in phase 1.
   const env: Record<string, string> = {}
   for (const k of [
     'PATH', 'HOME', 'TMPDIR', 'LANG', 'TZ', 'SYSTEMROOT', 'USERPROFILE',
-    'GH_TOKEN', 'GITHUB_TOKEN', 'KUBECONFIG',
+    'KUBECONFIG',
   ]) {
     const v = process.env[k]
     if (v !== undefined) env[k] = v

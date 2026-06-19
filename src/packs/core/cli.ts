@@ -253,12 +253,15 @@ export const ghApi: BlockDefinition = {
   description:
     'Call the GitHub REST API at the given path using `gh api` (GET only in v1). ' +
     'The `endpoint` pattern restricts to safe path characters so query injection is ' +
-    'not possible even without a shell. Authenticates via the `gh_token` secret ' +
-    '(stored as AART_SECRET_GH_TOKEN env var or `gh_token` key in secrets.json, ' +
-    'redacted from run reports); when the secret is unset, the block env omits GH_TOKEN ' +
-    'but the command-runner passes through ambient GH_TOKEN / GITHUB_TOKEN from the host ' +
-    'environment, so `gh` falls back to ambient auth (gh auth login / inherited GITHUB_TOKEN) ' +
-    'without any extra configuration.',
+    'not possible even without a shell. ' +
+    'Auth options (in precedence order): ' +
+    '(1) set AART_SECRET_GH_TOKEN to your token — it is injected as GH_TOKEN and ' +
+    'redacted from run reports; ' +
+    '(2) run `gh auth login` on the host — gh reads ~/.config/gh (HOME is in the ' +
+    'command-runner env whitelist) with no token env var needed. ' +
+    'CI note: if your pipeline only exposes GITHUB_TOKEN in the environment (not via ' +
+    'gh auth login), set AART_SECRET_GH_TOKEN=$GITHUB_TOKEN so the token is declared ' +
+    'and redacted rather than leaked unmasked into run reports.',
   category: 'github',
   keywords: ['github', 'gh', 'api', 'rest', 'repos', 'pulls', 'issues', 'releases'],
   inputs: [
@@ -288,7 +291,7 @@ export const ghApi: BlockDefinition = {
     args: ['api', '{{inputs.endpoint}}'],
     // Secret keys are always lowercased by loadSecrets (AART_SECRET_GH_TOKEN → gh_token).
     // When gh_token is unset, the command-runner omits GH_TOKEN from the child env
-    // and gh falls back to ambient auth (gh auth login / inherited GITHUB_TOKEN).
+    // and gh falls back to ~/.config/gh (set by `gh auth login`; HOME is whitelisted).
     env: { GH_TOKEN: '{{secrets.gh_token}}' },
   },
 }

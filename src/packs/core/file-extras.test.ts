@@ -108,20 +108,20 @@ describe('dir.list', () => {
     await expect(dirList.run(ctx, { path: '../..' })).rejects.toThrow(/escapes the workspace/)
   })
 
-  // Fix F: entries are sorted deterministically
-  it('returns entries in locale-sorted order (deterministic)', async () => {
+  // Fix F: entries are sorted deterministically (code-point / UTF-16, locale-independent)
+  it('returns entries in code-point order (deterministic, locale-independent)', async () => {
     const out = await dirList.run(ctx, { path: '.' })
     const entries = out.entries as string[]
-    const sorted = [...entries].sort((a, b) => a.localeCompare(b))
+    const sorted = [...entries].sort()
     expect(entries).toEqual(sorted)
   })
 
   it('sorted order is preserved after glob filter', async () => {
     const out = await dirList.run(ctx, { path: '.', glob: '*.json' })
     const entries = out.entries as string[]
-    const sorted = [...entries].sort((a, b) => a.localeCompare(b))
+    const sorted = [...entries].sort()
     expect(entries).toEqual(sorted)
-    // alpha < beta
+    // alpha < beta in code-point order
     expect(entries.indexOf('alpha.json')).toBeLessThan(entries.indexOf('beta.json'))
   })
 })
@@ -185,6 +185,15 @@ describe('file.append', () => {
       fileAppend.run(ctx, { path: 'state-link/secrets.json', content: 'x' })
     ).rejects.toThrow(/\.aa|symlink/)
   })
+
+  // P1: dangling symlink — target does not exist; old accessSync walk skipped it
+  it('rejects a DANGLING symlink component (target does not exist) — file.append', async () => {
+    // Point at a path that never exists so the symlink is perpetually dangling
+    fs.symlinkSync('/tmp/__aart_nonexistent_target__', path.join(dir, 'dangling-link'))
+    await expect(
+      fileAppend.run(ctx, { path: 'dangling-link/pwned.txt', content: 'x' })
+    ).rejects.toThrow(/symlink/)
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -210,5 +219,13 @@ describe('file.write symlink confinement', () => {
   it('non-symlink writes are unaffected', async () => {
     await fileWrite.run(ctx, { path: 'out.txt', content: 'ok' })
     expect(fs.readFileSync(path.join(dir, 'out.txt'), 'utf8')).toBe('ok')
+  })
+
+  // P1: dangling symlink — old accessSync walk followed the link (ENOENT), skipped it
+  it('rejects a DANGLING symlink component (target does not exist) — file.write', async () => {
+    fs.symlinkSync('/tmp/__aart_nonexistent_target__', path.join(dir, 'dangling-link'))
+    await expect(
+      fileWrite.run(ctx, { path: 'dangling-link/pwned.txt', content: 'x' })
+    ).rejects.toThrow(/symlink/)
   })
 })

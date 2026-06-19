@@ -124,6 +124,29 @@ describe('validateDraft', () => {
     expect(r.errors).toEqual([])
   })
 
+  // P2: non-string defaults must be checked against pattern too (via String(default))
+  it('rejects a numeric default that violates its pattern (e.g. 0 against ^[1-9][0-9]*$)', () => {
+    // This mirrors the git.log `count` field: pattern ^[1-9][0-9]*$ rejects 0.
+    // The engine tests String(value), so validateDraft must do the same.
+    const b: unknown = {
+      ...node('numeric-default-bad-pattern'),
+      inputs: [{ name: 'count', type: 'number', default: 0, pattern: '^[1-9][0-9]*$' }],
+    }
+    const r = validateDraft(b, registry)
+    expect(r.ok).toBe(false)
+    expect(r.errors.join()).toMatch(/default.*pattern|does not match/)
+  })
+
+  it('accepts a numeric default that satisfies its pattern', () => {
+    const b: unknown = {
+      ...node('numeric-default-good-pattern'),
+      inputs: [{ name: 'count', type: 'number', default: 10, pattern: '^[1-9][0-9]*$' }],
+    }
+    const r = validateDraft(b, registry)
+    expect(r.ok).toBe(true)
+    expect(r.errors).toEqual([])
+  })
+
   // -------------------------------------------------------------------------
   // forEach validation
   // -------------------------------------------------------------------------

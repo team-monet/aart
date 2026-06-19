@@ -20,32 +20,50 @@ function resolveInWorkspace(ctx: ExecutionContext, p: string): string {
   if (rel === '.aa' || rel.startsWith('.aa' + path.sep)) {
     throw new Error(`path is inside .aa (runtime state, includes secrets) — not allowed: ${p}`)
   }
-  // Symlink check: resolve the real path of the deepest existing ancestor
-  // (the target file may not exist yet for write/append ops) and verify it
-  // still lives inside the workspace's real path. This catches symlinks like
-  // `logs -> /tmp/outside` that pass the syntactic check above.
+  // Symlink check: walk the workspace-relative path segment-by-segment using
+  // lstatSync (which does NOT follow symlinks) so we catch DANGLING symlinks
+  // too (accessSync/realpathSync follow the link and throw ENOENT on a dangling
+  // target, causing the old walk to skip the symlink entirely).
+  //
+  // Algorithm: split the relative path into segments; for each prefix that
+  // exists on disk, lstat it — if it's a symlink (live OR dangling), reject
+  // immediately.  An ENOENT means the component doesn't exist yet (fine for
+  // write/append ops), so we stop walking deeper.
   const realRoot = fs.realpathSync(root)
-  // Walk up from abs to find the deepest existing ancestor directory.
-  let existing = abs
-  while (existing !== path.dirname(existing)) {
+  const segments = rel === '' ? [] : rel.split(path.sep)
+  let current = root
+  for (const seg of segments) {
+    current = path.join(current, seg)
+    let lstat: fs.Stats
     try {
-      fs.accessSync(existing)
-      break
+      lstat = fs.lstatSync(current)
     } catch {
-      existing = path.dirname(existing)
+      // ENOENT — component doesn't exist yet (fine for write/append ops); stop walking.
+      break
+    }
+    if (lstat.isSymbolicLink()) {
+      throw new Error(`path contains a symlinked component (not allowed): ${p}`)
     }
   }
+  // Belt-and-suspenders: confirm the deepest existing prefix (with OS-level
+  // aliasing normalised) is still inside the workspace.
+  const existingPrefix = (() => {
+    let e = abs
+    while (e !== path.dirname(e)) {
+      try { fs.lstatSync(e); return e } catch { e = path.dirname(e) }
+    }
+    return root
+  })()
   let realExisting: string
   try {
-    realExisting = fs.realpathSync(existing)
+    realExisting = fs.realpathSync(existingPrefix)
   } catch {
-    // If even the ancestor can't be resolved, fall back to the root check already done.
     realExisting = realRoot
   }
   if (realExisting !== realRoot && !realExisting.startsWith(realRoot + path.sep)) {
     throw new Error(`path escapes the workspace (via symlink): ${p}`)
   }
-  // Re-check .aa against the real path so a symlink pointing into .aa is also caught.
+  // Re-check .aa against the real path so a symlink pointing into .aa is caught.
   const realRel = path.relative(realRoot, realExisting)
   if (realRel === '.aa' || realRel.startsWith('.aa' + path.sep)) {
     throw new Error(`path is inside .aa (runtime state, includes secrets) — not allowed: ${p}`)
@@ -135,7 +153,9 @@ export const dirList = nativeBlock(
     }
     // Sort before filtering so the result is deterministic regardless of the
     // underlying filesystem's readdir order (ext4, APFS, etc. differ).
-    names.sort((a, b) => a.localeCompare(b))
+    // Use default lexicographic (UTF-16 code-unit) sort — locale-independent
+    // and stable across Node versions and process locales.
+    names.sort()
     if (inputs.glob !== undefined && inputs.glob !== null && String(inputs.glob) !== '') {
       const glob = String(inputs.glob)
       names = names.filter((n) => matchGlob(n, glob))
