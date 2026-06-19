@@ -14,6 +14,7 @@ import { AUTHORING_GUIDE } from '../agent/guide'
 import { renderReport, readRun, listRuns } from '../core/report'
 import { openRuntime, resolveWorkspace, workspaceSourceLabel } from '../cli/workspace'
 import type { RunRecord } from '../core/types'
+import { verifyWeb } from '../agent/verify'
 
 /**
  * The agent-callable interface. A coding agent connects over stdio and uses
@@ -274,6 +275,25 @@ export async function startMcpServer(): Promise<void> {
       description: 'List recent runs (id, block, status). Use aa_get_report for the full report of one.',
     },
     async () => json(await listRuns(ws)),
+  )
+
+  server.registerTool(
+    'aa_verify',
+    {
+      title: 'Verify a web page renders / works',
+      description:
+        'Your "did it actually work?" check for anything affecting a web page. Loads the URL in a ' +
+        'real browser, waits for it to settle (incl. JS-rendered SPAs), and returns a COMPACT view of ' +
+        "what's actually on the page — title, the main rendered text, interactive elements, console " +
+        'errors, and a screenshot — plus `ok` (is the `expect` text present?) when you pass `expect`. ' +
+        'Reach for this RIGHT AFTER you change something that affects how a page renders, BEFORE ' +
+        "claiming it works — don't guess from the code or unit tests. One call, no workflow authoring.",
+      inputSchema: { url: z.string(), focus: z.string().optional(), expect: z.string().optional() },
+    },
+    async ({ url, focus, expect }) => {
+      const result = await verifyWeb(runtime, { url, focus, expect })
+      return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }], isError: result.status !== 'ok' }
+    },
   )
 
   server.registerTool(
