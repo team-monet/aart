@@ -56,6 +56,8 @@ const runViewShape = {
       error: z.string().optional(),
       startedAt: z.string(),
       endedAt: z.string().optional(),
+      // forEach iterations carry a per-iteration index (rendered as step[i]).
+      iteration: z.number().optional(),
     }),
   ),
   artifacts: z.array(z.string()),

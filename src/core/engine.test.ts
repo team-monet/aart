@@ -172,6 +172,65 @@ describe('Engine', () => {
     expect(rec.inputs).toEqual({ value: 'fallback' })
   })
 
+  // Round-4 fix #1: branch (if) evaluation must see workflow params, not just
+  // step-input resolution.
+  it('passes workflow params into branch (if) evaluation', async () => {
+    const wf: BlockDefinition = {
+      id: 'param-branch',
+      name: 'param-branch',
+      version: '0.1.0',
+      inputs: [],
+      outputs: [],
+      execution: {
+        type: 'workflow',
+        steps: [
+          { id: 'gate', block: 'echo', inputs: { value: 'g' }, if: '$params.go === true', then: 'yes', else: 'no' },
+          { id: 'no', block: 'echo', inputs: { value: 'took-no' } },
+          { id: 'yes', block: 'echo', inputs: { value: 'took-yes' } },
+        ],
+      },
+    }
+    const ctx = createContext({
+      runId: 'param-branch',
+      workspace: dir,
+      artifacts: new ArtifactStore(runDir(dir, 'param-branch')),
+    })
+    const rec = await new Engine(registry).run(wf, {}, ctx, { go: true })
+    expect(rec.status).toBe('COMPLETED')
+    const visited = rec.trace.map((t) => t.stepId)
+    expect(visited).toContain('yes') // params.go === true → 'then' branch
+    expect(visited).not.toContain('no')
+  })
+
+  // Round-4 fix #4: a handler that mutates a defaulted object input in place must
+  // not corrupt the persisted run record (the recorded inputs are snapshotted).
+  it('a handler mutating a defaulted object input does not corrupt the run record', async () => {
+    const withObjDefault: BlockDefinition = {
+      id: 'obj-default-mut',
+      name: 'obj-default-mut',
+      version: '0.1.0',
+      inputs: [{ name: 'config', type: 'object', default: { n: 1 } }],
+      outputs: [],
+      execution: { type: 'native' },
+    }
+    const nativeHandlers = new Map([
+      ['obj-default-mut', async (_ctx: unknown, inputs: Record<string, unknown>) => {
+        ;(inputs.config as Record<string, unknown>).n = 999 // handler mutates in place
+        return {}
+      }],
+    ])
+    const ctx = createContext({
+      runId: 'obj-mut',
+      workspace: dir,
+      artifacts: new ArtifactStore(runDir(dir, 'obj-mut')),
+    })
+    const engine = new Engine(registry, { nativeHandlers: nativeHandlers as Map<string, import('../pack/types').NativeRunFn> })
+    const rec = await engine.run(withObjDefault, {}, ctx)
+    expect(rec.status).toBe('COMPLETED')
+    // Persisted inputs reflect the default (n:1), NOT the handler's mutation (999).
+    expect(rec.inputs).toEqual({ config: { n: 1 } })
+  })
+
   it('caller-provided value overrides a declared default', async () => {
     const withDefault: BlockDefinition = {
       id: 'with-default2',

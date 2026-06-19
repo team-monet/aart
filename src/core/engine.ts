@@ -54,7 +54,9 @@ export class Engine {
       runId: ctx.runId,
       blockId: root.id,
       status: 'RUNNING',
-      inputs: rootInputs,
+      // Snapshot the recorded inputs so a handler that mutates a (defaulted)
+      // object/array input in place cannot corrupt the persisted audit trail.
+      inputs: structuredClone(rootInputs),
       params,
       trace: [],
       snapshot: this.buildSnapshot(root),
@@ -231,7 +233,8 @@ export class Engine {
             stepId: step.id,
             block: step.block,
             status: 'RUNNING',
-            inputs: iterInputs,
+            // Snapshot: isolate the recorded inputs from in-place handler mutation.
+            inputs: structuredClone(iterInputs),
             startedAt: nowIso(),
             iteration: i,
           }
@@ -265,6 +268,7 @@ export class Engine {
         // order. if/then/else/next are prohibited by validateDraft.
         current = this.nextStep(step, index, steps, {
           inputs: resolvedInputs,
+          params,
           ctx: ctxView,
           secrets,
           steps: stepOutputs,
@@ -290,7 +294,8 @@ export class Engine {
         stepId: step.id,
         block: step.block,
         status: 'RUNNING',
-        inputs: stepInputs,
+        // Snapshot: isolate the recorded inputs from in-place handler mutation.
+        inputs: structuredClone(stepInputs),
         startedAt: nowIso(),
       }
       record.trace.push(trace)
@@ -315,6 +320,7 @@ export class Engine {
 
       current = this.nextStep(step, index, steps, {
         inputs: resolvedInputs,
+        params,
         ctx: ctxView,
         secrets,
         steps: stepOutputs,

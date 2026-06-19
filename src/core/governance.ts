@@ -29,7 +29,16 @@ export function setApproval(
     return { ok: false, id, error: `${id} is a built-in pack block — already trusted` }
   }
   block.approval = status
-  registry.registerBlock(block)
+  try {
+    registry.registerBlock(block)
+  } catch (err) {
+    // A built-in pack workflow (e.g. http.health-check) or a legacy-alias
+    // collision cannot be (de)approved — registerBlock throws. Return a controlled
+    // result instead of surfacing a raw exception to `aart approve/deprecate` or
+    // the MCP approval tool. (getBlock returns a copy for pack workflows, so the
+    // approval mutation above does not touch the stored built-in.)
+    return { ok: false, id, error: err instanceof Error ? err.message : String(err) }
+  }
   const pending =
     status === 'approved'
       ? unapprovedInTree(block, registry, true).filter((x) => x !== id)
