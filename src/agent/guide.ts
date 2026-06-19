@@ -7,6 +7,10 @@
  */
 export const AUTHORING_GUIDE = `# Using aart (Agentic Automation RunTime)
 
+## ⚡ Reflex — verify before you claim it works
+
+If you just changed something that affects a **web page or a running service**, call **\`aa_verify\`** to actually *see* whether it works — before you say it's done. One call: \`aa_verify({ url, expect? })\` loads the page in a real browser, waits for it to settle, and returns a compact view (title, the rendered text, interactive elements, console errors, a screenshot) plus \`ok\` when you pass \`expect\`. Reach for it the way you reach for the test suite — reading the code or running unit tests doesn't tell you whether the page actually renders. (Quick "does it render?" check → \`aa_verify\` is one call; authoring a full workflow is for repeatable automations.)
+
 ## Task → block quick-reference
 
 | I want to… | block | category |
@@ -24,6 +28,7 @@ export const AUTHORING_GUIDE = `# Using aart (Agentic Automation RunTime)
 | Run JavaScript in the browser and return a value | \`browser.eval\` | browser |
 | Map every interactive element + selector on the page | \`browser.snapshot\` | browser |
 | Take a screenshot | \`browser.screenshot\` | browser |
+| **See/read what's actually rendered on a (JS-heavy) page, compactly** | \`web.read\` | browser |
 | Parse JSON, YAML, or CSV text into structured data | \`data.parse\` | data |
 | Serialize structured data to JSON, YAML, or CSV | \`data.stringify\` | data |
 | Read a file from the workspace | \`file.read\` | file |
