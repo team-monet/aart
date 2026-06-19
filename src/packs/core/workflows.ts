@@ -15,6 +15,14 @@ export const httpHealthCheck: BlockDefinition = {
     '(GET, expecting HTTP 200) and return a pass/fail summary plus a health-summary.md ' +
     'artifact. v1 forwards only the endpoint url and the workflow-level timeoutMs; ' +
     'per-endpoint method/expectStatus/headers overrides are not supported yet.',
+  category: 'http',
+  keywords: ['health', 'check', 'probe', 'endpoints', 'uptime', 'monitor', 'http', 'status', 'report'],
+  examples: [
+    {
+      description: 'Check liveness of a set of service endpoints',
+      inputs: { endpoints: [{ url: 'https://api.example.com/health' }], timeoutMs: 5000 },
+    },
+  ],
   inputs: [
     {
       name: 'endpoints',

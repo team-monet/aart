@@ -9,6 +9,11 @@ import { httpCheck } from './http-check'
 import { assertJsonpath } from './assert-jsonpath'
 import { reportSummarize } from './report-summarize'
 import { httpHealthCheck } from './workflows'
+import { httpPoll } from './http-poll'
+import { cliCommands } from './cli'
+import { jsonGet, textTemplate, base64Encode, base64Decode, hashSha256, regexMatch } from './data-utils'
+import { assertMatch, assertRange } from './assert-extras'
+import { fileExists, dirList, fileAppend } from './file-extras'
 import {
   browserCapability,
   browserGoto,
@@ -49,6 +54,17 @@ export const corePack: Pack = {
     httpCheck,
     assertJsonpath,
     reportSummarize,
+    jsonGet,
+    textTemplate,
+    base64Encode,
+    base64Decode,
+    hashSha256,
+    regexMatch,
+    assertMatch,
+    assertRange,
+    fileExists,
+    dirList,
+    fileAppend,
     browserGoto,
     browserClick,
     browserFill,
@@ -61,7 +77,8 @@ export const corePack: Pack = {
     browserScreenshot,
   ],
   capabilities: [browserCapability],
-  workflows: [httpHealthCheck],
+  workflows: [httpHealthCheck, httpPoll],
+  commands: cliCommands,
   aliases: {
     'qa.api.request': 'http.request',
     'qa.assert.equals': 'assert.equals',

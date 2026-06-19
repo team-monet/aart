@@ -16,6 +16,14 @@ export const assertEquals = nativeBlock(
     name: 'Assert Equals',
     version: '0.1.0',
     description: 'Fail unless `actual` equals `expected`.',
+    category: 'assert',
+    keywords: ['assert', 'equal', 'equals', 'compare', 'expect', 'match', 'check', 'deep'],
+    examples: [
+      {
+        description: 'Assert an HTTP response status is 200',
+        inputs: { actual: 200, expected: 200 },
+      },
+    ],
     inputs: [
       { name: 'actual', type: 'any', required: true },
       { name: 'expected', type: 'any', required: true },
@@ -40,6 +48,14 @@ export const assertContains = nativeBlock(
     name: 'Assert Contains',
     version: '0.1.0',
     description: 'Fail unless `value` (a string or array) contains `item`.',
+    category: 'assert',
+    keywords: ['assert', 'contains', 'include', 'substring', 'array', 'search', 'check'],
+    examples: [
+      {
+        description: 'Assert a response body contains a required substring',
+        inputs: { value: 'status: healthy', item: 'healthy' },
+      },
+    ],
     inputs: [
       { name: 'value', type: 'any', required: true },
       { name: 'item', type: 'any', required: true },

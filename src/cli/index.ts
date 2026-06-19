@@ -53,12 +53,16 @@ block
 block
   .command('list')
   .option('--json', 'machine-readable catalog', false)
+  .option('--category <cat>', 'filter by category (exact match)')
+  .option('--search <query>', 'filter by free-text query (id, name, description, keywords)')
   .description('list registered blocks & workflows')
   .action(listCommand)
 
 program
   .command('list')
   .option('--json', 'machine-readable catalog', false)
+  .option('--category <cat>', 'filter by category (exact match)')
+  .option('--search <query>', 'filter by free-text query (id, name, description, keywords)')
   .description('alias of `block list`')
   .action(listCommand)
 

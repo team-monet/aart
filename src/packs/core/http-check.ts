@@ -10,6 +10,14 @@ export const httpCheck = nativeBlock(
     description:
       'Probe a URL and return ok/status/latencyMs without throwing on bad status or ' +
       'network errors — safe to use inside retry loops and branching health workflows.',
+    category: 'http',
+    keywords: ['http', 'health', 'check', 'probe', 'ping', 'uptime', 'latency', 'monitor', 'status'],
+    examples: [
+      {
+        description: 'Probe an API endpoint for liveness',
+        inputs: { url: 'https://api.example.com/health', expectStatus: 200, timeoutMs: 3000 },
+      },
+    ],
     inputs: [
       { name: 'url', type: 'string', required: true },
       { name: 'method', type: 'string', default: 'GET' },

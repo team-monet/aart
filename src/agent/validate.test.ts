@@ -396,4 +396,70 @@ describe('validateDraft', () => {
     expect(r.ok).toBe(false)
     expect(r.errors.join()).toMatch(/params.*reserved|reserved.*params/)
   })
+
+  // -------------------------------------------------------------------------
+  // Discoverability: examples[i].inputs key validation
+  // -------------------------------------------------------------------------
+
+  it('emits no warning when example keys match declared inputs', () => {
+    const b: unknown = {
+      ...node('ex-valid'),
+      inputs: [
+        { name: 'url', type: 'string' },
+        { name: 'method', type: 'string' },
+      ],
+      examples: [{ description: 'GET a URL', inputs: { url: 'https://example.com', method: 'GET' } }],
+    }
+    const r = validateDraft(b, registry)
+    expect(r.ok).toBe(true)
+    expect(r.warnings.filter((w) => /examples/.test(w))).toHaveLength(0)
+  })
+
+  it('emits a WARNING (not error) when an example references an unknown input key', () => {
+    const b: unknown = {
+      ...node('ex-unknown-key'),
+      inputs: [{ name: 'url', type: 'string' }],
+      examples: [{ description: 'bad example', inputs: { url: 'https://example.com', typo: 'oops' } }],
+    }
+    const r = validateDraft(b, registry)
+    expect(r.ok).toBe(true)
+    expect(r.warnings.length).toBeGreaterThan(0)
+    expect(r.warnings.join()).toMatch(/examples\[0\]/)
+    expect(r.warnings.join()).toMatch(/typo/)
+  })
+
+  it('names all unknown keys in the warning message', () => {
+    const b: unknown = {
+      ...node('ex-multi-unknown'),
+      inputs: [{ name: 'url', type: 'string' }],
+      examples: [{ description: 'many unknown', inputs: { url: 'x', bad1: 'a', bad2: 'b' } }],
+    }
+    const r = validateDraft(b, registry)
+    expect(r.ok).toBe(true)
+    const w = r.warnings.join()
+    expect(w).toMatch(/bad1/)
+    expect(w).toMatch(/bad2/)
+  })
+
+  it('includes the example index in the warning for the correct example', () => {
+    const b: unknown = {
+      ...node('ex-index'),
+      inputs: [{ name: 'url', type: 'string' }],
+      examples: [
+        { description: 'good first', inputs: { url: 'x' } },
+        { description: 'bad second', inputs: { url: 'x', typo: 'oops' } },
+      ],
+    }
+    const r = validateDraft(b, registry)
+    expect(r.ok).toBe(true)
+    expect(r.warnings.join()).toMatch(/examples\[1\]/)
+    expect(r.warnings.join()).not.toMatch(/examples\[0\]/)
+  })
+
+  it('emits no warning when block has no examples', () => {
+    const b: unknown = { ...node('ex-none'), inputs: [{ name: 'url', type: 'string' }] }
+    const r = validateDraft(b, registry)
+    expect(r.ok).toBe(true)
+    expect(r.warnings.filter((w) => /examples/.test(w))).toHaveLength(0)
+  })
 })

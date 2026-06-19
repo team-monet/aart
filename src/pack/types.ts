@@ -42,6 +42,17 @@ export interface Pack {
    * unconditionally based on trusted origin (pack-shipped = trusted).
    */
   workflows?: BlockDefinition[]
+  /**
+   * Pre-approved command block definitions shipped with the pack. These are
+   * data-only `BlockDefinition` values whose `execution.type === 'command'`.
+   * The registry stamps each with `approval: 'approved'` at load time, so they
+   * run without --yes and appear in the catalog exactly like pack workflows.
+   *
+   * Safety comes from a FIXED command/argv shape, enum/pattern input
+   * constraints, read-only operations, and the command-runner's full
+   * stdout/stderr/exitCode audit trail persisted to run history.
+   */
+  commands?: BlockDefinition[]
 }
 
 /** Helper to declare a native block with a `native` execution type. */

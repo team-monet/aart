@@ -16,6 +16,14 @@ export const flowSleep = nativeBlock(
     description:
       `Wait \`ms\` milliseconds (max ${MAX_SLEEP_MS} per step), then continue. ` +
       'For polling: sleep → re-check → `if`/`next` back to the check step.',
+    category: 'flow',
+    keywords: ['sleep', 'wait', 'delay', 'pause', 'throttle', 'poll', 'timer', 'ms'],
+    examples: [
+      {
+        description: 'Wait 2 seconds between polling attempts',
+        inputs: { ms: 2000 },
+      },
+    ],
     inputs: [{ name: 'ms', type: 'number', required: true }],
     outputs: [{ name: 'sleptMs', type: 'number' }],
   },
@@ -38,6 +46,14 @@ export const flowFail = nativeBlock(
     description:
       'Fail the run with a message. Use as the target of an `else` branch so a ' +
       'bad state stops the workflow with a clear, intended error.',
+    category: 'flow',
+    keywords: ['fail', 'error', 'abort', 'stop', 'throw', 'branch', 'else', 'control'],
+    examples: [
+      {
+        description: 'Fail the run when a required condition is not met',
+        inputs: { message: 'Deployment gate failed: health check did not pass' },
+      },
+    ],
     inputs: [{ name: 'message', type: 'string', required: true }],
     outputs: [],
   },

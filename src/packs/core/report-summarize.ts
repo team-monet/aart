@@ -10,6 +10,14 @@ export const reportSummarize = nativeBlock(
       'Aggregate an array of pass/fail result objects into a human-readable evidence report. ' +
       'Accepts a raw array or a forEach step output `{items:[...]}`. ' +
       'Optionally persists the summary as a run artifact.',
+    category: 'report',
+    keywords: ['report', 'summarize', 'aggregate', 'pass', 'fail', 'results', 'health', 'summary', 'evidence'],
+    examples: [
+      {
+        description: 'Summarize health-check probe results into a pass/fail report',
+        inputs: { results: [{ ok: true, url: 'https://api.example.com' }], title: 'Health Check' },
+      },
+    ],
     inputs: [
       { name: 'results', type: 'any', required: true },
       { name: 'okKey', type: 'string', default: 'ok' },

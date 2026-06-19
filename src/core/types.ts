@@ -142,6 +142,13 @@ export const BlockDefinitionSchema = z.object({
    * promotes to 'approved'. Absent ⇒ treated as draft.
    */
   approval: z.enum(['draft', 'approved', 'deprecated']).optional(),
+  // --- discoverability ---
+  /** Functional category for filtering/grouping, e.g. "http" | "browser" | "data" | "flow" | "assert" | "file" | "report". Workspace packs may add their own. */
+  category: z.string().optional(),
+  /** Free-form search terms (synonyms, verbs, domain nouns) supplementing description, e.g. ["probe","ping","uptime","health"]. */
+  keywords: z.array(z.string()).optional(),
+  /** Worked examples of wiring this block as a step. First example is surfaced in the catalog entry. */
+  examples: z.array(z.object({ description: z.string(), inputs: z.record(z.unknown()) })).optional(),
 })
 export type BlockDefinition = z.infer<typeof BlockDefinitionSchema>
 

@@ -198,6 +198,20 @@ export function validateDraft(value: unknown, registry: Registry): ValidationRes
       }
     }
   }
+  // Examples: warn when an example's inputs reference a key that isn't a declared input.
+  if (block.examples && block.examples.length > 0) {
+    const declaredInputNames = new Set(block.inputs.map((f) => f.name))
+    for (const [i, example] of block.examples.entries()) {
+      const unknownKeys = Object.keys(example.inputs).filter(
+        (k) => !declaredInputNames.has(k),
+      )
+      if (unknownKeys.length > 0) {
+        warnings.push(
+          `examples[${i}]: unknown input key(s) ${unknownKeys.map((k) => `"${k}"`).join(', ')} — not declared in inputs[]`,
+        )
+      }
+    }
+  }
   const refErrors = validateWorkflowRefs(block, registry)
   return refErrors.length
     ? { ok: false, errors: refErrors, warnings, block }
