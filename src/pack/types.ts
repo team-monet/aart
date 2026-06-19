@@ -33,6 +33,15 @@ export interface Pack {
   capabilities: Capability[]
   /** Legacy id → current id. Old ids keep resolving after a rename. */
   aliases?: Record<string, string>
+  /**
+   * Pre-approved workflow definitions shipped with the pack. These are
+   * data-only `BlockDefinition` values whose `execution.type === 'workflow'`.
+   * The registry stamps each with `approval: 'approved'` at load time so they
+   * are catalog-visible and bypass the approval gate, exactly like native
+   * blocks. Authors do NOT need to set `approval` by hand; the runtime sets it
+   * unconditionally based on trusted origin (pack-shipped = trusted).
+   */
+  workflows?: BlockDefinition[]
 }
 
 /** Helper to declare a native block with a `native` execution type. */

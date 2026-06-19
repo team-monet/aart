@@ -72,4 +72,24 @@ describe('setApproval', () => {
     setApproval(registry, 'a', 'deprecated')
     expect(registry.getBlock('a')!.approval).toBe('deprecated')
   })
+
+  // Round-4 fix #3: (de)approving a built-in pack workflow returns a controlled
+  // result instead of surfacing a raw exception, and leaves the stored built-in
+  // untouched.
+  it('returns a controlled result (no throw) when (de)approving a built-in pack workflow', () => {
+    const wfDef: BlockDefinition = {
+      id: 'pack.flow',
+      name: 'pack.flow',
+      version: '0.1.0',
+      inputs: [],
+      outputs: [],
+      execution: { type: 'workflow', steps: [] },
+    }
+    const reg = new CompositeRegistry(new FileRegistry(path.join(dir, 'reg2')), [], new Map(), [wfDef])
+    const r = setApproval(reg, 'pack.flow', 'deprecated')
+    expect(r.ok).toBe(false)
+    expect(r.error).toMatch(/built-in pack workflow|cannot overwrite/i)
+    // The stored built-in workflow is untouched (getBlock returns a copy).
+    expect(reg.getBlock('pack.flow')!.approval).toBe('approved')
+  })
 })

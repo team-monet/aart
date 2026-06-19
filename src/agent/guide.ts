@@ -131,6 +131,65 @@ A workflow that opens a page and checks text is visible:
 - \`next\` — explicit next step id; otherwise steps run in order.
 - Polling: check → \`if\` not ready → \`flow.sleep\` → \`next\` back to the check.
   Dead-end branches: finish with \`flow.fail\` so the run fails with intent.
+- \`forEach\` — fan-out: run a block once per element of an array. Cannot be
+  combined with \`if\`/\`then\`/\`else\`/\`next\`.
+
+### forEach — sequential fan-out
+
+Run one block once per element of an array, in order. Each element is bound
+to the variable named by \`as\` (default \`"item"\`).
+
+**Two reference syntaxes work inside a forEach step's \`inputs\`:**
+- \`"$item.expectedStatus"\` — typed $-ref: preserves the original type
+  (number, boolean, …). Use this when the downstream block needs the real type.
+- \`"{{item.url}}"\` — interpolation: always yields a string.
+- \`"{{loop.index}}"\` — the zero-based iteration counter (string after interpolation).
+
+**Outputs:** the step's entry in \`stepOutputs\` becomes \`{ items: [...] }\` —
+one object per iteration, in order. A later step accesses the typed array via
+\`$stepId.items\`.
+
+**Example:**
+
+\`\`\`json
+{
+  "id": "check-all-endpoints",
+  "name": "Check All Endpoints",
+  "version": "0.1.0",
+  "inputs": [
+    { "name": "endpoints", "type": "array", "required": true }
+  ],
+  "outputs": [{ "name": "results", "type": "array" }],
+  "execution": {
+    "type": "workflow",
+    "steps": [
+      {
+        "id": "probe",
+        "block": "http.check",
+        "forEach": "{{inputs.endpoints}}",
+        "as": "endpoint",
+        "inputs": {
+          "url": "{{endpoint.url}}",
+          "method": "GET",
+          "expectStatus": "$endpoint.expectedStatus"
+        }
+      },
+      {
+        "id": "summarise",
+        "block": "report.summarize",
+        "inputs": { "results": "$probe.items", "title": "Endpoint Health" }
+      }
+    ],
+    "outputMapping": { "results": "$probe.items" }
+  }
+}
+\`\`\`
+
+- \`{{endpoint.url}}\` resolves as a string (interpolation).
+- \`$endpoint.expectedStatus\` resolves as the original type (e.g. number 200),
+  NOT the string "200" — critical for blocks that type-check their inputs.
+- \`{{loop.index}}\` gives "0", "1", … as a string.
+- \`$probe.items\` in a later step is the typed array of per-iteration outputs.
 
 ## Approval (it's the user's call, made in chat)
 
@@ -158,6 +217,13 @@ A workflow that opens a page and checks text is visible:
   inputs (\`{ "name": "namespace", "type": "string", "enum": ["dev", "staging"] }\`)
   and the engine rejects out-of-range values on every run — a block that
   cannot reach prod is better than one that logs that it did.
+  Optional inputs can declare a \`default\` value
+  (\`{ "name": "timeout", "type": "number", "default": 30 }\`) — the engine
+  fills it in when the caller omits that input. Defaults are literal values,
+  not resolver expressions: a default of \`"{{secrets.X}}"\` stays the literal
+  string. Enum/pattern constraints are validated at registration time and
+  additionally re-enforced at run time (defense-in-depth), so an invalid
+  default is caught early.
 - \`node\` — custom JavaScript you author. Two tiers:
   - **Sandboxed** (no \`dependencies\`): a locked-down V8 isolate — no \`process\`,
     \`require\`, fs, or network. Pure compute: gets \`inputs\` + \`ctx\` {runId,vars},

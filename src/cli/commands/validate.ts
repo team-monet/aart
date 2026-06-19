@@ -21,6 +21,7 @@ export async function validateCommand(file: string): Promise<void> {
   if (result.ok && result.block) {
     const kind = result.block.execution.type === 'workflow' ? 'workflow' : 'block'
     console.log(`✓ valid ${kind}: ${result.block.id}@${result.block.version}`)
+    for (const w of result.warnings) console.warn(`  ⚠ ${w}`)
     return
   }
   console.error(`✗ invalid:`)

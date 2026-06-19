@@ -25,6 +25,7 @@ export async function addCommand(file: string): Promise<void> {
     console.error(`✗ refused — ${err instanceof Error ? err.message : String(err)}`)
     process.exit(1)
   }
+  for (const w of result.warnings) console.warn(`  ⚠ ${w}`)
   const kind = result.block.execution.type === 'workflow' ? 'workflow' : 'block'
   console.log(`registered ${kind} ${result.block.id}@${result.block.version} (${result.block.name}) [draft]`)
   console.log(`approve it with:  aart approve ${result.block.id}`)

@@ -18,6 +18,8 @@ export class ArtifactStore {
   private dir: string
   private items: ArtifactMeta[] = []
   private _currentStep: string | undefined
+  /** On-disk filenames already written this run (exact basenames on disk). */
+  private writtenNames = new Set<string>()
 
   constructor(runDirectory: string) {
     this.dir = path.join(runDirectory, 'artifacts')
@@ -36,20 +38,50 @@ export class ArtifactStore {
 
   /** Persist a named artifact and return its path. `name` is untrusted authoring
    *  data, so it is reduced to a basename and confined to the store directory.
-   *  meta.mime defaults to extension inference; meta.kind defaults to 'file'. */
+   *  meta.mime defaults to extension inference; meta.kind defaults to 'file'.
+   *
+   *  When the same basename has been attached before (e.g. forEach loop attaching
+   *  `screenshot.png` on every iteration), a counter suffix is inserted before the
+   *  extension so each iteration lands on its own file on disk:
+   *    screenshot.png, screenshot.1.png, screenshot.2.png, …
+   *  The first attach of a given name is unchanged — existing single-attach paths
+   *  are not affected. */
   attach(name: string, data: Buffer | string, meta?: { mime?: string; kind?: ArtifactMeta['kind'] }): string {
     fs.mkdirSync(this.dir, { recursive: true })
     const safe = path.basename(name)
-    const target = path.resolve(this.dir, safe)
-    if (!safe || !target.startsWith(path.resolve(this.dir) + path.sep)) {
+    if (!safe) throw new Error(`unsafe artifact name: ${name}`)
+
+    // Deduplicate: find the smallest on-disk name that is not already taken.
+    // Checks against ALL names written this run (not just same-key repeats), so
+    // a manually-supplied name like "report.1.md" cannot collide with the
+    // auto-generated suffix for "report.md".
+    let diskName = safe
+    if (this.writtenNames.has(diskName)) {
+      const dot = safe.lastIndexOf('.')
+      let k = 1
+      while (true) {
+        const candidate = dot === -1
+          ? `${safe}.${k}`
+          : `${safe.slice(0, dot)}.${k}${safe.slice(dot)}`
+        if (!this.writtenNames.has(candidate)) {
+          diskName = candidate
+          break
+        }
+        k++
+      }
+    }
+    this.writtenNames.add(diskName)
+
+    const target = path.resolve(this.dir, diskName)
+    if (!target.startsWith(path.resolve(this.dir) + path.sep)) {
       throw new Error(`unsafe artifact name: ${name}`)
     }
     fs.writeFileSync(target, data)
     const bytes = Buffer.isBuffer(data) ? data.byteLength : Buffer.byteLength(data)
-    const mime = meta?.mime ?? inferMime(safe)
+    const mime = meta?.mime ?? inferMime(diskName)
     const kind = meta?.kind ?? 'file'
     this.items.push({
-      name: safe,
+      name: diskName,
       mime,
       path: target,
       bytes,

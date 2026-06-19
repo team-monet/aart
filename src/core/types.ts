@@ -21,6 +21,16 @@ export const FieldSchema = z.object({
   description: z.string().optional(),
   required: z.boolean().optional(),
   /**
+   * Literal fallback value for this input when the caller omits it. Applied
+   * by the engine before required/enum/pattern checks, so a field with a
+   * default is effectively optional even when `required` is absent. The value
+   * is used as-is — it is NOT interpolated through the resolver, so a default
+   * of "{{secrets.X}}" stays the literal string. Enum/pattern constraints
+   * are validated at registration time and additionally re-enforced at run time
+   * (defense-in-depth), so an invalid default is caught early.
+   */
+  default: z.unknown().optional(),
+  /**
    * Safe-interface constraints, enforced by the engine on every run. They make
    * unsafe values unrepresentable — e.g. a kubectl block whose `namespace`
    * input has `enum: ["dev", "staging"]` cannot be pointed at prod, no matter
@@ -48,6 +58,17 @@ export const WorkflowStepSchema = z.object({
   else: z.string().optional(),
   /** Explicit next step id; absent control flow falls through by array order. */
   next: z.string().optional(),
+  /**
+   * forEach iteration: a resolver expression that evaluates to an array.
+   * The block is executed once per element; each element is bound to the
+   * name given by `as` (default "item"). Cannot be combined with if/then/else/next.
+   */
+  forEach: z.string().optional(),
+  /**
+   * Names the loop variable within a forEach step. Defaults to "item".
+   * Settable only when forEach is also set.
+   */
+  as: z.string().optional(),
 })
 export type WorkflowStep = z.infer<typeof WorkflowStepSchema>
 
@@ -142,6 +163,12 @@ export const StepTraceSchema = z.object({
   error: z.string().optional(),
   startedAt: z.string(),
   endedAt: z.string().optional(),
+  /**
+   * Set on forEach steps: the zero-based index of this trace entry within the
+   * loop. Absent on non-forEach steps. Lets report readers distinguish
+   * "step X iteration 0" from "step X iteration 1" in the trace array.
+   */
+  iteration: z.number().optional(),
 })
 export type StepTrace = z.infer<typeof StepTraceSchema>
 
@@ -176,7 +203,7 @@ export const ArtifactSchema = z.object({
   mime: z.string(),
   path: z.string(),
   bytes: z.number(),
-  kind: z.enum(['file', 'screenshot', 'download', 'trace', 'console', 'network']),
+  kind: z.enum(['file', 'screenshot', 'download', 'trace', 'console', 'network', 'report']),
   stepId: z.string().optional(),
 })
 export type ArtifactMeta = z.infer<typeof ArtifactSchema>

@@ -14,7 +14,8 @@ export function renderDefinition(b: BlockDefinition): string {
   if (b.inputs.length) {
     const field = (i: (typeof b.inputs)[number]) => {
       const constraint = i.enum ? ` ∈ {${i.enum.join(', ')}}` : i.pattern ? ` ~ /${i.pattern}/` : ''
-      return `${i.name}${i.required ? '*' : ''}:${i.type}${constraint}`
+      const dflt = i.default !== undefined ? ` = ${JSON.stringify(i.default)}` : ''
+      return `${i.name}${i.required ? '*' : ''}:${i.type}${constraint}${dflt}`
     }
     lines.push(`  inputs: ${b.inputs.map(field).join(', ')}`)
   }
@@ -26,7 +27,8 @@ export function renderDefinition(b: BlockDefinition): string {
         .map(([k, v]) => `${k}=${val(v)}`)
         .join(', ')
       const branch = s.if ? `   if(${s.if}) → ${s.then ?? '∅'} else ${s.else ?? '∅'}` : ''
-      lines.push(`    ${i + 1}. ${s.id} → ${s.block}${ins ? `   ${ins}` : ''}${branch}`)
+      const loop = s.forEach ? `   forEach ${s.forEach} as ${s.as ?? 'item'}` : ''
+      lines.push(`    ${i + 1}. ${s.id} → ${s.block}${ins ? `   ${ins}` : ''}${loop}${branch}`)
     })
     if (b.execution.outputMapping) {
       lines.push(

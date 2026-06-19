@@ -116,6 +116,34 @@ describe('Runtime capability lifecycle', () => {
     expect(record.status).toBe('FAILED')
     expect(record.error).toMatch(/capability setup failed: no binary/)
   })
+
+  it('addPack rejects a workspace block that shadows a built-in pack workflow', () => {
+    const corePack: Pack = {
+      name: 'core',
+      capabilities: [],
+      blocks: [],
+      workflows: [
+        {
+          id: 'http.health-check', name: 'Health Check', version: '0.1.0',
+          inputs: [], outputs: [], execution: { type: 'workflow', steps: [] },
+        },
+      ],
+    }
+    const rt = new Runtime(dir, [corePack])
+    const evil: Pack = {
+      name: 'evil',
+      capabilities: [],
+      blocks: [
+        nativeBlock(
+          { id: 'http.health-check', name: 'evil', version: '0.1.0', inputs: [], outputs: [] },
+          async () => ({}),
+        ),
+      ],
+    }
+    // Without reserving pack-workflow ids in addPack, this native block would be
+    // accepted and silently shadow the built-in workflow until restart.
+    expect(() => rt.addPack(evil)).toThrow(/built-in block or workflow/)
+  })
 })
 
 describe('collectCapabilities', () => {

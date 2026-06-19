@@ -186,9 +186,28 @@ function validatePackShape(value: unknown, name: string): Pack {
     throw new Error(`pack "${name}": ${msg}`)
   }
   if (!value || typeof value !== 'object') fail('entry must export a pack object ({ name, blocks, capabilities? })')
-  const p = value as { name?: unknown; blocks?: unknown; capabilities?: unknown }
+  const p = value as { name?: unknown; blocks?: unknown; capabilities?: unknown; workflows?: unknown }
   if (p.name !== name) fail(`pack.name must be "${name}" (got ${JSON.stringify(p.name)})`)
   if (!Array.isArray(p.blocks) || p.blocks.length === 0) fail('pack.blocks must be a non-empty array')
+
+  // Workspace packs may NOT ship a `workflows` array.
+  //
+  // The workspace-pack approval review (aa_register_pack / aa_approve_pack) shows
+  // the user the raw entry-file source code preview — it does NOT render each
+  // workflow via renderDefinition.  A shipped workflow would therefore become
+  // runnable (stamped approved by origin) without the human approver ever seeing
+  // it in the approval surface — violating the governance trust-surface rule.
+  //
+  // TODO(follow-up): surface workspace-pack workflows via renderDefinition in the
+  // approval conversation, then parse and validate them here (mirror how corePack
+  // ships workflows), and lift this restriction.
+  if (Array.isArray(p.workflows) && p.workflows.length > 0) {
+    fail(
+      'workspace packs may not export a `workflows` array — shipped workflows are not yet shown in the ' +
+      'pack approval review and would run unapproved.  Move the workflow logic into a native block, or ' +
+      'register it separately via aa_register / aart register.',
+    )
+  }
 
   const blocks: NativeBlock[] = (p.blocks as unknown[]).map((b: unknown, i: number) => {
     const nb = b as { def?: unknown; run?: unknown }
@@ -250,13 +269,25 @@ export function loadApprovedPacks(ws: string): LoadedPacks {
 
 /**
  * Combine built-in packs with workspace packs, dropping any workspace pack
- * that collides (block id or capability name) with what's already loaded —
- * with a warning, instead of letting the Runtime constructor throw.
+ * that collides (block id, workflow id, or capability name) with what's already
+ * loaded — with a warning, instead of letting the Runtime constructor throw.
+ *
+ * Built-in WORKFLOW ids are included in the taken-id set.  Without this a
+ * workspace pack whose native block id equals a core workflow id (e.g.
+ * `http.health-check`) would pass this check, then throw inside CompositeRegistry
+ * construction (_loadPackDef) causing a hard CLI/MCP startup failure.
  */
 export function mergePacks(base: Pack[], extra: Pack[]): LoadedPacks {
   // Legacy alias ids count as taken too — a workspace pack must not shadow them.
+  // Built-in workflow ids (pack.workflows[].id) are also reserved so a workspace
+  // pack block that collides with one is skipped here rather than crashing at
+  // CompositeRegistry construction.
   const blockIds = new Set(
-    base.flatMap((p) => [...p.blocks.map((b) => b.def.id), ...Object.keys(p.aliases ?? {})]),
+    base.flatMap((p) => [
+      ...p.blocks.map((b) => b.def.id),
+      ...Object.keys(p.aliases ?? {}),
+      ...(p.workflows ?? []).map((w) => w.id),
+    ]),
   )
   const capNames = new Set(base.flatMap((p) => p.capabilities.map((c) => c.name)))
   const packs = [...base]

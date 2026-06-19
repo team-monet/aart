@@ -43,6 +43,7 @@ export async function runCommand(workflowRef: string, opts: RunOpts): Promise<vo
       for (const e of result.errors) console.error(`  - ${e}`)
       process.exit(1)
     }
+    for (const w of result.warnings) console.warn(`  ⚠ ${w}`)
     wf = result.block
   } else {
     wf = runtime.registry.getBlock(workflowRef)
