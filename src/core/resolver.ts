@@ -58,7 +58,14 @@ function resolveRef(expr: string, scope: ResolveScope): unknown {
     if (first === 'inputs') return getPath(scope.inputs, rest)
     if (first === 'params') return getPath(scope.params ?? {}, rest)
     if (first === 'ctx') return getPath(scope.ctx ?? {}, rest)
-    if (first === 'secrets') return getPath(scope.secrets ?? {}, rest)
+    if (first === 'secrets') {
+      if (rest.length === 0) {
+        throw new Error(
+          '$secrets must name a secret (use $secrets.NAME) — bare $secrets would hand the whole secrets map to a block',
+        )
+      }
+      return getPath(scope.secrets ?? {}, rest)
+    }
     if (first === 'steps') return getPath(scope.steps, rest)
     // Fall through to the normal step-output lookup.
     const out = scope.steps[first as string]
@@ -76,6 +83,11 @@ function resolveRef(expr: string, scope: ResolveScope): unknown {
     case 'ctx':
       return getPath(scope.ctx ?? {}, rest)
     case 'secrets':
+      if (rest.length === 0) {
+        throw new Error(
+          '{{secrets}} must name a secret (use {{secrets.NAME}}) — bare {{secrets}} would expose the whole secrets map',
+        )
+      }
       return getPath(scope.secrets ?? {}, rest)
     case 'steps':
       return getPath(scope.steps, rest)

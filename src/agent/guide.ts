@@ -176,8 +176,8 @@ one object per iteration, in order. A later step accesses the typed array via
       },
       {
         "id": "summarise",
-        "block": "node-summarise",
-        "inputs": { "results": "$probe.items" }
+        "block": "report.summarize",
+        "inputs": { "results": "$probe.items", "title": "Endpoint Health" }
       }
     ],
     "outputMapping": { "results": "$probe.items" }

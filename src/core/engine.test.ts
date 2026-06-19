@@ -231,6 +231,23 @@ describe('Engine', () => {
     expect(rec.inputs).toEqual({ config: { n: 1 } })
   })
 
+  // Round-5 fix #1: a (legacy/on-disk) workflow whose step id collides with a
+  // typed $-ref root must fail loudly at run, not silently mis-resolve refs.
+  // Built directly (bypassing validateDraft) to simulate an unvalidated registry file.
+  it('rejects a workflow whose step id collides with a typed-ref root at run time', async () => {
+    const wf: BlockDefinition = {
+      id: 'reserved-step',
+      name: 'reserved-step',
+      version: '0.1.0',
+      inputs: [],
+      outputs: [],
+      execution: { type: 'workflow', steps: [{ id: 'inputs', block: 'echo', inputs: { value: 'x' } }] },
+    }
+    const rec = await run(wf, {})
+    expect(rec.status).toBe('FAILED')
+    expect(rec.error).toMatch(/typed-reference root/)
+  })
+
   it('caller-provided value overrides a declared default', async () => {
     const withDefault: BlockDefinition = {
       id: 'with-default2',
@@ -430,7 +447,7 @@ describe('Engine', () => {
           type: 'workflow',
           steps: [
             {
-              id: 'loop',
+              id: 'each',
               block: 'echo',
               forEach: '{{inputs.items}}',
               inputs: { value: '{{item}}' },
@@ -443,7 +460,7 @@ describe('Engine', () => {
       expect(rec.trace).toHaveLength(2)
       expect(rec.trace[0]!.iteration).toBe(0)
       expect(rec.trace[1]!.iteration).toBe(1)
-      expect(rec.trace.every((t) => t.stepId === 'loop')).toBe(true)
+      expect(rec.trace.every((t) => t.stepId === 'each')).toBe(true)
     })
 
     it('type fidelity: $item.field reaches the child as a real number, not a string', async () => {

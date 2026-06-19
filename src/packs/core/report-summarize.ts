@@ -65,12 +65,14 @@ export const reportSummarize = nativeBlock(
       }
     }
     const failed = total - passed
-    const ok = failed === 0
+    // An empty result set is NOT a pass — "0 of 0 passed" must not report healthy
+    // (e.g. http.health-check with endpoints: [] would otherwise show ALL PASSED).
+    const ok = total > 0 && failed === 0
 
     // Build a readable multi-line summary.
     const lines: string[] = []
     lines.push(`# ${title}`)
-    lines.push(`Total: ${total}  Passed: ${passed}  Failed: ${failed}  ${ok ? 'ALL PASSED' : 'FAILURES DETECTED'}`)
+    lines.push(`Total: ${total}  Passed: ${passed}  Failed: ${failed}  ${total === 0 ? 'NO RESULTS' : ok ? 'ALL PASSED' : 'FAILURES DETECTED'}`)
     lines.push('')
     for (const item of items) {
       if (item === null || typeof item !== 'object') {

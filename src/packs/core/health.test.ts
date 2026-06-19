@@ -381,6 +381,16 @@ describe('report.summarize', () => {
     expect(out.failed).toBe(1)
   })
 
+  // Round-5 fix #4: an empty result set must NOT report healthy (e.g. an empty or
+  // miswired http.health-check endpoint list would otherwise show ALL PASSED).
+  it('empty result set is NOT a pass (ok=false, NO RESULTS)', async () => {
+    const out = await reportSummarize.run(ctx, { results: [], writeArtifact: false })
+    expect(out.total).toBe(0)
+    expect(out.failed).toBe(0)
+    expect(out.ok).toBe(false)
+    expect(String(out.summary)).toContain('NO RESULTS')
+  })
+
   // Fix #3: two failures with the same status must produce DISTINCT summary lines
   // when http.check now includes `url` in its output.  This verifies that
   // report.summarize renders url= per row and the two rows are distinguishable.

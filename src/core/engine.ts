@@ -17,6 +17,12 @@ import type {
 const nowIso = () => new Date().toISOString()
 const STEP_LIMIT = 10_000
 
+// Step ids / `as` bindings that collide with a typed $-ref root. validateDraft
+// forbids them for new drafts, but registry files are NOT re-validated on run —
+// so the engine rejects them defensively, rather than silently resolving e.g.
+// $inputs to the workflow root instead of a step output named "inputs".
+const RESERVED_REF_ROOTS = new Set(['loop', 'inputs', 'params', 'ctx', 'secrets', 'steps'])
+
 export interface EngineOptions {
   timeoutMs?: number
   /** Per-`node`-block memory ceiling (MB); defaults to the executor's default. */
@@ -170,6 +176,20 @@ export class Engine {
 
     // execution.type === 'workflow'
     const steps = block.execution.steps
+    // Reject a (legacy/on-disk) workflow whose step id or `as` binding collides
+    // with a typed $-ref root, rather than silently mis-resolving references.
+    for (const s of steps) {
+      if (RESERVED_REF_ROOTS.has(s.id)) {
+        throw new Error(
+          `workflow ${block.id}: step id "${s.id}" collides with the $${s.id} typed-reference root — re-author this workflow`,
+        )
+      }
+      if (s.as !== undefined && RESERVED_REF_ROOTS.has(s.as)) {
+        throw new Error(
+          `workflow ${block.id}: step "${s.id}" as: "${s.as}" collides with the $${s.as} typed-reference root — re-author this workflow`,
+        )
+      }
+    }
     const stepIndex = new Map(steps.map((s, i) => [s.id, i]))
     const stepOutputs: Record<string, Record<string, unknown>> = {}
 

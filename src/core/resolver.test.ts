@@ -33,6 +33,19 @@ describe('resolveValue', () => {
   })
 })
 
+describe('$secrets safety', () => {
+  const s: ResolveScope = { inputs: {}, steps: {}, secrets: { token: 'abc' } }
+  it('resolves a named secret $secrets.NAME', () => {
+    expect(resolveValue('$secrets.token', s)).toBe('abc')
+  })
+  it('rejects bare $secrets (would hand the whole secrets map to a block)', () => {
+    expect(() => resolveValue('$secrets', s)).toThrow(/must name a secret/)
+  })
+  it('rejects bare {{secrets}}', () => {
+    expect(() => resolveValue('{{secrets}}', s)).toThrow(/must name a secret/)
+  })
+})
+
 describe('evalCondition (safe, no eval)', () => {
   it('compares numbers', () => {
     expect(evalCondition('inputs.n > 3', scope)).toBe(true)
