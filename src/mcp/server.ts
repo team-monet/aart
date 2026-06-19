@@ -3,7 +3,7 @@ import path from 'node:path'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod'
-import { buildCatalog } from '../agent/catalog'
+import { buildCatalog, filterCatalog } from '../agent/catalog'
 import { definitionJsonSchema } from '../agent/schema'
 import { validateDraft } from '../agent/validate'
 import { renderDefinition } from '../agent/render'
@@ -110,6 +110,20 @@ export async function startMcpServer(): Promise<void> {
       description: 'List all blocks & workflows in the local registry (the catalog to compose from).',
     },
     async () => json(buildCatalog(registry)),
+  )
+
+  server.registerTool(
+    'aa_find_blocks',
+    {
+      title: 'Find blocks by category or keyword',
+      description:
+        'Search the block catalog by category (e.g. "http","browser","data","flow","assert","file","report") and/or a free-text query matched against id, name, description, and keywords. Returns the same entry shape as aa_list_blocks. Use when you know the domain (category:"browser") or the verb you want (query:"health check") — returns a focused slice rather than the full catalog.',
+      inputSchema: { category: z.string().optional(), query: z.string().optional() },
+    },
+    async ({ category, query }) => {
+      const results = filterCatalog(buildCatalog(registry), { category, query })
+      return json(results)
+    },
   )
 
   server.registerTool(

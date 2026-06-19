@@ -46,6 +46,7 @@ export class Runtime {
   private packBlocks = new Map<string, string[]>()
   private packCaps = new Map<string, string[]>()
   private packWfs = new Map<string, string[]>()
+  private packCmds = new Map<string, string[]>()
 
   constructor(
     private workspace: string,
@@ -57,6 +58,7 @@ export class Runtime {
       packs.flatMap((p) => p.blocks),
       new Map(packs.flatMap((p) => Object.entries(p.aliases ?? {}))),
       packs.flatMap((p) => p.workflows ?? []),
+      packs.flatMap((p) => p.commands ?? []),
     )
     this.nativeHandlers = this.registry.nativeHandlers()
     this.capabilities = new Map()
@@ -70,6 +72,7 @@ export class Runtime {
       this.packBlocks.set(p.name, p.blocks.map((b) => b.def.id))
       this.packCaps.set(p.name, p.capabilities.map((c) => c.name))
       this.packWfs.set(p.name, (p.workflows ?? []).map((w) => w.id))
+      this.packCmds.set(p.name, (p.commands ?? []).map((c) => c.id))
     }
   }
 
@@ -84,6 +87,7 @@ export class Runtime {
     const ownBlocks = new Set(this.packBlocks.get(pack.name) ?? [])
     const ownCaps = new Set(this.packCaps.get(pack.name) ?? [])
     const ownWfs = new Set(this.packWfs.get(pack.name) ?? [])
+    const ownCmds = new Set(this.packCmds.get(pack.name) ?? [])
     for (const b of pack.blocks) {
       if (ownBlocks.has(b.def.id)) continue
       // Reject a block that collides with an existing native block OR a built-in
@@ -110,6 +114,7 @@ export class Runtime {
       this.nativeHandlers.delete(id)
     }
     for (const id of ownWfs) this.registry.removePackWorkflow(id)
+    for (const id of ownCmds) this.registry.removePackCommand(id)
     for (const name of ownCaps) this.capabilities.delete(name)
     for (const b of pack.blocks) {
       this.registry.addNativeBlock(b)
@@ -118,10 +123,14 @@ export class Runtime {
     if (pack.workflows?.length) {
       this.registry.addPackWorkflows(pack.workflows)
     }
+    if (pack.commands?.length) {
+      this.registry.addPackCommands(pack.commands)
+    }
     for (const c of pack.capabilities) this.capabilities.set(c.name, c)
     this.packBlocks.set(pack.name, pack.blocks.map((b) => b.def.id))
     this.packCaps.set(pack.name, pack.capabilities.map((c) => c.name))
     this.packWfs.set(pack.name, (pack.workflows ?? []).map((w) => w.id))
+    this.packCmds.set(pack.name, (pack.commands ?? []).map((c) => c.id))
   }
 
   async run(

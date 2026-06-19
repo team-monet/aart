@@ -34,6 +34,31 @@ function interpolate(template: string, scope: ResolveScope, what: string): strin
   return typeof v === 'string' ? v : JSON.stringify(v)
 }
 
+/**
+ * Like interpolate() but returns undefined when the referenced value is
+ * absent. Used for env-var values only — an unset secret should mean "omit
+ * the env entry" rather than throwing, because env vars are optional by
+ * nature (e.g. GH_TOKEN lets `gh` fall back to ambient auth when not set).
+ * Argv-slot interpolation uses the strict `interpolate()` above.
+ *
+ * The resolver itself throws on a missing reference, so we catch and convert
+ * "unresolved" errors to undefined. Any other error (e.g. invalid template
+ * syntax) is re-thrown so bugs remain visible.
+ */
+function interpolateEnvValue(template: string, scope: ResolveScope): string | undefined {
+  try {
+    const v = resolveValue(template, scope)
+    if (v === undefined || v === null) return undefined
+    return typeof v === 'string' ? v : JSON.stringify(v)
+  } catch (err) {
+    // An unresolved reference or interpolation means the value is absent — omit it.
+    // Re-throw anything that isn't an "Unresolved" miss so bugs aren't swallowed.
+    const msg = err instanceof Error ? err.message : String(err)
+    if (msg.startsWith('Unresolved')) return undefined
+    throw err
+  }
+}
+
 function clamp(s: string): { text: string; truncated: boolean } {
   return s.length > MAX_OUTPUT_CHARS
     ? { text: s.slice(0, MAX_OUTPUT_CHARS), truncated: true }
@@ -69,7 +94,12 @@ export async function runCommandBlock(
     if (v !== undefined) env[k] = v
   }
   for (const [k, v] of Object.entries(exec.env ?? {})) {
-    env[k] = interpolate(v, scope, `env.${k}`)
+    // Env-var values are optional: an unset secret (undefined) means omit the
+    // entry entirely so the child process can fall back to ambient auth or
+    // inherited env (e.g. GH_TOKEN omitted → `gh` uses gh auth login /
+    // inherited GITHUB_TOKEN). Argv-slot interpolation (above) remains strict.
+    const resolved = interpolateEnvValue(v, scope)
+    if (resolved !== undefined) env[k] = resolved
   }
 
   const timeoutMs = exec.timeoutMs ?? DEFAULT_TIMEOUT_MS

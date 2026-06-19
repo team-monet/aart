@@ -71,6 +71,33 @@ describe('runCommandBlock', () => {
     expect(res.output).toMatchObject({ exitCode: 3, ok: false })
   })
 
+  it('env: an unset secret is omitted from child env (no throw); argv-slot missing still throws', async () => {
+    // When a secret referenced in env is undefined, the env entry is omitted
+    // rather than throwing — the child can fall back to ambient auth.
+    // (ctx.secrets has no 'missing_secret' key.)
+    const res = await runCommandBlock(
+      node({
+        args: ['-e', 'console.log(JSON.stringify(typeof process.env.ABSENT_KEY))'],
+        env: { ABSENT_KEY: '{{secrets.missing_secret}}' },
+      }),
+      {},
+      undefined,
+      ctx,
+    )
+    // The env entry was omitted, so the child sees it as undefined
+    expect(res.output.stdout).toContain('"undefined"')
+
+    // Argv-slot interpolation remains strict: an unresolvable slot still throws
+    await expect(
+      runCommandBlock(
+        node({ args: ['-e', 'process.exit(0)', '{{inputs.missing}}'] }),
+        {},
+        undefined,
+        ctx,
+      ),
+    ).rejects.toThrow(/Unresolved/)
+  })
+
   it('env template resolves secrets; cwd is workspace-rooted', async () => {
     const res = await runCommandBlock(
       node({

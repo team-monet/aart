@@ -7,10 +7,36 @@
  */
 export const AUTHORING_GUIDE = `# Using aart (Agentic Automation RunTime)
 
-You (the agent) build and run automations for the user **entirely through the
-aart tools** — the user should never have to type an \`aart\` command themselves.
-aart does not call an LLM; you do the authoring, aart validates, runs
-deterministically, and returns an evidence report you read and iterate on.
+## Task → block quick-reference
+
+| I want to… | block | category |
+|---|---|---|
+| Make an HTTP request (any method, headers, auth) | \`http.request\` | http |
+| Download a binary file | \`http.download\` | http |
+| Check a URL is reachable (health check) | \`http.health-check\` (workflow) | http |
+| Navigate a browser to a URL | \`browser.goto\` | browser |
+| Go back in browser history | \`browser.back\` | browser |
+| Click a page element | \`browser.click\` | browser |
+| Fill a form field | \`browser.fill\` | browser |
+| Assert text is visible on the page | \`browser.text_visible\` | browser |
+| Extract all visible text from the page | \`browser.extract_text\` | browser |
+| Get the raw HTML of the page | \`browser.html\` | browser |
+| Run JavaScript in the browser and return a value | \`browser.eval\` | browser |
+| Map every interactive element + selector on the page | \`browser.snapshot\` | browser |
+| Take a screenshot | \`browser.screenshot\` | browser |
+| Parse JSON, YAML, or CSV text into structured data | \`data.parse\` | data |
+| Serialize structured data to JSON, YAML, or CSV | \`data.stringify\` | data |
+| Read a file from the workspace | \`file.read\` | file |
+| Write a file to the workspace | \`file.write\` | file |
+| Attach a produced artifact to the run | \`artifact.write\` | file |
+| Pause execution for N milliseconds | \`flow.sleep\` | flow |
+| Fail a branch with an intentional error | \`flow.fail\` | flow |
+| Assert two values are equal | \`assert.equals\` | assert |
+| Assert a string/array contains a value | \`assert.contains\` | assert |
+| Assert a JSONPath expression matches | \`assert.jsonpath\` | assert |
+| Summarize a run for a human reader | \`report.summarize\` | report |
+
+Filter via \`aa_find_blocks {category|query}\`, full list via \`aa_list_blocks\`, wiring details in the sections below.
 
 ## Why & when to use aart
 

@@ -15,6 +15,14 @@ export const artifactWrite = nativeBlock(
     description:
       'Save text as a named run artifact (e.g. a generated report.md or data.csv) ' +
       'and return its path. Artifact contents are NOT secret-redacted.',
+    category: 'file',
+    keywords: ['artifact', 'write', 'save', 'output', 'report', 'file', 'attach', 'run'],
+    examples: [
+      {
+        description: 'Save a generated markdown report as a run artifact',
+        inputs: { name: 'report.md', content: '# Run Report\nAll checks passed.' },
+      },
+    ],
     inputs: [
       { name: 'name', type: 'string', required: true },
       { name: 'content', type: 'string', required: true },

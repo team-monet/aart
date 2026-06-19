@@ -32,6 +32,14 @@ export const fileRead = nativeBlock(
     description:
       'Read a UTF-8 file by workspace-relative path. Clamped at `maxChars` ' +
       '(default 200000); `truncated` reports clipping. `.aa/**` is off-limits.',
+    category: 'file',
+    keywords: ['file', 'read', 'load', 'open', 'text', 'workspace', 'path', 'content'],
+    examples: [
+      {
+        description: 'Read a config file from the workspace',
+        inputs: { path: 'config/settings.json' },
+      },
+    ],
     inputs: [
       { name: 'path', type: 'string', required: true },
       { name: 'maxChars', type: 'number' },
@@ -59,6 +67,14 @@ export const fileWrite = nativeBlock(
     description:
       'Write `content` to a workspace-relative path (parent dirs created). ' +
       'Overwrites. `.aa/**` is off-limits. For per-run outputs use artifact.write.',
+    category: 'file',
+    keywords: ['file', 'write', 'save', 'create', 'output', 'workspace', 'path', 'content'],
+    examples: [
+      {
+        description: 'Write generated content to a workspace file',
+        inputs: { path: 'output/summary.txt', content: 'Run completed successfully.' },
+      },
+    ],
     inputs: [
       { name: 'path', type: 'string', required: true },
       { name: 'content', type: 'string', required: true },

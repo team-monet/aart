@@ -180,6 +180,103 @@ describe('mergePacks + Runtime.addPack', () => {
     expect(warnings.join(' ')).toMatch(/qa\.browser\.goto/)
   })
 
+  // Fix #7: built-in WORKFLOW ids must be in the taken-id set so a workspace
+  // pack block that collides with one is skipped gracefully (warning) instead of
+  // crashing CompositeRegistry / Runtime construction.
+  it('drops a workspace pack whose block id collides with a builtin workflow id (e.g. http.health-check)', () => {
+    const collidingWorkflowId = {
+      name: 'tools',
+      blocks: [
+        {
+          def: {
+            id: 'http.health-check', // collides with the built-in workflow
+            name: 'X',
+            version: '0.1.0',
+            inputs: [],
+            outputs: [],
+            execution: { type: 'native' as const },
+          },
+          run: async () => ({}),
+        },
+      ],
+      capabilities: [],
+    }
+    const { packs, warnings } = mergePacks(builtinPacks, [collidingWorkflowId])
+    // Pack must be skipped — same count as without the extra pack
+    expect(packs).toHaveLength(builtinPacks.length)
+    expect(warnings.join(' ')).toMatch(/http\.health-check/)
+    // Runtime construction must not throw (previously this crashed _loadPackDef)
+    expect(() => new Runtime(ws, packs)).not.toThrow()
+  })
+
+  // Fix #6: a workspace pack that exports a `workflows` array must be REJECTED
+  // at shape-validation time — shipped workflows are not yet shown in the approval
+  // review and would run unapproved.
+  it('rejects a workspace pack that exports a non-empty workflows array', () => {
+    const PACK_WITH_WORKFLOWS = `
+module.exports = {
+  name: 'wf-pack',
+  blocks: [
+    {
+      def: { id: 'wf-pack.echo', name: 'Echo', version: '0.1.0', inputs: [], outputs: [] },
+      run: async () => ({}),
+    },
+  ],
+  capabilities: [],
+  workflows: [
+    {
+      id: 'wf-pack.my-workflow',
+      name: 'My Workflow',
+      version: '0.1.0',
+      inputs: [],
+      outputs: [],
+      execution: { type: 'workflow', steps: [] },
+    },
+  ],
+}
+`
+    writePack('wf-pack', PACK_WITH_WORKFLOWS)
+    registerWorkspacePack(ws, 'wf-pack')
+    // Loading must throw a clear, governance-oriented error
+    expect(() => loadWorkspacePack(ws, 'wf-pack')).toThrow(/workspace packs may not export.*workflows/)
+  })
+
+  it('rejects a workspace pack that exports a non-empty commands array', () => {
+    const PACK_WITH_COMMANDS = `
+module.exports = {
+  name: 'cmd-pack',
+  blocks: [
+    {
+      def: { id: 'cmd-pack.echo', name: 'Echo', version: '0.1.0', inputs: [], outputs: [] },
+      run: async () => ({}),
+    },
+  ],
+  capabilities: [],
+  commands: [
+    {
+      id: 'cmd-pack.git-status',
+      name: 'Git Status',
+      version: '0.1.0',
+      inputs: [],
+      outputs: [],
+      execution: { type: 'command', command: 'git', args: ['status'] },
+    },
+  ],
+}
+`
+    writePack('cmd-pack', PACK_WITH_COMMANDS)
+    registerWorkspacePack(ws, 'cmd-pack')
+    // Loading must throw a clear, governance-oriented error
+    expect(() => loadWorkspacePack(ws, 'cmd-pack')).toThrow(/workspace packs may not export.*commands/)
+  })
+
+  it('accepts a workspace pack that does not export workflows', () => {
+    writePack('tools', PACK_SOURCE)
+    registerWorkspacePack(ws, 'tools')
+    // Must not throw
+    expect(() => loadWorkspacePack(ws, 'tools')).not.toThrow()
+  })
+
   it('hot-adds a pack and replaces it on re-approval after an edit', async () => {
     writePack('tools', PACK_SOURCE)
     registerWorkspacePack(ws, 'tools')

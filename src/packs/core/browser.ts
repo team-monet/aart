@@ -166,6 +166,14 @@ export const browserGoto = nativeBlock(
     name: 'Browser: Goto',
     version: '0.1.0',
     description: 'Navigate the browser to a URL.',
+    category: 'browser',
+    keywords: ['browser', 'navigate', 'goto', 'open', 'url', 'page', 'load'],
+    examples: [
+      {
+        description: 'Navigate to a web application login page',
+        inputs: { url: 'https://app.example.com/login' },
+      },
+    ],
     capabilities: ['browser'],
     inputs: [{ name: 'url', type: 'string', required: true }],
     outputs: [{ name: 'url', type: 'string' }],
@@ -185,6 +193,14 @@ export const browserClick = nativeBlock(
     description:
       'Click the element matching a selector — CSS (`#login`, `nav a`) or Playwright ' +
       'text engine (`text=Sign in`). Get ready-to-use selectors from browser.snapshot.',
+    category: 'browser',
+    keywords: ['browser', 'click', 'tap', 'button', 'link', 'selector', 'interact'],
+    examples: [
+      {
+        description: 'Click a submit button by its CSS selector',
+        inputs: { selector: '#submit-btn' },
+      },
+    ],
     capabilities: ['browser'],
     inputs: [{ name: 'selector', type: 'string', required: true }],
     outputs: [{ name: 'clicked', type: 'string' }],
@@ -203,6 +219,14 @@ export const browserFill = nativeBlock(
     description:
       'Fill an input matching a selector (CSS or `text=`) with a value. ' +
       'Get ready-to-use selectors from browser.snapshot.',
+    category: 'browser',
+    keywords: ['browser', 'fill', 'type', 'input', 'form', 'text', 'selector', 'enter'],
+    examples: [
+      {
+        description: 'Fill the username field on a login form',
+        inputs: { selector: 'input[name="username"]', value: 'testuser' },
+      },
+    ],
     capabilities: ['browser'],
     inputs: [
       { name: 'selector', type: 'string', required: true },
@@ -222,6 +246,14 @@ export const browserTextVisible = nativeBlock(
     name: 'Browser: Text Visible',
     version: '0.1.0',
     description: 'Fail unless the given text becomes visible on the page.',
+    category: 'browser',
+    keywords: ['browser', 'text', 'visible', 'assert', 'wait', 'check', 'appear', 'page'],
+    examples: [
+      {
+        description: 'Assert that a success message appears after form submission',
+        inputs: { text: 'Login successful', timeoutMs: 5000 },
+      },
+    ],
     capabilities: ['browser'],
     inputs: [
       { name: 'text', type: 'string', required: true },
@@ -258,6 +290,14 @@ export const browserExtractText = nativeBlock(
       'Return the rendered (post-JavaScript) text of the page — or of one element via ' +
       '`selector` — as a string output for later steps to parse or assert on. ' +
       'Truncated at `maxChars` (default 50000); `truncated` reports if clipping happened.',
+    category: 'browser',
+    keywords: ['browser', 'text', 'extract', 'scrape', 'read', 'content', 'page', 'element'],
+    examples: [
+      {
+        description: 'Extract visible text from a results section',
+        inputs: { selector: '#results' },
+      },
+    ],
     capabilities: ['browser'],
     inputs: [
       { name: 'selector', type: 'string' },
@@ -284,6 +324,14 @@ export const browserHtml = nativeBlock(
     description:
       'Return the rendered HTML of the page — or of one element via `selector` — as a ' +
       'string output (e.g. for a node block to parse). Truncated at `maxChars` (default 50000).',
+    category: 'browser',
+    keywords: ['browser', 'html', 'markup', 'source', 'dom', 'scrape', 'element', 'page'],
+    examples: [
+      {
+        description: 'Capture the full rendered HTML of the current page',
+        inputs: {},
+      },
+    ],
     capabilities: ['browser'],
     inputs: [
       { name: 'selector', type: 'string' },
@@ -312,6 +360,14 @@ export const browserEval = nativeBlock(
       'result — element counts, attribute values, table data, anything the DOM knows. ' +
       'For plain page text/markup, prefer extract_text / html. The expression is part of ' +
       'the definition the user approves.',
+    category: 'browser',
+    keywords: ['browser', 'eval', 'javascript', 'execute', 'dom', 'script', 'query', 'attribute'],
+    examples: [
+      {
+        description: 'Count the number of list items on the page',
+        inputs: { expression: 'document.querySelectorAll("li").length' },
+      },
+    ],
     capabilities: ['browser'],
     inputs: [{ name: 'expression', type: 'string', required: true }],
     outputs: [{ name: 'result', type: 'any' }],
@@ -411,6 +467,14 @@ export const browserSnapshot = nativeBlock(
       'interactive element as { role, name, selector, href? } — each selector is ' +
       'directly usable with browser.click / browser.fill. Run this instead of ' +
       'guessing selectors from raw HTML; cap the list with `maxElements` (default 100).',
+    category: 'browser',
+    keywords: ['browser', 'snapshot', 'map', 'elements', 'interactive', 'selectors', 'accessibility', 'discover'],
+    examples: [
+      {
+        description: 'Map all interactive elements on the current page',
+        inputs: { maxElements: 50 },
+      },
+    ],
     capabilities: ['browser'],
     inputs: [{ name: 'maxElements', type: 'number' }],
     outputs: [
@@ -447,6 +511,14 @@ export const browserBack = nativeBlock(
     name: 'Browser: Back',
     version: '0.1.0',
     description: 'Go back one entry in the browser history; returns the resulting URL.',
+    category: 'browser',
+    keywords: ['browser', 'back', 'history', 'navigate', 'previous', 'return'],
+    examples: [
+      {
+        description: 'Navigate back to the previous page after viewing a detail view',
+        inputs: {},
+      },
+    ],
     capabilities: ['browser'],
     inputs: [],
     outputs: [{ name: 'url', type: 'string' }],
@@ -466,6 +538,14 @@ export const browserScreenshot = nativeBlock(
     description:
       'Capture a screenshot and attach it as an artifact. Pass `mask` (a list of ' +
       'selectors) to black out secret-bearing fields — artifact contents are NOT redacted.',
+    category: 'browser',
+    keywords: ['browser', 'screenshot', 'capture', 'image', 'artifact', 'snapshot', 'visual', 'evidence'],
+    examples: [
+      {
+        description: 'Capture a screenshot of the current page after login',
+        inputs: { name: 'post-login' },
+      },
+    ],
     capabilities: ['browser'],
     inputs: [
       { name: 'name', type: 'string', required: true },

@@ -58,6 +58,14 @@ export const dataParse = nativeBlock(
       'Parse text into a structured value. `format`: "json", "yaml", or "csv". ' +
       'CSV returns an array of objects keyed by the header row (set `csvHeader` ' +
       'false for raw row arrays).',
+    category: 'data',
+    keywords: ['parse', 'json', 'yaml', 'csv', 'decode', 'deserialize', 'text', 'format', 'convert'],
+    examples: [
+      {
+        description: 'Parse a JSON API response body into a structured value',
+        inputs: { text: '{"status":"ok","count":3}', format: 'json' },
+      },
+    ],
     inputs: [
       { name: 'text', type: 'string', required: true },
       { name: 'format', type: 'string', required: true },
@@ -92,6 +100,14 @@ export const dataStringify = nativeBlock(
       'Turn a value into text. `format`: "json" (pretty by default; `pretty` false ' +
       'for compact), "yaml", or "csv" (value must be an array of flat objects or ' +
       'an array of arrays).',
+    category: 'data',
+    keywords: ['stringify', 'serialize', 'json', 'yaml', 'csv', 'encode', 'text', 'format', 'convert'],
+    examples: [
+      {
+        description: 'Serialize a result object to compact JSON for an HTTP body',
+        inputs: { value: { status: 'ok' }, format: 'json', pretty: false },
+      },
+    ],
     inputs: [
       { name: 'value', type: 'any', required: true },
       { name: 'format', type: 'string', required: true },

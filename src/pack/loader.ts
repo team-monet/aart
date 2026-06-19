@@ -186,7 +186,7 @@ function validatePackShape(value: unknown, name: string): Pack {
     throw new Error(`pack "${name}": ${msg}`)
   }
   if (!value || typeof value !== 'object') fail('entry must export a pack object ({ name, blocks, capabilities? })')
-  const p = value as { name?: unknown; blocks?: unknown; capabilities?: unknown; workflows?: unknown }
+  const p = value as { name?: unknown; blocks?: unknown; capabilities?: unknown; workflows?: unknown; commands?: unknown }
   if (p.name !== name) fail(`pack.name must be "${name}" (got ${JSON.stringify(p.name)})`)
   if (!Array.isArray(p.blocks) || p.blocks.length === 0) fail('pack.blocks must be a non-empty array')
 
@@ -206,6 +206,19 @@ function validatePackShape(value: unknown, name: string): Pack {
       'workspace packs may not export a `workflows` array — shipped workflows are not yet shown in the ' +
       'pack approval review and would run unapproved.  Move the workflow logic into a native block, or ' +
       'register it separately via aa_register / aart register.',
+    )
+  }
+
+  // Workspace packs may NOT ship a `commands` array either. Command blocks
+  // execute host CLIs with approval='approved' stamped by origin — the same
+  // trust level as built-in pack commands — yet the workspace-pack approval
+  // review does NOT render each command definition, so a shipped command would
+  // run unapproved on the host. Register host-CLI access separately.
+  if (Array.isArray(p.commands) && p.commands.length > 0) {
+    fail(
+      'workspace packs may not export a `commands` array — shipped command blocks execute host CLIs ' +
+      'and are not yet shown in the pack approval review (they would run unapproved). ' +
+      'Register host-CLI access separately via aa_register / aart register.',
     )
   }
 

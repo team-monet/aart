@@ -11,6 +11,14 @@ export const httpDownload = nativeBlock(
       'Download a URL (binary-safe) and attach it as a named run artifact — a PDF, ' +
       'image, archive, dataset. Fails on non-2xx. `maxBytes` caps the size ' +
       `(default ${MAX_DOWNLOAD_BYTES}).`,
+    category: 'http',
+    keywords: ['http', 'download', 'fetch', 'binary', 'artifact', 'file', 'url', 'get'],
+    examples: [
+      {
+        description: 'Download a PDF report and attach it to the run',
+        inputs: { url: 'https://example.com/report.pdf', name: 'report.pdf' },
+      },
+    ],
     inputs: [
       { name: 'url', type: 'string', required: true },
       { name: 'name', type: 'string', required: true },
@@ -68,6 +76,14 @@ export const apiRequest = nativeBlock(
     name: 'HTTP Request',
     version: '0.1.0',
     description: 'Make an HTTP request and return status, ok and parsed body.',
+    category: 'http',
+    keywords: ['http', 'request', 'fetch', 'get', 'post', 'put', 'delete', 'patch', 'rest', 'api', 'call'],
+    examples: [
+      {
+        description: 'GET a JSON API endpoint and check the response',
+        inputs: { url: 'https://api.example.com/health', method: 'GET' },
+      },
+    ],
     inputs: [
       { name: 'url', type: 'string', required: true },
       { name: 'method', type: 'string' },

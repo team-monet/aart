@@ -70,6 +70,8 @@ export function startDashboard(ws: string, port: number): Promise<http.Server> {
           kind: 'built-in',
           status: 'native',
           blocks: p.blocks.length,
+          commands: (p.commands ?? []).length,
+          workflows: (p.workflows ?? []).length,
           capabilities: p.capabilities.map((c) => c.name),
           aliases: Object.keys(p.aliases ?? {}),
         }))

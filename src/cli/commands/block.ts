@@ -1,7 +1,7 @@
 import fs from 'node:fs'
 import YAML from 'yaml'
 import { validateDraft } from '../../agent/validate'
-import { buildCatalog } from '../../agent/catalog'
+import { buildCatalog, filterCatalog } from '../../agent/catalog'
 import { openRuntime } from '../workspace'
 
 /** `aart block add <file>` — validate then register a definition (the gate). */
@@ -33,11 +33,18 @@ export async function addCommand(file: string): Promise<void> {
 
 interface ListOpts {
   json?: boolean
+  category?: string
+  search?: string
 }
 
 /** `aart block list` / `aart list` — readable table, or `--json` machine catalog. */
 export async function listCommand(opts: ListOpts = {}): Promise<void> {
-  const catalog = buildCatalog(openRuntime().registry)
+  const allEntries = buildCatalog(openRuntime().registry)
+  const catalog =
+    opts.category || opts.search
+      ? filterCatalog(allEntries, { category: opts.category, query: opts.search })
+      : allEntries
+
   if (opts.json) {
     console.log(JSON.stringify(catalog, null, 2))
     return
@@ -46,8 +53,20 @@ export async function listCommand(opts: ListOpts = {}): Promise<void> {
     console.log('no blocks registered yet — try:  aart block add <file>')
     return
   }
+
+  // Group by category; blocks with no category go under "(uncategorized)".
+  const groups = new Map<string, typeof catalog>()
   for (const b of catalog) {
-    const tag = b.status === 'native' ? '[native]' : `[${b.type} · ${b.status}]`
-    console.log(`${b.id}@${b.version}\t${tag}\t${b.name}`)
+    const key = b.category ?? '(uncategorized)'
+    if (!groups.has(key)) groups.set(key, [])
+    groups.get(key)!.push(b)
+  }
+
+  for (const [cat, entries] of groups) {
+    console.log(`\n${cat}`)
+    for (const b of entries) {
+      const tag = b.status === 'native' ? '[native]' : `[${b.type} · ${b.status}]`
+      console.log(`  ${b.id}@${b.version}\t${tag}\t${b.name}`)
+    }
   }
 }

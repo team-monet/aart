@@ -19,6 +19,14 @@ export const assertJsonpath = nativeBlock(
     description:
       'Extract a value by dot-path from a JSON object (or JSON string) and optionally ' +
       'assert it equals `expected` or that it `exists`.',
+    category: 'assert',
+    keywords: ['assert', 'jsonpath', 'json', 'path', 'dot-path', 'extract', 'exists', 'check', 'nested'],
+    examples: [
+      {
+        description: 'Assert a nested field in an API response equals a specific value',
+        inputs: { data: '{"user":{"role":"admin"}}', path: 'user.role', expected: 'admin' },
+      },
+    ],
     inputs: [
       { name: 'data', type: 'any', required: true },
       { name: 'path', type: 'string', required: true },
