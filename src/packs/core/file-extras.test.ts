@@ -9,6 +9,7 @@ import path from 'node:path'
 import { createContext } from '../../core/context'
 import { ArtifactStore } from '../../artifacts/artifact-store'
 import { fileExists, dirList, fileAppend } from './file-extras'
+import { fileWrite } from './file'
 import type { ExecutionContext } from '../../core/context'
 
 let dir: string
@@ -106,6 +107,23 @@ describe('dir.list', () => {
   it('rejects workspace escapes', async () => {
     await expect(dirList.run(ctx, { path: '../..' })).rejects.toThrow(/escapes the workspace/)
   })
+
+  // Fix F: entries are sorted deterministically (code-point / UTF-16, locale-independent)
+  it('returns entries in code-point order (deterministic, locale-independent)', async () => {
+    const out = await dirList.run(ctx, { path: '.' })
+    const entries = out.entries as string[]
+    const sorted = [...entries].sort()
+    expect(entries).toEqual(sorted)
+  })
+
+  it('sorted order is preserved after glob filter', async () => {
+    const out = await dirList.run(ctx, { path: '.', glob: '*.json' })
+    const entries = out.entries as string[]
+    const sorted = [...entries].sort()
+    expect(entries).toEqual(sorted)
+    // alpha < beta in code-point order
+    expect(entries.indexOf('alpha.json')).toBeLessThan(entries.indexOf('beta.json'))
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -148,5 +166,66 @@ describe('file.append', () => {
     await expect(
       fileAppend.run(ctx, { path: '.aa/injected.json', content: '{}' })
     ).rejects.toThrow(/not allowed/)
+  })
+
+  // Fix E: symlink confinement — symlinks pointing outside the workspace or into .aa
+  it('rejects a symlink in the workspace pointing to an external directory (file.append)', async () => {
+    // Create a symlink logs -> /tmp (outside workspace)
+    fs.symlinkSync(os.tmpdir(), path.join(dir, 'escape-link'))
+    await expect(
+      fileAppend.run(ctx, { path: 'escape-link/pwned.txt', content: 'x' })
+    ).rejects.toThrow(/symlink/)
+  })
+
+  it('rejects a symlink pointing into .aa (file.append)', async () => {
+    // Create .aa dir, then symlink state -> .aa
+    fs.mkdirSync(path.join(dir, '.aa'), { recursive: true })
+    fs.symlinkSync(path.join(dir, '.aa'), path.join(dir, 'state-link'))
+    await expect(
+      fileAppend.run(ctx, { path: 'state-link/secrets.json', content: 'x' })
+    ).rejects.toThrow(/\.aa|symlink/)
+  })
+
+  // P1: dangling symlink — target does not exist; old accessSync walk skipped it
+  it('rejects a DANGLING symlink component (target does not exist) — file.append', async () => {
+    // Point at a path that never exists so the symlink is perpetually dangling
+    fs.symlinkSync('/tmp/__aart_nonexistent_target__', path.join(dir, 'dangling-link'))
+    await expect(
+      fileAppend.run(ctx, { path: 'dangling-link/pwned.txt', content: 'x' })
+    ).rejects.toThrow(/symlink/)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Fix E: symlink confinement for file.write
+// ---------------------------------------------------------------------------
+
+describe('file.write symlink confinement', () => {
+  it('rejects a symlink pointing outside the workspace', async () => {
+    fs.symlinkSync(os.tmpdir(), path.join(dir, 'escape-link'))
+    await expect(
+      fileWrite.run(ctx, { path: 'escape-link/pwned.txt', content: 'x' })
+    ).rejects.toThrow(/symlink/)
+  })
+
+  it('rejects a symlink pointing into .aa', async () => {
+    fs.mkdirSync(path.join(dir, '.aa'), { recursive: true })
+    fs.symlinkSync(path.join(dir, '.aa'), path.join(dir, 'state-link'))
+    await expect(
+      fileWrite.run(ctx, { path: 'state-link/evil.json', content: '{}' })
+    ).rejects.toThrow(/\.aa|symlink/)
+  })
+
+  it('non-symlink writes are unaffected', async () => {
+    await fileWrite.run(ctx, { path: 'out.txt', content: 'ok' })
+    expect(fs.readFileSync(path.join(dir, 'out.txt'), 'utf8')).toBe('ok')
+  })
+
+  // P1: dangling symlink — old accessSync walk followed the link (ENOENT), skipped it
+  it('rejects a DANGLING symlink component (target does not exist) — file.write', async () => {
+    fs.symlinkSync('/tmp/__aart_nonexistent_target__', path.join(dir, 'dangling-link'))
+    await expect(
+      fileWrite.run(ctx, { path: 'dangling-link/pwned.txt', content: 'x' })
+    ).rejects.toThrow(/symlink/)
   })
 })

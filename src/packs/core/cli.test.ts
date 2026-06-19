@@ -210,37 +210,52 @@ describe('Part B — block definitions', () => {
   })
 
   describe('git blocks', () => {
-    it('git.status: fixed args, no inputs, category=git, has example', () => {
+    it('git.status: global options precede subcommand, no inputs, category=git, has example', () => {
       expect(gitStatus.execution.type).toBe('command')
       const exec = gitStatus.execution as Extract<typeof gitStatus.execution, { type: 'command' }>
       expect(exec.command).toBe('git')
-      expect(exec.args).toEqual(['status', '--porcelain'])
+      // Global options (-c, --no-optional-locks) must appear before the subcommand
+      expect(exec.args).toEqual(['-c', 'core.fsmonitor=false', '--no-optional-locks', 'status', '--porcelain'])
       expect(gitStatus.inputs).toHaveLength(0)
       expect(gitStatus.category).toBe('git')
       expect(gitStatus.examples?.[0]).toBeDefined()
     })
 
-    it('git.current-branch: fixed args, no inputs', () => {
+    it('git.current-branch: uses symbolic-ref, failOnError:false, no inputs', () => {
       const exec = gitCurrentBranch.execution as Extract<typeof gitCurrentBranch.execution, { type: 'command' }>
       expect(exec.command).toBe('git')
-      expect(exec.args).toEqual(['rev-parse', '--abbrev-ref', 'HEAD'])
+      // Must use symbolic-ref (not rev-parse --abbrev-ref HEAD which returns "HEAD" in detached mode)
+      expect(exec.args).toContain('symbolic-ref')
+      expect(exec.args).toContain('-q')
+      expect(exec.args).toContain('--short')
+      expect(exec.args).toContain('HEAD')
+      // Global -c must precede subcommand
+      expect(exec.args[0]).toBe('-c')
+      expect(exec.failOnError).toBe(false)
       expect(gitCurrentBranch.inputs).toHaveLength(0)
     })
 
-    it('git.log: count input with pattern ^[0-9]+$, default 10', () => {
+    it('git.log: count input with pattern ^[1-9][0-9]*$ (positive integer), default 10', () => {
       const exec = gitLog.execution as Extract<typeof gitLog.execution, { type: 'command' }>
       expect(exec.command).toBe('git')
       expect(exec.args).toContain('{{inputs.count}}')
+      // Global options before subcommand
+      expect(exec.args[0]).toBe('-c')
+      expect(exec.args).toContain('--no-optional-locks')
       const countInput = gitLog.inputs.find((i) => i.name === 'count')
       expect(countInput).toBeDefined()
-      expect(countInput!.pattern).toBe('^[0-9]+$')
+      // Must be positive-integer-only (no 0, negatives, floats)
+      expect(countInput!.pattern).toBe('^[1-9][0-9]*$')
       expect(countInput!.default).toBe(10)
     })
 
-    it('git.diff: fixed --stat args, no inputs', () => {
+    it('git.diff: global options, --no-textconv, --no-ext-diff, no inputs', () => {
       const exec = gitDiff.execution as Extract<typeof gitDiff.execution, { type: 'command' }>
       expect(exec.command).toBe('git')
-      expect(exec.args).toEqual(['diff', '--stat'])
+      expect(exec.args).toEqual([
+        '-c', 'core.fsmonitor=false', '--no-optional-locks',
+        'diff', '--stat', '--no-textconv', '--no-ext-diff',
+      ])
       expect(gitDiff.inputs).toHaveLength(0)
     })
   })
@@ -406,6 +421,47 @@ describe('git real execution (end-to-end via Runtime)', () => {
     expect(record.status).toBe('COMPLETED')
     const lines = (record.results?.stdout as string).trim().split('\n').filter(Boolean)
     expect(lines.length).toBeLessThanOrEqual(3)
+  }, 15_000)
+
+  // Fix B: engine pattern enforcement applies to numeric inputs via String(value)
+  it('git.log rejects count=-1 (negative integer)', async () => {
+    const rt = new Runtime(WS, [corePack])
+    const def = rt.registry.getBlock('git.log')!
+    const record = await rt.run(def, { count: -1 })
+    expect(record.status).toBe('FAILED')
+    expect(record.error).toMatch(/pattern/)
+  }, 15_000)
+
+  it('git.log rejects count=0 (zero is not a positive integer)', async () => {
+    const rt = new Runtime(WS, [corePack])
+    const def = rt.registry.getBlock('git.log')!
+    const record = await rt.run(def, { count: 0 })
+    expect(record.status).toBe('FAILED')
+    expect(record.error).toMatch(/pattern/)
+  }, 15_000)
+
+  it('git.log rejects count=3.5 (float)', async () => {
+    const rt = new Runtime(WS, [corePack])
+    const def = rt.registry.getBlock('git.log')!
+    const record = await rt.run(def, { count: 3.5 })
+    expect(record.status).toBe('FAILED')
+    expect(record.error).toMatch(/pattern/)
+  }, 15_000)
+
+  // Fix A4: git.current-branch uses symbolic-ref + failOnError:false
+  // so detached HEAD returns ok:false without throwing.
+  it('git.current-branch in detached HEAD returns ok:false (not a throw)', async () => {
+    // Detach HEAD
+    const git = (args: string[]) =>
+      execFileSync('git', ['-c', 'commit.gpgsign=false', ...args], { cwd: WS, stdio: 'ignore' })
+    git(['checkout', '--detach'])
+    const rt = new Runtime(WS, [corePack])
+    const def = rt.registry.getBlock('git.current-branch')!
+    const record = await rt.run(def, {})
+    // Must complete (not throw) — failOnError:false
+    expect(record.status).toBe('COMPLETED')
+    expect(record.results?.ok).toBe(false)
+    expect(record.results?.exitCode).not.toBe(0)
   }, 15_000)
 
   it('git.diff runs and returns a stat summary (string stdout, exitCode 0)', async () => {

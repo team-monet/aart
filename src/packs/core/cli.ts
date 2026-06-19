@@ -58,7 +58,10 @@ export const gitStatus: BlockDefinition = {
   execution: {
     type: 'command',
     command: 'git',
-    args: ['status', '--porcelain'],
+    // -c core.fsmonitor=false: prevent fsmonitor hook execution.
+    // --no-optional-locks: skip optional index-lock writes (read-only intent).
+    // Global options must precede the subcommand.
+    args: ['-c', 'core.fsmonitor=false', '--no-optional-locks', 'status', '--porcelain'],
   },
 }
 
@@ -66,9 +69,12 @@ export const gitCurrentBranch: BlockDefinition = {
   id: 'git.current-branch',
   name: 'Git Current Branch',
   version: '0.1.0',
-  description: 'Return the name of the currently checked-out Git branch.',
+  description:
+    'Return the name of the currently checked-out Git branch using `symbolic-ref`. ' +
+    'In detached-HEAD mode (common in CI) exits non-zero and ok is false rather than ' +
+    'falsely reporting "HEAD" as a branch name.',
   category: 'git',
-  keywords: ['git', 'branch', 'current', 'head', 'ref'],
+  keywords: ['git', 'branch', 'current', 'head', 'ref', 'symbolic-ref', 'detached'],
   inputs: [],
   outputs: commandOutputs,
   examples: [
@@ -80,7 +86,12 @@ export const gitCurrentBranch: BlockDefinition = {
   execution: {
     type: 'command',
     command: 'git',
-    args: ['rev-parse', '--abbrev-ref', 'HEAD'],
+    // symbolic-ref yields the real branch name or exits non-zero on detached HEAD.
+    // -c core.fsmonitor=false: no hook execution.
+    // -q: suppress the "fatal: …" message on detached HEAD.
+    // failOnError:false so detached HEAD → ok:false / empty stdout instead of throw.
+    args: ['-c', 'core.fsmonitor=false', 'symbolic-ref', '-q', '--short', 'HEAD'],
+    failOnError: false,
   },
 }
 
@@ -88,19 +99,19 @@ export const gitLog: BlockDefinition = {
   id: 'git.log',
   name: 'Git Log (oneline)',
   version: '0.1.0',
-  description: 'Return the last N commits in `--oneline` format. `count` must be a decimal integer.',
+  description: 'Return the last N commits in `--oneline` format. `count` must be a positive integer.',
   category: 'git',
   keywords: ['git', 'log', 'commits', 'history', 'changelog'],
   inputs: [
     {
       name: 'count',
       type: 'number',
-      description: 'Number of commits to show (default 10). Must be a decimal integer.',
+      description: 'Number of commits to show (default 10). Must be a positive integer (no leading zero).',
       required: false,
       default: 10,
-      // Safe numeric-only pattern: prevents any non-digit content from being
-      // interpolated into the -n flag value, even though no shell is used.
-      pattern: '^[0-9]+$',
+      // Positive integer only — rejects 0, negatives, floats, and leading zeros.
+      // The engine applies this against String(value) so numeric inputs are covered.
+      pattern: '^[1-9][0-9]*$',
     },
   ],
   outputs: commandOutputs,
@@ -113,7 +124,10 @@ export const gitLog: BlockDefinition = {
   execution: {
     type: 'command',
     command: 'git',
-    args: ['log', '-n', '{{inputs.count}}', '--oneline'],
+    // -c core.fsmonitor=false: no hook execution.
+    // --no-optional-locks: no index-lock writes.
+    // Global options before the subcommand.
+    args: ['-c', 'core.fsmonitor=false', '--no-optional-locks', 'log', '-n', '{{inputs.count}}', '--oneline'],
   },
 }
 
@@ -138,7 +152,11 @@ export const gitDiff: BlockDefinition = {
   execution: {
     type: 'command',
     command: 'git',
-    args: ['diff', '--stat'],
+    // -c core.fsmonitor=false: no hook execution.
+    // --no-optional-locks: no index-lock writes.
+    // --no-textconv: no external textconv converters.
+    // --no-ext-diff: no external diff drivers.
+    args: ['-c', 'core.fsmonitor=false', '--no-optional-locks', 'diff', '--stat', '--no-textconv', '--no-ext-diff'],
   },
 }
 
@@ -235,10 +253,15 @@ export const ghApi: BlockDefinition = {
   description:
     'Call the GitHub REST API at the given path using `gh api` (GET only in v1). ' +
     'The `endpoint` pattern restricts to safe path characters so query injection is ' +
-    'not possible even without a shell. Authenticates via the `gh_token` secret ' +
-    '(stored as AART_SECRET_GH_TOKEN env var or `gh_token` key in secrets.json, ' +
-    'redacted from run reports); when the secret is unset, GH_TOKEN is omitted from ' +
-    'the child env and `gh` falls back to ambient auth (gh auth login / inherited GITHUB_TOKEN).',
+    'not possible even without a shell. ' +
+    'Auth options (in precedence order): ' +
+    '(1) set AART_SECRET_GH_TOKEN to your token — it is injected as GH_TOKEN and ' +
+    'redacted from run reports; ' +
+    '(2) run `gh auth login` on the host — gh reads ~/.config/gh (HOME is in the ' +
+    'command-runner env whitelist) with no token env var needed. ' +
+    'CI note: if your pipeline only exposes GITHUB_TOKEN in the environment (not via ' +
+    'gh auth login), set AART_SECRET_GH_TOKEN=$GITHUB_TOKEN so the token is declared ' +
+    'and redacted rather than leaked unmasked into run reports.',
   category: 'github',
   keywords: ['github', 'gh', 'api', 'rest', 'repos', 'pulls', 'issues', 'releases'],
   inputs: [
@@ -268,7 +291,7 @@ export const ghApi: BlockDefinition = {
     args: ['api', '{{inputs.endpoint}}'],
     // Secret keys are always lowercased by loadSecrets (AART_SECRET_GH_TOKEN → gh_token).
     // When gh_token is unset, the command-runner omits GH_TOKEN from the child env
-    // and gh falls back to ambient auth (gh auth login / inherited GITHUB_TOKEN).
+    // and gh falls back to ~/.config/gh (set by `gh auth login`; HOME is whitelisted).
     env: { GH_TOKEN: '{{secrets.gh_token}}' },
   },
 }

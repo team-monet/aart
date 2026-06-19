@@ -132,9 +132,12 @@ export class Engine {
           `Input "${field.name}" for block ${block.id} must be one of: ${field.enum.join(', ')} (got ${JSON.stringify(value)})`,
         )
       }
-      if (field.pattern && typeof value === 'string') {
+      if (field.pattern !== undefined) {
         // Full match — a partial hit must not pass a gate like "^[a-z-]+$".
-        if (!new RegExp(`^(?:${field.pattern})$`).test(value)) {
+        // Apply against String(value) for any non-undefined value so numeric
+        // inputs like -1 or 3.5 are covered (typeof -1 === 'number', not 'string').
+        // String('x') === 'x', so existing string-typed inputs are unaffected.
+        if (!new RegExp(`^(?:${field.pattern})$`).test(String(value))) {
           throw new Error(
             `Input "${field.name}" for block ${block.id} must match pattern ${field.pattern} (got ${JSON.stringify(value)})`,
           )

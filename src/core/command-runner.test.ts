@@ -71,10 +71,9 @@ describe('runCommandBlock', () => {
     expect(res.output).toMatchObject({ exitCode: 3, ok: false })
   })
 
-  it('env: an unset secret is omitted from child env (no throw); argv-slot missing still throws', async () => {
-    // When a secret referenced in env is undefined, the env entry is omitted
-    // rather than throwing — the child can fall back to ambient auth.
-    // (ctx.secrets has no 'missing_secret' key.)
+  it('env: an unset secret (lone {{secrets.*}} ref) is omitted; argv-slot missing still throws', async () => {
+    // When a secret referenced in env is a lone {{secrets.X}} template and the
+    // secret is not set, the env entry is omitted rather than throwing.
     const res = await runCommandBlock(
       node({
         args: ['-e', 'console.log(JSON.stringify(typeof process.env.ABSENT_KEY))'],
@@ -96,6 +95,60 @@ describe('runCommandBlock', () => {
         ctx,
       ),
     ).rejects.toThrow(/Unresolved/)
+  })
+
+  // Fix C1: typo'd non-secret env template must THROW, not be silently omitted.
+  it('env: a typo\'d {{inputs.x}} reference in env value throws (not silently omitted)', async () => {
+    await expect(
+      runCommandBlock(
+        node({
+          args: ['-e', 'process.exit(0)'],
+          // inputs.token is not in the inputs map — this is a typo, not an
+          // optional secret. It must throw so the user sees the bug.
+          env: { MY_TOKEN: '{{inputs.token}}' },
+        }),
+        {}, // inputs map — token is absent
+        undefined,
+        ctx,
+      ),
+    ).rejects.toThrow(/Unresolved/)
+  })
+
+  // Fix C2: KUBECONFIG passes through from process.env (config-file path, not a secret).
+  // GH_TOKEN and GITHUB_TOKEN are intentionally NOT in the whitelist — passing them
+  // to every child would leak CI tokens unredacted into run reports.
+  it('env: KUBECONFIG from process.env is inherited by child', async () => {
+    const prev = process.env.KUBECONFIG
+    process.env.KUBECONFIG = '/tmp/kube.yaml'
+    try {
+      const res = await runCommandBlock(
+        node({ args: ['-e', 'console.log(process.env.KUBECONFIG ?? "absent")'] }),
+        {},
+        undefined,
+        ctx,
+      )
+      expect((res.output.stdout as string).trim()).toBe('/tmp/kube.yaml')
+    } finally {
+      if (prev === undefined) delete process.env.KUBECONFIG
+      else process.env.KUBECONFIG = prev
+    }
+  })
+
+  it('env: GH_TOKEN is NOT passed through from process.env (would leak unredacted into reports)', async () => {
+    const prev = process.env.GH_TOKEN
+    process.env.GH_TOKEN = 'ambient-gh-token'
+    try {
+      const res = await runCommandBlock(
+        node({ args: ['-e', 'console.log(process.env.GH_TOKEN ?? "absent")'] }),
+        {},
+        undefined,
+        ctx,
+      )
+      expect((res.output.stdout as string).trim()).toBe('absent')
+    } finally {
+      if (prev === undefined) delete process.env.GH_TOKEN
+      else process.env.GH_TOKEN = prev
+    }
   })
 
   it('env template resolves secrets; cwd is workspace-rooted', async () => {

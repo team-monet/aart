@@ -34,16 +34,26 @@ function interpolate(template: string, scope: ResolveScope, what: string): strin
   return typeof v === 'string' ? v : JSON.stringify(v)
 }
 
+// Matches a whole-string single secret reference: "{{secrets.foo_bar}}" (with
+// optional inner whitespace). Used to identify the "unset optional secret"
+// pattern where we intentionally omit the env var rather than throwing.
+const SINGLE_SECRET_REF_RE = /^\{\{\s*secrets\.[\w]+\s*\}\}$/
+
 /**
- * Like interpolate() but returns undefined when the referenced value is
- * absent. Used for env-var values only — an unset secret should mean "omit
- * the env entry" rather than throwing, because env vars are optional by
- * nature (e.g. GH_TOKEN lets `gh` fall back to ambient auth when not set).
- * Argv-slot interpolation uses the strict `interpolate()` above.
+ * Like interpolate() but selectively returns undefined for unset optional
+ * secrets. Used for env-var values only.
  *
- * The resolver itself throws on a missing reference, so we catch and convert
- * "unresolved" errors to undefined. Any other error (e.g. invalid template
- * syntax) is re-thrown so bugs remain visible.
+ * Omit-vs-throw logic:
+ *   - If the trimmed template is a SINGLE whole-string secret reference
+ *     (e.g. `{{secrets.gh_token}}`) AND the resolver throws "Unresolved"
+ *     (meaning the secret is not set) → return undefined (omit the entry).
+ *     This is the intended optional-secret case: the child falls back to
+ *     ambient auth or a different mechanism.
+ *   - For ANY other unresolved env template — a typo'd `{{inputs.token}}`,
+ *     a composite `{{secrets.x}}{{y}}`, a misspelled resolver root — THROW
+ *     so structural bugs surface rather than being silently swallowed.
+ *
+ * Argv-slot interpolation uses the strict `interpolate()` above.
  */
 function interpolateEnvValue(template: string, scope: ResolveScope): string | undefined {
   try {
@@ -51,10 +61,13 @@ function interpolateEnvValue(template: string, scope: ResolveScope): string | un
     if (v === undefined || v === null) return undefined
     return typeof v === 'string' ? v : JSON.stringify(v)
   } catch (err) {
-    // An unresolved reference or interpolation means the value is absent — omit it.
-    // Re-throw anything that isn't an "Unresolved" miss so bugs aren't swallowed.
     const msg = err instanceof Error ? err.message : String(err)
-    if (msg.startsWith('Unresolved')) return undefined
+    // Only silently omit when: the template is a lone secrets.* reference
+    // AND the resolver says it's unresolved (the secret is simply not set).
+    if (msg.startsWith('Unresolved') && SINGLE_SECRET_REF_RE.test(template.trim())) {
+      return undefined
+    }
+    // Everything else — typo'd inputs.*, composite templates, wrong root — throws.
     throw err
   }
 }
@@ -88,16 +101,30 @@ export async function runCommandBlock(
     throw new Error(`cwd escapes the workspace: ${exec.cwd}`)
   }
 
+  // Build the child env in two phases:
+  // 1. Whitelist ambient vars (standard PATH/HOME/etc. plus KUBECONFIG for
+  //    kubectl cluster-config discovery).
+  //    GH_TOKEN/GITHUB_TOKEN are NOT whitelisted here — passing them to every
+  //    command would leak a CI token unredacted into run reports (redaction
+  //    only masks secrets declared in .aa/secrets.json / AART_SECRET_*).
+  //    GitHub auth for gh.api works via two safe paths instead:
+  //      (a) declare `AART_SECRET_GH_TOKEN=$GITHUB_TOKEN` → secret is redacted;
+  //      (b) the host has run `gh auth login` → gh reads ~/.config/gh (HOME is
+  //          whitelisted) without needing any token env var.
+  // 2. Apply block-declared `env` overrides (resolved secrets/inputs) on top —
+  //    these take precedence over anything in phase 1.
   const env: Record<string, string> = {}
-  for (const k of ['PATH', 'HOME', 'TMPDIR', 'LANG', 'TZ', 'SYSTEMROOT', 'USERPROFILE']) {
+  for (const k of [
+    'PATH', 'HOME', 'TMPDIR', 'LANG', 'TZ', 'SYSTEMROOT', 'USERPROFILE',
+    'KUBECONFIG',
+  ]) {
     const v = process.env[k]
     if (v !== undefined) env[k] = v
   }
   for (const [k, v] of Object.entries(exec.env ?? {})) {
     // Env-var values are optional: an unset secret (undefined) means omit the
-    // entry entirely so the child process can fall back to ambient auth or
-    // inherited env (e.g. GH_TOKEN omitted → `gh` uses gh auth login /
-    // inherited GITHUB_TOKEN). Argv-slot interpolation (above) remains strict.
+    // override so the ambient value (set in phase 1 above) flows through.
+    // Argv-slot interpolation (above) remains strict.
     const resolved = interpolateEnvValue(v, scope)
     if (resolved !== undefined) env[k] = resolved
   }
