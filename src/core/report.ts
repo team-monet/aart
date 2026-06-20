@@ -2,7 +2,6 @@ import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import type { ArtifactMeta, BlockDefinition, RunRecord, RunStatus } from './types'
 import { ArtifactSchema, RunRecordSchema } from './types'
-import { approvalEnforced } from './approval'
 
 /**
  * Normalize the on-disk artifacts field to ArtifactMeta[]. Legacy run.json
@@ -141,7 +140,7 @@ export function renderReport(record: RunRecord): string {
   // Only flag an unapproved run when approval is actually being ENFORCED — there,
   // approved:false means a deliberate --yes bypass of the gate. When enforcement
   // is off (the default), unapproved is the normal frictionless case; no nag.
-  if (record.approved === false && approvalEnforced()) {
+  if (record.approved === false && record.approvalEnforced) {
     lines.push('  ⚠ ran UNAPPROVED (--yes override of the approval gate)')
   }
   if (record.endedAt) {

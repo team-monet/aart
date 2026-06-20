@@ -47,6 +47,7 @@ interface BrowserPage {
   ) => Promise<void>
   url: () => string
   title: () => Promise<string>
+  locator: (selector: string) => unknown
   screenshot: (opts?: { mask?: unknown[] }) => Promise<Buffer>
   innerText: (selector: string) => Promise<string>
   evaluate: (expression: string) => Promise<unknown>
@@ -162,7 +163,9 @@ export const webRead = nativeBlock(
       'observation: clamped inline text, a capped interactive-element map, console errors, and ' +
       'paths to the screenshot and full-text artifacts. For SPAs that render content several ' +
       'seconds after load, pass `waitFor` (a CSS selector) to wait for the right element before ' +
-      'reading. Unlike the low-level browser.* primitives this does all perception in one step — ' +
+      'reading. For pages that show secrets, pass `mask` (CSS selectors) to black out those ' +
+      'elements in the screenshot, or `screenshot: false` to skip the screenshot entirely. ' +
+      'Unlike the low-level browser.* primitives this does all perception in one step — ' +
       'the whole point is COMPRESSION (inline ≤ maxChars tokens, bulk offloaded to artifacts).',
     category: 'browser',
     keywords: ['web', 'read', 'page', 'perceive', 'render', 'spa', 'content', 'see', 'screenshot'],
@@ -213,6 +216,21 @@ export const webRead = nativeBlock(
           'page (body) text — so nav/header/footer phrases are found even when a large <main> ' +
           'is present. The `text` and `fullText` outputs are unaffected.',
       },
+      {
+        name: 'mask',
+        type: 'array',
+        description:
+          'CSS selectors whose elements are masked (blacked out) in the screenshot — for pages ' +
+          'that show secrets. Mirrors browser.screenshot\'s mask.',
+      },
+      {
+        name: 'screenshot',
+        type: 'boolean',
+        description:
+          'Set false to skip the screenshot entirely (no image artifact) — for sensitive pages. ' +
+          'Default true. When false, the `screenshot` output field is also omitted — do not ' +
+          'reference it from an outputMapping or the run fails with an Unresolved reference.',
+      },
     ],
     outputs: [
       { name: 'url', type: 'string' },
@@ -221,7 +239,7 @@ export const webRead = nativeBlock(
       { name: 'truncated', type: 'boolean' },
       { name: 'elements', type: 'array' },
       { name: 'consoleErrors', type: 'object' },
-      { name: 'screenshot', type: 'string' },
+      { name: 'screenshot', type: 'string', description: 'Path to the screenshot artifact. Absent when screenshot:false was passed.' },
       { name: 'fullText', type: 'string' },
       { name: 'settled', type: 'boolean' },
       { name: 'matched', type: 'boolean' },
@@ -236,6 +254,26 @@ export const webRead = nativeBlock(
     const focusSel = inputs.focus ? String(inputs.focus) : null
     const waitForSel = inputs.waitFor ? String(inputs.waitFor) : null
     const expectStr = inputs.expect && typeof inputs.expect === 'string' ? inputs.expect : null
+    // Coerce a lone non-empty string to a single-element list so callers who pass
+    // mask: '#secret' (instead of mask: ['#secret']) are still masked. Without this
+    // the non-array branch silently takes the else path and the screenshot is taken
+    // unmasked — a secret leak.
+    const maskList = Array.isArray(inputs.mask)
+      ? inputs.mask
+      : (typeof inputs.mask === 'string' && inputs.mask ? [inputs.mask] : undefined)
+    const maskSelectors = maskList ? maskList.map((s) => p.locator(String(s))) : undefined
+    const wantShot = inputs.screenshot !== false
+
+    // Snapshot the console log entries themselves (by object identity) before
+    // navigating so consoleErrors only reflects entries that arrive during THIS
+    // navigation, not earlier steps that shared the same browser capability.
+    // Using a Set of entry references (not an index) makes this survive cappedPush
+    // evictions: once the shared buffer exceeds BUFFER_CAP (500) the oldest entry
+    // is shift()-ed out, sliding every subsequent entry's index down by 1. An index
+    // snapshot taken before eviction would then slice from the wrong position and
+    // silently drop errors (or return [] → report 0 errors on a broken page).
+    // Entry identity is stable across shift() — the object reference never changes.
+    const consoleBefore = new Set(cap.consoleLog ?? [])
 
     // 1. Navigate. Use domcontentloaded (reliable) rather than networkidle, which
     // never fires on pages with a persistent connection (SSE / long-poll / analytics)
@@ -294,16 +332,24 @@ export const webRead = nativeBlock(
       href?: string
     }>
 
-    // 6. Console errors from the captured log (accumulated since navigation).
-    const errorEntries = (cap.consoleLog ?? []).filter((e) => e.type === 'error')
+    // 6. Console errors from the captured log, scoped to entries that arrived
+    // after this navigation began (consoleBefore was captured before p.goto so
+    // earlier steps sharing the same browser cap don't pollute this count).
+    // Using Set membership (entry identity) rather than a sliced index so the
+    // count is correct even when cappedPush has evicted entries from the front
+    // of the shared buffer (shifting every index down).
+    const errorEntries = (cap.consoleLog ?? []).filter((e) => !consoleBefore.has(e) && e.type === 'error')
     const consoleErrors = {
       count: errorEntries.length,
       sample: errorEntries.slice(0, 3).map((e) => e.text),
     }
 
-    // 7. Screenshot → artifact.
-    const buf = await p.screenshot()
-    const screenshotPath = ctx.artifacts.attach('web-read.png', buf, { kind: 'screenshot' })
+    // 7. Screenshot → artifact (skipped when wantShot is false; masked when mask selectors given).
+    let screenshotPath: string | undefined
+    if (wantShot) {
+      const buf = await p.screenshot(maskSelectors ? { mask: maskSelectors } : undefined)
+      screenshotPath = ctx.artifacts.attach('web-read.png', buf, { kind: 'screenshot' })
+    }
 
     // 8. Full text → artifact (save as Buffer/string; attach accepts both).
     const fullTextPath = ctx.artifacts.attach('web-read.txt', fullText, {
@@ -339,7 +385,7 @@ export const webRead = nativeBlock(
       truncated,
       elements,
       consoleErrors,
-      screenshot: screenshotPath,
+      ...(screenshotPath !== undefined ? { screenshot: screenshotPath } : {}),
       fullText: fullTextPath,
       settled,
       ...(matched !== undefined ? { matched } : {}),

@@ -104,6 +104,7 @@ export async function scheduleAddCommand(workflowId: string, opts: AddOpts): Pro
     params,
     enabled: true,
     createdAt: now,
+    requireApproval: approvalEnforced(),
   }
 
   await writeSchedule(ws, record)
@@ -123,6 +124,14 @@ export async function scheduleAddCommand(workflowId: string, opts: AddOpts): Pro
   console.log(
     'Failed ticks (exit 1) are visible via the OS mailer (MAILTO in crontab, or launchd StandardErrorPath).',
   )
+  if (approvalEnforced()) {
+    console.log(
+      'Approval enforcement: this schedule was created with AART_REQUIRE_APPROVAL=1 and will',
+    )
+    console.log(
+      'refuse draft/unapproved workflows at fire time regardless of the cron environment.',
+    )
+  }
   console.log(
     'Version-pinning note: if the workflow is re-registered (same version), approval resets to draft',
   )
@@ -276,7 +285,7 @@ export async function scheduleRunCommand(scheduleId: string): Promise<void> {
     console.error(`A deprecated workflow will not run on a schedule. Re-approve it, or remove the schedule with:  aart schedule remove ${scheduleId}`)
     process.exit(1)
   }
-  if (approvalEnforced() && pending.length > 0) {
+  if ((schedule.requireApproval || approvalEnforced()) && pending.length > 0) {
     console.error(
       `schedule ${scheduleId}: refused — workflow is not approved: ${pending.join(', ')}`,
     )

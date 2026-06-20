@@ -246,6 +246,45 @@ describe('scheduleAddCommand', () => {
     // No schedule should have been written.
     expect(await listSchedules(ws)).toHaveLength(0)
   })
+
+  it('writes requireApproval: true to the record when AART_REQUIRE_APPROVAL=1', async () => {
+    process.env.AART_REQUIRE_APPROVAL = '1'
+    const runtime = new Runtime(ws, [corePack])
+    registerWorkflow(runtime, true /* approved */)
+
+    const { exited } = await run(() =>
+      scheduleAddCommand('test.schedule.workflow', {
+        cron: '0 9 * * 1-5',
+        input: '{}',
+        param: '{}',
+      }),
+    )
+    expect(exited).toBe(false)
+
+    const schedules = await listSchedules(ws)
+    expect(schedules).toHaveLength(1)
+    expect(schedules[0]!.requireApproval).toBe(true)
+  })
+
+  it('writes requireApproval: false (or omits it) when AART_REQUIRE_APPROVAL is unset', async () => {
+    delete process.env.AART_REQUIRE_APPROVAL
+    const runtime = new Runtime(ws, [corePack])
+    registerWorkflow(runtime, true /* approved */)
+
+    const { exited } = await run(() =>
+      scheduleAddCommand('test.schedule.workflow', {
+        cron: '0 9 * * 1-5',
+        input: '{}',
+        param: '{}',
+      }),
+    )
+    expect(exited).toBe(false)
+
+    const schedules = await listSchedules(ws)
+    expect(schedules).toHaveLength(1)
+    // approvalEnforced() is false when env is unset, so requireApproval is falsy.
+    expect(schedules[0]!.requireApproval).toBeFalsy()
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -354,6 +393,61 @@ describe('scheduleRunCommand', () => {
     expect(exited).toBe(true)
     expect(exitCode).toBe(1)
     expect(stderrLines.some((l) => l.includes('deprecated'))).toBe(true)
+  })
+
+  it('refuses a DRAFT workflow at fire-time when record.requireApproval=true even with env OFF', async () => {
+    // Create the schedule with approval enforcement ON.
+    process.env.AART_REQUIRE_APPROVAL = '1'
+    const runtime = new Runtime(ws, [corePack])
+    const wf = registerWorkflow(runtime, true /* approved at add-time */)
+
+    await run(() =>
+      scheduleAddCommand('test.schedule.workflow', {
+        cron: '0 9 * * 1-5',
+        input: '{"msg":"hi"}',
+        param: '{}',
+      }),
+    )
+    const scheduleId = (await listSchedules(ws))[0]!.scheduleId
+    // Confirm the record captured requireApproval.
+    expect((await listSchedules(ws))[0]!.requireApproval).toBe(true)
+
+    // Degrade to draft (simulates re-register resetting approval).
+    runtime.fileRegistry.registerBlock({ ...wf, approval: 'draft' as const })
+
+    // NOW turn off enforcement in the environment (simulates cron's bare env).
+    delete process.env.AART_REQUIRE_APPROVAL
+
+    // Tick — must still refuse because record.requireApproval is true.
+    const { exited } = await run(() => scheduleRunCommand(scheduleId))
+    expect(exited).toBe(true)
+    expect(exitCode).toBe(1)
+    expect(stderrLines.some((l) => l.includes('not approved'))).toBe(true)
+  })
+
+  it('fires a DRAFT workflow when record.requireApproval is falsy AND env enforcement is off', async () => {
+    // Create the schedule with enforcement OFF — record.requireApproval will be false.
+    delete process.env.AART_REQUIRE_APPROVAL
+    const runtime = new Runtime(ws, [corePack])
+    const wf = registerWorkflow(runtime, true /* approved at add-time */)
+
+    await run(() =>
+      scheduleAddCommand('test.schedule.workflow', {
+        cron: '0 9 * * 1-5',
+        input: '{"msg":"hi"}',
+        param: '{}',
+      }),
+    )
+    const scheduleId = (await listSchedules(ws))[0]!.scheduleId
+
+    // Degrade to draft.
+    runtime.fileRegistry.registerBlock({ ...wf, approval: 'draft' as const })
+
+    // Env is also off — should run without refusing.
+    const { exited } = await run(() => scheduleRunCommand(scheduleId))
+    expect(exited).toBe(false)
+    const updated = (await listSchedules(ws)).find((s) => s.scheduleId === scheduleId)!
+    expect(updated.lastStatus).toBe('COMPLETED')
   })
 
   it('exits 1 without throwing when the workflow is deleted (getBlock returns undefined)', async () => {

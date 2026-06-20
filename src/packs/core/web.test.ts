@@ -494,7 +494,264 @@ suite('web.read — real Chromium integration', () => {
     expect(elapsed).toBeLessThan(15000)
   }, 25000)
 
-  // ---- 13. Focus-miss is not a match (Fix 3) ---------------------------------
+  // ---- 13. Console scoping: step 2 must not inherit step 1's errors (Fix 1) --
+
+  it('consoleErrors only reflects errors from the current navigation, not prior steps', async () => {
+    // Step 1: a page that emits console.error
+    const errorUrl = await serve((_req, res) => {
+      res.setHeader('content-type', 'text/html')
+      res.end(
+        `<!doctype html><html><head><title>Error Page</title></head>
+        <body>
+          <main><p>Page with errors</p></main>
+          <script>console.error('STEP1_ERROR')</script>
+        </body></html>`,
+      )
+    })
+    // Step 2: a clean page with no errors
+    const cleanUrl = await serve((_req, res) => {
+      res.setHeader('content-type', 'text/html')
+      res.end(
+        `<!doctype html><html><head><title>Clean Page</title></head>
+        <body><main><p>Clean page, no errors here</p></main></body></html>`,
+      )
+    })
+
+    const dir = tmpDir()
+
+    // Two-step workflow sharing the same browser capability.
+    const wf: BlockDefinition = {
+      id: 'console-scope-test',
+      name: 'Console Scope Test',
+      version: '0.1.0',
+      inputs: [
+        { name: 'errorUrl', type: 'string' },
+        { name: 'cleanUrl', type: 'string' },
+      ],
+      outputs: [],
+      execution: {
+        type: 'workflow',
+        steps: [
+          {
+            id: 'step1',
+            block: 'web.read',
+            inputs: { url: '{{inputs.errorUrl}}' },
+          },
+          {
+            id: 'step2',
+            block: 'web.read',
+            inputs: { url: '{{inputs.cleanUrl}}' },
+          },
+        ],
+        outputMapping: {
+          step1Errors: '$step1.consoleErrors',
+          step2Errors: '$step2.consoleErrors',
+        },
+      },
+    }
+
+    const record = await new Runtime(dir, [corePack]).run(wf, { errorUrl, cleanUrl })
+    expect(record.status).toBe('COMPLETED')
+
+    const results = record.results as Record<string, unknown>
+    const step1Errors = results.step1Errors as { count: number; sample: string[] }
+    const step2Errors = results.step2Errors as { count: number; sample: string[] }
+
+    // Step 1 should have caught the error.
+    expect(step1Errors.count).toBeGreaterThanOrEqual(1)
+    expect(step1Errors.sample.some((s) => s.includes('STEP1_ERROR'))).toBe(true)
+
+    // Step 2 must NOT inherit step 1's error — the clean page has zero errors.
+    expect(step2Errors.count).toBe(0)
+  }, 60000)
+
+  // ---- 14. screenshot:false skips the artifact and omits the output field ----
+
+  it('screenshot:false produces no web-read.png artifact and no screenshot output', async () => {
+    const url = await serve((_req, res) => {
+      res.setHeader('content-type', 'text/html')
+      res.end(
+        `<!doctype html><html><head><title>No Shot</title></head>
+        <body><main><p>Sensitive page — no screenshot wanted</p></main></body></html>`,
+      )
+    })
+
+    const dir = tmpDir()
+
+    // Build a workflow that does NOT map screenshot in outputMapping (it won't be
+    // present in block output when screenshot:false), mirroring how matched is handled.
+    const wf: BlockDefinition = {
+      id: 'no-screenshot-test',
+      name: 'No Screenshot Test',
+      version: '0.1.0',
+      inputs: [{ name: 'url', type: 'string' }],
+      outputs: [],
+      execution: {
+        type: 'workflow',
+        steps: [
+          {
+            id: 'read',
+            block: 'web.read',
+            inputs: { url: '{{inputs.url}}', screenshot: false },
+          },
+        ],
+        outputMapping: {
+          text: '$read.text',
+          fullText: '$read.fullText',
+        },
+      },
+    }
+
+    const record = await new Runtime(dir, [corePack]).run(wf, { url })
+    expect(record.status).toBe('COMPLETED')
+
+    // No screenshot artifact attached.
+    const artifacts = record.artifacts as Array<{ name: string }>
+    expect(artifacts.find((a) => a.name === 'web-read.png')).toBeUndefined()
+
+    // Full-text artifact still present.
+    const textArt = artifacts.find((a) => a.name === 'web-read.txt')
+    expect(textArt).toBeDefined()
+  }, 30000)
+
+  // ---- 15. mask:['#secret'] completes and attaches screenshot ----------------
+
+  it('mask selectors: web.read still completes and attaches screenshot', async () => {
+    const url = await serve((_req, res) => {
+      res.setHeader('content-type', 'text/html')
+      res.end(
+        `<!doctype html><html><head><title>Masked</title></head>
+        <body>
+          <main><p>Public content</p></main>
+          <div id="secret">super-secret-token-12345</div>
+        </body></html>`,
+      )
+    })
+
+    const dir = tmpDir()
+    // Pass mask as a literal array (non-string) — same pattern as maxChars: 50.
+    const wf: BlockDefinition = {
+      id: 'mask-test',
+      name: 'Mask Test',
+      version: '0.1.0',
+      inputs: [{ name: 'url', type: 'string' }],
+      outputs: [],
+      execution: {
+        type: 'workflow',
+        steps: [
+          {
+            id: 'read',
+            block: 'web.read',
+            inputs: { url: '{{inputs.url}}', mask: ['#secret'] },
+          },
+        ],
+        outputMapping: {
+          screenshot: '$read.screenshot',
+          text: '$read.text',
+        },
+      },
+    }
+
+    const record = await new Runtime(dir, [corePack]).run(wf, { url })
+    expect(record.status).toBe('COMPLETED')
+
+    // Screenshot artifact is attached (we can't inspect pixels, but it must exist).
+    const artifacts = record.artifacts as Array<{ name: string; path: string; kind: string }>
+    const shotArt = artifacts.find((a) => a.name === 'web-read.png')
+    expect(shotArt).toBeDefined()
+    expect(shotArt?.kind).toBe('screenshot')
+    expect(fs.existsSync(shotArt!.path)).toBe(true)
+    expect(fs.statSync(shotArt!.path).size).toBeGreaterThan(0)
+  }, 30000)
+
+  // ---- 17. consoleErrors count survives buffer eviction (Fix 1 regression test) --
+  //
+  // The prior index-based approach (consoleStart = cap.consoleLog.length; slice(consoleStart))
+  // silently broke when cappedPush evicted entries from the front of the shared buffer:
+  // after N evictions every index slid down by N, so slice(consoleStart) returned []
+  // and reported 0 errors even on a page with real errors.
+  //
+  // This test proves the entry-set-diff approach is correct:
+  //   step 1 saturates the 500-entry buffer (≥ 520 console.errors → forces evictions)
+  //   step 2 visits a page with exactly 3 console.errors
+  //   the assertion is step2.consoleErrors.count === 3 (not 0)
+
+  it('consoleErrors count is exact even after the shared buffer is evicted past its cap', async () => {
+    // Step 1: emit 520 console.errors to overflow the 500-entry BUFFER_CAP and force evictions.
+    const floodUrl = await serve((_req, res) => {
+      res.setHeader('content-type', 'text/html')
+      res.end(
+        `<!doctype html><html><head><title>Flood</title></head>
+        <body>
+          <main><p>Flood page</p></main>
+          <script>for (var i = 0; i < 520; i++) console.error('fill' + i)</script>
+        </body></html>`,
+      )
+    })
+
+    // Step 2: a page with exactly 3 console.errors.
+    const threeErrorUrl = await serve((_req, res) => {
+      res.setHeader('content-type', 'text/html')
+      res.end(
+        `<!doctype html><html><head><title>Three Errors</title></head>
+        <body>
+          <main><p>Three errors page</p></main>
+          <script>
+            console.error('ERR_EVICTION_A');
+            console.error('ERR_EVICTION_B');
+            console.error('ERR_EVICTION_C');
+          </script>
+        </body></html>`,
+      )
+    })
+
+    const dir = tmpDir()
+
+    const wf: BlockDefinition = {
+      id: 'eviction-test',
+      name: 'Eviction Test',
+      version: '0.1.0',
+      inputs: [
+        { name: 'floodUrl', type: 'string' },
+        { name: 'threeErrorUrl', type: 'string' },
+      ],
+      outputs: [],
+      execution: {
+        type: 'workflow',
+        steps: [
+          {
+            id: 'step1',
+            block: 'web.read',
+            inputs: { url: '{{inputs.floodUrl}}' },
+          },
+          {
+            id: 'step2',
+            block: 'web.read',
+            inputs: { url: '{{inputs.threeErrorUrl}}' },
+          },
+        ],
+        outputMapping: {
+          step1Count: '$step1.consoleErrors',
+          step2Errors: '$step2.consoleErrors',
+        },
+      },
+    }
+
+    const record = await new Runtime(dir, [corePack]).run(wf, { floodUrl, threeErrorUrl })
+    expect(record.status).toBe('COMPLETED')
+
+    const results = record.results as Record<string, unknown>
+    const step2Errors = results.step2Errors as { count: number; sample: string[] }
+
+    // With the old index approach this would be 0 (all entries evicted past the index).
+    // With the entry-set-diff it must be exactly 3.
+    expect(step2Errors.count).toBe(3)
+    expect(step2Errors.sample).toContain('ERR_EVICTION_A')
+    expect(step2Errors.sample).toContain('ERR_EVICTION_B')
+    expect(step2Errors.sample).toContain('ERR_EVICTION_C')
+  }, 90000)
+
+  // ---- 16. Focus-miss is not a match (Fix 3) ---------------------------------
 
   it('matched:false when focus selector is absent from the page', async () => {
     const url = await serve((_req, res) => {

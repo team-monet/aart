@@ -39,8 +39,9 @@ export function deprecatedInTree(
   const deprecated: string[] = []
   const seen = new Set<string>()
   const visit = (b: BlockDefinition, trust: boolean) => {
-    if (seen.has(b.id)) return
-    seen.add(b.id)
+    const key = `${b.id}@${b.version ?? ''}`
+    if (seen.has(key)) return
+    seen.add(key)
     if (b.execution.type !== 'native' && trust && b.approval === 'deprecated') {
       deprecated.push(b.id)
     }
@@ -70,8 +71,9 @@ export function unapprovedInTree(
   const pending: string[] = []
   const seen = new Set<string>()
   const visit = (b: BlockDefinition, trust: boolean) => {
-    if (seen.has(b.id)) return
-    seen.add(b.id)
+    const key = `${b.id}@${b.version ?? ''}`
+    if (seen.has(key)) return
+    seen.add(key)
     const ok = b.execution.type === 'native' || (trust && b.approval === 'approved')
     if (!ok) pending.push(b.id)
     if (b.execution.type === 'workflow') {

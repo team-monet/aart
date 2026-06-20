@@ -122,6 +122,46 @@ describe('deprecatedInTree', () => {
     // trustTop=false only affects the top; referenced registry blocks are trusted.
     expect(deprecatedInTree(w, reg([w, leaf]), false)).toEqual(['leaf.depr2'])
   })
+
+  it('does NOT hide a deprecated leaf@2.0.0 behind an already-visited approved leaf@1.0.0', () => {
+    // Two versions of the same block id: v1 approved, v2 deprecated.
+    // id-only dedup would skip v2 because v1 was already seen — fix keys on id@version.
+    const leaf1: BlockDefinition = {
+      id: 'dedup.depr.leaf',
+      name: 'dedup.depr.leaf',
+      version: '1.0.0',
+      inputs: [],
+      outputs: [],
+      execution: { type: 'node', code: 'return {};' },
+      approval: 'approved',
+    }
+    const leaf2: BlockDefinition = {
+      id: 'dedup.depr.leaf',
+      name: 'dedup.depr.leaf',
+      version: '2.0.0',
+      inputs: [],
+      outputs: [],
+      execution: { type: 'node', code: 'return {};' },
+      approval: 'deprecated',
+    }
+    const w: BlockDefinition = {
+      id: 'dedup.depr.wf',
+      name: 'dedup.depr.wf',
+      version: '0.1.0',
+      inputs: [],
+      outputs: [],
+      execution: {
+        type: 'workflow',
+        steps: [
+          { id: 's1', block: 'dedup.depr.leaf', version: '1.0.0', inputs: {} },
+          { id: 's2', block: 'dedup.depr.leaf', version: '2.0.0', inputs: {} },
+        ],
+      },
+      approval: 'approved',
+    }
+    const result = deprecatedInTree(w, reg([w, leaf1, leaf2]), true)
+    expect(result).toContain('dedup.depr.leaf')
+  })
 })
 
 describe('unapprovedInTree', () => {
@@ -150,5 +190,46 @@ describe('unapprovedInTree', () => {
   it('does not trust the top def status when trustTop=false (ad-hoc file run)', () => {
     const w = wf('w', 'qa.x', 'approved') // claims approved, but from a file
     expect(unapprovedInTree(w, reg([w]), false)).toEqual(['w'])
+  })
+
+  it('does NOT hide a draft leaf@2.0.0 behind an already-visited approved leaf@1.0.0', () => {
+    // Two versions of the same block id: v1 approved, v2 draft.
+    // A workflow that references both must NOT silently skip v2 due to id-only dedup.
+    const leaf1: BlockDefinition = {
+      id: 'dedup.leaf',
+      name: 'dedup.leaf',
+      version: '1.0.0',
+      inputs: [],
+      outputs: [],
+      execution: { type: 'node', code: 'return {};' },
+      approval: 'approved',
+    }
+    const leaf2: BlockDefinition = {
+      id: 'dedup.leaf',
+      name: 'dedup.leaf',
+      version: '2.0.0',
+      inputs: [],
+      outputs: [],
+      execution: { type: 'node', code: 'return {};' },
+      approval: 'draft', // NOT approved
+    }
+    // Workflow pinning both versions in separate steps.
+    const w: BlockDefinition = {
+      id: 'dedup.wf',
+      name: 'dedup.wf',
+      version: '0.1.0',
+      inputs: [],
+      outputs: [],
+      execution: {
+        type: 'workflow',
+        steps: [
+          { id: 's1', block: 'dedup.leaf', version: '1.0.0', inputs: {} },
+          { id: 's2', block: 'dedup.leaf', version: '2.0.0', inputs: {} },
+        ],
+      },
+      approval: 'approved',
+    }
+    const result = unapprovedInTree(w, reg([w, leaf1, leaf2]), true)
+    expect(result).toContain('dedup.leaf')
   })
 })
