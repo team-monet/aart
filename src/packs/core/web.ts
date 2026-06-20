@@ -227,9 +227,15 @@ export const webRead = nativeBlock(
         name: 'screenshot',
         type: 'boolean',
         description:
-          'Set false to skip the screenshot entirely (no image artifact) — for sensitive pages. ' +
-          'Default true. When false, the `screenshot` output field is also omitted — do not ' +
-          'reference it from an outputMapping or the run fails with an Unresolved reference.',
+          'Set false to skip the screenshot AND the full-text artifact — so those on-disk files ' +
+          'under .aa/runs do not persist secrets. Accepts boolean false or the string "false" ' +
+          '(template interpolation stringifies booleans, so {{inputs.screenshot}} passes "false" ' +
+          'when the workflow-level input is false). Default true. When false, the `screenshot` and ' +
+          '`fullText` output fields are both omitted — do not reference either from an ' +
+          'outputMapping or the run fails with an Unresolved reference. The short clamped inline ' +
+          '`text` preview (first ~maxChars chars of main content, default 2000) is still returned ' +
+          'and written to run.json — do not point web.read at a page whose first ~2000 characters ' +
+          'are themselves secret.',
       },
     ],
     outputs: [
@@ -240,7 +246,7 @@ export const webRead = nativeBlock(
       { name: 'elements', type: 'array' },
       { name: 'consoleErrors', type: 'object' },
       { name: 'screenshot', type: 'string', description: 'Path to the screenshot artifact. Absent when screenshot:false was passed.' },
-      { name: 'fullText', type: 'string' },
+      { name: 'fullText', type: 'string', description: 'Path to the full-text artifact. Absent when screenshot:false was passed (sensitive read).' },
       { name: 'settled', type: 'boolean' },
       { name: 'matched', type: 'boolean' },
     ],
@@ -262,7 +268,12 @@ export const webRead = nativeBlock(
       ? inputs.mask
       : (typeof inputs.mask === 'string' && inputs.mask ? [inputs.mask] : undefined)
     const maskSelectors = maskList ? maskList.map((s) => p.locator(String(s))) : undefined
-    const wantShot = inputs.screenshot !== false
+    // screenshot:false (or "false" via template interpolation) marks a SENSITIVE
+    // read: skip the screenshot AND the full-text artifact so on-disk artifacts
+    // under .aa/runs don't persist secrets. (The clamped inline `text` is still
+    // returned — and thus may appear in the run record — but the verbatim
+    // full-text dump and the screenshot are not written.)
+    const persistArtifacts = inputs.screenshot !== false && inputs.screenshot !== 'false'
 
     // Snapshot the console log entries themselves (by object identity) before
     // navigating so consoleErrors only reflects entries that arrive during THIS
@@ -344,18 +355,21 @@ export const webRead = nativeBlock(
       sample: errorEntries.slice(0, 3).map((e) => e.text),
     }
 
-    // 7. Screenshot → artifact (skipped when wantShot is false; masked when mask selectors given).
+    // 7. Screenshot → artifact (skipped when persistArtifacts is false; masked when mask selectors given).
     let screenshotPath: string | undefined
-    if (wantShot) {
+    if (persistArtifacts) {
       const buf = await p.screenshot(maskSelectors ? { mask: maskSelectors } : undefined)
       screenshotPath = ctx.artifacts.attach('web-read.png', buf, { kind: 'screenshot' })
     }
 
-    // 8. Full text → artifact (save as Buffer/string; attach accepts both).
-    const fullTextPath = ctx.artifacts.attach('web-read.txt', fullText, {
-      mime: 'text/plain',
-      kind: 'file',
-    })
+    // 8. Full text → artifact (skipped on sensitive reads, i.e. when persistArtifacts is false).
+    let fullTextPath: string | undefined
+    if (persistArtifacts) {
+      fullTextPath = ctx.artifacts.attach('web-read.txt', fullText, {
+        mime: 'text/plain',
+        kind: 'file',
+      })
+    }
 
     // 9. Optional expect → matched boolean.
     // When focus is set we match against the already-extracted focus-region text
@@ -386,7 +400,7 @@ export const webRead = nativeBlock(
       elements,
       consoleErrors,
       ...(screenshotPath !== undefined ? { screenshot: screenshotPath } : {}),
-      fullText: fullTextPath,
+      ...(fullTextPath !== undefined ? { fullText: fullTextPath } : {}),
       settled,
       ...(matched !== undefined ? { matched } : {}),
     }

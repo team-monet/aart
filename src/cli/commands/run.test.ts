@@ -159,6 +159,8 @@ describe('approval gate — default off (AART_REQUIRE_APPROVAL unset)', () => {
     const record = JSON.parse(jsonLine!)
     expect(record.approved).toBe(true)
     expect(record.status).toBe('COMPLETED')
+    // M1: deprecated must be false (or falsy) for a non-deprecated workflow.
+    expect(record.deprecated).toBeFalsy()
   })
 })
 
@@ -263,7 +265,7 @@ describe('deprecation gate — refuses regardless of AART_REQUIRE_APPROVAL', () 
     expect(stderrLines.some((l) => l.includes('deprecated'))).toBe(true)
   })
 
-  it('allows a deprecated workflow with --yes (exit 0)', async () => {
+  it('allows a deprecated workflow with --yes (exit 0) and records deprecated:true', async () => {
     delete process.env.AART_REQUIRE_APPROVAL
     const runtime = new Runtime(ws, [corePack])
     registerWorkflow(runtime, 'deprecated')
@@ -285,6 +287,13 @@ describe('deprecation gate — refuses regardless of AART_REQUIRE_APPROVAL', () 
     expect(jsonLine).toBeDefined()
     const record = JSON.parse(jsonLine!)
     expect(record.status).toBe('COMPLETED')
+    // M1: the --json output must expose deprecated so CI wrappers can gate on it.
+    expect(record.deprecated).toBe(true)
+    // The run record must carry deprecated:true so renderReport can warn.
+    // Read back the on-disk record to verify it persisted (not just in-memory).
+    const { readRun } = await import('../../core/report')
+    const onDisk = await readRun(ws, record.runId)
+    expect(onDisk.deprecated).toBe(true)
   })
 
   it('an approved workflow is unaffected by the deprecation gate', async () => {

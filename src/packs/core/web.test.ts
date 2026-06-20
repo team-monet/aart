@@ -565,9 +565,9 @@ suite('web.read — real Chromium integration', () => {
     expect(step2Errors.count).toBe(0)
   }, 60000)
 
-  // ---- 14. screenshot:false skips the artifact and omits the output field ----
+  // ---- 14. screenshot:false skips BOTH artifacts but inline text is present ----
 
-  it('screenshot:false produces no web-read.png artifact and no screenshot output', async () => {
+  it('screenshot:false produces no web-read.png and no web-read.txt, but inline text is present', async () => {
     const url = await serve((_req, res) => {
       res.setHeader('content-type', 'text/html')
       res.end(
@@ -578,8 +578,10 @@ suite('web.read — real Chromium integration', () => {
 
     const dir = tmpDir()
 
-    // Build a workflow that does NOT map screenshot in outputMapping (it won't be
-    // present in block output when screenshot:false), mirroring how matched is handled.
+    // Build a workflow that does NOT map screenshot or fullText in outputMapping
+    // (both will be absent from block output when screenshot:false). Mirroring how
+    // matched is handled: omit absent fields from outputMapping to avoid the
+    // "Unresolved reference" error from the resolver.
     const wf: BlockDefinition = {
       id: 'no-screenshot-test',
       name: 'No Screenshot Test',
@@ -596,8 +598,8 @@ suite('web.read — real Chromium integration', () => {
           },
         ],
         outputMapping: {
+          // screenshot and fullText intentionally omitted — absent for sensitive reads.
           text: '$read.text',
-          fullText: '$read.fullText',
         },
       },
     }
@@ -605,13 +607,72 @@ suite('web.read — real Chromium integration', () => {
     const record = await new Runtime(dir, [corePack]).run(wf, { url })
     expect(record.status).toBe('COMPLETED')
 
-    // No screenshot artifact attached.
+    // Neither heavy artifact should be attached.
     const artifacts = record.artifacts as Array<{ name: string }>
     expect(artifacts.find((a) => a.name === 'web-read.png')).toBeUndefined()
+    expect(artifacts.find((a) => a.name === 'web-read.txt')).toBeUndefined()
 
-    // Full-text artifact still present.
-    const textArt = artifacts.find((a) => a.name === 'web-read.txt')
-    expect(textArt).toBeDefined()
+    // Inline text is still returned (the escape hatch suppresses artifacts, not perception).
+    const results = record.results as Record<string, unknown>
+    expect(String(results?.text ?? '')).toContain('Sensitive page')
+  }, 30000)
+
+  // ---- 14b. screenshot:"false" (stringified) also suppresses both artifacts ---
+  //
+  // Template interpolation stringifies booleans: a workflow that wires
+  // screenshot via {{inputs.screenshot}} passes the STRING "false" when the
+  // workflow-level input is false. This test proves Fix 2: string "false" is
+  // treated identically to boolean false.
+
+  it('screenshot:"false" (string) also suppresses both artifacts and inline text is present', async () => {
+    const url = await serve((_req, res) => {
+      res.setHeader('content-type', 'text/html')
+      res.end(
+        `<!doctype html><html><head><title>String False</title></head>
+        <body><main><p>Template-interpolated false — no artifacts wanted</p></main></body></html>`,
+      )
+    })
+
+    const dir = tmpDir()
+
+    // Pass screenshot as a STRING "false" to simulate {{inputs.screenshot}}
+    // template interpolation. The helper's string-path puts it through
+    // {{inputs.screenshot}}, which is exactly what a wrapper workflow does.
+    const wf: BlockDefinition = {
+      id: 'string-false-test',
+      name: 'String False Test',
+      version: '0.1.0',
+      inputs: [
+        { name: 'url', type: 'string' },
+        { name: 'screenshot', type: 'string' },
+      ],
+      outputs: [],
+      execution: {
+        type: 'workflow',
+        steps: [
+          {
+            id: 'read',
+            block: 'web.read',
+            inputs: { url: '{{inputs.url}}', screenshot: '{{inputs.screenshot}}' },
+          },
+        ],
+        outputMapping: {
+          text: '$read.text',
+        },
+      },
+    }
+
+    const record = await new Runtime(dir, [corePack]).run(wf, { url, screenshot: 'false' })
+    expect(record.status).toBe('COMPLETED')
+
+    // Neither heavy artifact should be attached — string "false" is a sensitive read.
+    const artifacts = record.artifacts as Array<{ name: string }>
+    expect(artifacts.find((a) => a.name === 'web-read.png')).toBeUndefined()
+    expect(artifacts.find((a) => a.name === 'web-read.txt')).toBeUndefined()
+
+    // Inline text still present.
+    const results = record.results as Record<string, unknown>
+    expect(String(results?.text ?? '')).toContain('Template-interpolated false')
   }, 30000)
 
   // ---- 15. mask:['#secret'] completes and attaches screenshot ----------------

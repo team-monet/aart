@@ -81,7 +81,7 @@ export async function runCommand(workflowRef: string, opts: RunOpts): Promise<vo
   const inputs = parseJson(opts.input, '--input')
   const params = parseJson(opts.param, '--param')
 
-  const record = await runtime.run(wf, inputs, params, { verbose: opts.verbose, approved })
+  const record = await runtime.run(wf, inputs, params, { verbose: opts.verbose, approved, deprecated: deprecated.length > 0 })
   const reportPath = path.join('.aa', 'runs', record.runId, 'run.json')
 
   if (opts.json) {
@@ -94,6 +94,7 @@ export async function runCommand(workflowRef: string, opts: RunOpts): Promise<vo
         blockId: record.blockId,
         status: record.status,
         approved: record.approved,
+        deprecated: record.deprecated,
         error: record.error,
         startedAt: record.startedAt,
         endedAt: record.endedAt,

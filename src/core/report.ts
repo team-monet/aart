@@ -143,6 +143,9 @@ export function renderReport(record: RunRecord): string {
   if (record.approved === false && record.approvalEnforced) {
     lines.push('  ⚠ ran UNAPPROVED (--yes override of the approval gate)')
   }
+  if (record.deprecated) {
+    lines.push('  ⚠ ran a DEPRECATED workflow (--yes override of the retire gate)')
+  }
   if (record.endedAt) {
     const ms = Date.parse(record.endedAt) - Date.parse(record.startedAt)
     lines.push(`  duration: ${ms}ms`)

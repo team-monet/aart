@@ -173,6 +173,21 @@ describe('Runtime capability lifecycle', () => {
     }
   })
 
+  it('persists deprecated:true on the final on-disk record when run invoked with { deprecated: true }', async () => {
+    const nodeWf: BlockDefinition = {
+      id: 'plain-deprecated',
+      name: 'plain-deprecated',
+      version: '0.1.0',
+      inputs: [],
+      outputs: [],
+      execution: { type: 'node', code: 'return { ok: true };' },
+    }
+    const record = await new Runtime(dir, []).run(nodeWf, {}, undefined, { deprecated: true })
+    expect(record.deprecated).toBe(true)
+    const onDisk = await readRun(dir, record.runId)
+    expect(onDisk.deprecated).toBe(true)
+  })
+
   it('persists approvalEnforced:false on the final COMPLETED record when AART_REQUIRE_APPROVAL is unset', async () => {
     const savedEnv = process.env.AART_REQUIRE_APPROVAL
     try {

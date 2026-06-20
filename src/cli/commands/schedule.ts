@@ -285,7 +285,12 @@ export async function scheduleRunCommand(scheduleId: string): Promise<void> {
     console.error(`A deprecated workflow will not run on a schedule. Re-approve it, or remove the schedule with:  aart schedule remove ${scheduleId}`)
     process.exit(1)
   }
-  if ((schedule.requireApproval || approvalEnforced()) && pending.length > 0) {
+  // Legacy schedule records (created before `requireApproval` existed) have the
+  // field absent (undefined). Treat undefined as enforced to preserve pre-0.8.0
+  // semantics — every schedule created under always-enforced rules must stay
+  // enforced, even in a bare cron env where AART_REQUIRE_APPROVAL is unset.
+  // Explicit `false` (a new schedule opted out at creation time) is honored as-is.
+  if (((schedule.requireApproval ?? true) || approvalEnforced()) && pending.length > 0) {
     console.error(
       `schedule ${scheduleId}: refused — workflow is not approved: ${pending.join(', ')}`,
     )

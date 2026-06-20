@@ -53,3 +53,28 @@ describe('renderReport — UNAPPROVED warning', () => {
     expect(renderReport(record)).not.toContain('ran UNAPPROVED')
   })
 })
+
+describe('renderReport — DEPRECATED warning', () => {
+  it('shows the DEPRECATED warning when deprecated:true, regardless of approvalEnforced', () => {
+    // Key assertion: deprecation warning fires even when approval enforcement is off.
+    const record = makeRecord({ deprecated: true, approved: false, approvalEnforced: false })
+    const output = renderReport(record)
+    expect(output).toContain('ran a DEPRECATED workflow')
+    expect(output).toContain('--yes override of the retire gate')
+  })
+
+  it('shows the DEPRECATED warning when deprecated:true and approvalEnforced:true', () => {
+    const record = makeRecord({ deprecated: true, approved: false, approvalEnforced: true })
+    expect(renderReport(record)).toContain('ran a DEPRECATED workflow')
+  })
+
+  it('does NOT show DEPRECATED warning when deprecated is absent (undefined) — legacy records', () => {
+    const record = makeRecord({ approved: false, approvalEnforced: false })
+    expect(renderReport(record)).not.toContain('ran a DEPRECATED workflow')
+  })
+
+  it('does NOT show DEPRECATED warning when deprecated:false', () => {
+    const record = makeRecord({ deprecated: false, approved: true })
+    expect(renderReport(record)).not.toContain('ran a DEPRECATED workflow')
+  })
+})

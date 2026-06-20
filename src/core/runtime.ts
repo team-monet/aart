@@ -138,9 +138,10 @@ export class Runtime {
     def: BlockDefinition,
     inputs: Record<string, unknown>,
     params?: Record<string, unknown>,
-    opts: { verbose?: boolean; timeoutMs?: number; approved?: boolean } = {},
+    opts: { verbose?: boolean; timeoutMs?: number; approved?: boolean; deprecated?: boolean } = {},
   ): Promise<RunRecord> {
     const approved = opts.approved ?? true
+    const deprecatedRun = opts.deprecated ?? false
     // Capture enforcement state ONCE at run start — rendering later must not
     // re-read the live env (that would mislabel historical records).
     const enforcedAtStart = approvalEnforced()
@@ -159,7 +160,7 @@ export class Runtime {
     // Chromium-launch step is the most crash-prone), so a hard crash mid-run
     // still leaves visible evidence the run started. The terminal record below
     // overwrites it; a phase-1 disk fault must not abort the run (persist warns).
-    await this.persist(redactRecord(initialRecord(def, inputs, params, runId, approved, enforcedAtStart), secrets), ctx)
+    await this.persist(redactRecord(initialRecord(def, inputs, params, runId, approved, enforcedAtStart, deprecatedRun), secrets), ctx)
 
     const needed = collectCapabilities(def, this.registry)
     const active: Capability[] = []
@@ -178,6 +179,7 @@ export class Runtime {
       }`)
       failed.approved = approved
       failed.approvalEnforced = enforcedAtStart
+      failed.deprecated = deprecatedRun
       const record = redactRecord(failed, secrets)
       await this.persist(record, ctx)
       try { await notify(this.workspace, record, secrets, ctx.logger) } catch (e) {
@@ -197,6 +199,7 @@ export class Runtime {
       }).run(def, inputs, ctx, params)
       raw.approved = approved
       raw.approvalEnforced = enforcedAtStart
+      raw.deprecated = deprecatedRun
       // Mask secret values before anything is persisted, printed, or returned.
       record = redactRecord(raw, secrets)
       await this.persist(record, ctx)
@@ -254,6 +257,7 @@ function initialRecord(
   runId: string,
   approved: boolean,
   enforcedAtStart: boolean,
+  deprecated: boolean,
 ): RunRecord {
   return {
     runId,
@@ -261,6 +265,7 @@ function initialRecord(
     status: 'RUNNING',
     approved,
     approvalEnforced: enforcedAtStart,
+    deprecated,
     inputs,
     params,
     trace: [],

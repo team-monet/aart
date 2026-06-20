@@ -228,6 +228,7 @@ export const RunRecordSchema = z.object({
   status: RunStatusSchema,
   approved: z.boolean().optional(),
   approvalEnforced: z.boolean().optional(),
+  deprecated: z.boolean().optional(),
   inputs: z.record(z.unknown()),
   params: z.record(z.unknown()).optional(),
   results: z.record(z.unknown()).optional(),
@@ -250,6 +251,9 @@ export type RunRecord = {
    *  regardless of the current environment. Absent on legacy on-disk records
    *  (treat as falsy — we can't know their state, silent is the safe default). */
   approvalEnforced?: boolean
+  /** Whether this run was of a DEPRECATED workflow (forced via --yes override of
+   *  the retire gate). Absent on legacy records — treat as falsy, no warning. */
+  deprecated?: boolean
   inputs: Record<string, unknown>
   params?: Record<string, unknown>
   results?: Record<string, unknown>
