@@ -38,13 +38,20 @@ export interface VerifyResult {
  * @param runtime  The live Runtime (has corePack loaded, which provides web.read).
  * @param args.url     The URL to verify.
  * @param args.focus   Optional CSS selector to scope text extraction.
- * @param args.expect  Optional phrase to look for in the rendered text.
+ * @param args.expect  Optional phrase to check for. Matched against the full page
+ *                     body text (not the clamped inline text), so nav/header/footer
+ *                     phrases are found. When `focus` is also given, matching is
+ *                     scoped to the focused region instead.
  */
 export async function verifyWeb(
   runtime: Runtime,
   args: { url: string; focus?: string; expect?: string },
 ): Promise<VerifyResult> {
   const { url, focus, expect: expectedText } = args
+
+  // Empty-string expect = no expectation. Mirrors web.read's own falsy guard so
+  // the two layers agree on what "expect was provided" means.
+  const hasExpect = typeof expectedText === 'string' && expectedText.length > 0
 
   // Resolve the web.read native block — always present in corePack (native
   // blocks are pre-approved, so approval enforcement is irrelevant here).
@@ -54,7 +61,7 @@ export async function verifyWeb(
       status: 'unreachable',
       url,
       error: 'web.read block not found — ensure corePack is loaded',
-      ...(expectedText !== undefined ? { ok: false } : {}),
+      ...(hasExpect ? { ok: false } : {}),
       hint: 'corePack may not have been passed to the Runtime constructor',
     }
   }
@@ -62,9 +69,15 @@ export async function verifyWeb(
   let record: Awaited<ReturnType<typeof runtime.run>>
   try {
     // Run web.read directly (it's native, always approved).
+    // Forward `expect` so the match runs in web.read against the full body text —
+    // not the clamped `text` output that verifyWeb previously matched against.
     record = await runtime.run(
       def,
-      { url, ...(focus ? { focus } : {}) },
+      {
+        url,
+        ...(focus ? { focus } : {}),
+        ...(hasExpect ? { expect: expectedText } : {}),
+      },
       undefined,
       { approved: true },
     )
@@ -77,7 +90,7 @@ export async function verifyWeb(
       status: 'unreachable',
       url,
       error: message,
-      ...(expectedText !== undefined ? { ok: false } : {}),
+      ...(hasExpect ? { ok: false } : {}),
       ...(hint ? { hint } : {}),
     }
   }
@@ -94,7 +107,7 @@ export async function verifyWeb(
       url,
       error: message,
       runId: record.runId,
-      ...(expectedText !== undefined ? { ok: false } : {}),
+      ...(hasExpect ? { ok: false } : {}),
       ...(hint ? { hint } : {}),
     }
   }
@@ -120,12 +133,14 @@ export async function verifyWeb(
   // screenshot: web.read attaches it as an artifact and returns the path.
   const screenshot = typeof r['screenshot'] === 'string' ? r['screenshot'] : undefined
 
-  // Compute ok + hint from expect.
+  // Compute ok + hint from expect. ok is sourced from web.read's `matched`
+  // output, which matches against the FULL body text (or the focus region when
+  // focus is set) — not the clamped `text` field.
   let ok: boolean | undefined
   let hint: string | undefined
 
-  if (expectedText !== undefined) {
-    ok = typeof pageText === 'string' && pageText.includes(expectedText)
+  if (hasExpect) {
+    ok = r['matched'] === true
     if (!ok) {
       hint = 'expected text not found — look at the screenshot artifact'
     }

@@ -90,6 +90,9 @@ async function runWebRead(
         screenshot: '$read.screenshot',
         fullText: '$read.fullText',
         settled: '$read.settled',
+        // Only map matched when expect was given — when absent from the block
+        // output the resolver throws "Unresolved reference" and fails the run.
+        ...(inputs.expect !== undefined ? { matched: '$read.matched' } : {}),
       },
     },
   }
@@ -329,5 +332,125 @@ suite('web.read — real Chromium integration', () => {
     // Header/footer should NOT appear — focus confined the extraction.
     expect(text).not.toContain('HEADER TEXT')
     expect(text).not.toContain('FOOTER TEXT')
+  }, 30000)
+
+  // ---- 7. expect: nav text with large <main> → matched:true (core regression) ----
+
+  it('matched:true for nav text outside <main> even when <main> is non-trivial', async () => {
+    const url = await serve((_req, res) => {
+      res.setHeader('content-type', 'text/html')
+      res.end(
+        `<!doctype html><html><head><title>Nav Test</title></head>
+        <body>
+          <nav><button>Packages</button></nav>
+          <main><p>${'x '.repeat(200)}</p></main>
+        </body></html>`,
+      )
+    })
+
+    const dir = tmpDir()
+    const { status, results } = await runWebRead(dir, { url, expect: 'Packages' })
+
+    expect(status).toBe('COMPLETED')
+    expect(results?.matched).toBe(true)
+    // Prove it matched the full page, not compact text — 'Packages' is not in
+    // the main-content heuristic output (the <main> is 400+ chars, so the
+    // heuristic picks <main> and excludes nav).
+    expect(String(results?.text ?? '')).not.toContain('Packages')
+  }, 30000)
+
+  // ---- 8. expect: text beyond maxChars clamp → matched:true -----------------
+
+  it('matched:true for token beyond maxChars clamp', async () => {
+    // Place a unique token after enough leading content to be cut by default maxChars (2000).
+    const leadingContent = 'A '.repeat(1100) // ~2200 chars — exceeds default 2000
+    const url = await serve((_req, res) => {
+      res.setHeader('content-type', 'text/html')
+      res.end(
+        `<!doctype html><html><head><title>Clamp Test</title></head>
+        <body><main><p>${leadingContent}</p><p>NEEDLE9f3a</p></main></body></html>`,
+      )
+    })
+
+    const dir = tmpDir()
+    const { status, results } = await runWebRead(dir, { url, expect: 'NEEDLE9f3a' })
+
+    expect(status).toBe('COMPLETED')
+    expect(results?.matched).toBe(true)
+    // The inline text is truncated before the needle.
+    expect(results?.truncated).toBe(true)
+    expect(String(results?.text ?? '')).not.toContain('NEEDLE9f3a')
+  }, 30000)
+
+  // ---- 9. expect: absent text → matched:false --------------------------------
+
+  it('matched:false when the expected phrase is not on the page', async () => {
+    const url = await serve((_req, res) => {
+      res.setHeader('content-type', 'text/html')
+      res.end(
+        `<!doctype html><html><head><title>Absent</title></head>
+        <body><main><p>Nothing special here.</p></main></body></html>`,
+      )
+    })
+
+    const dir = tmpDir()
+    const { status, results } = await runWebRead(dir, { url, expect: 'DEFINITELY_NOT_PRESENT_xyz' })
+
+    expect(status).toBe('COMPLETED')
+    expect(results?.matched).toBe(false)
+  }, 30000)
+
+  // ---- 10. expect: focus scoping — inside/outside -------------------------
+
+  it('matched respects focus scope: outside=false, inside=true', async () => {
+    const url = await serve((_req, res) => {
+      res.setHeader('content-type', 'text/html')
+      res.end(
+        `<!doctype html><html><head><title>Focus Scope</title></head>
+        <body>
+          <nav>OUTSIDEWORD</nav>
+          <article id="s"><p>INSIDEWORD</p></article>
+        </body></html>`,
+      )
+    })
+
+    const dir = tmpDir()
+
+    // OUTSIDEWORD is outside the focus region → matched:false
+    const { status: s1, results: r1 } = await runWebRead(dir, {
+      url,
+      focus: '#s',
+      expect: 'OUTSIDEWORD',
+    })
+    expect(s1).toBe('COMPLETED')
+    expect(r1?.matched).toBe(false)
+
+    // INSIDEWORD is inside the focus region → matched:true
+    const { status: s2, results: r2 } = await runWebRead(tmpDir(), {
+      url,
+      focus: '#s',
+      expect: 'INSIDEWORD',
+    })
+    expect(s2).toBe('COMPLETED')
+    expect(r2?.matched).toBe(true)
+  }, 30000)
+
+  // ---- 11. no expect → matched absent ----------------------------------------
+
+  it('matched is absent when expect is not provided', async () => {
+    const url = await serve((_req, res) => {
+      res.setHeader('content-type', 'text/html')
+      res.end(
+        `<!doctype html><html><head><title>No Expect</title></head>
+        <body><main><p>Just reading.</p></main></body></html>`,
+      )
+    })
+
+    const dir = tmpDir()
+    const { status, results } = await runWebRead(dir, { url })
+
+    expect(status).toBe('COMPLETED')
+    // matched should be absent (undefined) — it is only set when expect is given
+    expect(results?.matched).toBeUndefined()
   }, 30000)
 })

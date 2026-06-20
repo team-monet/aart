@@ -13,6 +13,11 @@ import type { ExecutionContext } from '../../core/context'
  * The full text and screenshot are offloaded to artifacts; the inline `text`
  * output is clamped to `maxChars` (default 2000). This is the compression
  * contract: a few hundred tokens inline, bulk offloaded.
+ *
+ * When `expect` is provided the block also returns `matched` (boolean): true if
+ * the phrase appears anywhere in the rendered page. When `focus` is set, matching
+ * is scoped to the focused region; otherwise matching runs against the FULL body
+ * text (not the clamped `text` output), so nav/header/footer phrases are found.
  */
 
 /** A single captured console message — mirrors browser.ts ConsoleEntry. */
@@ -165,6 +170,10 @@ export const webRead = nativeBlock(
         description: 'Read just the article section of a news page',
         inputs: { url: 'https://news.example.com/story', focus: 'article' },
       },
+      {
+        description: 'Check whether a phrase renders anywhere on the page (full-page match)',
+        inputs: { url: 'https://example.com', expect: 'Get Started' },
+      },
     ],
     capabilities: ['browser'],
     inputs: [
@@ -190,6 +199,15 @@ export const webRead = nativeBlock(
           'Maximum characters for the inline `text` output (default 2000). ' +
           'The full text is always saved to the fullText artifact.',
       },
+      {
+        name: 'expect',
+        type: 'string',
+        description:
+          'Optional phrase to check for in the rendered page. Returns `matched` (boolean). ' +
+          'When `focus` is set, matches within the focused region; otherwise matches the full ' +
+          'page (body) text — so nav/header/footer phrases are found even when a large <main> ' +
+          'is present. The `text` and `fullText` outputs are unaffected.',
+      },
     ],
     outputs: [
       { name: 'url', type: 'string' },
@@ -201,6 +219,7 @@ export const webRead = nativeBlock(
       { name: 'screenshot', type: 'string' },
       { name: 'fullText', type: 'string' },
       { name: 'settled', type: 'boolean' },
+      { name: 'matched', type: 'boolean' },
     ],
   },
   async (ctx, inputs) => {
@@ -211,6 +230,7 @@ export const webRead = nativeBlock(
     const maxChars = typeof inputs.maxChars === 'number' && inputs.maxChars > 0 ? inputs.maxChars : 2000
     const focusSel = inputs.focus ? String(inputs.focus) : null
     const waitForSel = inputs.waitFor ? String(inputs.waitFor) : null
+    const expectStr = inputs.expect && typeof inputs.expect === 'string' ? inputs.expect : null
 
     // 1. Navigate and wait for network to settle.
     await p.goto(targetUrl, { waitUntil: 'networkidle', timeout: 30000 })
@@ -268,6 +288,29 @@ export const webRead = nativeBlock(
       kind: 'file',
     })
 
+    // 9. Optional expect → matched boolean.
+    // When focus is set we match against the already-extracted focus-region text
+    // (fullText). When no focus is set we match against the FULL body innerText so
+    // nav/header/footer phrases are found even when a large <main> is present and
+    // would otherwise have been preferred by the main-content heuristic.
+    let matched: boolean | undefined
+    if (expectStr !== null) {
+      let matchSource: string
+      if (focusSel) {
+        // Focus region is already in fullText — match there.
+        matchSource = fullText
+      } else {
+        // Full body text — bypass the main-content heuristic.
+        try {
+          matchSource = normalizeWhitespace(await p.innerText('body'))
+        } catch {
+          // Defensive fallback: body not available (edge case in some page types).
+          matchSource = fullText
+        }
+      }
+      matched = matchSource.includes(expectStr)
+    }
+
     return {
       url: p.url(),
       title: await p.title(),
@@ -278,6 +321,7 @@ export const webRead = nativeBlock(
       screenshot: screenshotPath,
       fullText: fullTextPath,
       settled,
+      ...(matched !== undefined ? { matched } : {}),
     }
   },
 )

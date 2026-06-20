@@ -145,6 +145,22 @@ suite('verifyWeb — real Chromium integration', () => {
     expect(Array.isArray(result.elements)).toBe(true)
   }, 30000)
 
+  // ---- 3b. empty-string expect → treated as absent (no ok field) ----------
+
+  it('treats empty-string expect as absent (no ok field)', async () => {
+    const url = await serve((_req, res) => {
+      res.setHeader('content-type', 'text/html')
+      res.end(
+        `<!doctype html><html><head><title>Empty Expect</title></head>
+        <body><main><p>Just reading the page.</p></main></body></html>`,
+      )
+    })
+
+    const result = await verifyWeb(makeRuntime(tmpDir()), { url, expect: '' })
+    expect(result.status).toBe('ok')
+    expect('ok' in result).toBe(false)
+  }, 30000)
+
   // ---- 4. unreachable URL → verdict, no throw ------------------------------
 
   it('returns status:unreachable on a closed port without throwing', async () => {
@@ -187,6 +203,79 @@ suite('verifyWeb — real Chromium integration', () => {
     expect(result.status).toBe('unreachable')
     expect(result.ok).toBe(false)
     expect(typeof result.error).toBe('string')
+  }, 30000)
+
+  // ---- 6. Headline regression: nav/header text with large <main> → ok:true ----
+
+  it('ok:true for nav/header phrase when <main> is large (dashboard regression)', async () => {
+    const url = await serve((_req, res) => {
+      res.setHeader('content-type', 'text/html')
+      res.end(
+        `<!doctype html><html><head><title>Dashboard</title></head>
+        <body>
+          <header><h1>aart</h1></header>
+          <nav><button>Packages</button></nav>
+          <main><p>${'x '.repeat(200)}</p></main>
+        </body></html>`,
+      )
+    })
+
+    const result = await verifyWeb(makeRuntime(tmpDir()), { url, expect: 'Packages' })
+
+    expect(result.status).toBe('ok')
+    expect(result.ok).toBe(true)
+    expect(result.hint).toBeUndefined()
+  }, 30000)
+
+  // ---- 7. Beyond-clamp token → ok:true -------------------------------------
+
+  it('ok:true for token placed after >2000 chars of main content', async () => {
+    const leadingContent = 'A '.repeat(1100) // ~2200 chars — beyond default 2000 clamp
+    const url = await serve((_req, res) => {
+      res.setHeader('content-type', 'text/html')
+      res.end(
+        `<!doctype html><html><head><title>Clamp</title></head>
+        <body><main><p>${leadingContent}</p><p>NEEDLE9f3a</p></main></body></html>`,
+      )
+    })
+
+    const result = await verifyWeb(makeRuntime(tmpDir()), { url, expect: 'NEEDLE9f3a' })
+
+    expect(result.status).toBe('ok')
+    expect(result.ok).toBe(true)
+    expect(result.hint).toBeUndefined()
+  }, 30000)
+
+  // ---- 8. focus scoping in verifyWeb ----------------------------------------
+
+  it('ok respects focus scope: outside=false, inside=true', async () => {
+    const url = await serve((_req, res) => {
+      res.setHeader('content-type', 'text/html')
+      res.end(
+        `<!doctype html><html><head><title>Focus Scope</title></head>
+        <body>
+          <nav>OUTSIDEWORD</nav>
+          <article id="s"><p>INSIDEWORD</p></article>
+        </body></html>`,
+      )
+    })
+
+    const outsideResult = await verifyWeb(makeRuntime(tmpDir()), {
+      url,
+      focus: '#s',
+      expect: 'OUTSIDEWORD',
+    })
+    expect(outsideResult.status).toBe('ok')
+    expect(outsideResult.ok).toBe(false)
+
+    const insideResult = await verifyWeb(makeRuntime(tmpDir()), {
+      url,
+      focus: '#s',
+      expect: 'INSIDEWORD',
+    })
+    expect(insideResult.status).toBe('ok')
+    expect(insideResult.ok).toBe(true)
+    expect(insideResult.hint).toBeUndefined()
   }, 30000)
 })
 
