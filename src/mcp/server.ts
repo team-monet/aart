@@ -7,7 +7,7 @@ import { buildCatalog, filterCatalog } from '../agent/catalog'
 import { definitionJsonSchema } from '../agent/schema'
 import { validateDraft } from '../agent/validate'
 import { renderDefinition } from '../agent/render'
-import { unapprovedInTree, approvalEnforced } from '../core/approval'
+import { unapprovedInTree, approvalEnforced, deprecatedInTree } from '../core/approval'
 import { setApproval } from '../core/governance'
 import { approveWorkspacePack, loadWorkspacePack, registerWorkspacePack } from '../pack/loader'
 import { AUTHORING_GUIDE } from '../agent/guide'
@@ -205,6 +205,7 @@ export async function startMcpServer(): Promise<void> {
       description:
         'Run an APPROVED workflow by registry id (optionally a version), with inputs. ' +
         'Returns the structured run report (per-step trace, outputs, artifacts). ' +
+        'A DEPRECATED workflow is always refused (re-approve it first with aa_approve). ' +
         'If it refuses as not-approved, get the user to approve it (aa_approve), then run.',
       inputSchema: {
         id: z.string().optional(),
@@ -229,6 +230,15 @@ export async function startMcpServer(): Promise<void> {
         if (!def) return fail(`Workflow not found: ${id}${version ? '@' + version : ''}`)
       } else {
         return fail('Provide either `id` or `definition`.')
+      }
+      // Deprecation is an always-on hard stop (independent of AART_REQUIRE_APPROVAL).
+      // MCP runs are unattended (like scheduled runs) — no interactive override.
+      const deprecated = deprecatedInTree(def, registry, !definition)
+      if (deprecated.length) {
+        return fail(
+          `Refused — deprecated: ${deprecated.join(', ')}. ` +
+            `This workflow is no longer approved to run; re-approve it (aa_approve) before running.`,
+        )
       }
       // Governance gate: only run user-approved definitions. An inline
       // definition is never pre-trusted; a registry id's status is.
@@ -287,11 +297,18 @@ export async function startMcpServer(): Promise<void> {
         "what's actually on the page — title, the main rendered text, interactive elements, console " +
         'errors, and a screenshot — plus `ok` (is the `expect` text present?) when you pass `expect`. ' +
         'Reach for this RIGHT AFTER you change something that affects how a page renders, BEFORE ' +
-        "claiming it works — don't guess from the code or unit tests. One call, no workflow authoring.",
-      inputSchema: { url: z.string(), focus: z.string().optional(), expect: z.string().optional() },
+        "claiming it works — don't guess from the code or unit tests. One call, no workflow authoring. " +
+        'Pass `waitFor` (a CSS selector) to wait for content that only renders after page load (SPAs). ' +
+        'Pass `focus` (a CSS selector) to scope the read and `expect` match to a specific region of the page.',
+      inputSchema: {
+        url: z.string(),
+        focus: z.string().optional(),
+        expect: z.string().optional(),
+        waitFor: z.string().optional(),
+      },
     },
-    async ({ url, focus, expect }) => {
-      const result = await verifyWeb(runtime, { url, focus, expect })
+    async ({ url, focus, expect, waitFor }) => {
+      const result = await verifyWeb(runtime, { url, focus, expect, waitFor })
       return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }], isError: result.status !== 'ok' }
     },
   )

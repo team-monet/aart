@@ -42,12 +42,15 @@ export interface VerifyResult {
  *                     body text (not the clamped inline text), so nav/header/footer
  *                     phrases are found. When `focus` is also given, matching is
  *                     scoped to the focused region instead.
+ * @param args.waitFor Optional CSS selector to wait for before reading (for SPAs
+ *                     that inject content after load). A timeout degrades to
+ *                     settled=false, not an error.
  */
 export async function verifyWeb(
   runtime: Runtime,
-  args: { url: string; focus?: string; expect?: string },
+  args: { url: string; focus?: string; expect?: string; waitFor?: string },
 ): Promise<VerifyResult> {
-  const { url, focus, expect: expectedText } = args
+  const { url, focus, expect: expectedText, waitFor } = args
 
   // Empty-string expect = no expectation. Mirrors web.read's own falsy guard so
   // the two layers agree on what "expect was provided" means.
@@ -77,6 +80,7 @@ export async function verifyWeb(
         url,
         ...(focus ? { focus } : {}),
         ...(hasExpect ? { expect: expectedText } : {}),
+        ...(waitFor ? { waitFor } : {}),
       },
       undefined,
       { approved: true },

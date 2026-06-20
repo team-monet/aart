@@ -35,7 +35,14 @@ function startServer(
 }
 
 function stopServer(server: http.Server): Promise<void> {
-  return new Promise((r) => server.close(() => r()))
+  return new Promise((r) => {
+    // Node ≥20: closeAllConnections() terminates keep-alive / SSE / long-poll
+    // sockets immediately so server.close() completes without hanging.
+    if (typeof (server as { closeAllConnections?: () => void }).closeAllConnections === 'function') {
+      ;(server as { closeAllConnections: () => void }).closeAllConnections()
+    }
+    server.close(() => r())
+  })
 }
 
 /**
@@ -452,5 +459,75 @@ suite('web.read — real Chromium integration', () => {
     expect(status).toBe('COMPLETED')
     // matched should be absent (undefined) — it is only set when expect is given
     expect(results?.matched).toBeUndefined()
+  }, 30000)
+
+  // ---- 12. Persistent-connection page still reads (Fix 2) -------------------
+
+  it('reads a page that keeps a connection open (SSE / long-poll) without timing out', async () => {
+    // Serve a page with real content AND a script that opens a never-resolving
+    // fetch — simulating SSE / analytics that prevent networkidle forever.
+    const url = await serve((req, res) => {
+      if (req.url === '/hang') {
+        // Never respond — simulate a long-poll that never closes.
+        res.writeHead(200, { 'content-type': 'text/plain' })
+        // Don't call res.end() — intentionally hang.
+        return
+      }
+      res.setHeader('content-type', 'text/html')
+      res.end(
+        `<!doctype html><html><head><title>Persistent Conn</title></head>
+        <body>
+          <main><h1>PERSISTENT_PAGE_CONTENT</h1><p>This page has a hanging request.</p></main>
+          <script>fetch('/hang').catch(function() {})</script>
+        </body></html>`,
+      )
+    })
+
+    const dir = tmpDir()
+    const start = Date.now()
+    const { status, results } = await runWebRead(dir, { url })
+    const elapsed = Date.now() - start
+
+    expect(status).toBe('COMPLETED')
+    expect(String(results?.text ?? '')).toContain('PERSISTENT_PAGE_CONTENT')
+    // Must complete well under the old 30s networkidle timeout.
+    expect(elapsed).toBeLessThan(15000)
+  }, 25000)
+
+  // ---- 13. Focus-miss is not a match (Fix 3) ---------------------------------
+
+  it('matched:false when focus selector is absent from the page', async () => {
+    const url = await serve((_req, res) => {
+      res.setHeader('content-type', 'text/html')
+      res.end(
+        `<!doctype html><html><head><title>Focus Miss</title></head>
+        <body>
+          <nav>OUTSIDEWORD</nav>
+          <article id="present"><p>hi</p></article>
+        </body></html>`,
+      )
+    })
+
+    const dir = tmpDir()
+
+    // Focus selector is absent; OUTSIDEWORD is present elsewhere — must NOT match.
+    const { status: s1, results: r1 } = await runWebRead(dir, {
+      url,
+      focus: '#missing',
+      expect: 'OUTSIDEWORD',
+    })
+    expect(s1).toBe('COMPLETED')
+    expect(r1?.matched).toBe(false)
+    // settled is unaffected by a focus-miss (no waitFor was passed — page is static)
+    expect(r1?.settled).toBe(true)
+
+    // Guard: focus selector IS present and word is inside it → matched:true.
+    const { status: s2, results: r2 } = await runWebRead(tmpDir(), {
+      url,
+      focus: '#present',
+      expect: 'hi',
+    })
+    expect(s2).toBe('COMPLETED')
+    expect(r2?.matched).toBe(true)
   }, 30000)
 })

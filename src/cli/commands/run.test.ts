@@ -63,7 +63,7 @@ afterEach(() => {
 })
 
 /** A minimal workflow that writes an artifact — runnable with corePack. */
-function makeWorkflow(approval?: 'approved' | 'draft'): BlockDefinition {
+function makeWorkflow(approval?: 'approved' | 'draft' | 'deprecated'): BlockDefinition {
   return {
     id: 'test.run.workflow',
     name: 'Test Run Workflow',
@@ -84,7 +84,7 @@ function makeWorkflow(approval?: 'approved' | 'draft'): BlockDefinition {
   }
 }
 
-function registerWorkflow(runtime: Runtime, approval?: 'approved' | 'draft'): BlockDefinition {
+function registerWorkflow(runtime: Runtime, approval?: 'approved' | 'draft' | 'deprecated'): BlockDefinition {
   const wf = makeWorkflow(approval)
   runtime.fileRegistry.registerBlock(wf)
   return wf
@@ -214,6 +214,81 @@ describe('approval gate — enforced on (AART_REQUIRE_APPROVAL=1)', () => {
   })
 
   it('runs an approved workflow without --yes and records approved=true', async () => {
+    const runtime = new Runtime(ws, [corePack])
+    registerWorkflow(runtime, 'approved')
+
+    const { exited } = await run(() =>
+      runCommand('test.run.workflow', {
+        input: '{}',
+        param: '{}',
+        verbose: false,
+        yes: false,
+        json: true,
+      }),
+    )
+
+    expect(exited).toBe(false)
+    const jsonLine = stdoutLines.find((l) => {
+      try { JSON.parse(l); return true } catch { return false }
+    })
+    const record = JSON.parse(jsonLine!)
+    expect(record.approved).toBe(true)
+    expect(record.status).toBe('COMPLETED')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Deprecation gate — always-on hard stop
+// ---------------------------------------------------------------------------
+
+describe('deprecation gate — refuses regardless of AART_REQUIRE_APPROVAL', () => {
+  it('refuses a deprecated workflow when approval enforcement is OFF and no --yes (exit 1)', async () => {
+    // Approval enforcement is deliberately unset — deprecation must still refuse.
+    delete process.env.AART_REQUIRE_APPROVAL
+    const runtime = new Runtime(ws, [corePack])
+    registerWorkflow(runtime, 'deprecated')
+
+    const { exited } = await run(() =>
+      runCommand('test.run.workflow', {
+        input: '{}',
+        param: '{}',
+        verbose: false,
+        yes: false,
+        json: false,
+      }),
+    )
+
+    expect(exited).toBe(true)
+    expect(exitCode).toBe(1)
+    expect(stderrLines.some((l) => l.includes('deprecated'))).toBe(true)
+  })
+
+  it('allows a deprecated workflow with --yes (exit 0)', async () => {
+    delete process.env.AART_REQUIRE_APPROVAL
+    const runtime = new Runtime(ws, [corePack])
+    registerWorkflow(runtime, 'deprecated')
+
+    const { exited } = await run(() =>
+      runCommand('test.run.workflow', {
+        input: '{}',
+        param: '{}',
+        verbose: false,
+        yes: true,
+        json: true,
+      }),
+    )
+
+    expect(exited).toBe(false)
+    const jsonLine = stdoutLines.find((l) => {
+      try { JSON.parse(l); return true } catch { return false }
+    })
+    expect(jsonLine).toBeDefined()
+    const record = JSON.parse(jsonLine!)
+    expect(record.status).toBe('COMPLETED')
+  })
+
+  it('an approved workflow is unaffected by the deprecation gate', async () => {
+    delete process.env.AART_REQUIRE_APPROVAL
     const runtime = new Runtime(ws, [corePack])
     registerWorkflow(runtime, 'approved')
 

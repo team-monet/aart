@@ -1,6 +1,6 @@
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
-import { unapprovedInTree, approvalEnforced } from '../../core/approval'
+import { unapprovedInTree, deprecatedInTree, approvalEnforced } from '../../core/approval'
 import { openRuntime, resolveWorkspace } from '../workspace'
 import {
   writeSchedule,
@@ -55,8 +55,16 @@ export async function scheduleAddCommand(workflowId: string, opts: AddOpts): Pro
   }
 
   // Approval gate: a scheduled workflow must have standing approval — no --yes.
-  // Unattended runs cannot prompt the user, so draft/deprecated means refuse.
+  // Unattended runs cannot prompt the user. A DEPRECATED workflow always refuses
+  // (independent of AART_REQUIRE_APPROVAL). A DRAFT/unapproved one refuses only
+  // when approval enforcement is on.
   const pending = unapprovedInTree(wf, runtime.registry, true)
+  const deprecated = deprecatedInTree(wf, runtime.registry, true)
+  if (deprecated.length > 0) {
+    console.error(`✗ refused — workflow is deprecated: ${deprecated.join(', ')}`)
+    console.error('A deprecated workflow cannot be scheduled. Re-approve it first, or schedule a different workflow.')
+    process.exit(1)
+  }
   if (approvalEnforced() && pending.length > 0) {
     console.error(`✗ refused — workflow is not fully approved: ${pending.join(', ')}`)
     console.error(
@@ -212,7 +220,8 @@ export async function scheduleRemoveCommand(scheduleId: string): Promise<void> {
  *
  * This is the command installed into the OS scheduler. It:
  *   1. Reads the schedule record.
- *   2. Re-checks approval at fire time (a draft/deprecated workflow refuses).
+ *   2. Re-checks approval at fire time (a deprecated workflow always refuses;
+ *      a draft/unapproved one refuses only when approval enforcement is on).
  *   3. Runs the workflow via runtime.run(..., { approved: true }).
  *   4. Updates lastRunId/lastStatus/lastRunAt on the record.
  *   5. Exits 1 on FAILED (so OS mailers report the failure).
@@ -258,13 +267,21 @@ export async function scheduleRunCommand(scheduleId: string): Promise<void> {
   }
 
   // Re-check approval at fire time. No --yes for unattended runs.
+  // A DEPRECATED workflow always refuses (independent of AART_REQUIRE_APPROVAL).
+  // A DRAFT/unapproved one refuses only when approval enforcement is on.
   const pending = unapprovedInTree(wf, runtime.registry, true)
+  const deprecated = deprecatedInTree(wf, runtime.registry, true)
+  if (deprecated.length > 0) {
+    console.error(`schedule ${scheduleId}: refused — workflow is deprecated: ${deprecated.join(', ')}`)
+    console.error(`A deprecated workflow will not run on a schedule. Re-approve it, or remove the schedule with:  aart schedule remove ${scheduleId}`)
+    process.exit(1)
+  }
   if (approvalEnforced() && pending.length > 0) {
     console.error(
       `schedule ${scheduleId}: refused — workflow is not approved: ${pending.join(', ')}`,
     )
     console.error(
-      'The workflow may have been re-registered (resetting approval to draft) or deprecated.',
+      'The workflow may have been re-registered (resetting approval to draft).',
     )
     console.error(
       `Re-approve with:  aart approve ${pending.join(' && aart approve ')}`,

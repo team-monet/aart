@@ -92,6 +92,30 @@ function registerWorkflow(runtime: Runtime, approved: boolean): BlockDefinition 
   return wf
 }
 
+/** Register a deprecated workflow in the tmp workspace. */
+function registerDeprecatedWorkflow(runtime: Runtime): BlockDefinition {
+  const wf: BlockDefinition = {
+    id: 'test.schedule.deprecated',
+    name: 'Test Deprecated Workflow',
+    version: '0.1.0',
+    inputs: [{ name: 'msg', type: 'string' }],
+    outputs: [],
+    execution: {
+      type: 'workflow',
+      steps: [
+        {
+          id: 'echo',
+          block: 'artifact.write',
+          inputs: { name: 'out.txt', content: '{{inputs.msg}}' },
+        },
+      ],
+    },
+    approval: 'deprecated',
+  }
+  runtime.fileRegistry.registerBlock(wf)
+  return wf
+}
+
 /** Run a command and swallow the process.exit throw; return whether exit was called. */
 async function run(fn: () => Promise<void>): Promise<{ exited: boolean }> {
   try {
@@ -202,6 +226,26 @@ describe('scheduleAddCommand', () => {
     expect(exited).toBe(false)
     expect(stderrLines.some((l) => l.includes('literal secret'))).toBe(true)
   })
+
+  it('refuses a deprecated workflow at add-time even when AART_REQUIRE_APPROVAL is unset', async () => {
+    // Approval enforcement is deliberately OFF (default) — deprecation must still refuse.
+    delete process.env.AART_REQUIRE_APPROVAL
+    const runtime = new Runtime(ws, [corePack])
+    registerDeprecatedWorkflow(runtime)
+
+    const { exited } = await run(() =>
+      scheduleAddCommand('test.schedule.deprecated', {
+        cron: '0 9 * * 1-5',
+        input: '{}',
+        param: '{}',
+      }),
+    )
+    expect(exited).toBe(true)
+    expect(exitCode).toBe(1)
+    expect(stderrLines.some((l) => l.includes('deprecated'))).toBe(true)
+    // No schedule should have been written.
+    expect(await listSchedules(ws)).toHaveLength(0)
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -263,7 +307,8 @@ describe('scheduleRunCommand', () => {
     const { exited } = await run(() => scheduleRunCommand(scheduleId))
     expect(exited).toBe(true)
     expect(exitCode).toBe(1)
-    expect(stderrLines.some((l) => l.includes('not approved'))).toBe(true)
+    // Deprecation now has its own hard-stop message (independent of approval enforcement).
+    expect(stderrLines.some((l) => l.includes('deprecated'))).toBe(true)
   })
 
   it('fires a now-draft workflow when approval enforcement is off (the default)', async () => {
@@ -284,6 +329,31 @@ describe('scheduleRunCommand', () => {
     expect(exited).toBe(false) // runs anyway — approval not enforced by default
     const updated = (await listSchedules(ws)).find((s) => s.scheduleId === scheduleId)!
     expect(updated.lastStatus).toBe('COMPLETED')
+  })
+
+  it('refuses a deprecated workflow at fire-time even when AART_REQUIRE_APPROVAL is unset', async () => {
+    // Step 1: register as approved and create the schedule.
+    delete process.env.AART_REQUIRE_APPROVAL
+    const runtime = new Runtime(ws, [corePack])
+    const wf = registerWorkflow(runtime, true)
+
+    await run(() =>
+      scheduleAddCommand('test.schedule.workflow', {
+        cron: '0 9 * * 1-5',
+        input: '{"msg":"hi"}',
+        param: '{}',
+      }),
+    )
+    const scheduleId = (await listSchedules(ws))[0]!.scheduleId
+
+    // Step 2: deprecate the workflow (e.g. via aart deprecate).
+    runtime.fileRegistry.registerBlock({ ...wf, approval: 'deprecated' as const })
+
+    // Step 3: tick — must refuse even though AART_REQUIRE_APPROVAL is unset.
+    const { exited } = await run(() => scheduleRunCommand(scheduleId))
+    expect(exited).toBe(true)
+    expect(exitCode).toBe(1)
+    expect(stderrLines.some((l) => l.includes('deprecated'))).toBe(true)
   })
 
   it('exits 1 without throwing when the workflow is deleted (getBlock returns undefined)', async () => {

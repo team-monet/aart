@@ -27,6 +27,35 @@ export function statusLabel(block: BlockDefinition): ApprovalStatus | 'native' {
 }
 
 /**
+ * Ids in a definition's tree that are DEPRECATED (retired via `aart deprecate`).
+ * Deprecation is an always-on hard stop: unlike draft, it refuses regardless of
+ * AART_REQUIRE_APPROVAL. Same trusted-registry walk as unapprovedInTree.
+ */
+export function deprecatedInTree(
+  def: BlockDefinition,
+  registry: Registry,
+  trustTop: boolean,
+): string[] {
+  const deprecated: string[] = []
+  const seen = new Set<string>()
+  const visit = (b: BlockDefinition, trust: boolean) => {
+    if (seen.has(b.id)) return
+    seen.add(b.id)
+    if (b.execution.type !== 'native' && trust && b.approval === 'deprecated') {
+      deprecated.push(b.id)
+    }
+    if (b.execution.type === 'workflow') {
+      for (const step of b.execution.steps) {
+        const child = registry.getBlock(step.block, step.version)
+        if (child) visit(child, true) // referenced blocks come from the trusted registry
+      }
+    }
+  }
+  visit(def, trustTop)
+  return [...new Set(deprecated)]
+}
+
+/**
  * Ids in a definition's tree that are NOT approved (so a run would need user
  * sign-off). Referenced blocks are resolved from the registry, whose approval
  * field is trusted (only `aart approve` writes 'approved'). `trustTop` controls

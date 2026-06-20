@@ -246,6 +246,62 @@ suite('verifyWeb — real Chromium integration', () => {
     expect(result.hint).toBeUndefined()
   }, 30000)
 
+  // ---- 7b. waitFor passthrough (Fix 1) ----------------------------------------
+
+  it('waitFor passthrough: ok:true when phrase injected after delay and waitFor is given', async () => {
+    const PHRASE = 'LATE_RENDERED_PHRASE_7b'
+    const url = await serve((_req, res) => {
+      res.setHeader('content-type', 'text/html')
+      res.end(
+        `<!doctype html><html><head><title>SPA</title></head>
+        <body>
+          <div id="app"><p>Loading...</p></div>
+          <script>
+            setTimeout(function() {
+              document.getElementById('app').innerHTML =
+                '<div id="late"><p>${PHRASE}</p></div>';
+            }, 200);
+          </script>
+        </body></html>`,
+      )
+    })
+
+    const result = await verifyWeb(makeRuntime(tmpDir()), {
+      url,
+      waitFor: '#late',
+      expect: PHRASE,
+    })
+
+    expect(result.status).toBe('ok')
+    expect(result.ok).toBe(true)
+  }, 30000)
+
+  // ---- 7c. Focus-miss false positive at verify layer (Fix 3) ------------------
+
+  it('ok:false when focus selector is absent (not a false positive from body text)', async () => {
+    const PHRASE = 'OUTSIDEWORD_7c'
+    const url = await serve((_req, res) => {
+      res.setHeader('content-type', 'text/html')
+      res.end(
+        `<!doctype html><html><head><title>Focus Miss</title></head>
+        <body>
+          <nav>${PHRASE}</nav>
+          <article id="present"><p>inside</p></article>
+        </body></html>`,
+      )
+    })
+
+    // focus:#missing doesn't exist; PHRASE is on the page but outside the region.
+    const result = await verifyWeb(makeRuntime(tmpDir()), {
+      url,
+      focus: '#missing',
+      expect: PHRASE,
+    })
+
+    expect(result.status).toBe('ok')
+    expect(result.ok).toBe(false)
+  }, 30000)
+
   // ---- 8. focus scoping in verifyWeb ----------------------------------------
 
   it('ok respects focus scope: outside=false, inside=true', async () => {

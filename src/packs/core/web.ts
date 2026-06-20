@@ -41,6 +41,10 @@ interface BrowserPage {
     url: string,
     opts?: { waitUntil?: 'load' | 'domcontentloaded' | 'networkidle' | 'commit'; timeout?: number },
   ) => Promise<unknown>
+  waitForLoadState: (
+    state?: 'load' | 'domcontentloaded' | 'networkidle',
+    opts?: { timeout?: number },
+  ) => Promise<void>
   url: () => string
   title: () => Promise<string>
   screenshot: (opts?: { mask?: unknown[] }) => Promise<Buffer>
@@ -153,12 +157,13 @@ export const webRead = nativeBlock(
     name: 'Web: Read',
     version: '0.1.0',
     description:
-      'The high-level "read a page" block — navigates to a URL, waits for the page to settle ' +
-      '(including JS-rendered SPAs via `waitFor`), and returns a COMPACT observation: clamped ' +
-      'inline text, a capped interactive-element map, console errors, and paths to the ' +
-      'screenshot and full-text artifacts. Unlike the low-level browser.* primitives this does ' +
-      'all perception in one step — the whole point is COMPRESSION (inline ≤ maxChars tokens, ' +
-      'bulk offloaded to artifacts).',
+      'The high-level "read a page" block — navigates to a URL, waits briefly for the page to ' +
+      'settle (domcontentloaded plus a short best-effort network-idle wait), and returns a COMPACT ' +
+      'observation: clamped inline text, a capped interactive-element map, console errors, and ' +
+      'paths to the screenshot and full-text artifacts. For SPAs that render content several ' +
+      'seconds after load, pass `waitFor` (a CSS selector) to wait for the right element before ' +
+      'reading. Unlike the low-level browser.* primitives this does all perception in one step — ' +
+      'the whole point is COMPRESSION (inline ≤ maxChars tokens, bulk offloaded to artifacts).',
     category: 'browser',
     keywords: ['web', 'read', 'page', 'perceive', 'render', 'spa', 'content', 'see', 'screenshot'],
     examples: [
@@ -232,8 +237,16 @@ export const webRead = nativeBlock(
     const waitForSel = inputs.waitFor ? String(inputs.waitFor) : null
     const expectStr = inputs.expect && typeof inputs.expect === 'string' ? inputs.expect : null
 
-    // 1. Navigate and wait for network to settle.
-    await p.goto(targetUrl, { waitUntil: 'networkidle', timeout: 30000 })
+    // 1. Navigate. Use domcontentloaded (reliable) rather than networkidle, which
+    // never fires on pages with a persistent connection (SSE / long-poll / analytics)
+    // and would make a healthy page time out as "unreachable".
+    await p.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30000 })
+    // Best-effort settle for late-rendered content; swallow a timeout (not fatal).
+    try {
+      await p.waitForLoadState('networkidle', { timeout: 5000 })
+    } catch {
+      // Persistent connections never reach networkidle — fine, read what's there.
+    }
 
     // 2. Optionally wait for a late-rendered element (SPA settle).
     let settled = true
@@ -247,11 +260,21 @@ export const webRead = nativeBlock(
 
     // 3. Extract main readable content.
     let fullText: string
+    let focusFound = true
     if (focusSel) {
-      try {
+      // Check DOM synchronously via evaluate — no auto-wait, no timeout hazard.
+      // innerText(sel) waits for the element by default (Playwright auto-wait),
+      // which would hang 30s on a missing selector even with timeout:0 (which
+      // means "no timeout" in Playwright, not "fail immediately").
+      const exists = await p.evaluate(
+        `!!document.querySelector(${JSON.stringify(focusSel)})`,
+      )
+      if (exists) {
         fullText = await p.innerText(focusSel)
-      } catch {
-        // Selector not found — fall back to main-content heuristic.
+      } else {
+        focusFound = false
+        // Selector absent — fall back to main-content for the `text` output (still
+        // useful perception), but the match below will NOT treat this as a hit.
         fullText = String(await p.evaluate(MAIN_TEXT_SCRIPT))
       }
     } else {
@@ -295,20 +318,18 @@ export const webRead = nativeBlock(
     // would otherwise have been preferred by the main-content heuristic.
     let matched: boolean | undefined
     if (expectStr !== null) {
-      let matchSource: string
       if (focusSel) {
-        // Focus region is already in fullText — match there.
-        matchSource = fullText
+        // Focus region: a hit only if the selector actually resolved. A missing
+        // focus selector means the scoped region never rendered — never a match.
+        matched = focusFound ? fullText.includes(expectStr) : false
       } else {
-        // Full body text — bypass the main-content heuristic.
+        // No focus: match the FULL body text (bypass the main-content heuristic).
         try {
-          matchSource = normalizeWhitespace(await p.innerText('body'))
+          matched = normalizeWhitespace(await p.innerText('body')).includes(expectStr)
         } catch {
-          // Defensive fallback: body not available (edge case in some page types).
-          matchSource = fullText
+          matched = fullText.includes(expectStr)
         }
       }
-      matched = matchSource.includes(expectStr)
     }
 
     return {
