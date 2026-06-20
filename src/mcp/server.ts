@@ -7,13 +7,14 @@ import { buildCatalog, filterCatalog } from '../agent/catalog'
 import { definitionJsonSchema } from '../agent/schema'
 import { validateDraft } from '../agent/validate'
 import { renderDefinition } from '../agent/render'
-import { unapprovedInTree } from '../core/approval'
+import { unapprovedInTree, approvalEnforced, deprecatedInTree } from '../core/approval'
 import { setApproval } from '../core/governance'
 import { approveWorkspacePack, loadWorkspacePack, registerWorkspacePack } from '../pack/loader'
 import { AUTHORING_GUIDE } from '../agent/guide'
 import { renderReport, readRun, listRuns } from '../core/report'
 import { openRuntime, resolveWorkspace, workspaceSourceLabel } from '../cli/workspace'
 import type { RunRecord } from '../core/types'
+import { verifyWeb } from '../agent/verify'
 
 /**
  * The agent-callable interface. A coding agent connects over stdio and uses
@@ -99,7 +100,7 @@ export async function startMcpServer(): Promise<void> {
   )
 
   const server = new McpServer(
-    { name: 'aart', version: '0.7.0' },
+    { name: 'aart', version: '0.8.0' },
     { instructions: AUTHORING_GUIDE },
   )
 
@@ -204,6 +205,7 @@ export async function startMcpServer(): Promise<void> {
       description:
         'Run an APPROVED workflow by registry id (optionally a version), with inputs. ' +
         'Returns the structured run report (per-step trace, outputs, artifacts). ' +
+        'A DEPRECATED workflow is always refused (re-approve it first with aa_approve). ' +
         'If it refuses as not-approved, get the user to approve it (aa_approve), then run.',
       inputSchema: {
         id: z.string().optional(),
@@ -229,16 +231,29 @@ export async function startMcpServer(): Promise<void> {
       } else {
         return fail('Provide either `id` or `definition`.')
       }
-      // Governance gate: only run user-approved definitions. An inline
-      // definition is never pre-trusted; a registry id's status is.
-      const pending = unapprovedInTree(def, registry, !definition)
-      if (pending.length) {
+      // Deprecation is an always-on hard stop (independent of AART_REQUIRE_APPROVAL).
+      // MCP runs are unattended (like scheduled runs) — no interactive override.
+      const deprecated = deprecatedInTree(def, registry, !definition)
+      if (deprecated.length) {
         return fail(
-          `Not approved: ${pending.join(', ')}. Ask the user to approve, then call ` +
-            `aa_approve for: ${pending.join(', ')} — then run again.`,
+          `Refused — deprecated: ${deprecated.join(', ')}. ` +
+            `This workflow is no longer approved to run; re-approve it (aa_approve) before running.`,
         )
       }
-      const record = await runtime.run(def, input ?? {}, params, { approved: true })
+      // Governance gate: only run user-approved definitions. An inline
+      // definition is never pre-trusted; a registry id's status is.
+      //
+      // Enforcement is opt-in (AART_REQUIRE_APPROVAL=1). When unset (the
+      // default), unapproved/draft blocks run immediately. The approved field
+      // in the run record always reflects true approval status regardless.
+      const pending = unapprovedInTree(def, registry, !definition)
+      if (approvalEnforced() && pending.length) {
+        return fail(
+          `Not approved: ${pending.join(', ')}. Approval enforcement is on (AART_REQUIRE_APPROVAL=1); ` +
+            `ask the user to approve, then call aa_approve for: ${pending.join(', ')}.`,
+        )
+      }
+      const record = await runtime.run(def, input ?? {}, params, { approved: pending.length === 0 })
       return {
         content: [{ type: 'text' as const, text: renderReport(record) }],
         structuredContent: runView(record),
@@ -270,6 +285,32 @@ export async function startMcpServer(): Promise<void> {
       description: 'List recent runs (id, block, status). Use aa_get_report for the full report of one.',
     },
     async () => json(await listRuns(ws)),
+  )
+
+  server.registerTool(
+    'aa_verify',
+    {
+      title: 'Verify a web page renders / works',
+      description:
+        'Your "did it actually work?" check for anything affecting a web page. Loads the URL in a ' +
+        'real browser, waits for it to settle (incl. JS-rendered SPAs), and returns a COMPACT view of ' +
+        "what's actually on the page — title, the main rendered text, interactive elements, console " +
+        'errors, and a screenshot — plus `ok` (is the `expect` text present?) when you pass `expect`. ' +
+        'Reach for this RIGHT AFTER you change something that affects how a page renders, BEFORE ' +
+        "claiming it works — don't guess from the code or unit tests. One call, no workflow authoring. " +
+        'Pass `waitFor` (a CSS selector) to wait for content that only renders after page load (SPAs). ' +
+        'Pass `focus` (a CSS selector) to scope the read and `expect` match to a specific region of the page.',
+      inputSchema: {
+        url: z.string(),
+        focus: z.string().optional(),
+        expect: z.string().optional(),
+        waitFor: z.string().optional(),
+      },
+    },
+    async ({ url, focus, expect, waitFor }) => {
+      const result = await verifyWeb(runtime, { url, focus, expect, waitFor })
+      return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }], isError: result.status !== 'ok' }
+    },
   )
 
   server.registerTool(

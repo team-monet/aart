@@ -7,6 +7,10 @@
  */
 export const AUTHORING_GUIDE = `# Using aart (Agentic Automation RunTime)
 
+## ⚡ Reflex — verify before you claim it works
+
+If you just changed something that affects a **web page or a running service**, call **\`aa_verify\`** to actually *see* whether it works — before you say it's done. One call: \`aa_verify({ url, expect? })\` loads the page in a real browser, waits for it to settle, and returns a compact view (title, the rendered text, interactive elements, console errors, a screenshot) plus \`ok\` when you pass \`expect\`. Reach for it the way you reach for the test suite — reading the code or running unit tests doesn't tell you whether the page actually renders. (Quick "does it render?" check → \`aa_verify\` is one call; authoring a full workflow is for repeatable automations.)
+
 ## Task → block quick-reference
 
 | I want to… | block | category |
@@ -24,6 +28,7 @@ export const AUTHORING_GUIDE = `# Using aart (Agentic Automation RunTime)
 | Run JavaScript in the browser and return a value | \`browser.eval\` | browser |
 | Map every interactive element + selector on the page | \`browser.snapshot\` | browser |
 | Take a screenshot | \`browser.screenshot\` | browser |
+| **See/read what's actually rendered on a (JS-heavy) page, compactly** | \`web.read\` | browser |
 | Parse JSON, YAML, or CSV text into structured data | \`data.parse\` | data |
 | Serialize structured data to JSON, YAML, or CSV | \`data.stringify\` | data |
 | Read a file from the workspace | \`file.read\` | file |
@@ -103,12 +108,8 @@ composition can't get there.
    blocks. Get the exact shape from \`aa_get_schema\`. A workflow is a block with
    \`execution.type: "workflow"\` and an ordered \`steps\` array.
 3. **Validate.** Call \`aa_validate\` with your draft. Fix every error it reports.
-4. **Register.** Call \`aa_register_block\`. It saves as **draft** (not yet runnable).
-5. **Get the user's approval.** SHOW the user exactly what they're approving —
-   \`aa_register_block\` returns a readable summary of the workflow's steps; present
-   it (don't just say "approve?"). When they say yes, call \`aa_approve\` with its
-   id. (If you edit and re-register it, it returns to draft — show it and ask again.)
-6. **Run.** Call \`aa_run_workflow\` with the id and any \`input\`. Read the report
+4. **Register.** Call \`aa_register_block\`. It saves as **draft**.
+5. **Run.** Call \`aa_run_workflow\` with the id and any \`input\`. Read the report
    it returns (per-step trace, outputs, screenshots/artifacts, pass/fail). If it
    failed, revise the draft and loop.
 
@@ -136,8 +137,8 @@ A workflow that opens a page and checks text is visible:
 }
 \`\`\`
 
-→ \`aa_validate\` it → \`aa_register_block\` it → ask the user to approve →
-\`aa_approve\` → \`aa_run_workflow\` { id: "dashboard-check", input: { url: "..." } }.
+→ \`aa_validate\` it → \`aa_register_block\` it →
+\`aa_run_workflow\` { id: "dashboard-check", input: { url: "..." } }.
 
 ## Wiring data between steps
 
@@ -217,13 +218,20 @@ one object per iteration, in order. A later step accesses the typed array via
 - \`{{loop.index}}\` gives "0", "1", … as a string.
 - \`$probe.items\` in a later step is the typed array of per-iteration outputs.
 
-## Approval (it's the user's call, made in chat)
+## Approval (opt-in governance)
 
-- Every registration is **draft**. A draft can't run until approved.
-- **You ask; the user decides.** Present what it does, and approve via
-  \`aa_approve\` only once the user agrees — never approve unprompted.
+- Approval is **off by default**. Agent-authored blocks and workflows run
+  immediately after registration — no user sign-off required.
 - The catalog shows each block's \`status\`: \`native\` (trusted, always usable),
-  \`draft\`, \`approved\`, \`deprecated\`.
+  \`draft\`, \`approved\`, \`deprecated\`. Every new registration starts as \`draft\`.
+  The run record's \`approved\` field always reflects true approval status, even
+  when enforcement is off.
+- **To turn governance ON:** the user sets \`AART_REQUIRE_APPROVAL=1\`. With
+  enforcement on, the flow becomes: Register → user reviews → \`aa_approve\` →
+  Run. In that mode, present what it does before calling \`aa_approve\`, and only
+  approve once the user says yes — never approve unprompted.
+- \`aart approve\` / \`aa_approve\` / the dashboard status all remain available
+  regardless of the enforcement setting.
 
 ## Block types
 

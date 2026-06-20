@@ -27,6 +27,7 @@ import {
   browserBack,
   browserScreenshot,
 } from './browser'
+import { webRead } from './web'
 
 /**
  * Core pack — the built-in primitives every automation composes from: browser
@@ -75,6 +76,7 @@ export const corePack: Pack = {
     browserSnapshot,
     browserBack,
     browserScreenshot,
+    webRead,
   ],
   capabilities: [browserCapability],
   workflows: [httpHealthCheck, httpPoll],

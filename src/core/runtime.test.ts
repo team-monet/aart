@@ -6,6 +6,7 @@ import { Runtime, collectCapabilities } from './runtime'
 import { FileRegistry } from '../registry/file-registry'
 import { nativeBlock, type Pack } from '../pack/types'
 import type { BlockDefinition } from './types'
+import { readRun } from './report'
 
 // A fake pack with one capability and one native block that reads it.
 function fakePack(events: string[]): Pack {
@@ -143,6 +144,73 @@ describe('Runtime capability lifecycle', () => {
     // Without reserving pack-workflow ids in addPack, this native block would be
     // accepted and silently shadow the built-in workflow until restart.
     expect(() => rt.addPack(evil)).toThrow(/built-in block or workflow/)
+  })
+
+  it('persists approvalEnforced:true on the final COMPLETED record when AART_REQUIRE_APPROVAL=1', async () => {
+    const savedEnv = process.env.AART_REQUIRE_APPROVAL
+    try {
+      process.env.AART_REQUIRE_APPROVAL = '1'
+      const nodeWf: BlockDefinition = {
+        id: 'plain-enforced',
+        name: 'plain-enforced',
+        version: '0.1.0',
+        inputs: [],
+        outputs: [],
+        execution: { type: 'node', code: 'return { ok: true };' },
+      }
+      const record = await new Runtime(dir, []).run(nodeWf, {})
+      // In-memory record reflects enforcement state captured at run start.
+      expect(record.approvalEnforced).toBe(true)
+      // On-disk record must also carry approvalEnforced (final write, not only RUNNING).
+      const onDisk = await readRun(dir, record.runId)
+      expect(onDisk.approvalEnforced).toBe(true)
+    } finally {
+      if (savedEnv === undefined) {
+        delete process.env.AART_REQUIRE_APPROVAL
+      } else {
+        process.env.AART_REQUIRE_APPROVAL = savedEnv
+      }
+    }
+  })
+
+  it('persists deprecated:true on the final on-disk record when run invoked with { deprecated: true }', async () => {
+    const nodeWf: BlockDefinition = {
+      id: 'plain-deprecated',
+      name: 'plain-deprecated',
+      version: '0.1.0',
+      inputs: [],
+      outputs: [],
+      execution: { type: 'node', code: 'return { ok: true };' },
+    }
+    const record = await new Runtime(dir, []).run(nodeWf, {}, undefined, { deprecated: true })
+    expect(record.deprecated).toBe(true)
+    const onDisk = await readRun(dir, record.runId)
+    expect(onDisk.deprecated).toBe(true)
+  })
+
+  it('persists approvalEnforced:false on the final COMPLETED record when AART_REQUIRE_APPROVAL is unset', async () => {
+    const savedEnv = process.env.AART_REQUIRE_APPROVAL
+    try {
+      delete process.env.AART_REQUIRE_APPROVAL
+      const nodeWf: BlockDefinition = {
+        id: 'plain-unenforced',
+        name: 'plain-unenforced',
+        version: '0.1.0',
+        inputs: [],
+        outputs: [],
+        execution: { type: 'node', code: 'return { ok: true };' },
+      }
+      const record = await new Runtime(dir, []).run(nodeWf, {})
+      expect(record.approvalEnforced).toBe(false)
+      const onDisk = await readRun(dir, record.runId)
+      expect(onDisk.approvalEnforced).toBe(false)
+    } finally {
+      if (savedEnv === undefined) {
+        delete process.env.AART_REQUIRE_APPROVAL
+      } else {
+        process.env.AART_REQUIRE_APPROVAL = savedEnv
+      }
+    }
   })
 })
 

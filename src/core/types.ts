@@ -227,6 +227,8 @@ export const RunRecordSchema = z.object({
   blockId: z.string(),
   status: RunStatusSchema,
   approved: z.boolean().optional(),
+  approvalEnforced: z.boolean().optional(),
+  deprecated: z.boolean().optional(),
   inputs: z.record(z.unknown()),
   params: z.record(z.unknown()).optional(),
   results: z.record(z.unknown()).optional(),
@@ -244,6 +246,14 @@ export type RunRecord = {
   /** Whether the executed definition (and its refs) were user-approved. A
    *  `false` here means the run was a one-time `--yes` user override. */
   approved?: boolean
+  /** Whether approval enforcement was active at run START. Captured once so
+   *  that `aart report <oldRunId>` can reconstruct the correct warning state
+   *  regardless of the current environment. Absent on legacy on-disk records
+   *  (treat as falsy — we can't know their state, silent is the safe default). */
+  approvalEnforced?: boolean
+  /** Whether this run was of a DEPRECATED workflow (forced via --yes override of
+   *  the retire gate). Absent on legacy records — treat as falsy, no warning. */
+  deprecated?: boolean
   inputs: Record<string, unknown>
   params?: Record<string, unknown>
   results?: Record<string, unknown>

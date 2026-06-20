@@ -15,6 +15,15 @@ export interface ScheduleRecord {
    * visibility; there is no push alert.
    */
   version?: string
+  /**
+   * Whether approval enforcement was on when this schedule was created.
+   * Honored at fire time regardless of the cron/launchd environment, so a
+   * user who set AART_REQUIRE_APPROVAL=1 at add-time gets enforcement on
+   * unattended ticks even when that env var is absent in cron's environment.
+   * Undefined on records written before this field existed — falls back to
+   * the current env (preserving prior behavior).
+   */
+  requireApproval?: boolean
   /** cron(5) expression (5 or 6 fields). Stored for documentation; the OS
    *  scheduler owns the cadence — aart never polls or loops. */
   cron: string

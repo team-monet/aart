@@ -3,6 +3,18 @@ import type { Registry } from '../registry/file-registry'
 
 export type ApprovalStatus = 'draft' | 'approved' | 'deprecated'
 
+/**
+ * Whether approval enforcement is on. Off by default — agent-authored blocks
+ * run immediately without requiring `aart approve`. Set AART_REQUIRE_APPROVAL=1
+ * to enable the governance gate (register → user approves → run).
+ *
+ * Distinct from AART_STRICT_APPROVAL, which only controls whether the MCP
+ * approve tools are registered.
+ */
+export function approvalEnforced(): boolean {
+  return process.env.AART_REQUIRE_APPROVAL === '1'
+}
+
 /** Native (pack) blocks are trusted runtime code; otherwise only 'approved' counts. */
 export function isApproved(block: BlockDefinition): boolean {
   return block.execution.type === 'native' || block.approval === 'approved'
@@ -12,6 +24,36 @@ export function isApproved(block: BlockDefinition): boolean {
 export function statusLabel(block: BlockDefinition): ApprovalStatus | 'native' {
   if (block.execution.type === 'native') return 'native'
   return block.approval ?? 'draft'
+}
+
+/**
+ * Ids in a definition's tree that are DEPRECATED (retired via `aart deprecate`).
+ * Deprecation is an always-on hard stop: unlike draft, it refuses regardless of
+ * AART_REQUIRE_APPROVAL. Same trusted-registry walk as unapprovedInTree.
+ */
+export function deprecatedInTree(
+  def: BlockDefinition,
+  registry: Registry,
+  trustTop: boolean,
+): string[] {
+  const deprecated: string[] = []
+  const seen = new Set<string>()
+  const visit = (b: BlockDefinition, trust: boolean) => {
+    const key = `${b.id}@${b.version ?? ''}`
+    if (seen.has(key)) return
+    seen.add(key)
+    if (b.execution.type !== 'native' && trust && b.approval === 'deprecated') {
+      deprecated.push(b.id)
+    }
+    if (b.execution.type === 'workflow') {
+      for (const step of b.execution.steps) {
+        const child = registry.getBlock(step.block, step.version)
+        if (child) visit(child, true) // referenced blocks come from the trusted registry
+      }
+    }
+  }
+  visit(def, trustTop)
+  return [...new Set(deprecated)]
 }
 
 /**
@@ -29,8 +71,9 @@ export function unapprovedInTree(
   const pending: string[] = []
   const seen = new Set<string>()
   const visit = (b: BlockDefinition, trust: boolean) => {
-    if (seen.has(b.id)) return
-    seen.add(b.id)
+    const key = `${b.id}@${b.version ?? ''}`
+    if (seen.has(key)) return
+    seen.add(key)
     const ok = b.execution.type === 'native' || (trust && b.approval === 'approved')
     if (!ok) pending.push(b.id)
     if (b.execution.type === 'workflow') {

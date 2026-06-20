@@ -137,8 +137,14 @@ const glyph = (s: RunStatus): string =>
 export function renderReport(record: RunRecord): string {
   const lines: string[] = []
   lines.push(`${glyph(record.status)} ${record.blockId}  [${record.status}]  run ${record.runId}`)
-  if (record.approved === false) {
-    lines.push('  ⚠ ran UNAPPROVED (one-time --yes override)')
+  // Only flag an unapproved run when approval is actually being ENFORCED — there,
+  // approved:false means a deliberate --yes bypass of the gate. When enforcement
+  // is off (the default), unapproved is the normal frictionless case; no nag.
+  if (record.approved === false && record.approvalEnforced) {
+    lines.push('  ⚠ ran UNAPPROVED (--yes override of the approval gate)')
+  }
+  if (record.deprecated) {
+    lines.push('  ⚠ ran a DEPRECATED workflow (--yes override of the retire gate)')
   }
   if (record.endedAt) {
     const ms = Date.parse(record.endedAt) - Date.parse(record.startedAt)

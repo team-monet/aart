@@ -6,6 +6,7 @@ import { ArtifactStore } from '../artifacts/artifact-store'
 import { writeRun, runDir } from './report'
 import { loadSecrets, redactRecord } from './secrets'
 import { notify } from './notify'
+import { approvalEnforced } from './approval'
 import { FileRegistry, type Registry } from '../registry/file-registry'
 import { CompositeRegistry } from '../pack/composite-registry'
 import type { Capability, NativeRunFn, Pack } from '../pack/types'
@@ -137,9 +138,13 @@ export class Runtime {
     def: BlockDefinition,
     inputs: Record<string, unknown>,
     params?: Record<string, unknown>,
-    opts: { verbose?: boolean; timeoutMs?: number; approved?: boolean } = {},
+    opts: { verbose?: boolean; timeoutMs?: number; approved?: boolean; deprecated?: boolean } = {},
   ): Promise<RunRecord> {
     const approved = opts.approved ?? true
+    const deprecatedRun = opts.deprecated ?? false
+    // Capture enforcement state ONCE at run start — rendering later must not
+    // re-read the live env (that would mislabel historical records).
+    const enforcedAtStart = approvalEnforced()
     const runId = randomUUID()
     const artifacts = new ArtifactStore(runDir(this.workspace, runId))
     const secrets = loadSecrets(this.workspace)
@@ -155,7 +160,7 @@ export class Runtime {
     // Chromium-launch step is the most crash-prone), so a hard crash mid-run
     // still leaves visible evidence the run started. The terminal record below
     // overwrites it; a phase-1 disk fault must not abort the run (persist warns).
-    await this.persist(redactRecord(initialRecord(def, inputs, params, runId, approved), secrets), ctx)
+    await this.persist(redactRecord(initialRecord(def, inputs, params, runId, approved, enforcedAtStart, deprecatedRun), secrets), ctx)
 
     const needed = collectCapabilities(def, this.registry)
     const active: Capability[] = []
@@ -173,6 +178,8 @@ export class Runtime {
         err instanceof Error ? err.message : String(err)
       }`)
       failed.approved = approved
+      failed.approvalEnforced = enforcedAtStart
+      failed.deprecated = deprecatedRun
       const record = redactRecord(failed, secrets)
       await this.persist(record, ctx)
       try { await notify(this.workspace, record, secrets, ctx.logger) } catch (e) {
@@ -191,6 +198,8 @@ export class Runtime {
         timeoutMs: opts.timeoutMs,
       }).run(def, inputs, ctx, params)
       raw.approved = approved
+      raw.approvalEnforced = enforcedAtStart
+      raw.deprecated = deprecatedRun
       // Mask secret values before anything is persisted, printed, or returned.
       record = redactRecord(raw, secrets)
       await this.persist(record, ctx)
@@ -247,12 +256,16 @@ function initialRecord(
   params: Record<string, unknown> | undefined,
   runId: string,
   approved: boolean,
+  enforcedAtStart: boolean,
+  deprecated: boolean,
 ): RunRecord {
   return {
     runId,
     blockId: def.id,
     status: 'RUNNING',
     approved,
+    approvalEnforced: enforcedAtStart,
+    deprecated,
     inputs,
     params,
     trace: [],

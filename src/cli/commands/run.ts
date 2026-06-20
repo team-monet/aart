@@ -3,7 +3,7 @@ import path from 'node:path'
 import YAML from 'yaml'
 import { renderReport } from '../../core/report'
 import { validateDraft } from '../../agent/validate'
-import { unapprovedInTree } from '../../core/approval'
+import { unapprovedInTree, deprecatedInTree, approvalEnforced } from '../../core/approval'
 import type { BlockDefinition } from '../../core/types'
 import { openRuntime } from '../workspace'
 
@@ -57,9 +57,21 @@ export async function runCommand(workflowRef: string, opts: RunOpts): Promise<vo
   // Approval gate: an ad-hoc file def is never pre-trusted (trustTop=false);
   // a registry def's own approval is trusted. Either way the user can run an
   // unapproved definition once with --yes.
+  //
+  // Deprecation is an always-on hard stop (independent of AART_REQUIRE_APPROVAL)
+  // but --yes still overrides it for attended runs. Enforcement for draft/unapproved
+  // is opt-in: when AART_REQUIRE_APPROVAL is unset (the default), that gate is
+  // skipped and the run proceeds immediately. The approved flag in the run record
+  // always reflects true approval status regardless.
   const pending = unapprovedInTree(wf, runtime.registry, !fromFile)
+  const deprecated = deprecatedInTree(wf, runtime.registry, !fromFile)
   const approved = pending.length === 0
-  if (!approved && !opts.yes) {
+  if (!opts.yes && deprecated.length > 0) {
+    console.error(`✗ refused — deprecated: ${deprecated.join(', ')}`)
+    console.error('This workflow is deprecated (no longer approved to run). Re-approve it, or force this one run with:  --yes')
+    process.exit(1)
+  }
+  if (approvalEnforced() && !approved && !opts.yes) {
     console.error(`✗ refused — not approved: ${pending.join(', ')}`)
     if (!fromFile) console.error(`approve with:  aart approve ${pending.join(' && aart approve ')}`)
     console.error(`or run it once as the user with:  --yes`)
@@ -69,7 +81,7 @@ export async function runCommand(workflowRef: string, opts: RunOpts): Promise<vo
   const inputs = parseJson(opts.input, '--input')
   const params = parseJson(opts.param, '--param')
 
-  const record = await runtime.run(wf, inputs, params, { verbose: opts.verbose, approved })
+  const record = await runtime.run(wf, inputs, params, { verbose: opts.verbose, approved, deprecated: deprecated.length > 0 })
   const reportPath = path.join('.aa', 'runs', record.runId, 'run.json')
 
   if (opts.json) {
@@ -82,6 +94,7 @@ export async function runCommand(workflowRef: string, opts: RunOpts): Promise<vo
         blockId: record.blockId,
         status: record.status,
         approved: record.approved,
+        deprecated: record.deprecated,
         error: record.error,
         startedAt: record.startedAt,
         endedAt: record.endedAt,
