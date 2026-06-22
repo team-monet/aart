@@ -7,9 +7,16 @@ import { loadApprovedPacks, mergePacks } from '../pack/loader'
 
 let override: string | undefined
 
+/** Expand a leading `~` or `~/` to the home directory; leave everything else unchanged. */
+function expandTilde(p: string): string {
+  if (p === '~') return os.homedir()
+  if (p.startsWith('~/') || p.startsWith('~\\')) return path.join(os.homedir(), p.slice(2))
+  return p
+}
+
 /** Set the workspace explicitly (from the global `--workspace` flag). */
 export function setWorkspace(dir?: string): void {
-  override = dir ? path.resolve(dir) : undefined
+  override = dir ? path.resolve(expandTilde(dir)) : undefined
 }
 
 export type WorkspaceSource = 'flag' | 'env' | 'default'
@@ -28,7 +35,7 @@ export type WorkspaceSource = 'flag' | 'env' | 'default'
 export function resolveWorkspace(): { dir: string; source: WorkspaceSource } {
   if (override) return { dir: path.resolve(override), source: 'flag' }
   const env = process.env.AART_WORKSPACE?.trim()
-  if (env) return { dir: path.resolve(env), source: 'env' } // ignore an empty/whitespace value
+  if (env) return { dir: path.resolve(expandTilde(env)), source: 'env' } // ignore an empty/whitespace value
   return { dir: defaultWorkspace(), source: 'default' }
 }
 

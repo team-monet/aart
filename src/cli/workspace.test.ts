@@ -84,4 +84,46 @@ describe('resolveWorkspace precedence (--workspace > $AART_WORKSPACE > ~/.aart)'
     expect(workspaceSourceLabel('env')).toBe('via $AART_WORKSPACE')
     expect(workspaceSourceLabel('default')).toBe('default workspace (~/.aart)')
   })
+
+  it('env ~/ expands to the home directory — not a literal ~ segment under cwd', () => {
+    process.env.AART_WORKSPACE = '~/.aart'
+    setWorkspace(undefined)
+    const result = resolveWorkspace()
+    expect(result.source).toBe('env')
+    expect(result.dir).toBe(path.join(os.homedir(), '.aart'))
+    expect(result.dir).not.toContain('/~/')
+    expect(result.dir).not.toMatch(/\/~$/)
+  })
+
+  it('env bare ~ expands to homedir', () => {
+    process.env.AART_WORKSPACE = '~'
+    setWorkspace(undefined)
+    const result = resolveWorkspace()
+    expect(result.source).toBe('env')
+    expect(result.dir).toBe(os.homedir())
+  })
+
+  it('flag ~/foo expands to homedir/foo — source is flag', () => {
+    setWorkspace('~/foo')
+    const result = resolveWorkspace()
+    expect(result.source).toBe('flag')
+    expect(result.dir).toBe(path.join(os.homedir(), 'foo'))
+    expect(result.dir).not.toContain('/~/')
+  })
+
+  it('flag bare ~ expands to homedir — source is flag', () => {
+    setWorkspace('~')
+    const result = resolveWorkspace()
+    expect(result.source).toBe('flag')
+    expect(result.dir).toBe(os.homedir())
+  })
+
+  it('a relative non-tilde env value still resolves against cwd (intentional behaviour)', () => {
+    process.env.AART_WORKSPACE = './scratch'
+    setWorkspace(undefined)
+    const result = resolveWorkspace()
+    expect(result.source).toBe('env')
+    expect(result.dir).toBe(path.resolve('./scratch'))
+    expect(result.dir).not.toContain('/~/')
+  })
 })
