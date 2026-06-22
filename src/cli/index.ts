@@ -24,8 +24,8 @@ const program = new Command()
 program
   .name('aart')
   .description('Agentic Automation RunTime — a governed block/workflow runtime for AI agents')
-  .version('0.8.0')
-  .option('-w, --workspace <dir>', 'workspace directory (default: $AART_WORKSPACE or cwd)')
+  .version('0.8.1')
+  .option('-w, --workspace <dir>', 'workspace directory (default: $AART_WORKSPACE or ~/.aart)')
   .hook('preAction', () => {
     const ws = program.opts().workspace
     if (ws) setWorkspace(ws)
