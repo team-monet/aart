@@ -155,16 +155,28 @@ export class Runtime {
       // loadSecrets code path) is unexpected and should propagate.
       if (!(err instanceof SecretCollisionError)) throw err
       // A SecretCollisionError is a config error: produce a proper FAILED record.
-      // Redacting with an empty map is safe here because collision messages contain
-      // key NAMES only, no secret values.
+      // FIX B: pass empty inputs/params — the collision happened before execution,
+      // so caller-supplied inputs/params are irrelevant and cannot be redacted
+      // (no secrets were loaded). The record carries no caller data and only a
+      // names-only collision message, so it is safe to persist and notify as-is.
       const logger = createLogger(opts.verbose)
-      const failed = failedRecord(def, inputs, params, runId, [], `secrets load failed: ${err.message}`)
+      const failed = failedRecord(def, {}, {}, runId, [], `secrets load failed: ${err.message}`)
       failed.approved = opts.approved ?? true
       failed.approvalEnforced = approvalEnforced()
       failed.deprecated = opts.deprecated ?? false
-      const record = redactRecord(failed, {})
+      // FIX C: build a best-effort secret map (last-wins on the colliding key)
+      // so a {{secrets.webhook_url}} reference in notify.json can still resolve,
+      // and redactRecord has values to mask from the failure record. Last-wins
+      // means only the SURVIVING colliding value is in the mask set (the losing
+      // key's value is not) — acceptable here since the record carries no caller
+      // data (FIX B) and the run has already FAILED.
+      // If this itself throws unexpectedly, fall back to an empty map so the
+      // collision path never crashes.
+      let bestEffort: Record<string, string> = {}
+      try { bestEffort = loadSecrets(this.workspace, { tolerateCollisions: true }) } catch { /* ignore */ }
+      const record = redactRecord(failed, bestEffort)
       await this.persist(record, { logger })
-      try { await notify(this.workspace, record, {}, logger) } catch (e) {
+      try { await notify(this.workspace, record, bestEffort, logger) } catch (e) {
         logger.warn(`aart notify: unexpected error: ${e instanceof Error ? e.message : String(e)}`)
       }
       return record

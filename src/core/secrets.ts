@@ -31,30 +31,48 @@ export class SecretCollisionError extends Error {
  * (e.g. a screenshot of a secret typed into a visible field). Treat the run
  * report as low-sensitivity, not secret-free.
  */
-export function loadSecrets(workspace: string): Record<string, string> {
+export interface LoadSecretsOptions {
+  /**
+   * When true, canonical-name collisions (file or env) do NOT throw — the last
+   * key wins instead. Used on the collision-failure path so a best-effort map
+   * can still be built for webhook-URL resolution and redaction hygiene.
+   * Default: false (throw SecretCollisionError on any collision).
+   */
+  tolerateCollisions?: boolean
+}
+
+export function loadSecrets(workspace: string, opts?: LoadSecretsOptions): Record<string, string> {
+  const tolerateCollisions = opts?.tolerateCollisions ?? false
   const secrets: Record<string, string> = {}
 
   const file = path.join(workspace, '.aa', 'secrets.json')
   if (fs.existsSync(file)) {
-    let parsed: Record<string, unknown> | undefined
+    let parsed: unknown
     try {
-      parsed = JSON.parse(fs.readFileSync(file, 'utf8')) as Record<string, unknown>
+      parsed = JSON.parse(fs.readFileSync(file, 'utf8'))
     } catch {
       // ignore a malformed secrets file; treat as no file secrets
     }
-    if (parsed !== undefined) {
+    // FIX A: Guard that parsed is a non-null plain object before iterating.
+    // Valid JSON that is not an object (null, [], 42, "x") is tolerated silently
+    // as "no file secrets" — same as malformed JSON above. Env secrets still load.
+    if (parsed !== undefined && parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
       // Collision detection: two keys that differ only in case would collapse to
-      // the same canonical (lowercased) name — that is ambiguous, so throw.
+      // the same canonical (lowercased) name — that is ambiguous, so throw
+      // (unless tolerateCollisions is set, in which case last-wins).
       const seen = new Map<string, string>() // canonical -> original key
-      for (const [k, v] of Object.entries(parsed)) {
+      for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
         if (typeof v !== 'string') continue
         const canonical = k.toLowerCase()
         const prior = seen.get(canonical)
         if (prior !== undefined) {
-          throw new SecretCollisionError(
-            `secrets.json has two keys that collide on the same canonical name "${canonical}": ` +
-              `"${prior}" and "${k}". Remove one of them.`,
-          )
+          if (!tolerateCollisions) {
+            throw new SecretCollisionError(
+              `secrets.json has two keys that collide on the same canonical name "${canonical}": ` +
+                `"${prior}" and "${k}". Remove one of them.`,
+            )
+          }
+          // tolerateCollisions: last-wins — fall through to overwrite
         }
         seen.set(canonical, k)
         secrets[canonical] = v
@@ -63,7 +81,8 @@ export function loadSecrets(workspace: string): Record<string, string> {
   }
 
   // Collision detection: two AART_SECRET_* env vars that collapse to the same
-  // lowercased name are ambiguous — throw rather than silently picking one.
+  // lowercased name are ambiguous — throw rather than silently picking one
+  // (unless tolerateCollisions is set, in which case last-wins).
   const envSeen = new Map<string, string>() // canonical -> original env key
   for (const [k, v] of Object.entries(process.env)) {
     if (k.startsWith('AART_SECRET_') && typeof v === 'string') {
@@ -71,10 +90,13 @@ export function loadSecrets(workspace: string): Record<string, string> {
       if (!name) continue
       const prior = envSeen.get(name)
       if (prior !== undefined) {
-        throw new SecretCollisionError(
-          `Two environment variables collide on the same secret name "${name}": ` +
-            `${prior} and ${k}. Remove one of them.`,
-        )
+        if (!tolerateCollisions) {
+          throw new SecretCollisionError(
+            `Two environment variables collide on the same secret name "${name}": ` +
+              `${prior} and ${k}. Remove one of them.`,
+          )
+        }
+        // tolerateCollisions: last-wins — fall through to overwrite
       }
       envSeen.set(name, k)
       secrets[name] = v // env overrides file (same lowercased namespace)

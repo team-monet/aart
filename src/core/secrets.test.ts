@@ -3,6 +3,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { loadSecrets, redactRecord, SecretCollisionError } from './secrets'
+import type { LoadSecretsOptions } from './secrets'
 import { Runtime } from './runtime'
 import { corePack } from '../packs/core'
 import type { BlockDefinition, RunRecord } from './types'
@@ -106,6 +107,91 @@ describe('loadSecrets', () => {
     expect(() => loadSecrets(dir)).not.toThrow()
     const s = loadSecrets(dir)
     expect(Object.keys(s)).toHaveLength(0)
+  })
+
+  // FIX A: valid JSON that is not a plain object is tolerated as "no file secrets"
+  it('FIX-A: secrets.json containing JSON null is silently tolerated (no throw, no file secrets)', () => {
+    fs.mkdirSync(path.join(dir, '.aa'), { recursive: true })
+    fs.writeFileSync(path.join(dir, '.aa', 'secrets.json'), 'null')
+    expect(() => loadSecrets(dir)).not.toThrow()
+    expect(Object.keys(loadSecrets(dir))).toHaveLength(0)
+  })
+
+  it('FIX-A: secrets.json containing a JSON array is silently tolerated (no throw, no file secrets)', () => {
+    fs.mkdirSync(path.join(dir, '.aa'), { recursive: true })
+    fs.writeFileSync(path.join(dir, '.aa', 'secrets.json'), '["a","b"]')
+    expect(() => loadSecrets(dir)).not.toThrow()
+    expect(Object.keys(loadSecrets(dir))).toHaveLength(0)
+  })
+
+  it('FIX-A: secrets.json containing a JSON number is silently tolerated (no throw, no file secrets)', () => {
+    fs.mkdirSync(path.join(dir, '.aa'), { recursive: true })
+    fs.writeFileSync(path.join(dir, '.aa', 'secrets.json'), '42')
+    expect(() => loadSecrets(dir)).not.toThrow()
+    expect(Object.keys(loadSecrets(dir))).toHaveLength(0)
+  })
+
+  it('FIX-A: secrets.json containing a JSON string is silently tolerated (no throw, no file secrets)', () => {
+    fs.mkdirSync(path.join(dir, '.aa'), { recursive: true })
+    fs.writeFileSync(path.join(dir, '.aa', 'secrets.json'), '"just-a-string"')
+    expect(() => loadSecrets(dir)).not.toThrow()
+    expect(Object.keys(loadSecrets(dir))).toHaveLength(0)
+  })
+
+  it('FIX-A: env secrets still load when secrets.json is wrong-shaped (null)', () => {
+    fs.mkdirSync(path.join(dir, '.aa'), { recursive: true })
+    fs.writeFileSync(path.join(dir, '.aa', 'secrets.json'), 'null')
+    process.env.AART_SECRET_TOKEN = 'envtok-fixA'
+    const s = loadSecrets(dir)
+    expect(s['token']).toBe('envtok-fixA')
+  })
+})
+
+describe('loadSecrets tolerateCollisions option (FIX C)', () => {
+  let dir: string
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'aart-sec-tol-'))
+    fs.mkdirSync(path.join(dir, '.aa'), { recursive: true })
+  })
+  afterEach(() => {
+    fs.rmSync(dir, { recursive: true, force: true })
+    delete process.env['AART_SECRET_FOO']
+    delete process.env['AART_SECRET_foo']
+  })
+
+  it('FIX-C: tolerateCollisions:true returns last-wins map instead of throwing on file key collision', () => {
+    fs.writeFileSync(
+      path.join(dir, '.aa', 'secrets.json'),
+      JSON.stringify({ Foo: 'first', foo: 'last' }),
+    )
+    // default: throws
+    expect(() => loadSecrets(dir)).toThrowError(SecretCollisionError)
+    // tolerateCollisions: last-wins, no throw
+    const opts: LoadSecretsOptions = { tolerateCollisions: true }
+    expect(() => loadSecrets(dir, opts)).not.toThrow()
+    const s = loadSecrets(dir, opts)
+    // canonical 'foo' is present; the last value wins
+    expect(s['foo']).toBe('last')
+  })
+
+  it('FIX-C: tolerateCollisions:true returns non-colliding keys intact', () => {
+    fs.writeFileSync(
+      path.join(dir, '.aa', 'secrets.json'),
+      JSON.stringify({ Bar: 'first', bar: 'last', other: 'safe' }),
+    )
+    const s = loadSecrets(dir, { tolerateCollisions: true })
+    expect(s['other']).toBe('safe')
+    // colliding key: last-wins
+    expect(s['bar']).toBe('last')
+  })
+
+  it('FIX-C: tolerateCollisions:false (default) still throws on collision', () => {
+    fs.writeFileSync(
+      path.join(dir, '.aa', 'secrets.json'),
+      JSON.stringify({ Baz: 'a', baz: 'b' }),
+    )
+    expect(() => loadSecrets(dir)).toThrowError(SecretCollisionError)
+    expect(() => loadSecrets(dir, { tolerateCollisions: false })).toThrowError(SecretCollisionError)
   })
 })
 
@@ -370,6 +456,87 @@ describe('loadSecrets collision → runtime produces a FAILED record (not an unc
     // (identical guarded try/catch block) is the assurance instead. A
     // failing webhook does not throw out of runtime.run — that is the
     // observable contract verified here.
+  })
+
+  // FIX A via runtime: a null secrets.json must not abort the run
+  it('FIX-A: secrets.json containing null does NOT abort the run — workflow still COMPLETES', async () => {
+    fs.mkdirSync(path.join(dir, '.aa'), { recursive: true })
+    fs.writeFileSync(path.join(dir, '.aa', 'secrets.json'), 'null')
+
+    const wf: BlockDefinition = {
+      id: 'null-sec-wf',
+      name: 'Null Secret WF',
+      version: '0.1.0',
+      inputs: [],
+      outputs: [],
+      execution: { type: 'node', code: 'return { ok: true };' },
+    }
+
+    const record = await new Runtime(dir, []).run(wf, {})
+    // Must COMPLETE — null secrets.json is tolerated as "no file secrets"
+    expect(record.status).toBe('COMPLETED')
+  })
+
+  // FIX B: collision FAILED record carries NO caller inputs/params
+  it('FIX-B: collision FAILED record does not contain caller-supplied input values', async () => {
+    fs.mkdirSync(path.join(dir, '.aa'), { recursive: true })
+    fs.writeFileSync(
+      path.join(dir, '.aa', 'secrets.json'),
+      JSON.stringify({ Sensitive: 'val1', sensitive: 'val2' }),
+    )
+
+    const wf: BlockDefinition = {
+      id: 'fixb-wf',
+      name: 'FIX B WF',
+      version: '0.1.0',
+      inputs: [{ name: 'token', type: 'string' }],
+      outputs: [],
+      execution: { type: 'node', code: 'return {};' },
+    }
+
+    // Pass a sensitive value via inputs — FIX B ensures it never reaches the record
+    const sensitiveInput = 'leak-me-xyz-12345'
+    const record = await new Runtime(dir, []).run(wf, { token: sensitiveInput })
+    expect(record.status).toBe('FAILED')
+    expect(record.error).toMatch(/secrets load failed/)
+
+    // The sensitive input value must not appear anywhere in the persisted record
+    const serialized = JSON.stringify(record)
+    expect(serialized).not.toContain(sensitiveInput)
+
+    // inputs and params on the record must be empty (not the caller-supplied values)
+    expect(record.inputs).toEqual({})
+    expect(record.params == null || Object.keys(record.params).length === 0).toBe(true)
+  })
+
+  // FIX C: best-effort secret map is built on collision path
+  // We cannot easily assert the bestEffort map reaches notify without mocking,
+  // but we can assert that the tolerateCollisions path produces a non-empty map
+  // for the non-colliding key — unit-tested in 'loadSecrets tolerateCollisions option' above.
+  // Here we verify the runtime collision path does NOT throw even when tolerateCollisions
+  // call inside is given a secrets.json with mixed colliding and safe keys.
+  it('FIX-C: collision path with mixed colliding+safe keys still returns a FAILED record (no crash)', async () => {
+    fs.mkdirSync(path.join(dir, '.aa'), { recursive: true })
+    // 'Alpha'/'alpha' collide; 'safe' does not
+    fs.writeFileSync(
+      path.join(dir, '.aa', 'secrets.json'),
+      JSON.stringify({ Alpha: 'v1', alpha: 'v2', safe: 'safevalue' }),
+    )
+
+    const wf: BlockDefinition = {
+      id: 'fixc-wf',
+      name: 'FIX C WF',
+      version: '0.1.0',
+      inputs: [],
+      outputs: [],
+      execution: { type: 'node', code: 'return {};' },
+    }
+
+    const record = await new Runtime(dir, []).run(wf, {})
+    expect(record.status).toBe('FAILED')
+    expect(record.error).toMatch(/collide/)
+    // safe key value must not appear in the record (it was only used for webhook URL resolution)
+    expect(JSON.stringify(record)).not.toContain('safevalue')
   })
 })
 
