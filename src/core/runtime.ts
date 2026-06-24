@@ -4,7 +4,7 @@ import { Engine } from './engine'
 import { createContext, createLogger } from './context'
 import { ArtifactStore } from '../artifacts/artifact-store'
 import { writeRun, runDir } from './report'
-import { loadSecrets, redactRecord } from './secrets'
+import { loadSecrets, allSecretValues, redactRecord, redactRecordValues, SecretCollisionError } from './secrets'
 import { notify } from './notify'
 import { approvalEnforced } from './approval'
 import { FileRegistry, type Registry } from '../registry/file-registry'
@@ -147,7 +147,43 @@ export class Runtime {
     const enforcedAtStart = approvalEnforced()
     const runId = randomUUID()
     const artifacts = new ArtifactStore(runDir(this.workspace, runId))
-    const secrets = loadSecrets(this.workspace)
+    let secrets: Record<string, string>
+    try {
+      secrets = loadSecrets(this.workspace)
+    } catch (err) {
+      // Only handle typed collision errors here — any other error (e.g. a future
+      // loadSecrets code path) is unexpected and should propagate.
+      if (!(err instanceof SecretCollisionError)) throw err
+      // A SecretCollisionError is a config error: produce a proper FAILED record.
+      // FIX B: pass empty inputs/params — the collision happened before execution,
+      // so caller-supplied inputs/params are irrelevant and cannot be redacted
+      // (no secrets were loaded). The record carries no caller data and only a
+      // names-only collision message, so it is safe to persist and notify as-is.
+      const logger = createLogger(opts.verbose)
+      const failed = failedRecord(def, {}, {}, runId, [], `secrets load failed: ${err.message}`)
+      failed.approved = opts.approved ?? true
+      failed.approvalEnforced = approvalEnforced()
+      failed.deprecated = opts.deprecated ?? false
+      // FIX C: build a best-effort secret map (last-wins on the colliding key)
+      // so a {{secrets.webhook_url}} reference in notify.json can still resolve.
+      // This map is used ONLY for notify URL resolution — NOT for redaction,
+      // because last-wins drops the LOSING side of a collision, so a literal
+      // from that losing value in the workflow definition would escape the mask.
+      // If this itself throws unexpectedly, fall back to an empty map so the
+      // collision path never crashes.
+      let bestEffort: Record<string, string> = {}
+      try { bestEffort = loadSecrets(this.workspace, { tolerateCollisions: true }) } catch { /* ignore */ }
+      // Redact against ALL raw secret values (both sides of a collision), so
+      // even the LOSING value is masked from the persisted failure record.
+      let maskValues: string[] = []
+      try { maskValues = allSecretValues(this.workspace) } catch { /* ignore */ }
+      const record = redactRecordValues(failed, maskValues)
+      await this.persist(record, { logger })
+      try { await notify(this.workspace, record, bestEffort, logger) } catch (e) {
+        logger.warn(`aart notify: unexpected error: ${e instanceof Error ? e.message : String(e)}`)
+      }
+      return record
+    }
     const ctx = createContext({
       runId,
       workspace: this.workspace,

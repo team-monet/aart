@@ -3,6 +3,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { runCommandBlock } from './command-runner'
+import { SecretNotDefinedError } from './resolver'
 import { createContext } from './context'
 import { ArtifactStore } from '../artifacts/artifact-store'
 import { Runtime } from './runtime'
@@ -21,7 +22,9 @@ beforeEach(() => {
   ctx = createContext({
     workspace: dir,
     artifacts: new ArtifactStore(path.join(dir, 'run')),
-    secrets: { TOKEN: 'hunter2' },
+    // Secrets are always stored with lowercase keys (as loadSecrets normalises them).
+    // Tests that bypass loadSecrets must match that contract.
+    secrets: { token: 'hunter2' },
   })
 })
 afterEach(() => fs.rmSync(dir, { recursive: true, force: true }))
@@ -225,5 +228,54 @@ describe('command blocks via Runtime + governance surfaces', () => {
       execution: { type: 'command', command: 'kubectl', args: ['get', 'pods', '-n', '{{inputs.ns}}'] },
     }
     expect(validateDraft(good, registry).ok).toBe(true)
+  })
+})
+
+describe('optional-secret omit contract — typed error path', () => {
+  // Regression test: a lone {{secrets.NAME}} env value referencing an unset
+  // secret OMITS the var (no throw, no empty injection). This is pinned to the
+  // SecretNotDefinedError TYPE, not to error message wording — a future change
+  // to the error message text cannot silently break this omit contract.
+
+  it('an unset secret in a lone {{secrets.*}} env template omits the var (typed-error path, not string match)', async () => {
+    // Verify that SecretNotDefinedError is what the resolver throws on a miss.
+    // This is the typed check that command-runner now branches on.
+    const { resolveValue } = await import('./resolver')
+    const scope = { inputs: {}, steps: {}, secrets: {} }
+    let thrown: unknown
+    try {
+      resolveValue('{{secrets.absent_key}}', scope)
+    } catch (e) {
+      thrown = e
+    }
+    expect(thrown).toBeInstanceOf(SecretNotDefinedError)
+
+    // End-to-end: the env var is omitted (child sees undefined), not thrown.
+    const res = await runCommandBlock(
+      node({
+        args: ['-e', 'console.log(JSON.stringify(typeof process.env.OMITTED_KEY))'],
+        env: { OMITTED_KEY: '{{secrets.absent_key}}' },
+      }),
+      {},
+      undefined,
+      ctx,
+    )
+    expect(res.output.stdout).toContain('"undefined"')
+  })
+
+  it('a composite env template with a missing secret still throws (not omitted)', async () => {
+    // "{{secrets.absent}}suffix" is NOT a lone secret ref, so SecretNotDefinedError
+    // still propagates — the omit only applies to a bare whole-string reference.
+    await expect(
+      runCommandBlock(
+        node({
+          args: ['-e', 'process.exit(0)'],
+          env: { COMPOSITE: '{{secrets.absent}}suffix' },
+        }),
+        {},
+        undefined,
+        ctx,
+      ),
+    ).rejects.toBeInstanceOf(SecretNotDefinedError)
   })
 })

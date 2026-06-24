@@ -29,6 +29,20 @@ export interface ResolveScope {
   loopIndex?: number
 }
 
+/**
+ * Thrown by resolveSecret when a named secret is not present in the secrets
+ * map. Using a typed error (rather than a plain Error) lets callers like
+ * command-runner.ts branch on the error type rather than fragile string-prefix
+ * matching — rewording the message cannot accidentally change control flow.
+ */
+export class SecretNotDefinedError extends Error {
+  readonly code = 'SECRET_UNDEFINED' as const
+  constructor(message: string) {
+    super(message)
+    this.name = 'SecretNotDefinedError'
+  }
+}
+
 const INTERP = /\{\{\s*([\w$.]+)\s*\}\}/g
 
 export function getPath(obj: unknown, segments: string[]): unknown {
@@ -38,6 +52,30 @@ export function getPath(obj: unknown, segments: string[]): unknown {
     cur = (cur as Record<string, unknown>)[seg]
   }
   return cur
+}
+
+/**
+ * Case-insensitive secret lookup (secrets is the only multi-source namespace).
+ * Lowercases the reference segments before lookup so {{secrets.TESTKEY}} resolves
+ * the same as {{secrets.testkey}}. Throws an actionable error on miss (key name +
+ * available keys listed; never values).
+ */
+function resolveSecret(
+  secrets: Record<string, string> | undefined,
+  segments: string[],
+): unknown {
+  const map = secrets ?? {}
+  const value = getPath(map, segments.map((s) => s.toLowerCase()))
+  if (value !== undefined) return value
+  const requested = segments.map((s) => s.toLowerCase()).join('.')
+  const available = Object.keys(map)
+  const availableStr = available.length
+    ? available.join(', ')
+    : 'no secrets are defined'
+  throw new SecretNotDefinedError(
+    `Secret "${requested}" is not defined. Available secrets: ${availableStr} ` +
+      `(set it in <workspace>/.aa/secrets.json or AART_SECRET_${segments.join('_').toUpperCase()})`,
+  )
 }
 
 /** Resolve a single reference expression (no braces / leading $ already stripped logic). */
@@ -64,7 +102,7 @@ function resolveRef(expr: string, scope: ResolveScope): unknown {
           '$secrets must name a secret (use $secrets.NAME) — bare $secrets would hand the whole secrets map to a block',
         )
       }
-      return getPath(scope.secrets ?? {}, rest)
+      return resolveSecret(scope.secrets, rest)
     }
     if (first === 'steps') return getPath(scope.steps, rest)
     // Fall through to the normal step-output lookup.
@@ -88,7 +126,7 @@ function resolveRef(expr: string, scope: ResolveScope): unknown {
           '{{secrets}} must name a secret (use {{secrets.NAME}}) — bare {{secrets}} would expose the whole secrets map',
         )
       }
-      return getPath(scope.secrets ?? {}, rest)
+      return resolveSecret(scope.secrets, rest)
     case 'steps':
       return getPath(scope.steps, rest)
     // forEach loop variable ({{item.field}} syntax).
