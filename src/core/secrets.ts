@@ -3,6 +3,21 @@ import path from 'node:path'
 import type { RunRecord } from './types'
 
 /**
+ * Thrown by loadSecrets when two keys in secrets.json or two AART_SECRET_*
+ * env vars collapse to the same canonical (lowercased) name. Using a typed
+ * error mirrors SecretNotDefinedError in resolver.ts and lets callers branch
+ * on error TYPE rather than fragile message-string matching — rewording the
+ * message cannot accidentally change control flow.
+ */
+export class SecretCollisionError extends Error {
+  readonly code = 'SECRET_COLLISION' as const
+  constructor(message: string) {
+    super(message)
+    this.name = 'SecretCollisionError'
+  }
+}
+
+/**
  * Secrets are referenced from a workflow as `{{secrets.NAME}}` in step inputs.
  * They are sourced from (env overrides file):
  *   - `<workspace>/.aa/secrets.json` — a flat { name: value } object (gitignored)
@@ -21,20 +36,48 @@ export function loadSecrets(workspace: string): Record<string, string> {
 
   const file = path.join(workspace, '.aa', 'secrets.json')
   if (fs.existsSync(file)) {
+    let parsed: Record<string, unknown> | undefined
     try {
-      const parsed = JSON.parse(fs.readFileSync(file, 'utf8')) as Record<string, unknown>
-      for (const [k, v] of Object.entries(parsed)) {
-        if (typeof v === 'string') secrets[k.toLowerCase()] = v
-      }
+      parsed = JSON.parse(fs.readFileSync(file, 'utf8')) as Record<string, unknown>
     } catch {
       // ignore a malformed secrets file; treat as no file secrets
     }
+    if (parsed !== undefined) {
+      // Collision detection: two keys that differ only in case would collapse to
+      // the same canonical (lowercased) name — that is ambiguous, so throw.
+      const seen = new Map<string, string>() // canonical -> original key
+      for (const [k, v] of Object.entries(parsed)) {
+        if (typeof v !== 'string') continue
+        const canonical = k.toLowerCase()
+        const prior = seen.get(canonical)
+        if (prior !== undefined) {
+          throw new SecretCollisionError(
+            `secrets.json has two keys that collide on the same canonical name "${canonical}": ` +
+              `"${prior}" and "${k}". Remove one of them.`,
+          )
+        }
+        seen.set(canonical, k)
+        secrets[canonical] = v
+      }
+    }
   }
 
+  // Collision detection: two AART_SECRET_* env vars that collapse to the same
+  // lowercased name are ambiguous — throw rather than silently picking one.
+  const envSeen = new Map<string, string>() // canonical -> original env key
   for (const [k, v] of Object.entries(process.env)) {
     if (k.startsWith('AART_SECRET_') && typeof v === 'string') {
       const name = k.slice('AART_SECRET_'.length).toLowerCase()
-      if (name) secrets[name] = v // env overrides file (same lowercased namespace)
+      if (!name) continue
+      const prior = envSeen.get(name)
+      if (prior !== undefined) {
+        throw new SecretCollisionError(
+          `Two environment variables collide on the same secret name "${name}": ` +
+            `${prior} and ${k}. Remove one of them.`,
+        )
+      }
+      envSeen.set(name, k)
+      secrets[name] = v // env overrides file (same lowercased namespace)
     }
   }
 

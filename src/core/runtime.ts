@@ -4,7 +4,7 @@ import { Engine } from './engine'
 import { createContext, createLogger } from './context'
 import { ArtifactStore } from '../artifacts/artifact-store'
 import { writeRun, runDir } from './report'
-import { loadSecrets, redactRecord } from './secrets'
+import { loadSecrets, redactRecord, SecretCollisionError } from './secrets'
 import { notify } from './notify'
 import { approvalEnforced } from './approval'
 import { FileRegistry, type Registry } from '../registry/file-registry'
@@ -147,7 +147,28 @@ export class Runtime {
     const enforcedAtStart = approvalEnforced()
     const runId = randomUUID()
     const artifacts = new ArtifactStore(runDir(this.workspace, runId))
-    const secrets = loadSecrets(this.workspace)
+    let secrets: Record<string, string>
+    try {
+      secrets = loadSecrets(this.workspace)
+    } catch (err) {
+      // Only handle typed collision errors here — any other error (e.g. a future
+      // loadSecrets code path) is unexpected and should propagate.
+      if (!(err instanceof SecretCollisionError)) throw err
+      // A SecretCollisionError is a config error: produce a proper FAILED record.
+      // Redacting with an empty map is safe here because collision messages contain
+      // key NAMES only, no secret values.
+      const logger = createLogger(opts.verbose)
+      const failed = failedRecord(def, inputs, params, runId, [], `secrets load failed: ${err.message}`)
+      failed.approved = opts.approved ?? true
+      failed.approvalEnforced = approvalEnforced()
+      failed.deprecated = opts.deprecated ?? false
+      const record = redactRecord(failed, {})
+      await this.persist(record, { logger })
+      try { await notify(this.workspace, record, {}, logger) } catch (e) {
+        logger.warn(`aart notify: unexpected error: ${e instanceof Error ? e.message : String(e)}`)
+      }
+      return record
+    }
     const ctx = createContext({
       runId,
       workspace: this.workspace,

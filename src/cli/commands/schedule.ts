@@ -10,7 +10,7 @@ import {
 } from '../../core/schedule'
 import type { ScheduleRecord } from '../../core/schedule'
 import { renderReport } from '../../core/report'
-import { loadSecrets } from '../../core/secrets'
+import { loadSecrets, SecretCollisionError } from '../../core/secrets'
 
 // ---------------------------------------------------------------------------
 // Option interfaces
@@ -348,11 +348,19 @@ function parseJsonObj(value: string, flag: string): Record<string, unknown> {
   }
 }
 
-/** Load secrets without crashing if the file is absent or malformed. */
-function loadSecretsQuiet(ws: string): Record<string, string> {
+/**
+ * Load secrets without crashing if the file is absent or malformed —
+ * but RE-THROW a SecretCollisionError (two keys colliding on the same
+ * canonical name is a config error that must not be silently swallowed;
+ * it would cause the next scheduled run to run with zero secrets and fail
+ * confusingly). All other errors (absent file, malformed JSON) return {}.
+ */
+export function loadSecretsQuiet(ws: string): Record<string, string> {
   try {
     return loadSecrets(ws)
-  } catch {
+  } catch (err) {
+    // Branch on the typed error — rewording the message cannot change control flow.
+    if (err instanceof SecretCollisionError) throw err
     return {}
   }
 }

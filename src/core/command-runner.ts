@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process'
 import path from 'node:path'
-import { resolveValue, type ResolveScope } from './resolver'
+import { resolveValue, SecretNotDefinedError, type ResolveScope } from './resolver'
 import type { ExecutionContext } from './context'
 import type { Execution } from './types'
 
@@ -45,7 +45,7 @@ const SINGLE_SECRET_REF_RE = /^\{\{\s*secrets\.[\w]+\s*\}\}$/
  *
  * Omit-vs-throw logic:
  *   - If the trimmed template is a SINGLE whole-string secret reference
- *     (e.g. `{{secrets.gh_token}}`) AND the resolver throws "Unresolved"
+ *     (e.g. `{{secrets.gh_token}}`) AND the resolver throws a SecretNotDefinedError
  *     (meaning the secret is not set) → return undefined (omit the entry).
  *     This is the intended optional-secret case: the child falls back to
  *     ambient auth or a different mechanism.
@@ -61,10 +61,14 @@ function interpolateEnvValue(template: string, scope: ResolveScope): string | un
     if (v === undefined || v === null) return undefined
     return typeof v === 'string' ? v : JSON.stringify(v)
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err)
     // Only silently omit when: the template is a lone secrets.* reference
-    // AND the resolver says it's unresolved (the secret is simply not set).
-    if (msg.startsWith('Unresolved') && SINGLE_SECRET_REF_RE.test(template.trim())) {
+    // AND the resolver throws SecretNotDefinedError (the secret is not set).
+    // Branching on the typed error rather than a string prefix means a future
+    // rewording of the error message cannot silently break this contract.
+    const isSecretMiss =
+      err instanceof SecretNotDefinedError &&
+      SINGLE_SECRET_REF_RE.test(template.trim())
+    if (isSecretMiss) {
       return undefined
     }
     // Everything else — typo'd inputs.*, composite templates, wrong root — throws.

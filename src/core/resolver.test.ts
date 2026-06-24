@@ -46,6 +46,102 @@ describe('$secrets safety', () => {
   })
 })
 
+// ---------------------------------------------------------------------------
+// Case-insensitive secret lookup (Part 1) + enriched miss error (Part 2)
+// ---------------------------------------------------------------------------
+
+describe('secrets: case-insensitive lookup', () => {
+  // Keys stored lowercase (as loadSecrets normalises them).
+  const s: ResolveScope = {
+    inputs: { foo: 'inputs-foo' },
+    steps: {},
+    secrets: { testkey: 'hello', test_key: 'world', gh_token: 'tok123' },
+  }
+
+  // 1. lowercase key + uppercase ref via {{}}
+  it('{{secrets.TESTKEY}} resolves a lowercase-stored key (was the bug)', () => {
+    expect(resolveValue('{{secrets.TESTKEY}}', s)).toBe('hello')
+  })
+
+  // 1b. same via $-ref
+  it('$secrets.TESTKEY resolves a lowercase-stored key (was the bug)', () => {
+    expect(resolveValue('$secrets.TESTKEY', s)).toBe('hello')
+  })
+
+  // 2. mixed-case ref against lowercase key
+  it('{{secrets.Test_Key}} resolves key stored as test_key', () => {
+    expect(resolveValue('{{secrets.Test_Key}}', s)).toBe('world')
+  })
+
+  // 3. already-lowercase ref still works
+  it('{{secrets.testkey}} (all lowercase) still resolves', () => {
+    expect(resolveValue('{{secrets.testkey}}', s)).toBe('hello')
+  })
+
+  // 5. Scoping guard: inputs (non-secret namespace) is still case-sensitive
+  it('{{inputs.Foo}} still fails — non-secret namespaces remain case-sensitive', () => {
+    expect(() => resolveValue('{{inputs.Foo}}', s)).toThrow(/Unresolved/)
+  })
+
+  // 5b. $inputs.Foo also fails
+  it('$inputs.Foo still fails — non-secret namespaces remain case-sensitive', () => {
+    // resolveValue returns undefined for $ref misses (no step named "Foo" either),
+    // but for $inputs.* it returns undefined which causes "Unresolved reference"
+    expect(() => resolveValue('$inputs.Foo', s)).toThrow(/Unresolved/)
+  })
+})
+
+describe('secrets: enriched miss error (Part 2)', () => {
+  const s: ResolveScope = {
+    inputs: {},
+    steps: {},
+    secrets: { agent_api_key: 'a', slack_token: 'b' },
+  }
+
+  // 6. missing secret: error names requested key + lists available keys
+  it('missing {{secrets.gh_token}} throws with key name and available list', () => {
+    expect(() => resolveValue('{{secrets.gh_token}}', s)).toThrow(/gh_token/)
+    expect(() => resolveValue('{{secrets.gh_token}}', s)).toThrow(/agent_api_key/)
+    expect(() => resolveValue('{{secrets.gh_token}}', s)).toThrow(/slack_token/)
+  })
+
+  it('missing $secrets.gh_token throws with key name and available list', () => {
+    expect(() => resolveValue('$secrets.gh_token', s)).toThrow(/gh_token/)
+    expect(() => resolveValue('$secrets.gh_token', s)).toThrow(/agent_api_key/)
+  })
+
+  // 6b. error must never contain secret VALUES (only key names)
+  it('miss error contains key names but not secret values', () => {
+    const withValues: ResolveScope = {
+      inputs: {},
+      steps: {},
+      secrets: { api_key: 'super-secret-value-xyz', db_pass: 'another-secret-abc' },
+    }
+    const fn = () => resolveValue('{{secrets.missing}}', withValues)
+    expect(fn).toThrow()
+    try { fn() } catch (e) {
+      const msg = (e as Error).message
+      // key names should appear (for actionability)
+      expect(msg).toContain('api_key')
+      expect(msg).toContain('db_pass')
+      // values must NOT appear
+      expect(msg).not.toContain('super-secret-value-xyz')
+      expect(msg).not.toContain('another-secret-abc')
+    }
+  })
+
+  // 6c. zero secrets available
+  it('missing secret with empty secrets map says "no secrets are defined"', () => {
+    const empty: ResolveScope = { inputs: {}, steps: {}, secrets: {} }
+    expect(() => resolveValue('{{secrets.anything}}', empty)).toThrow(/no secrets are defined/)
+  })
+
+  it('missing secret when secrets is undefined says "no secrets are defined"', () => {
+    const nomap: ResolveScope = { inputs: {}, steps: {} }
+    expect(() => resolveValue('{{secrets.anything}}', nomap)).toThrow(/no secrets are defined/)
+  })
+})
+
 describe('evalCondition (safe, no eval)', () => {
   it('compares numbers', () => {
     expect(evalCondition('inputs.n > 3', scope)).toBe(true)
