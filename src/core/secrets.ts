@@ -41,42 +41,59 @@ export interface LoadSecretsOptions {
   tolerateCollisions?: boolean
 }
 
+/**
+ * Parse and shape-guard the secrets.json file. Returns the raw parsed object
+ * (NOT canonicalised — keys are as written in the file) if the file exists and
+ * is a non-null plain object; returns undefined if the file is absent,
+ * malformed, or wrong-shaped. Never throws.
+ *
+ * Extracted so loadSecrets and allSecretValues share the same read/parse/guard
+ * without duplicating I/O.
+ */
+function parseSecretsFile(workspace: string): Record<string, unknown> | undefined {
+  const file = path.join(workspace, '.aa', 'secrets.json')
+  if (!fs.existsSync(file)) return undefined
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(fs.readFileSync(file, 'utf8'))
+  } catch {
+    // malformed JSON — treat as no file secrets
+    return undefined
+  }
+  // FIX A: Guard that parsed is a non-null plain object before iterating.
+  // Valid JSON that is not an object (null, [], 42, "x") is tolerated silently
+  // as "no file secrets" — same as malformed JSON above. Env secrets still load.
+  if (parsed === undefined || parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return undefined
+  }
+  return parsed as Record<string, unknown>
+}
+
 export function loadSecrets(workspace: string, opts?: LoadSecretsOptions): Record<string, string> {
   const tolerateCollisions = opts?.tolerateCollisions ?? false
   const secrets: Record<string, string> = {}
 
-  const file = path.join(workspace, '.aa', 'secrets.json')
-  if (fs.existsSync(file)) {
-    let parsed: unknown
-    try {
-      parsed = JSON.parse(fs.readFileSync(file, 'utf8'))
-    } catch {
-      // ignore a malformed secrets file; treat as no file secrets
-    }
-    // FIX A: Guard that parsed is a non-null plain object before iterating.
-    // Valid JSON that is not an object (null, [], 42, "x") is tolerated silently
-    // as "no file secrets" — same as malformed JSON above. Env secrets still load.
-    if (parsed !== undefined && parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
-      // Collision detection: two keys that differ only in case would collapse to
-      // the same canonical (lowercased) name — that is ambiguous, so throw
-      // (unless tolerateCollisions is set, in which case last-wins).
-      const seen = new Map<string, string>() // canonical -> original key
-      for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
-        if (typeof v !== 'string') continue
-        const canonical = k.toLowerCase()
-        const prior = seen.get(canonical)
-        if (prior !== undefined) {
-          if (!tolerateCollisions) {
-            throw new SecretCollisionError(
-              `secrets.json has two keys that collide on the same canonical name "${canonical}": ` +
-                `"${prior}" and "${k}". Remove one of them.`,
-            )
-          }
-          // tolerateCollisions: last-wins — fall through to overwrite
+  const parsed = parseSecretsFile(workspace)
+  if (parsed !== undefined) {
+    // Collision detection: two keys that differ only in case would collapse to
+    // the same canonical (lowercased) name — that is ambiguous, so throw
+    // (unless tolerateCollisions is set, in which case last-wins).
+    const seen = new Map<string, string>() // canonical -> original key
+    for (const [k, v] of Object.entries(parsed)) {
+      if (typeof v !== 'string') continue
+      const canonical = k.toLowerCase()
+      const prior = seen.get(canonical)
+      if (prior !== undefined) {
+        if (!tolerateCollisions) {
+          throw new SecretCollisionError(
+            `secrets.json has two keys that collide on the same canonical name "${canonical}": ` +
+              `"${prior}" and "${k}". Remove one of them.`,
+          )
         }
-        seen.set(canonical, k)
-        secrets[canonical] = v
+        // tolerateCollisions: last-wins — fall through to overwrite
       }
+      seen.set(canonical, k)
+      secrets[canonical] = v
     }
   }
 
@@ -106,6 +123,42 @@ export function loadSecrets(workspace: string, opts?: LoadSecretsOptions): Recor
   return secrets
 }
 
+/**
+ * Returns EVERY raw secret string value from the workspace, ignoring key case
+ * and collision detection. Specifically:
+ *   - ALL string values from .aa/secrets.json (both sides of a colliding pair)
+ *   - ALL AART_SECRET_* env var string values
+ *
+ * This is the correct input for redaction on the collision-failure path: a
+ * last-wins canonical map (loadSecrets + tolerateCollisions) drops the LOSING
+ * side of a collision, so any literal that value appears in the workflow
+ * definition would escape redactRecord. allSecretValues + redactRecordValues
+ * masks every raw value regardless of which side "wins".
+ *
+ * Missing, malformed, or wrong-shaped secrets.json is silently tolerated.
+ * Never throws.
+ */
+export function allSecretValues(workspace: string): string[] {
+  const raw: string[] = []
+
+  const parsed = parseSecretsFile(workspace)
+  if (parsed !== undefined) {
+    for (const v of Object.values(parsed)) {
+      if (typeof v === 'string') raw.push(v)
+    }
+  }
+
+  for (const [k, v] of Object.entries(process.env)) {
+    if (k.startsWith('AART_SECRET_') && typeof v === 'string') {
+      const name = k.slice('AART_SECRET_'.length)
+      if (!name) continue
+      raw.push(v)
+    }
+  }
+
+  return raw
+}
+
 /** Variant encodings of a secret value that commonly appear in records. */
 function encodedForms(v: string): string[] {
   const out = new Set<string>([v])
@@ -123,18 +176,27 @@ function encodedForms(v: string): string[] {
 }
 
 /**
- * The list of strings to mask, longest-first so a longer secret is masked
- * before a shorter one that is its prefix. Values < 4 chars are skipped to
- * avoid mangling unrelated text.
+ * Build the sorted mask list from a raw value list (no key/collision awareness).
+ * Longest-first so a longer secret is masked before a shorter prefix. Values
+ * < 4 chars are skipped to avoid mangling unrelated text.
  */
-export function secretValues(secrets: Record<string, string>): string[] {
+function maskFromValues(rawValues: string[]): string[] {
   const vals = new Set<string>()
-  for (const v of Object.values(secrets)) {
+  for (const v of rawValues) {
     for (const form of encodedForms(v)) {
       if (form.length >= 4) vals.add(form)
     }
   }
   return [...vals].sort((a, b) => b.length - a.length)
+}
+
+/**
+ * The list of strings to mask, longest-first so a longer secret is masked
+ * before a shorter one that is its prefix. Values < 4 chars are skipped to
+ * avoid mangling unrelated text.
+ */
+export function secretValues(secrets: Record<string, string>): string[] {
+  return maskFromValues(Object.values(secrets))
 }
 
 /** Mask every occurrence of each value (assumed pre-sorted longest-first). */
@@ -158,6 +220,22 @@ function redactValue(value: unknown, values: string[]): unknown {
 /** Return a copy of the run record with secret values masked (best-effort). */
 export function redactRecord(record: RunRecord, secrets: Record<string, string>): RunRecord {
   const values = secretValues(secrets)
+  if (!values.length) return record
+  return redactValue(record, values) as RunRecord
+}
+
+/**
+ * Like redactRecord, but takes a raw value list instead of a keyed secrets map.
+ * Use this on the collision-failure path: a last-wins canonical map drops the
+ * LOSING side of a collision, so redactRecord would miss that value. By passing
+ * allSecretValues(workspace) — which includes EVERY raw string value, both
+ * sides of any collision — we mask the full set.
+ *
+ * An empty rawValues list returns the record unchanged, matching redactRecord's
+ * behaviour for an empty secrets map.
+ */
+export function redactRecordValues(record: RunRecord, rawValues: string[]): RunRecord {
+  const values = maskFromValues(rawValues)
   if (!values.length) return record
   return redactValue(record, values) as RunRecord
 }

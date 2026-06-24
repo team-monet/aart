@@ -4,7 +4,7 @@ import { Engine } from './engine'
 import { createContext, createLogger } from './context'
 import { ArtifactStore } from '../artifacts/artifact-store'
 import { writeRun, runDir } from './report'
-import { loadSecrets, redactRecord, SecretCollisionError } from './secrets'
+import { loadSecrets, allSecretValues, redactRecord, redactRecordValues, SecretCollisionError } from './secrets'
 import { notify } from './notify'
 import { approvalEnforced } from './approval'
 import { FileRegistry, type Registry } from '../registry/file-registry'
@@ -165,16 +165,19 @@ export class Runtime {
       failed.approvalEnforced = approvalEnforced()
       failed.deprecated = opts.deprecated ?? false
       // FIX C: build a best-effort secret map (last-wins on the colliding key)
-      // so a {{secrets.webhook_url}} reference in notify.json can still resolve,
-      // and redactRecord has values to mask from the failure record. Last-wins
-      // means only the SURVIVING colliding value is in the mask set (the losing
-      // key's value is not) — acceptable here since the record carries no caller
-      // data (FIX B) and the run has already FAILED.
+      // so a {{secrets.webhook_url}} reference in notify.json can still resolve.
+      // This map is used ONLY for notify URL resolution — NOT for redaction,
+      // because last-wins drops the LOSING side of a collision, so a literal
+      // from that losing value in the workflow definition would escape the mask.
       // If this itself throws unexpectedly, fall back to an empty map so the
       // collision path never crashes.
       let bestEffort: Record<string, string> = {}
       try { bestEffort = loadSecrets(this.workspace, { tolerateCollisions: true }) } catch { /* ignore */ }
-      const record = redactRecord(failed, bestEffort)
+      // Redact against ALL raw secret values (both sides of a collision), so
+      // even the LOSING value is masked from the persisted failure record.
+      let maskValues: string[] = []
+      try { maskValues = allSecretValues(this.workspace) } catch { /* ignore */ }
+      const record = redactRecordValues(failed, maskValues)
       await this.persist(record, { logger })
       try { await notify(this.workspace, record, bestEffort, logger) } catch (e) {
         logger.warn(`aart notify: unexpected error: ${e instanceof Error ? e.message : String(e)}`)

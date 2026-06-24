@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { loadSecrets, redactRecord, SecretCollisionError } from './secrets'
+import { loadSecrets, allSecretValues, redactRecord, redactRecordValues, SecretCollisionError } from './secrets'
 import type { LoadSecretsOptions } from './secrets'
 import { Runtime } from './runtime'
 import { corePack } from '../packs/core'
@@ -575,5 +575,180 @@ describe('loadSecretsQuiet (schedule path)', () => {
     fs.writeFileSync(path.join(dir2, '.aa', 'secrets.json'), 'not-valid-json{{{')
     // Malformed JSON is silently tolerated — must not throw.
     expect(loadSecretsQuiet(dir2)).toEqual({})
+  })
+})
+
+// ─── Unit tests for allSecretValues and redactRecordValues ──────────────────
+
+describe('allSecretValues', () => {
+  let dir: string
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'aart-asv-'))
+  })
+  afterEach(() => {
+    fs.rmSync(dir, { recursive: true, force: true })
+    delete process.env.AART_SECRET_LOSER_TEST
+    delete process.env.AART_SECRET_WINNER_TEST
+  })
+
+  it('returns BOTH values for a file with colliding keys (Foo and foo)', () => {
+    fs.mkdirSync(path.join(dir, '.aa'), { recursive: true })
+    fs.writeFileSync(
+      path.join(dir, '.aa', 'secrets.json'),
+      JSON.stringify({ Foo: 'LOSER-9999', foo: 'WINNER-8888' }),
+    )
+    const vals = allSecretValues(dir)
+    expect(vals).toContain('LOSER-9999')
+    expect(vals).toContain('WINNER-8888')
+  })
+
+  it('includes AART_SECRET_* env values', () => {
+    process.env.AART_SECRET_LOSER_TEST = 'ENV-LOSER-7777'
+    const vals = allSecretValues(dir)
+    expect(vals).toContain('ENV-LOSER-7777')
+  })
+
+  it('returns [] when no secrets file exists and no env secrets are set', () => {
+    // dir has no .aa directory — no file, no relevant env vars (those were cleaned up)
+    const vals = allSecretValues(dir)
+    // May contain other AART_SECRET_* vars from the environment; just check our values absent
+    expect(vals).not.toContain('LOSER-9999')
+    expect(vals).not.toContain('WINNER-8888')
+  })
+
+  it('tolerates absent secrets.json (returns only env values)', () => {
+    // No .aa dir at all
+    process.env.AART_SECRET_WINNER_TEST = 'ENV-WIN-5555'
+    const vals = allSecretValues(dir)
+    expect(vals).toContain('ENV-WIN-5555')
+  })
+
+  it('tolerates malformed secrets.json (returns only env values, no throw)', () => {
+    fs.mkdirSync(path.join(dir, '.aa'), { recursive: true })
+    fs.writeFileSync(path.join(dir, '.aa', 'secrets.json'), 'not{json')
+    expect(() => allSecretValues(dir)).not.toThrow()
+  })
+
+  it('tolerates wrong-shaped secrets.json (null, returns only env)', () => {
+    fs.mkdirSync(path.join(dir, '.aa'), { recursive: true })
+    fs.writeFileSync(path.join(dir, '.aa', 'secrets.json'), 'null')
+    expect(() => allSecretValues(dir)).not.toThrow()
+    const vals = allSecretValues(dir)
+    // null-shaped file contributes nothing — no crash
+    expect(Array.isArray(vals)).toBe(true)
+  })
+
+  it('does not include non-string values from secrets.json', () => {
+    fs.mkdirSync(path.join(dir, '.aa'), { recursive: true })
+    fs.writeFileSync(
+      path.join(dir, '.aa', 'secrets.json'),
+      JSON.stringify({ key: 'string-val', num: 42, flag: true }),
+    )
+    const vals = allSecretValues(dir)
+    expect(vals).toContain('string-val')
+    // Non-string entries (42, true) must not appear
+    expect(vals).not.toContain(42)
+    expect(vals).not.toContain(true)
+  })
+})
+
+describe('redactRecordValues', () => {
+  it('masks both colliding values by raw value list', () => {
+    const rec = {
+      inputs: { def: 'embedded LOSER-9999 here' },
+      results: { x: 'also WINNER-8888' },
+    } as unknown as RunRecord
+    const out = redactRecordValues(rec, ['LOSER-9999', 'WINNER-8888'])
+    expect((out.inputs as Record<string, unknown>).def).toBe('embedded *** here')
+    expect((out.results as Record<string, unknown>).x).toBe('also ***')
+  })
+
+  it('returns record unchanged when rawValues is empty', () => {
+    const rec = { results: { x: 'plaintext' } } as unknown as RunRecord
+    const out = redactRecordValues(rec, [])
+    expect(out).toBe(rec) // same reference — no copy made
+  })
+
+  it('skips values shorter than 4 chars (same as redactRecord)', () => {
+    const rec = { results: { x: 'abc' } } as unknown as RunRecord
+    const out = redactRecordValues(rec, ['abc'])
+    expect((out.results as Record<string, unknown>).x).toBe('abc') // not masked
+  })
+
+  it('masks encoded forms (JSON-escaped) of raw values', () => {
+    const secret = 'a"b\\c-secret'
+    const escaped = JSON.stringify(secret).slice(1, -1)
+    const rec = { results: { body: `{"echo":"${escaped}"}` } } as unknown as RunRecord
+    const out = redactRecordValues(rec, [secret])
+    expect(JSON.stringify(out)).not.toContain(escaped)
+  })
+})
+
+// ─── Integration test: the actual leak scenario ──────────────────────────────
+
+describe('collision path: losing value embedded in workflow definition is masked in persisted record', () => {
+  let dir: string
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'aart-sec-intg-'))
+    fs.mkdirSync(path.join(dir, '.aa'), { recursive: true })
+  })
+  afterEach(() => {
+    fs.rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('masks BOTH sides of a collision in the persisted FAILED record (the actual leak scenario)', async () => {
+    // The colliding keys: "Foo" → "LOSER-9999" and "foo" → "WINNER-8888".
+    // The LAST key written (foo) wins in a last-wins map, so a redaction pass
+    // against loadSecrets(tolerateCollisions:true) would only mask WINNER-8888
+    // and leave LOSER-9999 in plain text in the run.json. This test proves
+    // the fix — redactRecordValues against allSecretValues — masks BOTH.
+    fs.writeFileSync(
+      path.join(dir, '.aa', 'secrets.json'),
+      JSON.stringify({ Foo: 'LOSER-9999', foo: 'WINNER-8888' }),
+    )
+
+    // Embed the LOSING value as a literal in the workflow definition (step input
+    // default), so it appears in snapshot.root and therefore in the run.json.
+    const wf: BlockDefinition = {
+      id: 'collision-leak-wf',
+      name: 'Collision Leak WF',
+      version: '0.1.0',
+      inputs: [],
+      outputs: [],
+      execution: {
+        type: 'node',
+        // The literal appears in the block code — it will surface in snapshot.root
+        code: 'return { note: "value is LOSER-9999 here" };',
+      },
+    }
+
+    const record = await new Runtime(dir, []).run(wf, {})
+    // Must fail — secret collision is the expected error
+    expect(record.status).toBe('FAILED')
+    expect(record.error).toMatch(/secrets load failed/)
+
+    const serialized = JSON.stringify(record)
+    // Both values must be masked — the losing value LOSER-9999 was the bug:
+    // it appeared in snapshot.root (the wf def) and escaped redaction.
+    expect(serialized).not.toContain('LOSER-9999')
+    expect(serialized).not.toContain('WINNER-8888')
+    // The redaction marker must appear (proves the value was replaced, not absent)
+    expect(serialized).toContain('***')
+  })
+
+  it('OLD behaviour (regression proof): last-wins map would have leaked the losing value', () => {
+    // This is a pure unit-level proof that the OLD redactRecord + last-wins map
+    // approach leaks the losing value. Doesn't use Runtime — just checks the
+    // semantic gap that the fix closes.
+    const colliding = { foo: 'WINNER-8888' } // last-wins: "Foo":"LOSER-9999" was dropped
+    const rec = { snapshot: { root: { code: 'value is LOSER-9999 here' } } } as unknown as RunRecord
+    const oldOut = redactRecord(rec, colliding)
+    // OLD approach: LOSER-9999 is NOT masked (it wasn't in the canonical map)
+    expect(JSON.stringify(oldOut)).toContain('LOSER-9999')
+
+    // NEW approach: pass both raw values — LOSER-9999 IS masked
+    const newOut = redactRecordValues(rec, ['LOSER-9999', 'WINNER-8888'])
+    expect(JSON.stringify(newOut)).not.toContain('LOSER-9999')
+    expect(JSON.stringify(newOut)).not.toContain('WINNER-8888')
   })
 })
