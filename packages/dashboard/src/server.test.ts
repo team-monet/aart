@@ -69,8 +69,10 @@ describe("dashboard HTTP server — route wiring", () => {
       expect(await detail.text()).toContain("1.0.0");
     });
 
-    it("GET /blocks and /packs render honest pending-integration pages", async () => {
-      expect((await (await fetch(`${baseUrl}/blocks`)).text())).toContain("Pending");
+    it("GET /blocks renders the real block catalog; GET /packs stays an honest pending-integration page (reconciliation ledger item 13)", async () => {
+      const blocksHtml = await (await fetch(`${baseUrl}/blocks`)).text();
+      expect(blocksHtml).toContain("http.request");
+      expect(blocksHtml).toContain("block(s)");
       expect((await (await fetch(`${baseUrl}/packs`)).text())).toContain("Pending");
     });
 
@@ -137,9 +139,9 @@ describe("dashboard HTTP server — route wiring", () => {
       expect(await fixture.store.deployments.list({ workflowId: "wf-prom" })).toHaveLength(1);
     });
 
-    it("view risk diff: POST renders the step diff between two versions", async () => {
-      await fixture.store.workflows.put(makeWorkflow({ id: "wf-diff", version: "1.0.0", execution: { type: "workflow", steps: [{ id: "s1", uses: "http.get" }] } }));
-      await fixture.store.workflows.put(makeWorkflow({ id: "wf-diff", version: "2.0.0", execution: { type: "workflow", steps: [{ id: "s1", uses: "http.get" }, { id: "s2", uses: "email.send" }] } }));
+    it("view risk diff: POST renders the real @aart/governance semantic risk diff between two versions (reconciliation ledger item 13)", async () => {
+      await fixture.store.workflows.put(makeWorkflow({ id: "wf-diff", version: "1.0.0", execution: { type: "workflow", steps: [{ id: "s1", uses: "http.request" }] } }));
+      await fixture.store.workflows.put(makeWorkflow({ id: "wf-diff", version: "2.0.0", execution: { type: "workflow", steps: [{ id: "s1", uses: "http.request" }, { id: "s2", uses: "command.run" }] } }));
 
       const res = await fetch(`${baseUrl}/workflows/wf-diff/risk-diff`, {
         method: "POST",
@@ -148,7 +150,13 @@ describe("dashboard HTTP server — route wiring", () => {
       });
 
       expect(res.status).toBe(200);
-      expect(await res.text()).toContain("email.send");
+      const text = await res.text();
+      expect(text).toContain("command.run");
+      // command.run's real manifest capability ("command") - only present if
+      // this route genuinely routes through the real capability-closure-based
+      // semanticRiskDiff, not a structural uses-string comparison.
+      expect(text).toContain("New capabilities");
+      expect(text).toContain("command");
     });
 
     it("inspect waiting runs: GET surfaces wait age", async () => {

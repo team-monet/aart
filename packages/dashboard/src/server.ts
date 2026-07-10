@@ -15,6 +15,7 @@ import type { DashboardDeps } from "./deps.js";
 import { redirect, Router, sendHtml, sendJson } from "./http/router.js";
 import { escapeHtml, page } from "./http/html.js";
 import { decideApprovalAction, renderApprovalQueuePage } from "./views/approvals.js";
+import { listBlockManifests } from "./capability-catalog.js";
 import { renderBlocksPage, renderPacksPage } from "./views/blocks-packs.js";
 import {
   blockPromotionAction,
@@ -34,7 +35,7 @@ import { createEvalAction, renderCreateEvalFormPage, renderEvalDashboardPage, ru
 import { clearFlagAction, renderFlaggedRunsPage } from "./views/flags.js";
 import { renderDeploymentsPage, renderEnvironmentsPage, renderSecretsStatusPage, renderTriggerConfigsPage, renderWorkerHealthPage, type WorkerHealthEntry } from "./views/production.js";
 import { listRunsFilterFromQuery, renderArtifactsPage, renderRunDetailPage, renderRunsListPage, renderTriggerFormPage, renderWaitingRunsPage, triggerWorkflowAction } from "./views/runs.js";
-import { approveOrDeprecateAction, computeSimpleStepDiff, promoteAction, renderRiskDiffPage, renderWorkflowDetailPage, renderWorkflowsListPage } from "./views/workflows.js";
+import { approveOrDeprecateAction, promoteAction, renderRiskDiffPage, renderWorkflowDetailPage, renderWorkflowsListPage } from "./views/workflows.js";
 
 function str(body: Record<string, unknown>, key: string, fallback = ""): string {
   const v = body[key];
@@ -122,7 +123,7 @@ export function buildDashboardRouter(store: AartStore, api: ApiClient, deps: Das
       sendHtml(ctx.res, 404, page("Not Found", "<p>One or both workflow versions not found.</p>"));
       return;
     }
-    sendHtml(ctx.res, 200, renderRiskDiffPage(id, fromVersion, toVersion, computeSimpleStepDiff(a, b)));
+    sendHtml(ctx.res, 200, renderRiskDiffPage(id, fromVersion, toVersion, deps.semanticRiskDiff(a, b)));
   });
 
   router.post("/workflows/:id/block-promotion", async (ctx, body) => {
@@ -146,7 +147,7 @@ export function buildDashboardRouter(store: AartStore, api: ApiClient, deps: Das
     redirect(ctx.res, `/workflows/${encodeURIComponent(ctx.params["id"]!)}`);
   });
 
-  router.get("/blocks", (ctx) => sendHtml(ctx.res, 200, renderBlocksPage()));
+  router.get("/blocks", (ctx) => sendHtml(ctx.res, 200, renderBlocksPage(listBlockManifests(store))));
   router.get("/packs", (ctx) => sendHtml(ctx.res, 200, renderPacksPage()));
 
   router.get("/artifacts", async (ctx) => {

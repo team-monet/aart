@@ -8,6 +8,7 @@
 // `store.workflows.getLatest` since S2 hasn't published a richer HTTP shape
 // for it yet — flagged in this package's SEAMS.md as a possible future
 // enrichment for S2's own route, not silently worked around.
+import type { SemanticRiskDiff } from "@aart/governance";
 import type { AartStore } from "@aart/store";
 import type { TrustMode, Workflow } from "@aart/types";
 import type { DashboardDeps, GateName, PromoteResult } from "../deps.js";
@@ -52,35 +53,32 @@ ${textField("toVersion", "To version", workflow.version)}`,
   return page(`Workflow ${workflow.id}`, body);
 }
 
-export interface StepDiff {
-  added: string[];
-  removed: string[];
-}
-
 /**
- * A structural step-list diff between two Workflow versions — added/removed
- * block ids (`WorkflowStep.uses`). This is a deliberately SIMPLIFIED stand-in
- * for architecture §17.4's real semantic risk diff (which needs block-manifest
- * capability closures — S3/S4/S7 real packages, none landed in this
- * worktree). Flagged in SEAMS.md/report: not the real risk diff, a
- * structural approximation "what steps changed" until the real capability-
- * closure-based diff can be wired in.
+ * Renders @aart/governance's real `SemanticRiskDiff` (S9 integration,
+ * reconciliation ledger item 13 — replaces the former `computeSimpleStepDiff`/
+ * `StepDiff`, a structural added/removed-block-id approximation whose own
+ * doc comment called itself "a deliberately SIMPLIFIED stand-in... until the
+ * real capability-closure-based diff can be wired in"; see deps.ts's
+ * `SemanticRiskDiffFn` doc comment for the real wiring). Surfaces every
+ * field spec §17.4/architecture's real risk diff defines: added/removed/
+ * modified steps, whether the capability set changed at all, the newly
+ * introduced capabilities/secrets/domains, and the risk-tier transition.
  */
-export function computeSimpleStepDiff(a: Workflow, b: Workflow): StepDiff {
-  const aUses = new Set(a.execution.steps.map((s) => s.uses));
-  const bUses = new Set(b.execution.steps.map((s) => s.uses));
-  return {
-    added: [...bUses].filter((u) => !aUses.has(u)),
-    removed: [...aUses].filter((u) => !bUses.has(u)),
-  };
-}
-
-export function renderRiskDiffPage(workflowId: string, fromVersion: string, toVersion: string, diff: StepDiff): string {
+export function renderRiskDiffPage(workflowId: string, fromVersion: string, toVersion: string, diff: SemanticRiskDiff): string {
   const body = `<p>${escapeHtml(workflowId)}: ${escapeHtml(fromVersion)} → ${escapeHtml(toVersion)}</p>
-<h2>Added steps (block ids)</h2>
-<ul>${diff.added.map((u) => `<li>${escapeHtml(u)}</li>`).join("")}</ul>
-<h2>Removed steps (block ids)</h2>
-<ul>${diff.removed.map((u) => `<li>${escapeHtml(u)}</li>`).join("")}</ul>`;
+<p>Risk: <strong>${escapeHtml(diff.riskFrom)} → ${escapeHtml(diff.riskTo)}</strong>${diff.riskIncreased ? " (increased)" : ""}${diff.capabilityChanged ? " — capability set changed" : ""}</p>
+<h2>Added steps</h2>
+<ul>${diff.added.map((s) => `<li>${escapeHtml(s.stepId)} (${escapeHtml(s.uses)})</li>`).join("")}</ul>
+<h2>Removed steps</h2>
+<ul>${diff.removed.map((s) => `<li>${escapeHtml(s.stepId)} (${escapeHtml(s.uses)})</li>`).join("")}</ul>
+<h2>Modified steps</h2>
+<ul>${diff.modified.map((s) => `<li>${escapeHtml(s.stepId)}${s.details.length > 0 ? `: ${s.details.map(escapeHtml).join("; ")}` : ""}</li>`).join("")}</ul>
+<h2>New capabilities</h2>
+<ul>${diff.newCapabilities.map((c) => `<li>${escapeHtml(c)}</li>`).join("")}</ul>
+<h2>New secrets</h2>
+<ul>${diff.newSecrets.map((s) => `<li>${escapeHtml(s)}</li>`).join("")}</ul>
+<h2>New domains</h2>
+<ul>${diff.newDomains.map((d) => `<li>${escapeHtml(d)}</li>`).join("")}</ul>`;
   return page("Risk Diff", body);
 }
 

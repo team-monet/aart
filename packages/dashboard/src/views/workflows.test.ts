@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { ApproveOrDeprecateWorkflowFn, PromoteResult, PromoteWorkflowVersionToEnvironmentFn } from "../deps.js";
 import { createTestFixture, makeEnvironment, makeWorkflow } from "../test-support/fixtures.js";
-import { approveOrDeprecateAction, computeSimpleStepDiff, promoteAction, renderRiskDiffPage, renderWorkflowDetailPage, renderWorkflowsListPage } from "./workflows.js";
+import { approveOrDeprecateAction, promoteAction, renderRiskDiffPage, renderWorkflowDetailPage, renderWorkflowsListPage } from "./workflows.js";
 
 describe("renderWorkflowsListPage / renderWorkflowDetailPage", () => {
   it("lists workflow ids with links", () => {
@@ -17,13 +17,43 @@ describe("renderWorkflowsListPage / renderWorkflowDetailPage", () => {
   });
 });
 
-describe("computeSimpleStepDiff / renderRiskDiffPage", () => {
-  it("diffs added/removed step block ids between two workflow versions", () => {
-    const a = makeWorkflow({ execution: { type: "workflow", steps: [{ id: "s1", uses: "http.get" }] } });
-    const b = makeWorkflow({ execution: { type: "workflow", steps: [{ id: "s1", uses: "http.get" }, { id: "s2", uses: "email.send" }] } });
-    const diff = computeSimpleStepDiff(a, b);
-    expect(diff).toEqual({ added: ["email.send"], removed: [] });
-    expect(renderRiskDiffPage("wf-1", "1.0.0", "2.0.0", diff)).toContain("email.send");
+describe("deps.semanticRiskDiff / renderRiskDiffPage — real @aart/governance risk diff (S9 integration, reconciliation ledger item 13)", () => {
+  it("a real capability-closure-based diff: added step, new capability, risk tier surfaced", async () => {
+    const { deps, cleanup } = await createTestFixture();
+    try {
+      const a = makeWorkflow({ execution: { type: "workflow", steps: [{ id: "s1", uses: "http.request" }] } });
+      const b = makeWorkflow({ execution: { type: "workflow", steps: [{ id: "s1", uses: "http.request" }, { id: "s2", uses: "command.run" }] } });
+      const diff = deps.semanticRiskDiff(a, b);
+      expect(diff.added).toEqual([{ stepId: "s2", uses: "command.run" }]);
+      expect(diff.removed).toEqual([]);
+      // command.run's real manifest declares the "command" capability
+      // (packages/blocks-core/src/command/run.ts) - proves this is genuinely
+      // resolving against the real block catalog, not a structural stand-in
+      // that only ever compares uses-string sets.
+      expect(diff.newCapabilities).toContain("command");
+      expect(diff.capabilityChanged).toBe(true);
+
+      const html = renderRiskDiffPage("wf-1", "1.0.0", "2.0.0", diff);
+      expect(html).toContain("command.run");
+      expect(html).toContain("command");
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it("identical workflows produce a no-change diff", async () => {
+    const { deps, cleanup } = await createTestFixture();
+    try {
+      const a = makeWorkflow({ execution: { type: "workflow", steps: [{ id: "s1", uses: "http.request" }] } });
+      const b = makeWorkflow({ execution: { type: "workflow", steps: [{ id: "s1", uses: "http.request" }] } });
+      const diff = deps.semanticRiskDiff(a, b);
+      expect(diff.added).toEqual([]);
+      expect(diff.removed).toEqual([]);
+      expect(diff.capabilityChanged).toBe(false);
+      expect(diff.riskIncreased).toBe(false);
+    } finally {
+      await cleanup();
+    }
   });
 });
 

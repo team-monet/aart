@@ -50,7 +50,7 @@ import type {
   TrustMode,
   Workflow,
 } from "@aart/types";
-import type { PromotionEvaluation, PromotionRecord } from "@aart/governance";
+import type { PromotionEvaluation, PromotionRecord, SemanticRiskDiff } from "@aart/governance";
 
 export type GateName = keyof Gates;
 export type { PromotionEvaluation, PromotionRecord };
@@ -118,6 +118,25 @@ export type EvaluatePromotionForEnvironmentFn = (params: {
   requiredGatesForEnvironment: readonly GateName[];
   environment: string;
 }) => PromotionEvaluation;
+
+// ---------------------------------------------------------------------------
+// @aart/governance's real semanticRiskDiff (S9 integration, reconciliation
+// ledger item 13) — replaces this package's former computeSimpleStepDiff
+// (views/workflows.ts), which that function's own doc comment already
+// flagged as "a deliberately SIMPLIFIED stand-in... until the real
+// capability-closure-based diff can be wired in." `SemanticRiskDiff`
+// (re-exported below) is governance's real, richer result shape (added/
+// removed/modified steps, capabilityChanged, newCapabilities/newSecrets/
+// newDomains, riskFrom/riskTo/riskIncreased) — see risk-diff.ts. Takes
+// plain `Workflow`s (not `{steps, capabilityClosure}`) at this package's
+// own DI boundary; the real 2-arg signature's capability-closure
+// computation happens inside the bound function (capability-catalog.ts),
+// matching how `approveOrDeprecateWorkflow` above hides its own
+// `computeApprovalState` call from callers.
+// ---------------------------------------------------------------------------
+
+export type { SemanticRiskDiff };
+export type SemanticRiskDiffFn = (from: Workflow, to: Workflow) => SemanticRiskDiff;
 
 // ---------------------------------------------------------------------------
 // S6 @aart/evidence seam E4 — SEAMS.md "Correction-outcome functions —
@@ -277,6 +296,7 @@ export interface DashboardDeps {
 
   computeApprovalState: ComputeApprovalStateFn;
   evaluatePromotionForEnvironment: EvaluatePromotionForEnvironmentFn;
+  semanticRiskDiff: SemanticRiskDiffFn;
   /** architecture §7.3's trust-mode→required-gates table — @aart/governance's real REQUIRED_GATES_BY_MODE as of S9 integration (reconciliation ledger item 2); this field's own name is unchanged (dashboard-internal DI naming), only its bound value. */
   requiredGatesByTrustMode: Record<TrustMode, readonly GateName[]>;
 

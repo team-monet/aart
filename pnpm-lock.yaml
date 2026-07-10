@@ -76,9 +76,15 @@ importers:
 
   packages/dashboard:
     dependencies:
+      '@aart/blocks-core':
+        specifier: workspace:*
+        version: link:../blocks-core
       '@aart/governance':
         specifier: workspace:*
         version: link:../governance
+      '@aart/llm':
+        specifier: workspace:*
+        version: link:../llm
       '@aart/server':
         specifier: workspace:*
         version: link:../server

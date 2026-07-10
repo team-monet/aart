@@ -10,21 +10,52 @@
 // REQUIRED_GATES_BY_TRUST_MODE/promoteWorkflowVersionToEnvironment) is no
 // longer this package's own mirror — bound directly to @aart/governance's
 // and @aart/server's real, now-merged exports below. This is the first of
-// several groups in this file to make that swap; the rest (evidence's
-// report renderers/scorer registry/runEvalSuite, engine's triggerRun/
-// resumeApproval) remain local mirrors until their own composition-root
-// wiring lands.
+// several groups in this file to make that swap.
+//
+// S9 integration (reconciliation ledger item 13): semanticRiskDiff joins
+// that real-bound group below — @aart/governance's real risk-diff
+// algorithm, fed a real capability-closure lookup built from
+// @aart/blocks-core + @aart/llm's actual manifests (capability-catalog.ts,
+// mirroring but NOT importing packages/mcp/src/real-context.ts's own
+// identically-shaped lookup — see that file's doc comment for why each
+// client builds its own rather than one client depending on another's
+// composition root). This package's former computeSimpleStepDiff
+// (views/workflows.ts) is deleted, not kept alongside — its own doc
+// comment already called itself "a deliberately SIMPLIFIED stand-in...
+// until the real capability-closure-based diff can be wired in."
+//
+// Still local mirrors (unrelated reconciliation items — evidence's report
+// renderers/scorer registry/runEvalSuite, engine's triggerRun/
+// resumeApproval) until their own composition-root wiring lands in this
+// package specifically (note: the ENGINE/EVIDENCE wiring itself already
+// landed for @aart/mcp's composition root, real-context.ts — this
+// package has its own separate DashboardDeps container per architecture's
+// three-client principle, so that wiring doesn't automatically reach here;
+// tracked as a distinct, not-yet-done follow-up, not silently assumed
+// resolved).
 import type { AartStore } from "@aart/store";
 import type { ApprovalTask, Correction, EvalExample, EvalRun, EvalSuite, ImprovementBrief, RunRecord, Scorer, StepTrace, Workflow } from "@aart/types";
-import { computeApprovalState, evaluatePromotionForEnvironment, REQUIRED_GATES_BY_MODE } from "@aart/governance";
+import { computeApprovalState, evaluatePromotionForEnvironment, REQUIRED_GATES_BY_MODE, semanticRiskDiff as governanceSemanticRiskDiff } from "@aart/governance";
 import { promoteWorkflowVersionToEnvironment } from "@aart/server";
+import { buildCapabilityClosureLookup, closureFor } from "./capability-catalog.js";
 import type { Clock } from "./clock.js";
 import { systemClock } from "./clock.js";
 import { escapeHtml } from "./http/html.js";
 import { generateId } from "./ids.js";
-import type { ClearRunFlagResult, DashboardDeps, GateName, ReportRenderers, ResumeOutcome, ScorerRegistry, ScorerResult, TriggerRunInput } from "./deps.js";
+import type { ClearRunFlagResult, DashboardDeps, GateName, ReportRenderers, ResumeOutcome, ScorerRegistry, ScorerResult, SemanticRiskDiffFn, TriggerRunInput } from "./deps.js";
 
 export { computeApprovalState, evaluatePromotionForEnvironment, promoteWorkflowVersionToEnvironment };
+
+/** Real semanticRiskDiff, bound to a fresh capability-closure lookup built from `store`'s available block catalog (capability-catalog.ts). A fresh lookup per call (not cached at `createStubDeps` construction time) — this package's block catalog is process-static today (no pack-delivered blocks are foldable in yet, item 13's documented gap shared with item 12's), so caching would be a safe micro-optimization, but computing it fresh keeps this function trivially correct if/when that stops being true, and `createBlockCatalog()`/`createLlmPack` are both cheap, pure, in-memory constructions (no I/O). */
+export function makeSemanticRiskDiff(store: AartStore): SemanticRiskDiffFn {
+  const lookup = buildCapabilityClosureLookup(store);
+  return function semanticRiskDiff(from: Workflow, to: Workflow) {
+    return governanceSemanticRiskDiff(
+      { steps: from.execution.steps, capabilityClosure: closureFor(lookup, from.execution.steps) },
+      { steps: to.execution.steps, capabilityClosure: closureFor(lookup, to.execution.steps) },
+    );
+  };
+}
 /** @deprecated kept as an alias during S9 integration in case any external caller imported this package's former locally-named constant directly; use `REQUIRED_GATES_BY_MODE` (re-exported from `@aart/governance` via this module) going forward. */
 export const REQUIRED_GATES_BY_TRUST_MODE = REQUIRED_GATES_BY_MODE;
 export { REQUIRED_GATES_BY_MODE };
@@ -466,6 +497,7 @@ export function createStubDeps(store: AartStore, clock: Clock = systemClock): Da
     decideApprovalTask: makeDecideApprovalTask(clock),
     computeApprovalState,
     evaluatePromotionForEnvironment,
+    semanticRiskDiff: makeSemanticRiskDiff(store),
     requiredGatesByTrustMode: REQUIRED_GATES_BY_TRUST_MODE,
     recordCorrection: makeRecordCorrection(clock),
     updateRunOutput,
