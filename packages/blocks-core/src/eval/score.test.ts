@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import { createEvalScoreBlock, evalScoreBlock } from "./score.js";
-import { ScorerRegistryUnavailableError } from "./scorer-registry-port.js";
 import { createFakeScorerRegistry } from "../test-support/fake-scorer-registry.js";
 import { fakeExecutionContext } from "../test-support/fake-context.js";
 
@@ -33,9 +32,21 @@ describe("eval.score", () => {
     expect(result).toEqual({ passed: true, score: 1 });
   });
 
-  it("the default catalog export (no injection) throws ScorerRegistryUnavailableError while @aart/evidence is still a stub", async () => {
-    await expect(evalScoreBlock.execute({ kind: "exact_match", actual: 1, expected: 1 }, fakeExecutionContext())).rejects.toThrow(
-      ScorerRegistryUnavailableError,
-    );
+  it("the default catalog export (no injection) now resolves via the real, merged @aart/evidence registry", async () => {
+    // Pre-S9-integration, @aart/evidence was S0's empty stub and this
+    // threw ScorerRegistryUnavailableError (see git history / SEAMS.md
+    // E2) - tryLoadEvidenceScorerRegistry()'s lazy dynamic import now
+    // resolves S6's real createScorerRegistry() with no injection
+    // needed for any of the 11 non-llm_judge kinds. ScorerRegistryUnavailableError
+    // is unreachable via this path now; it remains reachable only if
+    // @aart/evidence's own export shape ever regresses.
+    const result = await evalScoreBlock.execute({ kind: "exact_match", actual: 1, expected: 1 }, fakeExecutionContext());
+    expect(result).toEqual({ passed: true, score: 1 });
+  });
+
+  it("the default catalog export's llm_judge kind still throws (no LlmJudgeFn injected at the composition root)", async () => {
+    await expect(
+      evalScoreBlock.execute({ kind: "llm_judge", actual: "a", expected: "a" }, fakeExecutionContext()),
+    ).rejects.toThrow(/llm_judge scorer invoked with no LlmJudgeFn configured/);
   });
 });

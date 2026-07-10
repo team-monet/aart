@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { EvalSuite } from "@aart/types";
 import { createEvalRunBlock, evalRunBlock } from "./run.js";
-import { ScorerRegistryUnavailableError } from "./scorer-registry-port.js";
 import { createFakeScorerRegistry } from "../test-support/fake-scorer-registry.js";
 import { fakeExecutionContext } from "../test-support/fake-context.js";
 
@@ -88,9 +87,32 @@ describe("eval.run", () => {
     expect(result.improvements).toEqual([]);
   });
 
-  it("the default catalog export (no injection) throws ScorerRegistryUnavailableError while @aart/evidence is still a stub", async () => {
-    await expect(evalRunBlock.execute({ suite: fakeSuite(), actuals: {} }, fakeExecutionContext())).rejects.toThrow(
-      ScorerRegistryUnavailableError,
-    );
+  it("the default catalog export (no injection) now resolves via the real, merged @aart/evidence registry", async () => {
+    // Pre-S9-integration, @aart/evidence was S0's empty stub and this
+    // threw ScorerRegistryUnavailableError (see git history / SEAMS.md
+    // E2) - tryLoadEvidenceScorerRegistry()'s lazy dynamic import now
+    // resolves S6's real createScorerRegistry() with no injection
+    // needed for the exact_match kind this suite uses. With no actuals
+    // supplied, every example scores undefined-vs-expected, so all 3 fail.
+    const result = (await evalRunBlock.execute({ suite: fakeSuite(), actuals: {} }, fakeExecutionContext())) as {
+      total: number;
+      passed: number;
+      failed: number;
+      score: number;
+      status: string;
+      suiteId: string;
+      workflowId: string;
+      workflowVersion: string;
+      reportArtifact: string;
+    };
+    expect(result.total).toBe(3);
+    expect(result.passed).toBe(0);
+    expect(result.failed).toBe(3);
+    expect(result.score).toBe(0);
+    expect(result.status).toBe("completed");
+    expect(result.suiteId).toBe("suite-1");
+    expect(result.workflowId).toBe("");
+    expect(result.workflowVersion).toBe("");
+    expect(result.reportArtifact).toMatch(/^artifact-fake-\d{4}$/);
   });
 });
