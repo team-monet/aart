@@ -16,7 +16,8 @@ describe("buildExprContext", () => {
       trace: [{ seq: 0, stepId: "extract", block: "llm.extract", status: "completed", inputs: {}, outputs: { nmi: "123" }, startedAt: "t", endedAt: "t" }],
     });
     const ctx = buildExprContext(run);
-    expect((ctx.steps as Record<string, { outputs: unknown }>).extract.outputs).toEqual({ nmi: "123" });
+    const steps = ctx.steps as Record<string, { outputs: unknown }>;
+    expect(steps.extract?.outputs).toEqual({ nmi: "123" });
   });
 });
 
