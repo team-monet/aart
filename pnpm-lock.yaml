@@ -324,6 +324,9 @@ importers:
 
   packages/server:
     dependencies:
+      '@aart/engine':
+        specifier: workspace:*
+        version: link:../engine
       '@aart/expr':
         specifier: workspace:*
         version: link:../expr

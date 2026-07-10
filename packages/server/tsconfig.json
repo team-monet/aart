@@ -9,6 +9,7 @@
     { "path": "../types" },
     { "path": "../store" },
     { "path": "../expr" },
-    { "path": "../governance" }
+    { "path": "../governance" },
+    { "path": "../engine" }
   ]
 }

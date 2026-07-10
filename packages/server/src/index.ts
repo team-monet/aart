@@ -14,8 +14,13 @@ export { systemClock, type Clock } from "./clock.js";
 export { createServerLogger, type Logger } from "./logger.js";
 export { generateId } from "./ids.js";
 
-// --- engine boundary (stub/fake — see engine/boundary.ts's doc comment) ---
-export { createFakeEngine, type EngineBoundary, type ResumeResult, type StartRunParams, type StartRunResult } from "./engine/boundary.js";
+// --- engine boundary — see engine/boundary.ts's doc comments. createFakeEngine
+// is what S2's own tests wire (real RunRecord/job_queue writes, no real
+// step execution); createRealEngineBoundary (S10 completion) is the thin
+// adapter over a real @aart/engine Engine that a real composition root
+// (e.g. a worker process) constructs and injects into startServer/
+// startWorker's SharedRuntimeConfig.engine field. ---
+export { createFakeEngine, createRealEngineBoundary, type EngineBoundary, type ResumeResult, type StartRunParams, type StartRunResult } from "./engine/boundary.js";
 
 // --- the flagged-run clear write path (dashboard/CLI only, deliberately NOT MCP-exposed — architecture §13.3) ---
 export { clearRunFlag, listFlaggedRuns, type ClearRunFlagResult } from "./flags.js";

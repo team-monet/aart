@@ -17,6 +17,7 @@
     "build": "tsc -b"
   },
   "dependencies": {
+    "@aart/engine": "workspace:*",
     "@aart/expr": "workspace:*",
     "@aart/governance": "workspace:*",
     "@aart/store": "workspace:*",

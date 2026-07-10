@@ -16,7 +16,9 @@
 // shape — see this task's final report for the explicit list of what S9
 // must reconcile.
 import type { RunRecord, Signal, Trigger, WaitCondition } from "@aart/types";
+import { ConcurrencyRejectedError, CorrelationError } from "@aart/types";
 import type { AartStore } from "@aart/store";
+import type { Engine } from "@aart/engine";
 import type { Clock } from "../clock.js";
 import { generateId } from "../ids.js";
 
@@ -142,6 +144,123 @@ export function createFakeEngine(store: AartStore, clock: Clock): EngineBoundary
       if (!run) return;
       await store.runs.put({ ...run, status: "completed", updatedAt: clock.nowIso(), endedAt: clock.nowIso() });
       await store.jobQueue.remove(runId);
+    },
+  };
+}
+
+/**
+ * The REAL `EngineBoundary` — thin adapter over an already-constructed real
+ * `@aart/engine` `Engine` (S9 integration gap closed, S10 completion:
+ * `packages/mcp/src/real-context.ts`'s own module comment has claimed since
+ * S9 that "ServerPort <- ... via a real EngineBoundary adapter... this
+ * package's createRealEngineBoundary" — but no such function existed
+ * anywhere in this repo, and `packages/cli/src/cli-context.ts` unconditionally
+ * used `createStubServerPort` regardless of anything else being wired for
+ * real. This is that function, finally landed — `aart worker`/`aart server`
+ * were, until this fix, complete no-ops in the actually-shipping CLI (see
+ * `stubs/server.ts`'s own `startWorker`: `return { async stop() {} }`,
+ * literally does nothing) despite the underlying worker/claim/lease/reclaim
+ * machinery in this SAME package (worker.ts/claim.ts/reclaim.ts/lease.ts)
+ * being fully real and complete — this was purely a wiring gap, not a
+ * missing-machinery gap. See root AMENDMENTS.md, S10 completion, for the
+ * full write-up.
+ *
+ * Every method here is a direct pass-through to the equivalent bound
+ * `Engine` method (constructed via `@aart/engine`'s `createEngine`, the
+ * SAME composition every other real consumer — `@aart/mcp`'s real-context.ts
+ * — already uses) — this package (`@aart/server`) owns admission control
+ * (`startWorker`'s `maxConcurrentRuns`), the race-safe `job_queue` claim
+ * (`claim.ts`), lease renewal (`lease.ts`), and the reclaim sweep
+ * (`reclaim.ts`); it does not reimplement engine logic, exactly as this
+ * interface's own doc comment on `EngineBoundary` already specified.
+ */
+export function createRealEngineBoundary(store: AartStore, engine: Engine): EngineBoundary {
+  function mapResumeOutcome(outcome: Awaited<ReturnType<Engine["resumeBySignal"]>>): ResumeResult {
+    if (outcome.kind === "resumed") return { kind: "resumed", runId: outcome.run.runId };
+    if (outcome.kind === "duplicate") {
+      // ResumeOutcome's "duplicate" carries no runId (architecture §4.4.2's
+      // dedupe check happens before the run is even loaded) — ResumeResult
+      // requires one. Not reachable from resumeWithSignal/resumeDirect's
+      // real call sites below without a runId already in hand (the
+      // dedupe key itself is scoped to a specific run+step), so this is a
+      // defensive fallback, not an expected path.
+      return { kind: "duplicate", runId: "" };
+    }
+    return { kind: "no_match" };
+  }
+
+  return {
+    async startRun(params: StartRunParams): Promise<StartRunResult> {
+      const workflow = params.workflowVersion
+        ? await store.workflows.get(params.workflowId, params.workflowVersion)
+        : await store.workflows.getLatest(params.workflowId);
+      if (!workflow) {
+        return { kind: "rejected", reason: `Workflow "${params.workflowId}"${params.workflowVersion ? `@${params.workflowVersion}` : ""} not found.` };
+      }
+      try {
+        const run = await engine.triggerRun({
+          workflow,
+          trigger: params.trigger,
+          inputs: params.mappedInputs,
+          ...(params.dryRun ? { params: { dryRun: true } } : {}),
+        });
+        // run-lifecycle.ts's triggerRun stashes waitingOnConcurrency in the
+        // free-form params bag (its own `[DECISION]` comment) rather than a
+        // dedicated RunRecord field — this is the one place outside that
+        // file that needs to read it back, to distinguish "genuinely
+        // started" from "queued behind a blocking run under a queue
+        // ConcurrencyPolicy" for this boundary's own StartRunResult.
+        const queued = (run.params as Record<string, unknown> | undefined)?.["waitingOnConcurrency"] === true;
+        return { kind: queued ? "queued" : "started", runId: run.runId };
+      } catch (err) {
+        if (err instanceof ConcurrencyRejectedError) {
+          return { kind: "rejected", reason: err.message };
+        }
+        throw err;
+      }
+    },
+
+    async resumeWithSignal(signal: Signal): Promise<ResumeResult> {
+      try {
+        return mapResumeOutcome(await engine.resumeBySignal(signal));
+      } catch (err) {
+        // wait-machine.ts's resumeBySignal signals ">1 outstanding wait
+        // matched this correlationId" via a THROWN CorrelationError (detail
+        // .matches), not a return-value kind — ResumeResult's own
+        // "ambiguous" kind (matching this boundary's pre-existing fake)
+        // needs the count, which the error's own detail carries.
+        if (err instanceof CorrelationError && err.detail?.["kind"] === "multipleWaitMatches") {
+          const matches = err.detail["matches"];
+          return { kind: "ambiguous", matches: Array.isArray(matches) ? matches.length : 2 };
+        }
+        throw err;
+      }
+    },
+
+    async resumeDirect(runId: string, stepId: string, payload: unknown): Promise<ResumeResult> {
+      const outcome = await engine.resumeManual(runId, stepId, payload);
+      if (outcome.kind === "resumed") return { kind: "resumed", runId: outcome.run.runId };
+      if (outcome.kind === "duplicate") return { kind: "duplicate", runId };
+      return { kind: "no_match" };
+    },
+
+    async getDueWaits(now: string) {
+      return engine.getDueWaits(new Date(now));
+    },
+
+    async executeClaimedRun(runId: string): Promise<void> {
+      // The worker's own claim/lease is already held by the time this is
+      // called (worker/claim.ts, BEFORE this boundary method is invoked) —
+      // engine.executeRun is exactly "what a worker calls after claiming a
+      // run from job_queue" per that method's own doc comment (engine.ts).
+      // Releasing/removing the job_queue entry on normal completion is
+      // engine-internal (run-lifecycle.ts's finalization path already does
+      // this); worker.ts's own executeOneClaim has a best-effort release
+      // backstop for the checkpoint case, and deliberately does NOT release
+      // on a thrown error (leaves the lease for reclaim.ts to expire and
+      // sweep — architecture §4.7, this session's own worker-kill E2E
+      // proof).
+      await engine.executeRun(runId);
     },
   };
 }
