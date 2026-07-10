@@ -38,3 +38,4 @@ export {
   type FindBlocksInput,
   type RemoteRegistryIndexEntry,
 } from "./discovery.js";
+export { computePackSealChecks, type PackSealCheck, type PackVersionRef } from "./pack-seal.js";
