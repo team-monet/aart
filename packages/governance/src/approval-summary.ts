@@ -24,6 +24,7 @@ export const COVERED_WORKFLOW_FIELDS = [
   "generatedByModel",
   "needsReview",
   "promotionBlocked",
+  "concurrency",
 ] as const satisfies readonly (keyof Workflow)[];
 
 export const COVERED_WORKFLOW_STEP_FIELDS = [
@@ -99,6 +100,10 @@ export function renderApprovalSummary(input: ApprovalSummaryInput): string {
   lines.push("This workflow will:");
   for (const step of workflow.execution.steps) lines.push(describeStep(step));
   lines.push("");
+
+  if (workflow.concurrency) {
+    lines.push(`Concurrency: policy "${workflow.concurrency.policy}" on key ${workflow.concurrency.key}`, "");
+  }
 
   lines.push("Inputs:");
   if (workflow.inputs.length === 0) lines.push("- none");
