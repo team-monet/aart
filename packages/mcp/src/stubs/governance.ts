@@ -35,7 +35,8 @@
 //     documented JSON-string-escaped/URL-percent-encoded secondary-form
 //     matching, which is real redaction-hardening logic, not a trivial
 //     mirror.
-import type { Gates, TrustMode, Workflow, WorkflowStep } from "@aart/types";
+import type { AartStore } from "@aart/store";
+import type { ApprovalTask, Gates, TrustMode, Workflow, WorkflowStep } from "@aart/types";
 import { WorkflowSchema } from "@aart/types";
 import type {
   AutoApprovalState,
@@ -205,6 +206,56 @@ export function redact(record: unknown, resolvedSecretRefs: ReadonlySet<string>)
   return walk(record);
 }
 
+// Mirrors @aart/governance/src/approval-tasks.ts's workflowVersionApprovalSubject/
+// decodeWorkflowVersionApprovalSubject exactly (S9 integration, reconciliation
+// ledger item 1 — this is the sentinel convention that WON over this
+// package's own former `version-review:`/`humanReview` encoding; see root
+// AMENDMENTS.md A23's "S9 resolution").
+const WORKFLOW_VERSION_SUBJECT_PREFIX = "workflow-version:";
+const WORKFLOW_VERSION_SUBJECT_STEP_ID = "__gate:humanReview__";
+
+export function workflowVersionApprovalSubject(workflowId: string, workflowVersion: string): { runId: string; stepId: string } {
+  return { runId: `${WORKFLOW_VERSION_SUBJECT_PREFIX}${workflowId}@${workflowVersion}`, stepId: WORKFLOW_VERSION_SUBJECT_STEP_ID };
+}
+
+export function decodeWorkflowVersionApprovalSubject(runId: string): { workflowId: string; workflowVersion: string } | undefined {
+  if (!runId.startsWith(WORKFLOW_VERSION_SUBJECT_PREFIX)) return undefined;
+  const rest = runId.slice(WORKFLOW_VERSION_SUBJECT_PREFIX.length);
+  const at = rest.lastIndexOf("@");
+  if (at === -1) return undefined;
+  return { workflowId: rest.slice(0, at), workflowVersion: rest.slice(at + 1) };
+}
+
+// Mirrors @aart/governance/src/approval-tasks.ts's writeApprovalDecision —
+// the ONE path every ApprovalTask write should go through (architecture
+// §7.9's redaction-chokepoint diagram names "approval decision" as a named
+// redactRecord input path). Routes through this module's own SIMPLIFIED
+// `redact` above (see module doc comment on why it's simplified, not a
+// faithful port). S9 integration: added because this package's own
+// handlers previously wrote `store.approvals.put(...)` directly,
+// bypassing redaction entirely — a real finding from this reconciliation
+// pass, not a hypothetical.
+export async function writeApprovalDecision(
+  store: AartStore,
+  input: {
+    readonly id: string;
+    readonly runId: string;
+    readonly stepId: string;
+    readonly title: string;
+    readonly description: string;
+    readonly status: ApprovalTask["status"];
+    readonly reviewer?: string;
+    readonly decision?: unknown;
+    readonly createdAt: string;
+    readonly decidedAt?: string;
+  },
+): Promise<ApprovalTask> {
+  const task: ApprovalTask = { ...input };
+  const redacted = redact(task, new Set()) as ApprovalTask;
+  await store.approvals.put(redacted);
+  return redacted;
+}
+
 export function createStubGovernance(): GovernancePort {
   return {
     requiredGatesByMode: REQUIRED_GATES_BY_MODE,
@@ -215,5 +266,8 @@ export function createStubGovernance(): GovernancePort {
     validateWorkflow,
     semanticRiskDiff,
     redact,
+    workflowVersionApprovalSubject,
+    decodeWorkflowVersionApprovalSubject,
+    writeApprovalDecision,
   };
 }

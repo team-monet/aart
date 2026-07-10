@@ -140,6 +140,42 @@ export interface GovernancePort {
   validateWorkflow(input: unknown): ValidationResultShape;
   semanticRiskDiff(from: Workflow, to: Workflow): SemanticRiskDiffShape;
   redact(record: unknown, resolvedSecretRefs: ReadonlySet<string>): unknown;
+  /**
+   * S9 integration (reconciliation ledger item 1): governance's sentinel
+   * runId/stepId encoding for a workflow-VERSION-level ApprovalTask
+   * decision (approval-tasks.ts) — the convention this package's own
+   * handlers now use instead of the FORMER locally-invented
+   * `version-review:<id>@<version>`/`humanReview` encoding (root
+   * AMENDMENTS.md A23's "S9 resolution": governance's convention won,
+   * since governance owns the underlying ApprovalTask-writing business
+   * logic this sentinel decorates).
+   */
+  workflowVersionApprovalSubject(workflowId: string, workflowVersion: string): { runId: string; stepId: string };
+  /** The decode side of `workflowVersionApprovalSubject` above — `undefined` for any `runId` that isn't this sentinel shape (including a genuine per-run `RunRecord.runId`). */
+  decodeWorkflowVersionApprovalSubject(runId: string): { workflowId: string; workflowVersion: string } | undefined;
+  /**
+   * S9 integration (reconciliation ledger item 1's redaction-bypass finding):
+   * the one path every `ApprovalTask` write goes through, routing through
+   * governance's redaction chokepoint before persisting (architecture
+   * §7.9's diagram names "approval decision" as a redactRecord input path
+   * explicitly). This package's own handlers previously wrote
+   * `store.approvals.put(...)` directly, bypassing it.
+   */
+  writeApprovalDecision(
+    store: import("@aart/store").AartStore,
+    input: {
+      readonly id: string;
+      readonly runId: string;
+      readonly stepId: string;
+      readonly title: string;
+      readonly description: string;
+      readonly status: ApprovalTask["status"];
+      readonly reviewer?: string;
+      readonly decision?: unknown;
+      readonly createdAt: string;
+      readonly decidedAt?: string;
+    },
+  ): Promise<ApprovalTask>;
 }
 
 // ---------------------------------------------------------------------------

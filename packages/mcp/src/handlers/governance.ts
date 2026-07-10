@@ -11,10 +11,10 @@
 // §17.5's table — only the MCP tool's registration is mode-gated, not the
 // underlying action).
 //
-// Resolved ambiguity (documented here + this session's final report/
-// AMENDMENTS, since it's load-bearing and neither source document spells
-// it out): `ApprovalTask` (@aart/types) is keyed by `(runId, stepId)` only —
-// no `workflowId`/`workflowVersion` fields exist on the frozen type (spec
+// Resolved ambiguity (documented here + AMENDMENTS.md, since it's
+// load-bearing and neither source document spells it out): `ApprovalTask`
+// (@aart/types) is keyed by `(runId, stepId)` only — no
+// `workflowId`/`workflowVersion` fields exist on the frozen type (spec
 // §23.4's own vocabulary note confirms `ApprovalTask.status` is "a decision
 // on ONE RUN's approval step", distinct from a workflow-version-level
 // concept). But `aart_request_approval`/`aart_approve` (§34) and the
@@ -27,30 +27,30 @@
 // engine to write an ApprovalTask row... using with.title/with.description"),
 // `aart_request_approval` here supports a SECOND input shape — workflowId +
 // workflowVersion, no live run — for exactly this "please review this draft
-// version" case, using a documented sentinel encoding
-// (`runId: "version-review:<id>@<version>"`, `stepId: "humanReview"`) so it
-// still fits the frozen ApprovalTask shape without widening it. `aart_approve`
-// branches on this sentinel: a "version-review:" task updates the workflow's
-// `gates.humanReview` (and recomputes `approval`); any other task resumes
-// the matching run via the engine port.
+// version" case.
+//
+// S9 integration (reconciliation ledger item 1): this package originally
+// used its OWN documented-provisional sentinel encoding
+// (`runId: "version-review:<id>@<version>"`, `stepId: "humanReview"`),
+// built when @aart/governance was still a stub in this worktree. Now that
+// governance is really merged, this handler uses ITS real sentinel
+// convention instead (`ctx.governance.workflowVersionApprovalSubject`/
+// `decodeWorkflowVersionApprovalSubject`) — governance owns the underlying
+// ApprovalTask-writing business logic this sentinel decorates, so its
+// convention won (root AMENDMENTS.md A23's "S9 resolution": two
+// non-interoperable encodings of the same concept independently existed;
+// this package's own was explicitly self-documented as "a fill for a
+// genuine type-shape gap, not a frozen contract", i.e. always meant to be
+// revisited once the real thing landed). Both handlers below also now
+// route their ApprovalTask writes through `ctx.governance.writeApprovalDecision`
+// instead of `ctx.store.approvals.put` directly — a real redaction-bypass
+// finding from this same reconciliation pass (architecture §7.9's diagram
+// names "approval decision" as a named redactRecord input path; a task's
+// free-form `decision` field can echo back arbitrary data).
 import type { Gates, Workflow } from "@aart/types";
 import type { AartContext } from "../context.js";
 import type { HandlerResult } from "../response.js";
 import { newId } from "../stubs/engine.js";
-
-const VERSION_REVIEW_PREFIX = "version-review:";
-
-function encodeVersionReviewRunId(workflowId: string, workflowVersion: string): string {
-  return `${VERSION_REVIEW_PREFIX}${workflowId}@${workflowVersion}`;
-}
-
-function decodeVersionReviewRunId(runId: string): { workflowId: string; workflowVersion: string } | undefined {
-  if (!runId.startsWith(VERSION_REVIEW_PREFIX)) return undefined;
-  const rest = runId.slice(VERSION_REVIEW_PREFIX.length);
-  const at = rest.lastIndexOf("@");
-  if (at === -1) return undefined;
-  return { workflowId: rest.slice(0, at), workflowVersion: rest.slice(at + 1) };
-}
 
 export interface RequestApprovalInput {
   runId?: string;
@@ -65,8 +65,7 @@ export async function requestApprovalHandler(ctx: AartContext, input: RequestApp
   let runId: string;
   let stepId: string;
   if (input.workflowId && input.workflowVersion) {
-    runId = encodeVersionReviewRunId(input.workflowId, input.workflowVersion);
-    stepId = "humanReview";
+    ({ runId, stepId } = ctx.governance.workflowVersionApprovalSubject(input.workflowId, input.workflowVersion));
   } else if (input.runId && input.stepId) {
     runId = input.runId;
     stepId = input.stepId;
@@ -74,16 +73,15 @@ export async function requestApprovalHandler(ctx: AartContext, input: RequestApp
     return { ok: false, error: "Provide either (workflowId + workflowVersion) or (runId + stepId)." };
   }
 
-  const task = {
+  const task = await ctx.governance.writeApprovalDecision(ctx.store, {
     id: newId("task"),
     runId,
     stepId,
     title: input.title ?? "Approval requested",
     description: input.description ?? "An agent is requesting human approval before proceeding.",
-    status: "pending" as const,
+    status: "pending",
     createdAt: ctx.now().toISOString(),
-  };
-  await ctx.store.approvals.put(task);
+  });
   return { ok: true, taskId: task.id, runId: task.runId, stepId: task.stepId };
 }
 
@@ -114,10 +112,15 @@ export async function approveHandler(ctx: AartContext, input: ApproveInput): Pro
   const task = await ctx.store.approvals.get(input.taskId);
   if (!task) return { ok: false, error: `Approval task "${input.taskId}" not found. Call aart_request_approval first.` };
 
-  const decided = { ...task, status: input.decision, reviewer: input.reviewer, decision: input.decision, decidedAt: ctx.now().toISOString() };
-  await ctx.store.approvals.put(decided);
+  const decided = await ctx.governance.writeApprovalDecision(ctx.store, {
+    ...task,
+    status: input.decision,
+    reviewer: input.reviewer,
+    decision: input.decision,
+    decidedAt: ctx.now().toISOString(),
+  });
 
-  const versionReview = decodeVersionReviewRunId(task.runId);
+  const versionReview = ctx.governance.decodeWorkflowVersionApprovalSubject(task.runId);
   if (versionReview) {
     return applyVersionReviewDecision(ctx, versionReview.workflowId, versionReview.workflowVersion, input.decision);
   }

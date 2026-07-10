@@ -38,6 +38,7 @@ export {
 // The normal ApprovalTask write path — architecture §7.1/§7.2/§7.5
 // ---------------------------------------------------------------------------
 export {
+  decodeWorkflowVersionApprovalSubject,
   recordPrMergeApproval,
   recordStandingApprovalDecision,
   workflowVersionApprovalSubject,

@@ -164,7 +164,8 @@ export function buildDashboardRouter(store: AartStore, api: ApiClient, deps: Das
   });
   router.post("/approvals/:id/decision", async (ctx, body) => {
     const status = str(body, "status") as "approved" | "rejected" | "needs_changes";
-    await decideApprovalAction(deps, store, ctx.params["id"]!, status, str(body, "reviewer", "dashboard-operator"));
+    const trustMode = (str(body, "trustMode", "governed") as Parameters<typeof decideApprovalAction>[6]) ?? "governed";
+    await decideApprovalAction(deps, store, ctx.params["id"]!, status, str(body, "reviewer", "dashboard-operator"), undefined, trustMode);
     redirect(ctx.res, "/approvals");
   });
 

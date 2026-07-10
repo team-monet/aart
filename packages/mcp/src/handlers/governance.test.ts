@@ -21,11 +21,17 @@ describe("requestApprovalHandler (aart_request_approval)", () => {
     expect(task?.status).toBe("pending");
   });
 
-  it("creates a version-review task when given workflowId+workflowVersion instead of runId+stepId", async () => {
+  // S9 integration (reconciliation ledger item 1): the sentinel format is
+  // now @aart/governance's real workflowVersionApprovalSubject convention
+  // ("workflow-version:<id>@<version>" / "__gate:humanReview__"), not this
+  // package's former locally-invented "version-review:<id>@<version>" /
+  // "humanReview".
+  it("creates a workflow-version task when given workflowId+workflowVersion instead of runId+stepId", async () => {
     tc = await createTestContext();
     const result = await requestApprovalHandler(tc.ctx, { workflowId: "wf-x", workflowVersion: "1.0.0" });
     expect(result.ok).toBe(true);
-    expect(result.runId).toBe("version-review:wf-x@1.0.0");
+    expect(result.runId).toBe("workflow-version:wf-x@1.0.0");
+    expect(result.stepId).toBe("__gate:humanReview__");
   });
 
   it("fails when neither shape of input is given", async () => {

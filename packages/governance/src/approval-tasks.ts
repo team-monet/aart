@@ -63,8 +63,33 @@ export async function writeApprovalDecision(
  * runId/stepId from the RunRecord/WorkflowStep that created the wait and
  * never goes through this helper.
  */
+const WORKFLOW_VERSION_SUBJECT_PREFIX = "workflow-version:";
+const WORKFLOW_VERSION_SUBJECT_STEP_ID = "__gate:humanReview__";
+
 export function workflowVersionApprovalSubject(workflowId: string, workflowVersion: string): { runId: string; stepId: string } {
-  return { runId: `workflow-version:${workflowId}@${workflowVersion}`, stepId: "__gate:humanReview__" };
+  return { runId: `${WORKFLOW_VERSION_SUBJECT_PREFIX}${workflowId}@${workflowVersion}`, stepId: WORKFLOW_VERSION_SUBJECT_STEP_ID };
+}
+
+/**
+ * The decode side of `workflowVersionApprovalSubject` above (S9 integration,
+ * reconciliation ledger item 1 — added because a caller needs to recognize
+ * "this ApprovalTask is a workflow-version-level decision, not a real
+ * per-run wait" from a `runId` alone, e.g. `@aart/mcp`'s `aart_approve`
+ * handler branching on which write path to take). Returns `undefined` for
+ * any `runId` that isn't this sentinel shape (including a genuine per-run
+ * `RunRecord.runId`, which never starts with this prefix — generated run
+ * ids use a different convention, `ids.ts`). Splits on the LAST `@` (not
+ * the first), matching `@aart/llm`'s `decodeResolvedVersion` precedent for
+ * the same reason: defensive against a workflowId that itself happens to
+ * contain `@`, even though `workflowVersion` (typically semver) practically
+ * never does.
+ */
+export function decodeWorkflowVersionApprovalSubject(runId: string): { workflowId: string; workflowVersion: string } | undefined {
+  if (!runId.startsWith(WORKFLOW_VERSION_SUBJECT_PREFIX)) return undefined;
+  const rest = runId.slice(WORKFLOW_VERSION_SUBJECT_PREFIX.length);
+  const at = rest.lastIndexOf("@");
+  if (at === -1) return undefined;
+  return { workflowId: rest.slice(0, at), workflowVersion: rest.slice(at + 1) };
 }
 
 export interface GithubMergeEventPayload {
