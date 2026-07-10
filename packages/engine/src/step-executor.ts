@@ -327,8 +327,14 @@ export async function executeStep(
   const resolveOptions: ResolveOptions = { secretResolver };
   const exprContextBeforeDispatch = buildExprContext(run);
 
-  // 1. resolve step.with
-  const resolvedWith = await resolveWithRecord(step.with, exprContextBeforeDispatch, resolveOptions);
+  // 1. resolve step.with — EXCEPT for a forEach step, whose `with:` is
+  // resolved per-iteration instead (executeForEachStep, below), with the
+  // `as`-bound current element injected into context. Resolving it here
+  // too, unconditionally, would fail outright for any `with:` value that
+  // references the (not-yet-bound) forEach item — this isn't just wasted
+  // work, it's a genuine bug: `{{ steps.item }}` has no meaning until a
+  // specific iteration's context exists.
+  const resolvedWith = step.forEach === undefined ? await resolveWithRecord(step.with, exprContextBeforeDispatch, resolveOptions) : {};
 
   // 2. check step.if — architecture micro-decision #7: absent `if` always
   // falls through; `then`/`else` only consulted when `if` is present.

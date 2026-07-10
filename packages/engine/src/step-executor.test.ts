@@ -196,7 +196,7 @@ describe("executeStep — forEach/as (spec §14.1 R7, architecture §4.2)", () =
   it("runs the step body once per resolved array element, sequentially", async () => {
     const { config } = await setup();
     const run = fixtureRun({ inputs: { items: ["a", "b", "c"] } });
-    const workflow = fixtureWorkflow({ execution: { type: "workflow", steps: [{ id: "each", uses: "test.echo", forEach: "{{ inputs.items }}", as: "item", with: { value: "{{ item }}" } }] } });
+    const workflow = fixtureWorkflow({ execution: { type: "workflow", steps: [{ id: "each", uses: "test.echo", forEach: "{{ inputs.items }}", as: "item", with: { value: "{{ steps.item }}" } }] } });
     const outcome = await executeStep(config, run, workflow, workflow.execution.steps[0]!, new Set(), undefined);
     if (outcome.kind !== "continue") throw new Error("unreachable");
 
@@ -208,7 +208,7 @@ describe("executeStep — forEach/as (spec §14.1 R7, architecture §4.2)", () =
   it("records ONE aggregate trace entry under the plain step id, with outputs.items as the array of per-iteration outputs", async () => {
     const { config } = await setup();
     const run = fixtureRun({ inputs: { items: [1, 2] } });
-    const workflow = fixtureWorkflow({ execution: { type: "workflow", steps: [{ id: "each", uses: "test.echo", forEach: "{{ inputs.items }}", as: "item", with: { value: "{{ item }}" } }] } });
+    const workflow = fixtureWorkflow({ execution: { type: "workflow", steps: [{ id: "each", uses: "test.echo", forEach: "{{ inputs.items }}", as: "item", with: { value: "{{ steps.item }}" } }] } });
     const outcome = await executeStep(config, run, workflow, workflow.execution.steps[0]!, new Set(), undefined);
     if (outcome.kind !== "continue") throw new Error("unreachable");
 
@@ -225,7 +225,7 @@ describe("executeStep — forEach/as (spec §14.1 R7, architecture §4.2)", () =
       execution: {
         type: "workflow",
         steps: [
-          { id: "each", uses: "test.echo", forEach: "{{ inputs.items }}", as: "item", with: { value: "{{ item }}" } },
+          { id: "each", uses: "test.echo", forEach: "{{ inputs.items }}", as: "item", with: { value: "{{ steps.item }}" } },
           { id: "after", uses: "test.echo", with: { count: "{{ steps.each.outputs.items }}" } },
         ],
       },
@@ -240,7 +240,7 @@ describe("executeStep — forEach/as (spec §14.1 R7, architecture §4.2)", () =
   it("defaults the binding name to 'item' when as: is absent", async () => {
     const { config } = await setup();
     const run = fixtureRun({ inputs: { items: ["x"] } });
-    const workflow = fixtureWorkflow({ execution: { type: "workflow", steps: [{ id: "each", uses: "test.echo", forEach: "{{ inputs.items }}", with: { value: "{{ item }}" } }] } });
+    const workflow = fixtureWorkflow({ execution: { type: "workflow", steps: [{ id: "each", uses: "test.echo", forEach: "{{ inputs.items }}", with: { value: "{{ steps.item }}" } }] } });
     const outcome = await executeStep(config, run, workflow, workflow.execution.steps[0]!, new Set(), undefined);
     if (outcome.kind !== "continue") throw new Error("unreachable");
     expect(outcome.run.trace.find((t) => t.stepId === "each[0]")?.outputs).toEqual({ echoed: { value: "x" } });
