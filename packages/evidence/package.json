@@ -1,9 +1,9 @@
 {
   "name": "@aart/evidence",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "AART evidence package. Stub scaffolded by S0 (Wave 0) — real implementation is Wave-1 scope; see aart_implementation_plan_v1.md for session ownership.",
+  "description": "AART evidence subsystem: RunRecord report renderers (model-facing/markdown/HTML/PR-comment/JSON/CLI-text), correction capture + outcomes, eval suites/scorers/runs with dry-run + connector-fake side-effect-safe execution, and improvement brief generation (architecture §9; spec §19.3-19.4, §23-25, §32.7).",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
@@ -16,7 +16,12 @@
   "scripts": {
     "build": "tsc -b"
   },
+  "dependencies": {
+    "@aart/store": "workspace:*",
+    "@aart/types": "workspace:*"
+  },
   "devDependencies": {
-    "typescript": "5.9.3"
+    "typescript": "5.9.3",
+    "vitest": "4.1.10"
   }
 }
