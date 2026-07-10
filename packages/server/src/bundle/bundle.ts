@@ -106,8 +106,18 @@ export async function produceBundle(store: AartStore, params: ProduceBundleParam
   };
 
   const triggers = params.deployment?.triggerConfig ?? {};
+  // Deliberately excludes `createdAt` from the hashed payload: `bundleHash`
+  // is a CONTENT address (architecture §0.3's "self-contained,
+  // content-addressed" framing) — two bundles built from identical store
+  // content at different real-world moments must hash identically, so a
+  // deploy pipeline (or a human) can verify "this is the same deployable
+  // artifact" independent of build wall-clock time. Everything that
+  // actually varies the deployable content (workflows/packs/prompts/
+  // schemas/triggers, and the manifest's own structural workflow/version
+  // list) IS included.
+  const { createdAt: _createdAt, ...hashableManifest } = manifestWithoutHash;
   const bundleHash = createHash("sha256")
-    .update(canonicalJson({ manifest: manifestWithoutHash, definitions, packs, registry: { prompts, schemas }, triggers }))
+    .update(canonicalJson({ manifest: hashableManifest, definitions, packs, registry: { prompts, schemas }, triggers }))
     .digest("hex");
 
   return {
