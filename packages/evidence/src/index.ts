@@ -1,9 +1,16 @@
-// @aart/evidence — stub scaffolded by S0 (Wave 0 "Foundation").
+// @aart/evidence — RunRecord report renderers, correction capture +
+// outcomes, eval suites/scorers/runs with dry-run + connector-fake
+// side-effect-safe execution, and improvement brief generation. Architecture
+// §9 (full section); spec §19.3-19.4, §23-25, §32.7.
 //
-// This package is intentionally empty. It is Wave-1 scope; see
-// aart_implementation_plan_v1.md for which session owns building it and
-// aart_architecture_v1.md §1's package table for its responsibility and
-// primary spec-section anchor. S0's job was only to give the owning
-// session a real, buildable directory to write into — not to guess at
-// this package's shape.
-export {};
+// Owned by S6 (implementation plan §3). Consumed frozen interfaces:
+// @aart/types (RunRecord, EvalSuite/EvalExample/EvalRun, Correction,
+// ImprovementBrief), @aart/store. Consumes S4's redactRecord (via the
+// RedactFn type — see redact.ts) and S7's @aart/llm llm.judge (via the
+// LlmJudgeFn seam — see evals/scorers/llm-judge.ts and SEAMS.md).
+export * from "./corrections/index.js";
+export * from "./evals/index.js";
+export * from "./improvement-brief.js";
+export * from "./redact.js";
+export * from "./report-model.js";
+export * from "./renderers/index.js";

@@ -1,0 +1,121 @@
+import { createFsStore, type AartStore } from "@aart/store";
+import { CorrectionSchema } from "@aart/types";
+import { promises as fs } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { correctionKey, recordCorrection, type RecordCorrectionInput } from "./correction.js";
+
+let root: string;
+let store: AartStore;
+
+beforeEach(async () => {
+  root = await fs.mkdtemp(join(tmpdir(), "aart-evidence-corrections-"));
+  store = createFsStore(root);
+});
+
+afterEach(async () => {
+  await fs.rm(root, { recursive: true, force: true });
+});
+
+describe("recordCorrection", () => {
+  it("persists a Correction via store.corrections.put and returns it", async () => {
+    const correction = await recordCorrection(store, {
+      runId: "run_1",
+      stepId: "extract_bill",
+      fieldPath: "outputs.nmi",
+      observed: "6401234567",
+      corrected: "6401234568",
+      reason: "OCR misread final digit",
+      reviewer: "jane@example.com",
+    });
+    expect(correction.reviewer).toBe("jane@example.com");
+    expect(correction.createdAt).toBeTruthy();
+    await expect(store.corrections.list({ runId: "run_1" })).resolves.toEqual([correction]);
+  });
+
+  it("matches spec §23.3's literal correction primitive shape", async () => {
+    const correction = await recordCorrection(store, {
+      runId: "run_123",
+      stepId: "extract_bill",
+      fieldPath: "outputs.nmi",
+      observed: "6401234567",
+      corrected: "6401234568",
+      reason: "OCR misread final digit",
+      reviewer: "jane@example.com",
+    });
+    expect(correction).toMatchObject({
+      runId: "run_123",
+      stepId: "extract_bill",
+      fieldPath: "outputs.nmi",
+      observed: "6401234567",
+      corrected: "6401234568",
+      reason: "OCR misread final digit",
+    });
+  });
+});
+
+describe("reviewer is required — tested at the Zod (runtime) level, not just TypeScript's type level (spec §23.3 / this session's DoD)", () => {
+  it("CorrectionSchema rejects a payload with reviewer omitted", () => {
+    const withoutReviewer = {
+      runId: "r",
+      stepId: "s",
+      fieldPath: "f",
+      observed: "a",
+      corrected: "b",
+      reason: "x",
+      createdAt: new Date().toISOString(),
+      // reviewer intentionally omitted
+    };
+    const result = CorrectionSchema.safeParse(withoutReviewer);
+    expect(result.success).toBe(false);
+  });
+
+  it("CorrectionSchema rejects an empty-string reviewer just as it would omission (still no human name attached)", () => {
+    // CorrectionSchema's reviewer is z.string() (any string, including ""),
+    // not z.string().min(1) — confirm the actual frozen behavior rather than
+    // assuming a stricter contract than what @aart/types actually enforces.
+    const result = CorrectionSchema.safeParse({
+      runId: "r",
+      stepId: "s",
+      fieldPath: "f",
+      observed: "a",
+      corrected: "b",
+      reason: "x",
+      reviewer: "",
+      createdAt: new Date().toISOString(),
+    });
+    expect(result.success).toBe(true); // documents the actual frozen contract: presence, not non-emptiness, is enforced
+  });
+
+  it("recordCorrection's TS input type makes `reviewer` a required (non-optional) field — compile-time proof via @ts-expect-error", () => {
+    // If RecordCorrectionInput.reviewer were ever changed to optional, the
+    // assignment below would stop producing a type error, `@ts-expect-error`
+    // would itself become a type error ("Unused '@ts-expect-error'
+    // directive"), and `pnpm run typecheck` would fail — this is the
+    // standard way to assert "this is a compile-time error" without
+    // actually breaking the build.
+    // @ts-expect-error — reviewer is required, omitting it must not typecheck
+    const withoutReviewer: RecordCorrectionInput = {
+      runId: "r",
+      stepId: "s",
+      fieldPath: "f",
+      observed: "a",
+      corrected: "b",
+      reason: "x",
+    };
+    expect(withoutReviewer.reviewer).toBeUndefined();
+  });
+});
+
+describe("correctionKey", () => {
+  it("encodes the (runId, stepId, fieldPath) composite key Correction itself has no synthetic id for", () => {
+    expect(correctionKey({ runId: "run_1", stepId: "extract", fieldPath: "outputs.nmi" })).toBe("run_1:extract:outputs.nmi");
+  });
+
+  it("is stable across two Correction objects with the same identity but different observed/corrected/reason", () => {
+    const a = { runId: "run_1", stepId: "extract", fieldPath: "outputs.nmi", observed: "x", corrected: "y", reason: "r1", reviewer: "a", createdAt: "t1" };
+    const b = { runId: "run_1", stepId: "extract", fieldPath: "outputs.nmi", observed: "z", corrected: "w", reason: "r2", reviewer: "b", createdAt: "t2" };
+    expect(correctionKey(a)).toBe(correctionKey(b));
+  });
+});

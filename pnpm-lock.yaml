@@ -68,10 +68,20 @@ importers:
         version: 4.1.10(@types/node@26.1.1)(vite@8.1.4(@types/node@26.1.1)(yaml@2.9.0))
 
   packages/evidence:
+    dependencies:
+      '@aart/store':
+        specifier: workspace:*
+        version: link:../store
+      '@aart/types':
+        specifier: workspace:*
+        version: link:../types
     devDependencies:
       typescript:
         specifier: 5.9.3
         version: 5.9.3
+      vitest:
+        specifier: 4.1.10
+        version: 4.1.10(@types/node@26.1.1)(vite@8.1.4(@types/node@26.1.1)(yaml@2.9.0))
 
   packages/expr:
     devDependencies:
@@ -83,10 +93,17 @@ importers:
         version: 4.1.10(@types/node@26.1.1)(vite@8.1.4(@types/node@26.1.1)(yaml@2.9.0))
 
   packages/familiarity-evals:
+    dependencies:
+      '@aart/types':
+        specifier: workspace:*
+        version: link:../types
     devDependencies:
       typescript:
         specifier: 5.9.3
         version: 5.9.3
+      vitest:
+        specifier: 4.1.10
+        version: 4.1.10(@types/node@26.1.1)(vite@8.1.4(@types/node@26.1.1)(yaml@2.9.0))
 
   packages/governance:
     dependencies:
