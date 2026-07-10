@@ -12,6 +12,7 @@ import { systemClock, type Clock } from "../clock.js";
 import { DEFAULT_HEALTH_PORT, DEFAULT_HEARTBEAT_INTERVAL_MS, DEFAULT_LEASE_DURATION_MS, DEFAULT_MAX_CONCURRENT_RUNS, DEFAULT_SHUTDOWN_GRACE_MS, type WorkerConfig } from "../config.js";
 import { generateId } from "../ids.js";
 import { createServerLogger, type Logger } from "../logger.js";
+import { shouldFlagPoison } from "../poison.js";
 import { tryClaimNextRun } from "./claim.js";
 import { startHealthServer, type HealthServerHandle } from "./health.js";
 import { startLeaseHeartbeat, type LeaseHeartbeatHandle } from "./lease.js";
@@ -49,11 +50,36 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
   let claiming = true;
   let claimTimer: { cancel(): void } | undefined;
 
+  /**
+   * architecture §6.2's poison-run guard: "a correlation key... that
+   * accumulates N consecutive failures within a configurable time window
+   * has its MOST RECENT run set to... flag: { kind: 'poison', flaggedAt }."
+   * `poison.ts`'s `shouldFlagPoison` is the pure decision function; THIS is
+   * the one place in this package that actually calls it and writes the
+   * flag — the natural hook is "right after a claimed run's execution
+   * completes normally and left the run in `failed` status," which is
+   * exactly what this function is called from below. Skipped if the run is
+   * already flagged (nothing to add) or isn't `failed` at all.
+   */
+  async function maybeFlagPoison(runId: string): Promise<void> {
+    const run = await options.store.runs.get(runId);
+    if (!run || run.status !== "failed" || run.flag) return;
+    const flag = await shouldFlagPoison(options.store, run.workflowId, run.trigger, {
+      maxConsecutiveFailures: options.maxConsecutiveFailures,
+      windowMs: options.windowMs,
+      now: clock.now(),
+    });
+    if (!flag) return;
+    await options.store.runs.put({ ...run, flag: { kind: "poison", flaggedAt: clock.nowIso() } });
+    logger.error("run flagged poison after N consecutive failures on this correlation key (architecture §6.2) — will not be auto-retried until a human clears it", { runId, workflowId: run.workflowId });
+  }
+
   async function executeOneClaim(runId: string): Promise<void> {
     try {
       await options.engine.executeClaimedRun(runId, workerId);
       logger.info("run finished (completed, or reached a checkpoint the engine will resume later)", { runId });
       claimedRunIds.delete(runId);
+      await maybeFlagPoison(runId);
       // Best-effort backstop, reached ONLY on a NORMAL (non-throwing)
       // completion: if the engine's own completion path didn't already
       // remove/release the job_queue entry (e.g. a checkpoint that doesn't

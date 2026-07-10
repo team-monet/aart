@@ -152,6 +152,26 @@ describe("processTriggerIntake — start path", () => {
     if (outcome.kind === "rejected") expect(outcome.reason).toBe("backlog_ceiling");
   });
 
+  it("REJECTS with concurrency_rejected and persists a rejected-trigger record when the engine's own ConcurrencyPolicy (reject_new, architecture §4.3) rejects the run", async () => {
+    fx = await createTestFixture();
+    // The engine boundary owns concurrency-policy enforcement (architecture
+    // §4.3) — this fake models a `reject_new`-policy engine rejecting
+    // intake outright, exactly like the real engine would for a workflow
+    // configured that way.
+    const rejectingEngine = { ...fx.engine, startRun: async () => ({ kind: "rejected" as const, reason: "reject_new: another run with concurrency key 'case-1' is already active" }) };
+    const adapted: AdaptedTrigger = { trigger: manualTrigger() };
+    const outcome = await processTriggerIntake({ store: fx.store, engine: rejectingEngine, clock: fx.clock, logger: fx.logger }, binding(), adapted);
+    expect(outcome.kind).toBe("rejected");
+    if (outcome.kind === "rejected") {
+      expect(outcome.reason).toBe("concurrency_rejected");
+      expect(outcome.detail).toMatch(/reject_new/);
+    }
+    const rejected = await fx.store.rejectedTriggers.list({ reason: "concurrency_rejected" });
+    expect(rejected.length).toBe(1);
+    // No run was created.
+    await expect(fx.store.runs.list({ workflowId: "wf_intake" })).resolves.toHaveLength(0);
+  });
+
   it("poison_flagged takes precedence over backlog_ceiling when both conditions hold", async () => {
     fx = await createTestFixture();
     // Over the (tiny) backlog ceiling...

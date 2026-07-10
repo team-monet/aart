@@ -46,7 +46,7 @@ export interface BackpressureConfig {
   maxPendingRuns?: number;
 }
 
-export interface WorkerConfig extends SharedRuntimeConfig, TickerConfig, AdmissionConfig, LeaseConfig {
+export interface WorkerConfig extends SharedRuntimeConfig, TickerConfig, AdmissionConfig, LeaseConfig, PoisonGuardConfig {
   /** Stable identity for this worker process — used as `job_queue.claimed_by` and in the `/health` payload. Defaults to a generated id if omitted. */
   workerId?: string;
   /** Port for the worker's own lightweight `GET /health` listener (architecture ADR-16/§16) — separate from the control-plane API. `0` (the Node convention for "pick any free port") is a valid explicit choice; omit to default to 8787. */

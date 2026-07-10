@@ -33,6 +33,150 @@ function fixtureRunRecord(runId: string, clock: ReturnType<typeof createFakeCloc
   };
 }
 
+describe("GET /health (architecture ADR-16/§16) — the worker's own endpoint, over real HTTP", () => {
+  it("returns { status: 'ok', claimedRuns, uptime, version }", async () => {
+    const clock = createFakeClock();
+    fx = await createTestFixture(clock);
+    const worker = await startWorker({ store: fx.store, engine: fx.engine, clock, installSignalHandler: false, healthPort: 0 });
+    workers.push(worker);
+    const res = await fetch(`http://localhost:${worker.healthPort}/health`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { status: string; claimedRuns: number; uptime: number; version: string };
+    expect(body.status).toBe("ok");
+    expect(body.claimedRuns).toBe(0);
+    expect(typeof body.uptime).toBe("number");
+    expect(typeof body.version).toBe("string");
+  });
+
+  it("claimedRuns reflects live claim count, not a startup snapshot", async () => {
+    const clock = createFakeClock();
+    fx = await createTestFixture(clock);
+    await fx.store.runs.put(fixtureRunRecord("run_health", clock));
+    await fx.store.jobQueue.enqueue("run_health");
+    let resolveExecution: () => void = () => {};
+    const controlledEngine = { ...fx.engine, executeClaimedRun: () => new Promise<void>((resolve) => (resolveExecution = resolve)) };
+    const worker = await startWorker({ store: fx.store, engine: controlledEngine, clock, installSignalHandler: false, healthPort: 0 });
+    workers.push(worker);
+    const busyRes = await fetch(`http://localhost:${worker.healthPort}/health`);
+    expect(((await busyRes.json()) as { claimedRuns: number }).claimedRuns).toBe(1);
+    resolveExecution();
+    await flushAsync();
+    const idleRes = await fetch(`http://localhost:${worker.healthPort}/health`);
+    expect(((await idleRes.json()) as { claimedRuns: number }).claimedRuns).toBe(0);
+  });
+
+  it("404s on any other path", async () => {
+    const clock = createFakeClock();
+    fx = await createTestFixture(clock);
+    const worker = await startWorker({ store: fx.store, engine: fx.engine, clock, installSignalHandler: false, healthPort: 0 });
+    workers.push(worker);
+    const res = await fetch(`http://localhost:${worker.healthPort}/not-health`);
+    expect(res.status).toBe(404);
+  });
+});
+
+describe("poison-run guard write path (architecture §6.2) — worker.ts is where shouldFlagPoison()'s decision is actually applied", () => {
+  it("flags a run poison after N consecutive failures on the same correlation key, once the Nth failure completes", async () => {
+    const clock = createFakeClock("2026-07-10T00:00:00.000Z");
+    fx = await createTestFixture(clock);
+    const trigger = { type: "manual" as const, id: "trig_poison", source: "cli", payload: null, correlationId: "case-poison-worker", receivedAt: clock.nowIso() };
+
+    // Two PRIOR failures already on the books for this correlation key.
+    for (let i = 0; i < 2; i++) {
+      await fx.store.runs.put({
+        runId: `run_prior_${i}`,
+        workflowId: "wf",
+        workflowVersion: "1",
+        status: "failed",
+        approved: true,
+        approvalMode: "dev",
+        trigger,
+        inputs: {},
+        trace: [],
+        waits: [],
+        artifacts: [],
+        snapshot: { definitions: {}, resolvedVersions: {}, packHashes: {}, capturedAt: clock.nowIso() },
+        startedAt: `2026-07-10T00:0${i}:00.000Z`,
+        updatedAt: `2026-07-10T00:0${i}:00.000Z`,
+        schemaVersion: 1,
+      });
+    }
+
+    // A third run, currently pending/claimed, whose engine execution will
+    // leave it `failed` too — this should push the streak to 3 and flag it.
+    await fx.store.runs.put({
+      runId: "run_third_failure",
+      workflowId: "wf",
+      workflowVersion: "1",
+      status: "pending",
+      approved: true,
+      approvalMode: "dev",
+      trigger,
+      inputs: {},
+      trace: [],
+      waits: [],
+      artifacts: [],
+      snapshot: { definitions: {}, resolvedVersions: {}, packHashes: {}, capturedAt: clock.nowIso() },
+      startedAt: "2026-07-10T00:02:30.000Z",
+      updatedAt: "2026-07-10T00:02:30.000Z",
+      schemaVersion: 1,
+    });
+    await fx.store.jobQueue.enqueue("run_third_failure");
+
+    const failingEngine = {
+      ...fx.engine,
+      executeClaimedRun: async (runId: string) => {
+        const run = await fx!.store.runs.get(runId);
+        if (run) await fx!.store.runs.put({ ...run, status: "failed", error: "boom", updatedAt: clock.nowIso(), endedAt: clock.nowIso() });
+      },
+    };
+
+    const worker = await startWorker({ store: fx.store, engine: failingEngine, clock, maxConsecutiveFailures: 3, installSignalHandler: false, healthPort: 0 });
+    workers.push(worker);
+    await flushAsync();
+
+    const finalRun = await fx.store.runs.get("run_third_failure");
+    expect(finalRun?.status).toBe("failed");
+    expect(finalRun?.flag?.kind).toBe("poison");
+  });
+
+  it("does NOT flag below the threshold", async () => {
+    const clock = createFakeClock("2026-07-10T00:00:00.000Z");
+    fx = await createTestFixture(clock);
+    const trigger = { type: "manual" as const, id: "trig_ok", source: "cli", payload: null, correlationId: "case-ok-worker", receivedAt: clock.nowIso() };
+    await fx.store.runs.put({
+      runId: "run_single_failure",
+      workflowId: "wf",
+      workflowVersion: "1",
+      status: "pending",
+      approved: true,
+      approvalMode: "dev",
+      trigger,
+      inputs: {},
+      trace: [],
+      waits: [],
+      artifacts: [],
+      snapshot: { definitions: {}, resolvedVersions: {}, packHashes: {}, capturedAt: clock.nowIso() },
+      startedAt: clock.nowIso(),
+      updatedAt: clock.nowIso(),
+      schemaVersion: 1,
+    });
+    await fx.store.jobQueue.enqueue("run_single_failure");
+    const failingEngine = {
+      ...fx.engine,
+      executeClaimedRun: async (runId: string) => {
+        const run = await fx!.store.runs.get(runId);
+        if (run) await fx!.store.runs.put({ ...run, status: "failed", error: "boom", updatedAt: clock.nowIso() });
+      },
+    };
+    const worker = await startWorker({ store: fx.store, engine: failingEngine, clock, maxConsecutiveFailures: 3, installSignalHandler: false, healthPort: 0 });
+    workers.push(worker);
+    await flushAsync();
+    const finalRun = await fx.store.runs.get("run_single_failure");
+    expect(finalRun?.flag).toBeUndefined();
+  });
+});
+
 describe("race-safe claim (architecture §4.7/ADR-05)", () => {
   it("a worker cannot claim a run another worker already holds a valid lease on", async () => {
     const clock = createFakeClock();
