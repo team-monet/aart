@@ -1,9 +1,9 @@
 {
   "name": "@aart/familiarity-evals",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "AART familiarity-evals package. Stub scaffolded by S0 (Wave 0) — real implementation is Wave-1 scope; see aart_implementation_plan_v1.md for session ownership.",
+  "description": "AART familiarity-evals: CI-gate suite that evaluates AART's own tool surface for model-nativeness — authoring-task fixtures run zero-shot against target models, scored deterministically via aart_validate output + run success (ADR-15; spec §32.4). A separate package from @aart/evidence's per-workflow eval system: the subject under test is AART's own API surface, not a user workflow.",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
@@ -16,7 +16,11 @@
   "scripts": {
     "build": "tsc -b"
   },
+  "dependencies": {
+    "@aart/types": "workspace:*"
+  },
   "devDependencies": {
-    "typescript": "5.9.3"
+    "typescript": "5.9.3",
+    "vitest": "4.1.10"
   }
 }
