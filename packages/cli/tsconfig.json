@@ -5,5 +5,5 @@
     "rootDir": "src"
   },
   "include": ["src"],
-  "references": [{ "path": "../mcp" }, { "path": "../store" }, { "path": "../types" }]
+  "references": [{ "path": "../mcp" }, { "path": "../server" }, { "path": "../store" }, { "path": "../types" }]
 }

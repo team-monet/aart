@@ -16,7 +16,11 @@ export async function createTestCli(): Promise<TestCli> {
   const root = join(base, ".aart");
   const cwd = join(base, "project");
   await fs.mkdir(cwd, { recursive: true });
-  const cli = createCliContext({ root, trustMode: "governed" });
+  // real: false — this package's own unit-test suite is built against the
+  // fast, deterministic, offline stub engine (no real browser/LLM dispatch)
+  // — see cli-context.ts's module doc comment. Everything else (real CLI
+  // use, bin.ts) gets the real composition by default.
+  const cli = createCliContext({ root, trustMode: "governed", real: false });
   return { cli, root, cwd, cleanup: () => fs.rm(base, { recursive: true, force: true }) };
 }
 

@@ -85,6 +85,9 @@ importers:
       '@aart/mcp':
         specifier: workspace:*
         version: link:../mcp
+      '@aart/server':
+        specifier: workspace:*
+        version: link:../server
       '@aart/store':
         specifier: workspace:*
         version: link:../store

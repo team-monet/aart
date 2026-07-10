@@ -22,10 +22,9 @@
 // §0.3) — it writes a minimal, structurally-correct bundle (manifest +
 // the workflow definition + an empty triggers file) sufficient to exercise
 // `aart bundle`'s CLI wiring end to end.
-import { mkdir, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
 import type { AartStore } from "@aart/store";
 import type { BundleLike, ClearRunFlagResult, ServerHandleLike, ServerPort, WorkerHandleLike } from "@aart/mcp";
+import { writeBundleFilesToDisk } from "../bundle-files.js";
 
 export function createStubServerPort(store: AartStore): ServerPort {
   return {
@@ -56,12 +55,7 @@ export function createStubServerPort(store: AartStore): ServerPort {
     },
 
     async writeBundleToDisk(bundle: BundleLike, outDir: string): Promise<void> {
-      await mkdir(outDir, { recursive: true });
-      for (const [relPath, content] of Object.entries(bundle.files)) {
-        const fullPath = join(outDir, relPath);
-        await mkdir(dirname(fullPath), { recursive: true });
-        await writeFile(fullPath, content, "utf8");
-      }
+      await writeBundleFilesToDisk(bundle.files, outDir);
     },
 
     async clearRunFlag(runId: string, clearedBy: string): Promise<ClearRunFlagResult> {

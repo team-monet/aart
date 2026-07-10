@@ -1,9 +1,8 @@
 // run(argv) — the full CLI command surface (spec §33), dispatching to the
 // SAME handler functions the MCP tool surface calls wherever an MCP tool
 // exists for that action (architecture's three-clients principle).
-import type { CreateAartContextOptions } from "@aart/mcp";
 import { tokenize } from "./args.js";
-import { createCliContext, type CliContext } from "./cli-context.js";
+import { createCliContext, type CliContext, type CreateCliContextOptions } from "./cli-context.js";
 import { initAgentCommand, initCommand, listCommand, registerCommand, runCommand, validateCommand } from "./commands/authoring.js";
 import { deployCommand, triggerCommand } from "./commands/deployment.js";
 import { approveCommand, correctionCommand, diffCommand, promoteCommand } from "./commands/governance.js";
@@ -38,7 +37,7 @@ export const USAGE = `AART CLI — usage:
 export interface RunOptions {
   /** Reuse an already-constructed CLI context (tests: an isolated tmp-dir store). */
   cliContext?: CliContext;
-  aartOptions?: CreateAartContextOptions;
+  aartOptions?: CreateCliContextOptions;
   /** Threaded to worker/server/mcp — false makes them return immediately instead of blocking forever. Defaults true (real CLI use). */
   blocking?: boolean;
 }

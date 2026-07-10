@@ -8,6 +8,7 @@
 // literal same handler function object (S9's same-function-reference check,
 // per this session's own hard rules).
 import path from "node:path";
+import type { Engine } from "@aart/engine";
 import { createFsStore, type AartStore } from "@aart/store";
 import type { TrustMode } from "@aart/types";
 import { BUILTIN_BLOCK_CATALOG } from "./catalog.js";
@@ -83,6 +84,24 @@ export function createAartContext(options: CreateAartContextOptions = {}): AartC
   return { store, engine, governance, evidence, registry, trustMode, now };
 }
 
+export interface RealAartContextResult {
+  context: AartContext;
+  /**
+   * The raw `@aart/engine` `Engine` instance backing `context.engine`
+   * (`EnginePort`), when this call actually constructed one — `undefined`
+   * only if the caller overrode BOTH `options.engine` and `options.evidence`
+   * (the two ports that would otherwise need it), leaving nothing for this
+   * function to build. Exists so a caller that needs more of the real
+   * engine than `EnginePort` exposes — `@aart/cli`'s composition root,
+   * which feeds this same instance into `@aart/server`'s
+   * `createRealEngineBoundary` for `startServer`/`startWorker` (AMENDMENTS.md
+   * A42) — can reuse the exact same Engine `createRealAartContext` already
+   * built, rather than constructing a second, divergent one over the same
+   * store.
+   */
+  engine: Engine | undefined;
+}
+
 /**
  * The REAL composition root (S9 integration, reconciliation ledger items
  * 3/4/5/11) — every port bound to its real, now-merged sibling package
@@ -95,8 +114,13 @@ export function createAartContext(options: CreateAartContextOptions = {}): AartC
  * `options.engine`/`governance`/`evidence`/`registry` override still works
  * (an E2E test that wants to override just one piece can), matching
  * `createAartContext`'s own override discipline.
+ *
+ * Returns both the `AartContext` and the raw `Engine` (when one was built)
+ * — see `RealAartContextResult`'s own doc comment for why. `createRealAartContext`
+ * below is the pre-existing, unchanged-behavior convenience wrapper for
+ * every caller that only wants the context.
  */
-export function createRealAartContext(options: CreateAartContextOptions = {}): AartContext {
+export function createRealAartContextWithEngine(options: CreateAartContextOptions = {}): RealAartContextResult {
   const now = options.now ?? (() => new Date());
   const store = options.store ?? createFsStore(options.root ?? path.join(process.cwd(), ".aart"));
   const trustMode = options.trustMode ?? resolveTrustModeFromEnv();
@@ -114,5 +138,10 @@ export function createRealAartContext(options: CreateAartContextOptions = {}): A
   const engine = options.engine ?? createRealEnginePort(realEngine!);
   const evidence = options.evidence ?? createRealEvidencePort(store, realEngine!);
   const registry = options.registry ?? createRealRegistryPort(catalog!.entries);
-  return { store, engine, governance, evidence, registry, trustMode, now };
+  return { context: { store, engine, governance, evidence, registry, trustMode, now }, engine: realEngine };
+}
+
+/** Convenience wrapper over `createRealAartContextWithEngine` for every caller that only needs the `AartContext` (unchanged signature/behavior from before that function existed). */
+export function createRealAartContext(options: CreateAartContextOptions = {}): AartContext {
+  return createRealAartContextWithEngine(options).context;
 }

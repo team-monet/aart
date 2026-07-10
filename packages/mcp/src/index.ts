@@ -5,7 +5,24 @@
 // two implementations of the same action (architecture's three-clients
 // principle).
 
-export { createAartContext, createRealAartContext, resolveTrustModeFromEnv, type AartContext, type CreateAartContextOptions } from "./context.js";
+export {
+  createAartContext,
+  createRealAartContext,
+  createRealAartContextWithEngine,
+  resolveTrustModeFromEnv,
+  type AartContext,
+  type CreateAartContextOptions,
+  type RealAartContextResult,
+} from "./context.js";
+
+// Re-exported so a consumer that needs the raw @aart/engine Engine instance
+// `createRealAartContextWithEngine` hands back (e.g. @aart/cli's real
+// ServerPort, which feeds it into @aart/server's createRealEngineBoundary —
+// AMENDMENTS.md A42) can name its type without taking its own direct
+// @aart/engine dependency — this package already depends on @aart/engine
+// for real-context.ts, so threading its type through here broadens this
+// package's public surface rather than adding a new one.
+export type { Engine } from "@aart/engine";
 
 export type {
   AutoApprovalState,

@@ -18,10 +18,25 @@
 //     (core built-ins only - see the module doc comment on
 //     buildLocalCatalog below for the documented v1 gap on pack-delivered
 //     blocks).
-//   - ServerPort (CLI-only) <- @aart/server's real startServer/startWorker/
-//     produceBundle/writeBundleToDisk/clearRunFlag/listFlaggedRuns, via a
-//     real EngineBoundary adapter over the same real Engine instance
-//     (packages/server/src/engine/boundary.ts's createRealEngineBoundary).
+//
+// ServerPort is NOT built in this file and never has been — it isn't part
+// of AartContext at all (CLI-only, architecture §13.3's stated exception;
+// see types.ts's own ServerPort doc comment). This comment previously
+// claimed it was wired "here" via "a real EngineBoundary adapter... this
+// package's createRealEngineBoundary" — both halves of that claim were
+// false when written (createRealEngineBoundary did not exist anywhere in
+// the repo, and this file has no ServerPort-shaped export), flagged by
+// A37 when that function was finally built and left uncorrected until now.
+// The real, corrected story (AMENDMENTS.md A42): createRealEngineBoundary
+// lives in @aart/server (packages/server/src/engine/boundary.ts, built
+// A37); the ServerPort adapter that wraps it — createRealServerPort — lives
+// in @aart/cli (packages/cli/src/real-server-port.ts, built A42), which
+// pulls the raw Engine instance this file's createRealEngine constructs out
+// through context.ts's createRealAartContextWithEngine (also A42) so the
+// worker/server processes it starts share the exact same Engine (and
+// therefore the exact same store-backed catalog/governance wiring) as the
+// rest of that same CLI invocation's AartContext, rather than building a
+// second, potentially-divergent one.
 //
 // Two DI hooks landed earlier in this same reconciliation pass get their
 // real wiring here for the first time: EngineConfig.onRunTerminal ->

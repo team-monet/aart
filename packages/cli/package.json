@@ -36,6 +36,7 @@
   },
   "devDependencies": {
     "@aart/mcp": "workspace:*",
+    "@aart/server": "workspace:*",
     "@aart/store": "workspace:*",
     "@aart/types": "workspace:*",
     "esbuild": "0.27.7",
