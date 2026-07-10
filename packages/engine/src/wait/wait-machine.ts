@@ -70,74 +70,76 @@ export async function enterWait(config: WaitMachineConfig, options: EnterWaitOpt
   const now = config.now();
   const correlation = waitSignalCorrelation(wait);
 
-  if (correlation) {
-    const existingSignal = await config.store.signals.findUnconsumedMatch(correlation.name, correlation.correlationId);
-    if (existingSignal) {
-      // Early-arrival resolution — none of the wait bookkeeping below is
-      // ever persisted as outstanding; this step goes straight from
-      // "about to wait" to "completed" in one hop (architecture §4.4 step
-      // 3: "the wait resolves immediately... execution proceeds straight
-      // to step 8"). Marking the signal consumed is NOT staged through
-      // transact() — see SignalStore's own doc comment (types.ts) on this
-      // documented fs-adapter non-atomicity gap (architecture §5.8).
-      await config.store.signals.markConsumed(existingSignal.id);
-      const trace: StepTrace = {
-        seq: run.trace.length,
-        stepId,
-        block: blockId,
-        status: "completed",
-        inputs: resolvedInputs,
-        outputs: normalizePayloadToOutputs(existingSignal.payload),
-        startedAt: now.toISOString(),
-        endedAt: now.toISOString(),
-        durationMs: 0,
-      };
-      const updatedRun: RunRecord = { ...run, trace: [...run.trace, trace], updatedAt: now.toISOString() };
-      const redacted = applyRedaction(config.redact, updatedRun, resolvedSecretRefs);
-      await config.store.runs.put(redacted);
-      return { run: redacted, suspended: false };
+  // `[DECISION]` The ENTIRE check-then-act sequence below runs inside ONE
+  // `store.transact()` call — architecture §4.4 step 3, verbatim: "FIRST,
+  // inside the same AartStore.transact() call... checks SignalStore for an
+  // already-received, unconsumed Signal... If no match is found, the check
+  // and the writes below commit together in the one transaction, so a
+  // signal arriving in the gap is impossible." This is load-bearing, not
+  // just a style choice: without it, a Signal could arrive in the window
+  // between "I checked SignalStore and found nothing" and "I persisted the
+  // WaitStore row" — and since NOTHING re-scans SignalStore after wait
+  // creation (only a *new* signal arrival triggers a resume-match attempt,
+  // which requires the WaitStore row to already exist to match against),
+  // a signal landing in that exact gap would sit unconsumed forever and
+  // this wait would never resolve. `SQLite`/`Postgres` adapters (Wave 1/2)
+  // give this a real serializability guarantee against a concurrent writer;
+  // the fs adapter's own documented gap (architecture §5.8) is scoped to
+  // the SignalStore *audit-copy* write specifically (`tx.signals.append`/
+  // `markConsumed` are "deliberately NOT staged" — see types.ts's
+  // `SignalStore` doc comment), not to this check-then-act sequence itself.
+  return config.store.transact(async (tx) => {
+    if (correlation) {
+      const existingSignal = await tx.signals.findUnconsumedMatch(correlation.name, correlation.correlationId);
+      if (existingSignal) {
+        // Early-arrival resolution — none of the wait bookkeeping below is
+        // ever persisted as outstanding; this step goes straight from
+        // "about to wait" to "completed" in one hop (architecture §4.4 step
+        // 3: "the wait resolves immediately... execution proceeds straight
+        // to step 8").
+        await tx.signals.markConsumed(existingSignal.id);
+        const trace: StepTrace = {
+          seq: run.trace.length,
+          stepId,
+          block: blockId,
+          status: "completed",
+          inputs: resolvedInputs,
+          outputs: normalizePayloadToOutputs(existingSignal.payload),
+          startedAt: now.toISOString(),
+          endedAt: now.toISOString(),
+          durationMs: 0,
+        };
+        const updatedRun: RunRecord = { ...run, trace: [...run.trace, trace], updatedAt: now.toISOString() };
+        const redacted = applyRedaction(config.redact, updatedRun, resolvedSecretRefs);
+        await tx.runs.put(redacted);
+        return { run: redacted, suspended: false };
+      }
     }
-  }
 
-  // No early match (or this WaitCondition member never checks SignalStore
-  // at all) — persist the outstanding wait. `[DECISION]` NOT wrapped in
-  // `store.transact()`: unlike resume (which must atomically couple a
-  // dedupe-consume with a run-state transition, architecture §4.4.2), wait
-  // ENTRY has no analogous double-write race to close — the RunRecord put
-  // and the WaitStore put are two writes describing the SAME fact (this
-  // step is now waiting), and even under the fs adapter's non-transactional
-  // default a crash between them just means resume finds a RunRecord not
-  // yet reflecting "waiting" (safe: the run simply looks like it's still on
-  // the wait step, and re-entering the wait on a retry is idempotent — the
-  // early-arrival check above is unaffected by a partially-written prior
-  // attempt) or a WaitStore row with no matching RunRecord.waits entry
-  // (safe: nothing resumes a wait that was never durably recorded as
-  // "waiting" on the RunRecord side, so at worst this wait is never found
-  // by a resume attempt, which is the SAME failure shape as never having
-  // entered it in the first place — a clean, retryable gap, not a
-  // corruption). Using `transact()` anyway is still a reasonable batching
-  // choice; kept as two direct writes here for clarity that this path's
-  // correctness does not depend on atomicity the way resume's does.
-  const trace: StepTrace = {
-    seq: run.trace.length,
-    stepId,
-    block: blockId,
-    status: "waiting",
-    inputs: resolvedInputs,
-    startedAt: now.toISOString(),
-  };
-  const updatedRun: RunRecord = {
-    ...run,
-    status: "waiting",
-    waits: [...run.waits, wait],
-    trace: [...run.trace, trace],
-    updatedAt: now.toISOString(),
-  };
-  const redactedRun = applyRedaction(config.redact, updatedRun, resolvedSecretRefs);
-  const redactedWait = applyRedaction(config.redact, wait, resolvedSecretRefs);
-  await config.store.runs.put(redactedRun);
-  await config.store.waits.put(run.runId, stepId, redactedWait, now.toISOString());
-  return { run: redactedRun, suspended: true };
+    // No early match (or this WaitCondition member never checks SignalStore
+    // at all) — persist the outstanding wait, still inside the same
+    // transaction as the check above.
+    const trace: StepTrace = {
+      seq: run.trace.length,
+      stepId,
+      block: blockId,
+      status: "waiting",
+      inputs: resolvedInputs,
+      startedAt: now.toISOString(),
+    };
+    const updatedRun: RunRecord = {
+      ...run,
+      status: "waiting",
+      waits: [...run.waits, wait],
+      trace: [...run.trace, trace],
+      updatedAt: now.toISOString(),
+    };
+    const redactedRun = applyRedaction(config.redact, updatedRun, resolvedSecretRefs);
+    const redactedWait = applyRedaction(config.redact, wait, resolvedSecretRefs);
+    await tx.runs.put(redactedRun);
+    await tx.waits.put(run.runId, stepId, redactedWait, now.toISOString());
+    return { run: redactedRun, suspended: true };
+  });
 }
 
 // ---------------------------------------------------------------------------

@@ -105,6 +105,51 @@ describe("enterWait — early-arrival resolution (architecture §4.4 step 3 / §
 
     await expect(store.signals.findUnconsumedMatch("quote.received", "corr1")).resolves.toBeUndefined();
   });
+
+  it("THE EARLY-ARRIVAL RACE TEST: the SignalStore check and the WaitStore/RunRecord writes happen inside ONE store.transact() call (architecture §4.4 step 3) — a simulated crash after the check but before the wait row commits leaves NEITHER a resolved-immediately outcome NOR a persisted outstanding wait", async () => {
+    const { store, config } = await setup();
+    const run = fixtureRun({ status: "running" });
+    await store.runs.put(run);
+    // Deliberately NO matching signal exists — this exercises the
+    // "no-match, persist the wait" branch, which is the one that used to
+    // NOT be wrapped in transact() before this session's fix.
+    const wait = { type: "signal" as const, name: "quote.received", correlationId: "corr-race", schemaVersion: CURRENT_ENGINE_SCHEMA_VERSION };
+
+    class SimulatedCrash extends Error {}
+    let waitPutCalls = 0;
+    const crashingStore: AartStore = {
+      ...store,
+      transact: (fn) =>
+        store.transact(async (tx) => {
+          const wrappedTx: AartStore = {
+            ...tx,
+            waits: {
+              get: tx.waits.get.bind(tx.waits),
+              delete: tx.waits.delete.bind(tx.waits),
+              list: tx.waits.list.bind(tx.waits),
+              listDue: tx.waits.listDue.bind(tx.waits),
+              put: () => {
+                waitPutCalls += 1;
+                return Promise.reject(new SimulatedCrash("crash between SignalStore check and WaitStore write"));
+              },
+            },
+          };
+          return fn(wrappedTx);
+        }),
+    };
+    const crashingConfig: WaitMachineConfig = { ...config, store: crashingStore };
+
+    await expect(enterWait(crashingConfig, { run, stepId: "wait_step", blockId: "wait.for_signal", resolvedInputs: {}, wait, resolvedSecretRefs: new Set() })).rejects.toThrow(SimulatedCrash);
+    expect(waitPutCalls).toBe(1); // confirms the injected failure point was actually reached
+
+    // Re-read through the REAL (unwrapped) store — the RunRecord.put that
+    // would have accompanied the WaitStore.put in the SAME transaction
+    // also never committed (transact()'s all-or-nothing guarantee).
+    const reloaded = await store.runs.get(run.runId);
+    expect(reloaded?.status).toBe("running"); // NOT "waiting" — the transaction rolled back
+    expect(reloaded?.trace).toHaveLength(0); // no "waiting" StepTrace was persisted either
+    await expect(store.waits.get(run.runId, "wait_step")).resolves.toBeUndefined();
+  });
 });
 
 describe("resumeBySignal — signal-matched mechanism (architecture §4.4.1)", () => {
