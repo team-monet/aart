@@ -5,8 +5,22 @@
 // CLI/dashboard decision" for PR-merge, and spec §17.6's "recorded exactly
 // like a regular approval — same audit trail, same visibility" for standing
 // approvals.
+//
+// architecture §7.9's redaction-chokepoint diagram explicitly lists
+// "approval decision" as one of the named input paths into `redactRecord`
+// (alongside step outputs / llm call metadata / external call metadata /
+// artifact metadata / dashboard payload / MCP tool return values / engine
+// StepTrace/RunRecord persist) — an ApprovalTask's free-form `decision`
+// field can echo back arbitrary data (a corrected value, a synthetic
+// merge-event payload), so this write path routes through the SAME
+// `redactRecord` chokepoint every other persist path does, not a
+// second/divergent one. `resolvedSecretRefs` defaults to an empty set for
+// callers with no known secrets in scope (PR-merge/standing-approval
+// synthetic decisions never touch a resolved secret), in which case
+// `redactRecord` is a documented no-op (redact.test.ts).
 import type { AartStore, Logger } from "@aart/store";
 import type { ApprovalTask, StandingApproval } from "@aart/types";
+import { redactRecord } from "./redact.js";
 
 export interface WriteApprovalDecisionInput {
   readonly id: string;
@@ -21,12 +35,18 @@ export interface WriteApprovalDecisionInput {
   readonly decidedAt?: string;
 }
 
-/** S4's "normal approval-write function" (architecture §7.2's own phrase) — the one path every ApprovalTask write goes through, regardless of origin. */
-export async function writeApprovalDecision(store: AartStore, input: WriteApprovalDecisionInput, logger?: Logger): Promise<ApprovalTask> {
+/** S4's "normal approval-write function" (architecture §7.2's own phrase) — the one path every ApprovalTask write goes through, regardless of origin. Routes through the redaction chokepoint before persisting (architecture §7.9's diagram: "approval decision" is a named redactRecord input path). */
+export async function writeApprovalDecision(
+  store: AartStore,
+  input: WriteApprovalDecisionInput,
+  logger?: Logger,
+  resolvedSecretRefs: ReadonlySet<string> = new Set(),
+): Promise<ApprovalTask> {
   const task: ApprovalTask = { ...input };
-  await store.approvals.put(task);
-  logger?.info("approval task written", { runId: task.runId, stepId: task.stepId, status: task.status });
-  return task;
+  const redacted = redactRecord(task, resolvedSecretRefs) as ApprovalTask;
+  await store.approvals.put(redacted);
+  logger?.info("approval task written", { runId: redacted.runId, stepId: redacted.stepId, status: redacted.status });
+  return redacted;
 }
 
 /**

@@ -47,6 +47,48 @@ describe("writeApprovalDecision — the normal approval-write path, against a re
     expect(stored).toEqual(task);
   });
 
+  it("routes through the redaction chokepoint before persisting — architecture §7.9's diagram names 'approval decision' as a redactRecord input path", async () => {
+    const secret = "sk-live-approval-secret-value";
+    const task = await writeApprovalDecision(
+      store,
+      {
+        id: "approval_with_secret",
+        runId: "run_3",
+        stepId: "s1",
+        title: "t",
+        description: "d",
+        status: "approved",
+        decision: { echoedValue: `the resolved value was ${secret}` },
+        createdAt: "2026-07-10T00:00:00.000Z",
+      },
+      logger,
+      new Set([secret]),
+    );
+    expect(JSON.stringify(task)).not.toContain(secret);
+    expect((task.decision as { echoedValue: string }).echoedValue).toContain("[REDACTED:secret-1]");
+    const stored = await store.approvals.get("approval_with_secret");
+    expect(JSON.stringify(stored)).not.toContain(secret);
+  });
+
+  it("is a documented no-op when no resolvedSecretRefs are supplied (the default) — nothing is altered", async () => {
+    const task = await writeApprovalDecision(
+      store,
+      {
+        id: "approval_no_secrets",
+        runId: "run_4",
+        stepId: "s1",
+        title: "plain title",
+        description: "plain description",
+        status: "approved",
+        decision: { note: "nothing sensitive here" },
+        createdAt: "2026-07-10T00:00:00.000Z",
+      },
+      logger,
+    );
+    expect(task.title).toBe("plain title");
+    expect((task.decision as { note: string }).note).toBe("nothing sensitive here");
+  });
+
   it("uses the store-homed logger (F7) — a log line is emitted through the injected Logger, not console.log", async () => {
     await writeApprovalDecision(
       store,
