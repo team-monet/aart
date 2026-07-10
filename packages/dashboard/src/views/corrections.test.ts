@@ -3,8 +3,10 @@ import type { BlockPromotionFn, CreateEvalExampleFromCorrectionFn, CreateIssueFo
 import { createTestFixture, makeCorrection, makeRun, makeWorkflow } from "../test-support/fixtures.js";
 import {
   blockPromotionAction,
+  correctionKey,
   createEvalExampleFromCorrectionAction,
   createIssueForAgentAction,
+  findCorrectionByKey,
   markNeedsReviewAction,
   recordCorrectionAction,
   renderCorrectionQueuePage,
@@ -12,6 +14,55 @@ import {
   unblockPromotionAction,
   updateRunOutputAction,
 } from "./corrections.js";
+
+describe("correctionKey / findCorrectionByKey", () => {
+  it("matches S6's own correctionKey format EXACTLY: '${runId}:${stepId}:${fieldPath}', no timestamp component (architecture §5.3's corrections table primary key has none either)", () => {
+    const correction = makeCorrection({ runId: "run-key", stepId: "step1", fieldPath: "outputs.total", createdAt: "2026-07-10T00:00:00.000Z" });
+    expect(correctionKey(correction)).toBe("run-key:step1:outputs.total");
+  });
+
+  it("round-trips: a correction's key looks the same correction back up from the store", async () => {
+    const { store, cleanup } = await createTestFixture();
+    try {
+      const correction = makeCorrection({ runId: "run-key", stepId: "step1", fieldPath: "outputs.total", createdAt: "2026-07-10T00:00:00.000Z" });
+      await store.corrections.put(correction);
+
+      const found = await findCorrectionByKey(store, correctionKey(correction));
+
+      expect(found).toEqual(correction);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it("round-trips correctly even though createdAt (an ISO timestamp) contains colons — the historical bug this test guards against", async () => {
+    // An earlier version of this module's key format included createdAt
+    // directly in the colon-delimited key and split naively on ":", which
+    // silently corrupted both fieldPath and createdAt because ISO 8601
+    // timestamps ("2026-07-10T00:00:00.000Z") contain colons themselves.
+    // Matching S6's (runId, stepId, fieldPath)-only format sidesteps this
+    // entirely — asserted here so a regression back to the old format
+    // fails loudly.
+    const { store, cleanup } = await createTestFixture();
+    try {
+      const correction = makeCorrection({ runId: "run-ts", stepId: "step1", fieldPath: "outputs.total", createdAt: "2026-07-10T12:34:56.789Z" });
+      await store.corrections.put(correction);
+
+      expect(await findCorrectionByKey(store, correctionKey(correction))).toEqual(correction);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it("returns undefined for a key that doesn't match any stored correction", async () => {
+    const { store, cleanup } = await createTestFixture();
+    try {
+      expect(await findCorrectionByKey(store, correctionKey(makeCorrection({ runId: "run-missing" })))).toBeUndefined();
+    } finally {
+      await cleanup();
+    }
+  });
+});
 
 describe("renderCorrectionQueuePage", () => {
   it("renders a row per correction with outcome-action forms", () => {
