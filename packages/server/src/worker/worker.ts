@@ -134,7 +134,7 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
     claiming = false;
     claimTimer?.cancel();
     lease.stop();
-    await gracefulShutdown({ store: options.store, logger, claimedRunIds, graceMs: shutdownGraceMs, clock });
+    await gracefulShutdown({ store: options.store, logger, claimedRunIds, graceMs: shutdownGraceMs, clock, onShutdown: options.onShutdown });
     await health.close();
   }
 

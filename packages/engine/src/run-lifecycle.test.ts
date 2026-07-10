@@ -125,6 +125,30 @@ describe("executeRun — fresh execution", () => {
     expect(finished.snapshot.definitions).toMatchObject({ id: workflow.id });
   });
 
+  it("calls onRunTerminal with the runId once the run reaches a terminal status (S9 reconciliation ledger item 10)", async () => {
+    const calls: string[] = [];
+    const { store, config } = await setup({ onRunTerminal: (runId) => void calls.push(runId) });
+    const workflow = fixtureWorkflow({ execution: { type: "workflow", steps: [{ id: "s1", uses: "test.echo" }] } });
+    await store.workflows.put(workflow);
+    const run = await triggerRun(config, { workflow, trigger: fixtureTrigger(), inputs: {} });
+    const finished = await executeRun(config, run.runId);
+    expect(finished.status).toBe("completed");
+    expect(calls).toEqual([run.runId]);
+  });
+
+  it("a throwing onRunTerminal never fails the run's own (already-persisted) terminal transition", async () => {
+    const { store, config } = await setup({
+      onRunTerminal: () => {
+        throw new Error("simulated browser-cleanup failure");
+      },
+    });
+    const workflow = fixtureWorkflow({ execution: { type: "workflow", steps: [{ id: "s1", uses: "test.echo" }] } });
+    await store.workflows.put(workflow);
+    const run = await triggerRun(config, { workflow, trigger: fixtureTrigger(), inputs: {} });
+    const finished = await executeRun(config, run.runId);
+    expect(finished.status).toBe("completed"); // the hook's throw did not propagate
+  });
+
   it("transitions to failed when a step fails with no retry", async () => {
     const failing = failingBlock("test.rl-fail");
     const { store, config } = await setup({ blocks: { [failing.manifest.id]: failing } });
@@ -232,6 +256,19 @@ describe("cancelRun (architecture §4.1, spec F16)", () => {
     expect(cancelled.trace.find((t) => t.stepId === "s1")?.status).toBe("completed"); // already-reached step untouched
     expect(cancelled.trace.find((t) => t.stepId === "s2")?.status).toBe("skipped");
     expect(cancelled.trace.find((t) => t.stepId === "s3")?.status).toBe("skipped");
+  });
+
+  it("calls onRunTerminal with the runId once cancelled (S9 reconciliation ledger item 10 - cancelRun is a SEPARATE terminal-transition path from finalizeTerminal, needs the same hook)", async () => {
+    const calls: string[] = [];
+    const { store, config } = await setup({ onRunTerminal: (runId) => void calls.push(runId) });
+    const workflow = fixtureWorkflow({ execution: { type: "workflow", steps: [{ id: "s1", uses: "test.echo" }, { id: "s2", uses: "test.echo" }] } });
+    await store.workflows.put(workflow);
+    const run = await triggerRun(config, { workflow, trigger: fixtureTrigger(), inputs: {} });
+    await store.runs.put({ ...run, status: "running" });
+
+    const cancelled = await cancelRun(config, run.runId);
+    expect(cancelled.status).toBe("cancelled");
+    expect(calls).toEqual([run.runId]);
   });
 
   it("is idempotent for an already-terminal run", async () => {

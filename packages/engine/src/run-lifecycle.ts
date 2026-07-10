@@ -141,7 +141,21 @@ export async function finalizeTerminal(
   if (typeof concurrencyKey === "string") {
     await releaseQueuedRuns(config.store, redacted.workflowId, concurrencyKey);
   }
+  await runOnRunTerminal(config, redacted.runId);
   return redacted;
+}
+
+/** Best-effort per-run resource cleanup (S9 reconciliation ledger item 10, SEAMS.md S3-E1) — never lets a cleanup-hook failure fail the run's own (already-persisted) terminal transition. */
+async function runOnRunTerminal(config: EngineConfig, runId: string): Promise<void> {
+  if (!config.onRunTerminal) return;
+  try {
+    await config.onRunTerminal(runId);
+  } catch {
+    // Best-effort: the run's terminal status is already durably persisted;
+    // a resource-cleanup hook failing (e.g. a browser context that was
+    // already closed, or a transient error closing it) must never
+    // retroactively fail an already-completed/failed/cancelled run.
+  }
 }
 
 async function recordThrownFailureAndFinalize(
@@ -333,5 +347,6 @@ export async function cancelRun(config: EngineConfig, runId: string): Promise<Ru
   if (typeof concurrencyKey === "string") {
     await releaseQueuedRuns(config.store, redacted.workflowId, concurrencyKey);
   }
+  await runOnRunTerminal(config, redacted.runId);
   return redacted;
 }

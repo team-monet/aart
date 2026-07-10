@@ -306,6 +306,34 @@ describe("graceful SIGTERM shutdown (architecture §4.7)", () => {
     await stopPromise;
     await expect(fx.store.jobQueue.get("run_stuck")).resolves.toMatchObject({ claimedBy: null });
   }, 15000);
+
+  it("calls onShutdown once during graceful shutdown, after the drain/release loop (S9 reconciliation ledger item 10 - the coarse safety net alongside the engine's per-run onRunTerminal hook)", async () => {
+    const clock = createFakeClock();
+    fx = await createTestFixture(clock);
+    let shutdownCalls = 0;
+    const worker = await startWorker({ store: fx.store, engine: fx.engine, clock, shutdownGraceMs: 1000, installSignalHandler: false, healthPort: 0, onShutdown: () => void shutdownCalls++ });
+    workers.push(worker);
+    await worker.stop();
+    expect(shutdownCalls).toBe(1);
+  }, 15000);
+
+  it("a throwing onShutdown never blocks process exit (worker.stop() still resolves)", async () => {
+    const clock = createFakeClock();
+    fx = await createTestFixture(clock);
+    const worker = await startWorker({
+      store: fx.store,
+      engine: fx.engine,
+      clock,
+      shutdownGraceMs: 1000,
+      installSignalHandler: false,
+      healthPort: 0,
+      onShutdown: () => {
+        throw new Error("simulated browser-cleanup failure");
+      },
+    });
+    workers.push(worker);
+    await expect(worker.stop()).resolves.toBeUndefined();
+  }, 15000);
 });
 
 describe("mid-step worker-kill (architecture §4.7 reliability BLOCKER fix) — lighter-weight version of the full S9 E2E", () => {

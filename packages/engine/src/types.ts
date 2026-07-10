@@ -103,6 +103,22 @@ export interface EngineConfig {
   computeRetryDelayMs?: (attempt: number, backoff: string | undefined) => number;
   /** S9 integration (reconciliation ledger item 8): computes `ExecutionSnapshot.packHashes` at snapshot-capture time (snapshot.ts). Defaults to `alwaysEmptyPackHashes` (today's pre-integration behavior — an empty record) since the frozen `BlockManifest` carries no pack-provenance field this package could use to derive it unassisted; the real composition root wires @aart/registry's `computePackContentHash` here, fed whatever pack-provenance mapping that root's own catalog assembly maintains. */
   computePackHashes?: import("./snapshot.js").ComputePackHashes;
+  /**
+   * S9 integration (reconciliation ledger item 10, SEAMS.md S3-E1): called
+   * once a run reaches a terminal status (`finalizeTerminal`/`cancelRun`,
+   * run-lifecycle.ts), AFTER the terminal `RunRecord` is durably persisted
+   * and any queued same-key run is released — the same per-run resource-
+   * cleanup cadence `@aart/blocks-core`'s browser-session manager asked for
+   * ("the engine... once a run reaches a terminal status... should call
+   * closeBrowserSession(runId)"). Deliberately a generic
+   * `(runId) => void|Promise<void>` hook, not a `@aart/blocks-core` import —
+   * this package stays block-catalog-agnostic (types.ts's own framing);
+   * the real composition root wires `onRunTerminal: (runId) =>
+   * closeBrowserSession(runId)`. Defaults to a no-op. Failures are caught
+   * and logged by the caller, never allowed to fail the run's own terminal
+   * transition (resource cleanup is best-effort, not correctness-critical).
+   */
+  onRunTerminal?: (runId: string) => void | Promise<void>;
 }
 
 /** `triggerRun`'s input (architecture §4.3's trigger-intake path; also what S2's trigger adapters call — "trigger adapters call into the engine's run-intake function," implementation plan S2 consumed-interfaces note). */

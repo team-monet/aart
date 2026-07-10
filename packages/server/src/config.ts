@@ -33,6 +33,20 @@ export interface LeaseConfig {
   maxReclaimCount?: number;
   /** Grace period graceful SIGTERM shutdown waits for in-flight work to reach a checkpoint before forcing release (architecture §4.7). */
   shutdownGraceMs?: number;
+  /**
+   * S9 integration (reconciliation ledger item 10, SEAMS.md S3-E1) — called
+   * once during graceful SIGTERM shutdown (worker/shutdown.ts), AFTER the
+   * claim-drain/release loop, as a coarser safety-net alongside the
+   * engine's own per-run `onRunTerminal` hook: catches whatever a
+   * force-released or crashed run's per-run close missed (e.g. a run still
+   * claimed when the grace period elapsed). Deliberately generic
+   * (`() => void|Promise<void>`), not a `@aart/blocks-core` import — same
+   * layering reasoning as `EngineConfig.onRunTerminal`. The real
+   * composition root wires `onShutdown: () => closeAllBrowserSessions()`.
+   * Defaults to a no-op. Failures are caught and logged, never allowed to
+   * block process exit.
+   */
+  onShutdown?: () => void | Promise<void>;
 }
 
 export interface PoisonGuardConfig {

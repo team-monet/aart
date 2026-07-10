@@ -21,6 +21,8 @@ export interface GracefulShutdownOptions {
   clock: Clock;
   /** Polling granularity for checking whether `claimedRunIds` has drained — defaults to 200ms, overridable so tests don't need real wall-clock waits. */
   pollMs?: number;
+  /** S9 integration (reconciliation ledger item 10) — see config.ts's `LeaseConfig.onShutdown` doc comment. Coarse resource-cleanup safety net, run after the drain/release loop below. */
+  onShutdown?: () => void | Promise<void>;
 }
 
 /**
@@ -54,5 +56,17 @@ export async function gracefulShutdown(options: GracefulShutdownOptions): Promis
     }
     claimedRunIds.delete(runId);
   }
+
+  if (options.onShutdown) {
+    try {
+      await options.onShutdown();
+    } catch (err) {
+      // Best-effort, same reasoning as the engine's onRunTerminal hook: a
+      // resource-cleanup failure (e.g. closing an already-closed browser
+      // context) must never block process exit during shutdown.
+      logger.error("onShutdown cleanup hook failed", { error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+
   logger.info("graceful shutdown complete");
 }
