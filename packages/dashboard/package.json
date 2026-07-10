@@ -1,9 +1,9 @@
 {
   "name": "@aart/dashboard",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "AART dashboard package. Stub scaffolded by S0 (Wave 0) — real implementation is Wave-1 scope; see aart_implementation_plan_v1.md for session ownership.",
+  "description": "AART dashboard (architecture §13, spec §35): server-rendered v1 read-only pages / v2 writable actions / v3 production views over @aart/server's HTTP API, with every writable action a thin call to the same function CLI/MCP call (architecture §13.2 three-client principle).",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
@@ -16,7 +16,12 @@
   "scripts": {
     "build": "tsc -b"
   },
+  "dependencies": {
+    "@aart/store": "workspace:*",
+    "@aart/types": "workspace:*"
+  },
   "devDependencies": {
-    "typescript": "5.9.3"
+    "typescript": "5.9.3",
+    "vitest": "4.1.10"
   }
 }
