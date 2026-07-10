@@ -3,7 +3,7 @@
 import { WorkflowSchema, type StandingApproval, type TrustMode, type Workflow } from "@aart/types";
 import { computeCapabilityClosure, getGrantedCapabilities, type CapabilityClosureLookup, type CapabilityClosureResult } from "../capability.js";
 import type { GateName } from "../gates.js";
-import { validateCapabilities } from "./capability.js";
+import { validateCapabilities, type PackSealCheck } from "./capability.js";
 import type { DeploymentValidationContext } from "./deployment.js";
 import { validateDeployment } from "./deployment.js";
 import { validateInputSafety } from "./input-safety.js";
@@ -20,6 +20,8 @@ export interface ValidationContext {
   readonly now?: string;
   /** Class 5 (deployment) only runs when supplied — a workflow can be schema/reference/capability/input-safety-validated with no deployment target in view yet (e.g. draft authoring). */
   readonly deployment?: DeploymentValidationContext;
+  /** spec §18.3's "pack hash valid" sub-check — see CapabilityValidationContext.packSealChecks (validation/capability.ts) for why this is optional and caller-supplied. */
+  readonly packSealChecks?: readonly PackSealCheck[];
 }
 
 export interface FullValidationResult extends ValidationResult {
@@ -59,7 +61,7 @@ export function validateWorkflow(input: unknown, context: ValidationContext): Fu
     standingApprovals: context.standingApprovals,
     now: context.now,
   });
-  const capabilityFindings = validateCapabilities(closure, { granted });
+  const capabilityFindings = validateCapabilities(closure, { granted, packSealChecks: context.packSealChecks });
 
   const inputSafetyFindings = validateInputSafety(workflow, context.blockCatalog);
 

@@ -23,3 +23,31 @@ describe("validateCapabilities — class 3 (spec §18.3)", () => {
     expect(validateCapabilities(closure, { granted: [] })).toEqual([]);
   });
 });
+
+describe("validateCapabilities — 'pack hash valid' (spec §18.3's third bullet)", () => {
+  const closure: CapabilityClosureResult = { capabilities: [], riskTier: "Low", unresolved: [] };
+
+  it("flags a pack whose approval seal is broken", () => {
+    const findings = validateCapabilities(closure, {
+      granted: [],
+      packSealChecks: [{ packName: "aart-pack-github", sealBroken: true }],
+    });
+    expect(findings).toHaveLength(1);
+    expect(findings[0]?.class).toBe("capability");
+    expect(findings[0]?.severity).toBe("error");
+    expect(findings[0]?.message).toContain("aart-pack-github");
+    expect(findings[0]?.message).toContain("approval seal is broken");
+  });
+
+  it("does not flag a pack whose seal is intact", () => {
+    const findings = validateCapabilities(closure, {
+      granted: [],
+      packSealChecks: [{ packName: "aart-pack-github", sealBroken: false }],
+    });
+    expect(findings).toEqual([]);
+  });
+
+  it("is a no-op when packSealChecks is omitted entirely (a workflow with no pack-delivered blocks)", () => {
+    expect(validateCapabilities(closure, { granted: [] })).toEqual([]);
+  });
+});

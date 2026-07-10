@@ -186,3 +186,20 @@ describe("lintRedactionBypass — directory walking", () => {
     expect(findings[0]?.file).toContain("nested");
   });
 });
+
+describe("self-check — this package's OWN real source must stay clean (runs on every `pnpm test`, not just a manual CLI invocation)", () => {
+  // This is a belt-and-suspenders addition beyond this session's own DoD
+  // note ("S9 verifies it actually runs in CI") — S9 wires the lint into
+  // repo-wide CI across every Wave-1 package; this test wires it into
+  // @aart/governance's OWN automated suite specifically, so a regression
+  // introduced by a future change to THIS package doesn't have to wait for
+  // that cross-repo CI step to be caught. Found and fixed two real
+  // findings this exact way during this session (this package's own
+  // approval-tasks.ts, and this lint's own CLI diagnostic output) — this
+  // test locks in "stays clean," it doesn't just hope it does.
+  it("packages/governance/src has zero redaction-bypass findings", async () => {
+    const srcDir = new URL("./", import.meta.url).pathname;
+    const findings = await lintRedactionBypass([srcDir]);
+    expect(findings).toEqual([]);
+  });
+});
