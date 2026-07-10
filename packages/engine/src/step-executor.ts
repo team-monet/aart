@@ -10,7 +10,7 @@ import { checkCapabilityDispatch, alwaysEmptyGrantedCapabilities } from "./capab
 import { parseDurationMs } from "./duration.js";
 import { buildExprContext, resolveArrayExpression, resolveBooleanExpression, resolveStringExpression, resolveWithRecord } from "./expr-context.js";
 import { checkIdempotency, recordIdempotency } from "./idempotency.js";
-import { applyRedaction, createTrackingSecretResolver, throwingSecretResolver } from "./redaction.js";
+import { applyRedaction, createTrackingSecretResolver, isTextMime, throwingSecretResolver } from "./redaction.js";
 import { CURRENT_ENGINE_SCHEMA_VERSION } from "./schema-version.js";
 import type { EngineBlockExecutionContext, EngineConfig } from "./types.js";
 import { enterWait, type WaitMachineConfig } from "./wait/wait-machine.js";
@@ -119,6 +119,48 @@ async function dispatchWithRetry(
 }
 
 /**
+ * F5 fix (root AMENDMENTS.md, S10 completion — was: "artifact bytes bypass
+ * the redaction chokepoint"). `ctx.writeArtifact` used to call
+ * `store.artifacts.put` directly with the block's raw bytes — the ONE
+ * persist path in this package that never routed through `applyRedaction`
+ * at all, RunRecord/StepTrace/wait-checkpoint persistence all covered, this
+ * one entirely uncovered.
+ *
+ * Fix shape follows this codebase's own established "can't redact pixels"
+ * posture (see `packages/blocks-core/src/browser/screenshot.ts`'s
+ * `maskSelectors` comment: "text-based redaction doesn't work on a
+ * bitmap") one step further, generalized from screenshots to every
+ * artifact:
+ *
+ *   - TEXT-typed artifacts (`isTextMime` — text/*, application/json,
+ *     +json, application/xml, +xml) decode as UTF-8, pass through the SAME
+ *     `config.redact`/`resolvedSecretRefs` chokepoint every other persist
+ *     call site in this package uses (`applyRedaction`), and re-encode.
+ *     This is real value-scan-and-replace over real text, no different in
+ *     kind from redacting a StepTrace output string.
+ *   - BINARY artifacts (everything else — screenshots, downloads, PDFs,
+ *     ...) are NOT scan-redacted. There is no text to scan-and-replace in
+ *     a bitmap or an arbitrary binary blob; attempting to would either do
+ *     nothing (the secret's bytes are encoded/compressed/rendered, not
+ *     present as a literal substring) or corrupt the artifact outright.
+ *     The control for binary artifact content is NOT "redact on write" —
+ *     it's (a) PREVENTION at the point of capture, where that's possible
+ *     (e.g. `browser.screenshot`'s `maskSelectors`, which blacks out a
+ *     region BEFORE the bitmap is ever created), and (b) the fact that
+ *     nothing in this system ever reads artifact bytes back into a lower-
+ *     trust surface automatically — every report/MCP-tool-result/log this
+ *     codebase builds references an artifact by its METADATA (id, path,
+ *     kind, mime, byte count — see `@aart/evidence`'s report-model.ts) and
+ *     NEVER inlines raw bytes; `ArtifactStore.getBytes` is called from
+ *     nowhere in this repo's production code today (verified directly —
+ *     only test code calls it). Reading a binary artifact's actual content
+ *     back is necessarily a deliberate, separate, explicit act, not
+ *     something that happens as a side effect of a run being reported on
+ *     or an MCP tool returning. THIS is "the sensitive-read suppression
+ *     mechanism" being the control instead of scan-redaction: nothing
+ *     automatically SURFACES the bytes, so there is nothing for a passive
+ *     reader to be exposed to.
+ *
  * `onRecordLlmCall`, if given, is called synchronously whenever the
  * dispatched block invokes `ctx.recordLlmCall?.(metadata)` (S9 integration,
  * reconciliation ledger item 6, SEAMS.md L3 — `@aart/llm`'s `llm.*` blocks'
@@ -131,6 +173,7 @@ function buildBlockContext(
   runId: string,
   stepId: string,
   secretResolver: ReturnType<typeof createTrackingSecretResolver>,
+  resolvedSecretRefs: ReadonlySet<string>,
   onRecordLlmCall: (metadata: LlmCallMetadata) => void,
 ): EngineBlockExecutionContext {
   return {
@@ -143,9 +186,18 @@ function buildBlockContext(
     writeArtifact: async (input) => {
       const id = crypto.randomUUID();
       const path = `artifacts/${runId}/${id}`;
+      // See this function's own doc comment (F5 fix) for the full text-vs
+      // -binary rationale. Redaction runs on the LIVE resolvedSecretRefs
+      // set at the moment writeArtifact is actually called, same as every
+      // other persist call site — a block that resolves a secret and THEN
+      // writes an artifact within the same execute() call is covered, not
+      // just secrets resolved before dispatch began.
+      const bytes = isTextMime(input.mime)
+        ? new TextEncoder().encode(applyRedaction(config.redact, new TextDecoder().decode(input.bytes), resolvedSecretRefs))
+        : input.bytes;
       await config.store.artifacts.put(
-        { id, runId, stepId, name: input.name, kind: input.kind, mime: input.mime, path, bytes: input.bytes.byteLength, createdAt: (config.now?.() ?? new Date()).toISOString() },
-        input.bytes,
+        { id, runId, stepId, name: input.name, kind: input.kind, mime: input.mime, path, bytes: bytes.byteLength, createdAt: (config.now?.() ?? new Date()).toISOString() },
+        bytes,
       );
       return { id, path };
     },
@@ -187,7 +239,7 @@ async function dispatchOnce(
   // blocks) — attached to the trace entry below once dispatch completes.
   // A non-llm block simply never calls it, leaving this undefined.
   let capturedLlmCall: LlmCallMetadata | undefined;
-  const ctx = buildBlockContext(config, run.runId, stepIdForTrace, secretResolver, (metadata) => {
+  const ctx = buildBlockContext(config, run.runId, stepIdForTrace, secretResolver, resolvedSecretRefs, (metadata) => {
     capturedLlmCall = metadata;
   });
   const timeoutMs = step.timeout ? parseDurationMs(step.timeout) : undefined;

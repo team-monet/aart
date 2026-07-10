@@ -11,6 +11,16 @@
 // assert that the secret survives — a green assertion here is EVIDENCE of the
 // gap, cross-referenced to the security-pass report's finding of the same id.
 // Cases named "[SAFE]" assert the secret is correctly scrubbed.
+//
+// S10 completion update: F1/F2/F4 (object-key scanning, non-string record
+// fields, longest-secret-first ordering) are RESOLVED — their cases below
+// are relabeled "[SAFE: Fn]" and now assert the fixed behavior. Only the
+// genuinely inherent [LIMIT] cases (base64/hex/case-folded derived forms —
+// value-scan-and-replace structurally cannot catch a TRANSFORMED
+// representation of a secret it never searched for) remain as documented,
+// accepted limitations, not gaps. See root AMENDMENTS.md (S10 completion
+// entry) for the fix detail and F5 (artifact-bytes bypass, a different
+// chokepoint entirely — packages/mcp/src/redaction-adversarial.test.ts).
 import { describe, expect, it } from "vitest";
 import { redactRecord } from "./redact.js";
 
@@ -68,64 +78,80 @@ describe("redactRecord adversarial — confirmed-SAFE behaviors under pressure",
   });
 });
 
-describe("redactRecord adversarial — GENUINE GAPS (secret survives; flagged for triage)", () => {
-  // ---- FINDING F1: a resolved secret value used as an OBJECT KEY is NOT
-  // redacted. `applyReplacements` recurses into object VALUES only
-  // (redact.ts:63 `out[key] = applyReplacements(v, ...)`), copying keys
-  // verbatim. Realistic trigger: a group-by / index-by aggregation keyed on a
-  // field whose value is a resolved secret.
-  it("[GAP: F1] a secret value appearing as an OBJECT KEY survives redaction (keys are never scanned)", () => {
+describe("redactRecord adversarial — RESOLVED FINDINGS (S10 completion; formerly GENUINE GAPS)", () => {
+  // ---- FINDING F1 (RESOLVED): a resolved secret value used as an OBJECT KEY
+  // is now redacted. `applyReplacements`'s object branch scans the KEY
+  // through the same applyStringReplacements core every string field gets,
+  // then recurses into the value as before. Realistic trigger: a group-by /
+  // index-by aggregation keyed on a field whose value is a resolved secret.
+  it("[SAFE: F1] a secret value appearing as an OBJECT KEY is now redacted", () => {
     const record = { groupedByToken: { [SECRET]: ["row1", "row2"] } };
     const result = redactRecord(record, new Set([SECRET])) as typeof record;
-    // The secret is STILL present as a key — this is the leak.
-    expect(Object.keys(result.groupedByToken)).toContain(SECRET);
-    expect(JSON.stringify(result)).toContain(SECRET);
+    expect(Object.keys(result.groupedByToken)).toEqual(["[REDACTED:secret-1]"]);
+    expect(Object.keys(result.groupedByToken)).not.toContain(SECRET);
+    expect(JSON.stringify(result)).not.toContain(SECRET);
   });
 
-  it("[GAP: F1] the SAME secret is scrubbed from a value but survives as a key in the same record (asymmetry proof)", () => {
+  it("[SAFE: F1] the SAME secret is scrubbed from BOTH a value and a key in the same record (symmetry — the prior asymmetry is gone)", () => {
     const record = { asValue: SECRET, asKey: { [SECRET]: 1 } };
     const result = redactRecord(record, new Set([SECRET])) as typeof record;
-    expect(result.asValue).toBe("[REDACTED:secret-1]"); // value: scrubbed
-    expect(Object.keys(result.asKey)).toContain(SECRET); // key: leaked
+    expect(result.asValue).toBe("[REDACTED:secret-1]"); // value: scrubbed (unchanged from before)
+    expect(Object.keys(result.asKey)).toEqual(["[REDACTED:secret-1]"]); // key: now ALSO scrubbed
   });
 
-  // ---- FINDING F2: redaction is string-only. A resolved secret whose value
-  // coincides with a NUMBER in the record is not scrubbed — `applyReplacements`
-  // passes numbers/booleans/null through untouched, and the regex only runs on
-  // strings. (Compounded at the engine layer: createTrackingSecretResolver
-  // only adds `typeof value === "string"` values to the set, and SecretResolver
-  // is typed `=> unknown`, so a non-string secret never even enters the set.)
-  it("[GAP: F2] a numeric secret value is not redacted when it appears as a NUMBER (only its string form would be)", () => {
+  // ---- FINDING F2 (RESOLVED): redaction is no longer string-only for
+  // RECORD FIELDS — `applyReplacements` now has a number/boolean branch that
+  // stringifies, scans, and only actually replaces (changing the field's
+  // type to string) when a pattern genuinely matches. The compounding engine
+  // -layer cause (createTrackingSecretResolver only ever tracked
+  // `typeof value === "string"` resolved values, so a genuinely non-string
+  // secret VALUE never entered the scan set at all) is fixed separately —
+  // see packages/engine/src/redaction.test.ts's own coverage of
+  // createTrackingSecretResolver's new stringify-canonical-forms behavior.
+  it("[SAFE: F2] a numeric secret value IS now redacted when it appears as a NUMBER, not just in its string form", () => {
     const numericSecret = "782341"; // e.g. a resolved OTP/PIN secret, tracked as a string
     const record = { asNumber: 782341, asString: "782341" };
     const result = redactRecord(record, new Set([numericSecret])) as typeof record;
-    expect(result.asString).toBe("[REDACTED:secret-1]"); // string form: scrubbed
-    expect(result.asNumber).toBe(782341); // number form: leaked (unchanged)
+    expect(result.asString).toBe("[REDACTED:secret-1]"); // string form: scrubbed (unchanged from before)
+    expect(result.asNumber).toBe("[REDACTED:secret-1]"); // number form: now ALSO scrubbed
+    expect(typeof result.asNumber).toBe("string"); // documented side effect: a redacted number becomes a string — there's no numeric way to spell "[REDACTED:...]"
   });
 
-  // ---- FINDING F4: overlapping secrets are applied in insertion order with no
-  // longest-match-first sort, so if a SHORTER secret that is a substring of a
-  // LONGER secret is resolved first, redacting the short one first prevents the
-  // long one's pattern from matching, leaving the long secret's non-overlapping
-  // fragment in place.
-  it("[GAP: F4] overlapping secrets, SHORTER resolved first — the LONGER secret's non-overlapping fragment leaks", () => {
+  it("[SAFE: F2] a boolean field that happens to stringify to a resolved secret is also redacted (the fix generalizes beyond numbers)", () => {
+    const record = { flag: true, other: false };
+    const result = redactRecord(record, new Set(["true"])) as typeof record;
+    expect(result.flag).toBe("[REDACTED:secret-1]");
+    expect(result.other).toBe(false); // "false" was never in the resolved-secrets set — untouched, still a real boolean
+  });
+
+  // ---- FINDING F4 (RESOLVED): overlapping secrets are now applied
+  // longest-literal-first (sortLongestFirst, applied to the full replacements
+  // array before applyReplacements ever runs), regardless of the Set's
+  // insertion order — so a shorter secret that happens to be a substring of a
+  // longer one can no longer consume part of the longer match first.
+  it("[SAFE: F4] overlapping secrets, SHORTER resolved first — the LONGER secret is now fully redacted, no fragment leak", () => {
     const long = "prefix-SHAREDBODY";
     const short = "SHAREDBODY"; // substring of `long`
     const record = { blob: `value=${long}` };
-    // Insertion order: short first (it was resolved earlier in the run).
+    // Insertion order: short first (it was resolved earlier in the run) —
+    // exactly the ordering that used to leak the "prefix-" fragment.
     const result = redactRecord(record, new Set([short, long])) as typeof record;
-    // The "prefix-" fragment of the longer secret survives, revealing part of it.
-    expect(result.blob).toBe("value=prefix-[REDACTED:secret-1]");
-    expect(result.blob).toContain("prefix-"); // <-- the leaked fragment
-    expect(result.blob).not.toContain(long); // the FULL long value is gone, but its prefix is not
+    // long is redacted whole — its marker is secret-2 (insertion order still
+    // drives WHICH marker number a secret gets; only the APPLICATION order
+    // — which pattern is tried against the text first — is now
+    // length-sorted, independent of insertion order).
+    expect(result.blob).toBe("value=[REDACTED:secret-2]");
+    expect(result.blob).not.toContain("prefix-"); // the fragment that used to leak
+    expect(result.blob).not.toContain(long);
+    expect(result.blob).not.toContain(short);
   });
 
-  it("[GAP: F4] control: the very same pair with the LONGER resolved first has NO fragment leak (proves it is purely order-dependent)", () => {
+  it("[SAFE: F4] the very same pair with the LONGER resolved first — same fragment-free outcome (proves the fix is order-INDEPENDENT, not just luckier)", () => {
     const long = "prefix-SHAREDBODY";
     const short = "SHAREDBODY";
     const record = { blob: `value=${long}` };
     const result = redactRecord(record, new Set([long, short])) as typeof record;
-    expect(result.blob).toBe("value=[REDACTED:secret-1]");
+    expect(result.blob).toBe("value=[REDACTED:secret-1]"); // long inserted first here, so it gets marker secret-1
     expect(result.blob).not.toContain("prefix-");
   });
 });

@@ -17,6 +17,19 @@ import { SecretResolutionError } from "@aart/types";
 export const identityRedactFn: RedactFn = (record) => record;
 
 /**
+ * F5 fix (root AMENDMENTS.md, S10 completion): decides whether an artifact's
+ * declared MIME type is text — the boundary `step-executor.ts`'s
+ * `writeArtifact` uses to decide whether artifact BYTES pass through the
+ * redaction chokepoint before persist. Deliberately narrow and explicit
+ * (not "assume text unless proven binary") — a false positive here would
+ * mean attempting to UTF-8-decode genuinely binary bytes (corrupting them)
+ * before re-encoding, which is worse than doing nothing.
+ */
+export function isTextMime(mime: string): boolean {
+  return mime.startsWith("text/") || mime === "application/json" || mime.endsWith("+json") || mime === "application/xml" || mime.endsWith("+xml");
+}
+
+/**
  * Default `resolveSecret` — throws if a workflow under test actually
  * references `secrets.*` without the engine being configured with a real
  * resolver (`EngineConfig.resolveSecret`). Kept as a loud failure rather
@@ -31,6 +44,31 @@ export const throwingSecretResolver: SecretResolver = (name) => {
     detail: { kind: "missingResolver", name },
   });
 };
+
+/**
+ * F2 fix (root AMENDMENTS.md, S10 completion): stringifies the canonical
+ * form of a resolved secret VALUE so it enters the tracked-refs set even
+ * when the resolver's real return type isn't a string — `SecretResolver`
+ * is typed `=> unknown` (a resolver adapter can legitimately return a raw
+ * numeric OTP/PIN, a boolean flag, etc.), but before this fix only
+ * `typeof value === "string"` was ever tracked, so a genuinely non-string
+ * secret never entered the scan set at all — @aart/governance's
+ * `redactRecord` had nothing to search for even where the SAME value later
+ * appeared as a plain string elsewhere in a persisted record.
+ *
+ * Deliberately excludes `null`/`undefined` — neither is a "value" to
+ * protect, and adding the literal string `"null"`/`"undefined"` to a
+ * value-scan-and-replace set would redact every ordinary null/undefined-
+ * shaped field in every run, a catastrophic over-redaction bug, not a fix.
+ * Also excludes objects/arrays — a resolver returning a composite isn't
+ * itself a flat scalar secret to string-match against; if a scalar leaf
+ * inside it matters, the resolver should resolve to that scalar directly.
+ */
+function toCanonicalSecretString(value: unknown): string | undefined {
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean" || typeof value === "bigint") return String(value);
+  return undefined;
+}
 
 /**
  * Wraps a real `SecretResolver` so that every VALUE it successfully
@@ -70,7 +108,8 @@ export const throwingSecretResolver: SecretResolver = (name) => {
 export function createTrackingSecretResolver(resolver: SecretResolver, resolvedRefs: Set<string>): SecretResolver {
   return async (name: string) => {
     const value = await resolver(name);
-    if (typeof value === "string") resolvedRefs.add(value);
+    const canonical = toCanonicalSecretString(value);
+    if (canonical !== undefined) resolvedRefs.add(canonical);
     return value;
   };
 }

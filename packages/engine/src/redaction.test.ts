@@ -44,6 +44,42 @@ describe("createTrackingSecretResolver", () => {
     expect(resolvedRefs.size).toBe(0);
   });
 
+  it("does NOT track a resolved null (root AMENDMENTS.md F2 fix: null/undefined are never 'a value' to protect — tracking the literal string \"null\" would over-redact every ordinary null field in every run)", async () => {
+    const resolvedRefs = new Set<string>();
+    const tracking = createTrackingSecretResolver(async () => null, resolvedRefs);
+    await tracking("MAYBE_NULL");
+    expect(resolvedRefs.size).toBe(0);
+  });
+
+  // ---- F2 fix (root AMENDMENTS.md, S10 completion): SecretResolver is
+  // typed `=> unknown` — a resolver adapter can legitimately return a raw
+  // numeric OTP/PIN or boolean flag, not just a string. Before this fix,
+  // only `typeof value === "string"` was ever tracked, so a genuinely
+  // non-string secret never entered @aart/governance's redactRecord scan
+  // set at all, even where the SAME value later appeared as a plain string
+  // elsewhere in a persisted record (see packages/governance/src/
+  // redact-adversarial.test.ts's "[SAFE: F2]" cases for that half).
+  it("[F2] tracks the canonical STRING form of a resolved NUMBER value", async () => {
+    const resolvedRefs = new Set<string>();
+    const tracking = createTrackingSecretResolver(async () => 782341, resolvedRefs);
+    await tracking("OTP");
+    expect(resolvedRefs).toEqual(new Set(["782341"]));
+  });
+
+  it("[F2] tracks the canonical STRING form of a resolved BOOLEAN value", async () => {
+    const resolvedRefs = new Set<string>();
+    const tracking = createTrackingSecretResolver(async () => true, resolvedRefs);
+    await tracking("FEATURE_FLAG_SECRET");
+    expect(resolvedRefs).toEqual(new Set(["true"]));
+  });
+
+  it("[F2] does NOT track a resolved object/array (a composite isn't itself a flat scalar secret to string-match against)", async () => {
+    const resolvedRefs = new Set<string>();
+    const tracking = createTrackingSecretResolver(async () => ({ nested: "value" }), resolvedRefs);
+    await tracking("SOME_OBJECT");
+    expect(resolvedRefs.size).toBe(0);
+  });
+
   it("accumulates across multiple calls within the same set (segment-scoped, not per-call)", async () => {
     const resolvedRefs = new Set<string>();
     const tracking = createTrackingSecretResolver(async (name) => name, resolvedRefs);

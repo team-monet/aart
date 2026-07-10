@@ -11,7 +11,15 @@
 // Test-design note (mirrors packages/governance/src/redact-adversarial.test.ts):
 // the suite stays GREEN by asserting ACTUAL behavior. "[SAFE]" cases assert the
 // secret is scrubbed; "[FINDING: Fn]" cases assert it survives and are
-// cross-referenced to the security-pass report.
+// cross-referenced to the security-pass report; "[LIMIT: Fn]" cases assert a
+// secret survives as a DOCUMENTED, deliberate, accepted boundary (not a
+// residual gap) — see each such case's own comment for why.
+//
+// S10 completion update: F5 (artifact bytes bypassing the redaction
+// chokepoint) is RESOLVED for TEXT-mime artifacts (now "[SAFE: F5]") and
+// reclassified from an unaddressed finding to a documented, intentional
+// boundary for BINARY-mime artifacts (now "[LIMIT: F5]") — see
+// step-executor.ts's buildBlockContext doc comment for the full mechanism.
 import { afterEach, describe, expect, it } from "vitest";
 import type { BlockImplementation, LlmCallMetadata, Workflow } from "@aart/types";
 import { createEngine, type EngineBlockExecutionContext } from "@aart/engine";
@@ -64,13 +72,24 @@ const llmLeakBlock: BlockImplementation = {
   },
 };
 
-/** Writes a resolved secret's raw bytes into an artifact via ctx.writeArtifact, returns the artifact id. */
+/** Writes a resolved secret's raw bytes into a TEXT-mime artifact via ctx.writeArtifact, returns the artifact id. */
 const writeSecretArtifactBlock: BlockImplementation = {
-  manifest: { id: "adv.write-secret-artifact", version: "1.0.0", capabilities: ["file.write"], inputSchema: {}, outputSchema: {}, description: "writes secret into an artifact" },
+  manifest: { id: "adv.write-secret-artifact", version: "1.0.0", capabilities: ["file.write"], inputSchema: {}, outputSchema: {}, description: "writes secret into a text artifact" },
   execute: async (input, ctx) => {
     const secret = (input as { secret: string }).secret;
     const bytes = new TextEncoder().encode(`report body — apiKey=${secret}`);
     const written = await ctx.writeArtifact({ name: "leak.txt", kind: "file", mime: "text/plain", bytes });
+    return { id: written.id };
+  },
+};
+
+/** Writes a resolved secret's raw bytes into a BINARY-mime artifact (e.g. a screenshot-shaped PNG) via ctx.writeArtifact — models the documented boundary: a "secret" embedded in bitmap-shaped bytes (not literally realistic for a real screenshot, whose pixels wouldn't contain the LITERAL secret string, but this is exactly the worst case: bytes that DO contain the literal string, in a mime type this fix deliberately does not scan). */
+const writeSecretBinaryArtifactBlock: BlockImplementation = {
+  manifest: { id: "adv.write-secret-binary-artifact", version: "1.0.0", capabilities: ["file.write"], inputSchema: {}, outputSchema: {}, description: "writes secret into a binary-mime artifact" },
+  execute: async (input, ctx) => {
+    const secret = (input as { secret: string }).secret;
+    const bytes = new TextEncoder().encode(`\x89PNG-shaped-bytes apiKey=${secret}`);
+    const written = await ctx.writeArtifact({ name: "leak.png", kind: "screenshot", mime: "image/png", bytes });
     return { id: written.id };
   },
 };
@@ -80,6 +99,7 @@ const ALL_BLOCKS: Record<string, BlockImplementation> = {
   [throwSecretBlock.manifest.id]: throwSecretBlock,
   [llmLeakBlock.manifest.id]: llmLeakBlock,
   [writeSecretArtifactBlock.manifest.id]: writeSecretArtifactBlock,
+  [writeSecretBinaryArtifactBlock.manifest.id]: writeSecretBinaryArtifactBlock,
 };
 
 async function makeEngineAndStore(): Promise<{ engine: ReturnType<typeof createEngine>; store: AartStore }> {
@@ -203,26 +223,61 @@ describe("adversarial redaction e2e — real engine + real redactRecord", () => 
     expect((persisted!.trace.find((t) => t.stepId === "s4")!.outputs as { value: string }).value).toContain("[REDACTED:secret-1]");
   });
 
-  it("[FINDING: F5] artifact bytes BYPASS the redaction chokepoint — a secret written via ctx.writeArtifact is persisted RAW to the artifact store", async () => {
+  it("[SAFE: F5] TEXT-mime artifact bytes are now redacted before persist (root AMENDMENTS.md, S10 completion — was: '[FINDING: F5] artifact bytes BYPASS the redaction chokepoint')", async () => {
     const { engine, store } = await makeEngineAndStore();
-    const workflow = wf("adv-artifact", [{ id: "s1", uses: "adv.write-secret-artifact", with: { secret: "{{ secrets.API_KEY }}" } }]);
+    const workflow = wf("adv-artifact-text", [{ id: "s1", uses: "adv.write-secret-artifact", with: { secret: "{{ secrets.API_KEY }}" } }]);
     await store.workflows.put(workflow);
     const run = await trigger(engine, workflow);
     const finished = await engine.executeRun(run.runId);
     expect(finished.status).toBe("completed");
 
-    // The RunRecord trace IS redacted (writeArtifact's return + the resolved input are scrubbed there)...
+    // The RunRecord trace is redacted, as before.
     const persisted = await store.runs.get(run.runId);
     expect(JSON.stringify(persisted)).not.toContain(SECRET);
 
-    // ...but the ARTIFACT BYTES are not. This is the finding: ctx.writeArtifact
-    // (step-executor.ts buildBlockContext) calls store.artifacts.put() DIRECTLY,
-    // never through applyRedaction — the redaction chokepoint covers
-    // RunRecord/StepTrace/WaitCondition persists only, not artifact content.
+    // The fix: ctx.writeArtifact (step-executor.ts buildBlockContext) now
+    // decodes TEXT-mime bytes, runs them through the SAME applyRedaction
+    // chokepoint every other persist call site uses, and re-encodes before
+    // calling store.artifacts.put — so the artifact content itself is
+    // scrubbed too, not just the RunRecord's reference to it.
     const artifacts = await store.artifacts.listByRun(run.runId);
     expect(artifacts).toHaveLength(1);
+    expect(artifacts[0]!.mime).toBe("text/plain");
     const bytes = await store.artifacts.getBytes(artifacts[0]!.id);
     const text = new TextDecoder().decode(bytes!);
-    expect(text).toContain(SECRET); // RAW secret is on disk in the artifact, unredacted
+    expect(text).not.toContain(SECRET);
+    expect(text).toBe("report body — apiKey=[REDACTED:secret-1]");
+  });
+
+  it("[LIMIT: F5] BINARY-mime artifact bytes are deliberately NOT scan-redacted — the documented boundary, not a residual gap", async () => {
+    const { engine, store } = await makeEngineAndStore();
+    const workflow = wf("adv-artifact-binary", [{ id: "s1", uses: "adv.write-secret-binary-artifact", with: { secret: "{{ secrets.API_KEY }}" } }]);
+    await store.workflows.put(workflow);
+    const run = await trigger(engine, workflow);
+    const finished = await engine.executeRun(run.runId);
+    expect(finished.status).toBe("completed");
+
+    // The RunRecord trace is still redacted — only the artifact BYTES are
+    // exempt, and only because their declared mime is not text.
+    const persisted = await store.runs.get(run.runId);
+    expect(JSON.stringify(persisted)).not.toContain(SECRET);
+
+    const artifacts = await store.artifacts.listByRun(run.runId);
+    expect(artifacts).toHaveLength(1);
+    expect(artifacts[0]!.mime).toBe("image/png");
+    const bytes = await store.artifacts.getBytes(artifacts[0]!.id);
+    const text = new TextDecoder().decode(bytes!);
+    // The raw secret IS on disk in the artifact — this is the documented,
+    // intentional boundary (step-executor.ts's buildBlockContext doc
+    // comment): text-based scan-and-replace cannot operate on binary
+    // content, so it deliberately does not try. The compensating control
+    // is (a) prevention at capture where possible (browser.screenshot's
+    // maskSelectors) and (b) that nothing in this codebase's production
+    // paths ever reads artifact bytes back automatically — getBytes, the
+    // one call that CAN expose this, is called from nowhere in production
+    // code (only test code, this call included) — reading a binary
+    // artifact's real content back is necessarily a deliberate, separate
+    // act, never a side effect of a run being reported on.
+    expect(text).toContain(SECRET);
   });
 });
