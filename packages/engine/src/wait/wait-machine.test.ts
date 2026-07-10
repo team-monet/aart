@@ -9,7 +9,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { identityRedactFn } from "../redaction.js";
 import { CURRENT_ENGINE_SCHEMA_VERSION } from "../schema-version.js";
 import { createTestStore, fixtureRun, uniqueId } from "../test-utils/fixtures.js";
-import { enterWait, getDueWaits, listExternalJobWaits, resumeApproval, resumeBySignal, resumeExternalJobResult, resumeManual, resumeTimerWait, type WaitMachineConfig } from "./wait-machine.js";
+import { enterWait, failExpiredWait, getDueWaits, getExpiredWaits, listExternalJobWaits, resumeApproval, resumeBySignal, resumeExternalJobResult, resumeManual, resumeTimerWait, type WaitMachineConfig } from "./wait-machine.js";
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {
@@ -387,6 +387,118 @@ describe("listExternalJobWaits — S2's poll-mechanism sweep query", () => {
     const jobs = await listExternalJobWaits(store);
     expect(jobs).toHaveLength(1);
     expect(jobs[0]).toMatchObject({ stepId: "job_wait" });
+  });
+});
+
+describe("getExpiredWaits / failExpiredWait — wait TIMEOUT expiry (architecture §4.4.1's Expiry note)", () => {
+  it("getExpiredWaits returns a wait whose timeout has elapsed relative to its createdAt", async () => {
+    const { store, config } = await setup();
+    const run = fixtureRun({ status: "running" });
+    await store.runs.put(run);
+    // Enter the wait "in the past" by directly controlling `now` via a
+    // fixed-clock config, so its createdAt + timeout is already behind us.
+    const pastConfig: WaitMachineConfig = { ...config, now: () => new Date(Date.now() - 10_000) };
+    await enterWait(pastConfig, { run, stepId: "wait_step", blockId: "wait.for_signal", resolvedInputs: {}, wait: { type: "signal", name: "n", correlationId: "c", timeout: "5s", schemaVersion: CURRENT_ENGINE_SCHEMA_VERSION }, resolvedSecretRefs: new Set() });
+
+    const expired = await getExpiredWaits(store, new Date());
+    expect(expired.map((e) => e.stepId)).toContain("wait_step");
+  });
+
+  it("getExpiredWaits excludes a wait whose timeout has NOT yet elapsed", async () => {
+    const { store, config } = await setup();
+    const run = fixtureRun({ status: "running" });
+    await store.runs.put(run);
+    await enterWait(config, { run, stepId: "wait_step", blockId: "wait.for_signal", resolvedInputs: {}, wait: { type: "signal", name: "n", correlationId: "c", timeout: "7d", schemaVersion: CURRENT_ENGINE_SCHEMA_VERSION }, resolvedSecretRefs: new Set() });
+
+    const expired = await getExpiredWaits(store, new Date());
+    expect(expired.map((e) => e.stepId)).not.toContain("wait_step");
+  });
+
+  it("getExpiredWaits excludes a wait with no timeout field at all (e.g. manual, or signal without one declared)", async () => {
+    const { store, config } = await setup();
+    const run = fixtureRun({ status: "running" });
+    await store.runs.put(run);
+    const pastConfig: WaitMachineConfig = { ...config, now: () => new Date(Date.now() - 10_000) };
+    await enterWait(pastConfig, { run, stepId: "wait_step", blockId: "wait.manual", resolvedInputs: {}, wait: { type: "manual", schemaVersion: CURRENT_ENGINE_SCHEMA_VERSION }, resolvedSecretRefs: new Set() });
+
+    const expired = await getExpiredWaits(store, new Date());
+    expect(expired.map((e) => e.stepId)).not.toContain("wait_step");
+  });
+
+  it("getExpiredWaits excludes timer waits (no timeout field on that member — resumeAt due-ness is getDueWaits' job, not this one's)", async () => {
+    const { store, config } = await setup();
+    const run = fixtureRun({ status: "running" });
+    await store.runs.put(run);
+    await enterWait(config, { run, stepId: "wait_step", blockId: "wait.until", resolvedInputs: {}, wait: { type: "timer", resumeAt: new Date(Date.now() - 100_000).toISOString(), schemaVersion: CURRENT_ENGINE_SCHEMA_VERSION }, resolvedSecretRefs: new Set() });
+
+    const expired = await getExpiredWaits(store, new Date());
+    expect(expired.map((e) => e.stepId)).not.toContain("wait_step");
+  });
+
+  it("failExpiredWait marks the step FAILED (not completed), deletes the wait row, and leaves the run status 'running' for the caller to finalize", async () => {
+    const { store, config } = await setup();
+    const run = fixtureRun({ status: "running" });
+    await store.runs.put(run);
+    await enterWait(config, { run, stepId: "wait_step", blockId: "wait.for_signal", resolvedInputs: {}, wait: { type: "signal", name: "n", correlationId: "c", timeout: "5s", schemaVersion: CURRENT_ENGINE_SCHEMA_VERSION }, resolvedSecretRefs: new Set() });
+
+    const outcome = await failExpiredWait(config, run.runId, "wait_step");
+    expect(outcome.kind).toBe("resumed");
+    if (outcome.kind !== "resumed") throw new Error("unreachable");
+    expect(outcome.run.status).toBe("running");
+    const trace = outcome.run.trace.find((t) => t.stepId === "wait_step");
+    expect(trace?.status).toBe("failed");
+    expect(trace?.error).toMatch(/expired/i);
+    await expect(store.waits.get(run.runId, "wait_step")).resolves.toBeUndefined();
+  });
+
+  it("failExpiredWait on an approval wait also sets the referenced ApprovalTask.status to 'expired' (spec §13.5)", async () => {
+    const { store, config } = await setup();
+    const run = fixtureRun({ status: "running" });
+    await store.runs.put(run);
+    await store.approvals.put({ id: "task-1", runId: run.runId, stepId: "review", title: "Review", description: "", status: "pending", createdAt: new Date().toISOString() });
+    await enterWait(config, { run, stepId: "review", blockId: "human.approval", resolvedInputs: {}, wait: { type: "approval", taskId: "task-1", timeout: "5s", schemaVersion: CURRENT_ENGINE_SCHEMA_VERSION }, resolvedSecretRefs: new Set() });
+
+    await failExpiredWait(config, run.runId, "review");
+
+    const task = await store.approvals.get("task-1");
+    expect(task?.status).toBe("expired");
+    expect(task?.decidedAt).toBeTruthy();
+  });
+
+  it("a second failExpiredWait attempt on the same wait is a duplicate no-op (the same atomic-claim discipline as resume)", async () => {
+    const { store, config } = await setup();
+    const run = fixtureRun({ status: "running" });
+    await store.runs.put(run);
+    await enterWait(config, { run, stepId: "wait_step", blockId: "wait.manual", resolvedInputs: {}, wait: { type: "manual", timeout: "5s", schemaVersion: CURRENT_ENGINE_SCHEMA_VERSION }, resolvedSecretRefs: new Set() });
+
+    const first = await failExpiredWait(config, run.runId, "wait_step");
+    expect(first.kind).toBe("resumed");
+    const second = await failExpiredWait(config, run.runId, "wait_step");
+    expect(second.kind).toBe("duplicate");
+  });
+
+  it("expiry and resume are mutually exclusive: once a wait is resumed normally, a LATER expiry sweep finding it (e.g. a stale in-flight ticker tick) is a no-op, not a double-processing", async () => {
+    const { store, config } = await setup();
+    const run = fixtureRun({ status: "running" });
+    await store.runs.put(run);
+    await enterWait(config, { run, stepId: "wait_step", blockId: "wait.manual", resolvedInputs: {}, wait: { type: "manual", timeout: "5s", schemaVersion: CURRENT_ENGINE_SCHEMA_VERSION }, resolvedSecretRefs: new Set() });
+
+    const resumed = await resumeManual(config, run.runId, "wait_step", { ok: true });
+    expect(resumed.kind).toBe("resumed");
+
+    const lateExpiry = await failExpiredWait(config, run.runId, "wait_step");
+    expect(lateExpiry.kind).toBe("duplicate");
+    // The run's completed (not failed) state from the genuine resume is untouched.
+    const reloaded = await store.runs.get(run.runId);
+    expect(reloaded?.trace.find((t) => t.stepId === "wait_step")?.status).toBe("completed");
+  });
+
+  it("failing a wait that was never entered is unmatched, not a crash", async () => {
+    const { store, config } = await setup();
+    const run = fixtureRun({ status: "running" });
+    await store.runs.put(run);
+    const outcome = await failExpiredWait(config, run.runId, "never_waited");
+    expect(outcome.kind).toBe("unmatched");
   });
 });
 

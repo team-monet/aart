@@ -5,12 +5,14 @@
 import type { Signal } from "@aart/types";
 import { createTrackingSecretResolver, throwingSecretResolver } from "./redaction.js";
 import { buildExprContext, resolveBooleanExpression } from "./expr-context.js";
-import { cancelRun, executeRun, runStepsLoop, triggerRun } from "./run-lifecycle.js";
+import { cancelRun, executeRun, finalizeTerminal, runStepsLoop, triggerRun } from "./run-lifecycle.js";
 import { resolveWorkflowForRun } from "./snapshot.js";
 import { determineNextStepId } from "./step-executor.js";
 import type { DueWait, EngineConfig, ResumeOutcome, TriggerRunInput } from "./types.js";
 import {
+  failExpiredWait as failExpiredWaitMechanism,
   getDueWaits as getDueWaitsQuery,
+  getExpiredWaits as getExpiredWaitsQuery,
   listExternalJobWaits as listExternalJobWaitsQuery,
   resumeApproval as resumeApprovalMechanism,
   resumeBySignal as resumeBySignalMechanism,
@@ -41,6 +43,10 @@ export interface Engine {
   getDueWaits(now?: Date): Promise<DueWait[]>;
   /** Every outstanding `external_job` wait, for S2's poll mechanism to sweep. */
   listExternalJobWaits(): ReturnType<typeof listExternalJobWaitsQuery>;
+  /** Every outstanding wait whose declared `timeout` has elapsed (architecture §4.4.1's Expiry note) — S2's ticker should sweep this alongside `getDueWaits`. */
+  getExpiredWaits(now?: Date): ReturnType<typeof getExpiredWaitsQuery>;
+  /** Fails an expired wait — a step failure "routable via flow.branch like any other step failure" (architecture §4.4.1), finalizing the run as `"failed"` if nothing else resolves it first. For an `approval` wait, also sets the referenced `ApprovalTask.status = "expired"`. */
+  failExpiredWait(runId: string, stepId: string): Promise<ResumeOutcome>;
 }
 
 function waitMachineConfig(config: EngineConfig): WaitMachineConfig {
@@ -120,6 +126,21 @@ export function createEngine(config: EngineConfig): Engine {
 
     getDueWaits: (now) => getDueWaitsQuery(config.store, now ?? config.now?.() ?? new Date()),
     listExternalJobWaits: () => listExternalJobWaitsQuery(config.store),
+    getExpiredWaits: (now) => getExpiredWaitsQuery(config.store, now ?? config.now?.() ?? new Date()),
+
+    failExpiredWait: async (runId, stepId) => {
+      const outcome = await failExpiredWaitMechanism(waitMachineConfig(config), runId, stepId);
+      if (outcome.kind !== "resumed") return outcome;
+      // Unlike the resume wrappers above, a failed wait has no "next step"
+      // to continue to — finalize the run as failed directly (the same
+      // finalization path a normal step failure takes: snapshot-capture-
+      // if-needed, terminal status, concurrency-queue release).
+      const workflow = await resolveWorkflowForRun(config.store, outcome.run);
+      const resolvedSecretRefs = new Set<string>();
+      const failedTrace = outcome.run.trace.find((t) => t.stepId === stepId && t.status === "failed");
+      const finalRun = await finalizeTerminal(config, outcome.run, workflow, "failed", resolvedSecretRefs, failedTrace?.error ?? `Step "${stepId}" failed.`);
+      return { ...outcome, run: finalRun };
+    },
   };
 }
 

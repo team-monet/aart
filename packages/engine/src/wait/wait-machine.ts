@@ -8,6 +8,7 @@
 import type { AartStore } from "@aart/store";
 import type { RunRecord, Signal, StepTrace, WaitCondition } from "@aart/types";
 import { CorrelationError } from "@aart/types";
+import { parseDurationMs } from "../duration.js";
 import { applyRedaction } from "../redaction.js";
 import { assertSchemaVersionCompatible } from "../schema-version.js";
 import type { DueWait, ResumeMechanism, ResumeOutcome } from "../types.js";
@@ -258,6 +259,98 @@ async function claimAndCompleteWait(config: WaitMachineConfig, args: ClaimAndCom
       trace: newTrace,
       updatedAt: now.toISOString(),
     };
+    const redacted = applyRedaction(config.redact, updatedRun, resolvedSecretRefs);
+    await tx.runs.put(redacted);
+    return { kind: "resumed", run: redacted, mechanism };
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Wait TIMEOUT expiry (architecture §4.4.1's "Expiry note", spec §13.3) —
+// a DIFFERENT terminal outcome from resume: "wait timeouts in general are
+// detected by the §4.4.3 scheduler tick... On expiry, the wait step fails
+// with a timeout error, which is routable via flow.branch like any other
+// step failure." This is a run-lifecycle transition this session's own DoD
+// names explicitly ("every transition in the diagram") and is genuinely
+// separate machinery from the 3 resume mechanisms above — a wait can be
+// resolved by EITHER a resolving event (resume) OR its own timeout
+// elapsing first, never both (the atomic claim below is what guarantees
+// that: whichever claims the WaitStore row first — a resume or an expiry
+// sweep — wins, the other finds nothing left to claim).
+// ---------------------------------------------------------------------------
+
+/** Every outstanding wait carrying a `timeout` field whose deadline (relative to the `WaitStore` row's own `createdAt`) has elapsed. `[DECISION]` NOT part of `getDueWaits` (below) — `WaitStore.listDue` (S0-frozen, architecture §4.4.3) is specifically "every timer-type wait whose `resumeAt` has passed"; `timeout` is a DIFFERENT, relative-duration field present on 6 of the 7 `WaitCondition` members (all but `timer`, which has no `timeout` field — a timer's own `resumeAt` due-ness, via `getDueWaits`, is the only time-based resolution it has) and checking it requires comparing against `createdAt` + a parsed duration, not a stored absolute deadline. S2's ticker should sweep this ALONGSIDE `getDueWaits`/`listExternalJobWaits` on the same interval. */
+export async function getExpiredWaits(store: AartStore, now: Date): Promise<Array<{ runId: string; stepId: string; wait: WaitCondition }>> {
+  const all = await store.waits.list();
+  return all
+    .filter((entry) => {
+      const timeout = "timeout" in entry.wait ? entry.wait.timeout : undefined;
+      if (!timeout) return false;
+      const deadline = new Date(entry.createdAt).getTime() + parseDurationMs(timeout);
+      return now.getTime() >= deadline;
+    })
+    .map((entry) => ({ runId: entry.runId, stepId: entry.stepId, wait: entry.wait }));
+}
+
+/**
+ * Fails an expired wait (architecture §4.4.1's Expiry note) — the SAME
+ * atomic-claim discipline as `claimAndCompleteWait` (dedupe-keyed by the
+ * waiting trace entry's own `seq`, so an expiry sweep racing a genuine
+ * resolving event can't double-process the same wait), but marks the step
+ * `"failed"` with a `TimeoutError` instead of `"completed"`. For an
+ * `approval` wait specifically, ALSO sets the referenced `ApprovalTask.status
+ * = "expired"` (spec §13.5's terminal-status set includes `"expired"`
+ * precisely for this case) — not just the step trace.
+ */
+export async function failExpiredWait(config: WaitMachineConfig, runId: string, stepId: string, resolvedSecretRefs: ReadonlySet<string> = new Set()): Promise<ResumeOutcome> {
+  const now = config.now();
+  const mechanism: ResumeMechanism = "scheduler-tick";
+
+  return config.store.transact(async (tx) => {
+    const run = await tx.runs.get(runId);
+    if (!run) {
+      return { kind: "unmatched", mechanism };
+    }
+    const wait = await tx.waits.get(runId, stepId);
+    if (!wait) {
+      const alreadyResolved = run.trace.some((t) => t.stepId === stepId && (t.status === "completed" || t.status === "failed"));
+      return { kind: alreadyResolved ? "duplicate" : "unmatched", mechanism };
+    }
+
+    assertSchemaVersionCompatible(run.schemaVersion, { runId, recordKind: "RunRecord" });
+    assertSchemaVersionCompatible(wait.schemaVersion, { runId, stepId, recordKind: "WaitCondition" });
+
+    const traceIndex = findWaitingTraceIndex(run, stepId);
+    const waitingTrace = run.trace[traceIndex]!;
+    const dedupeKey = `${stepId}:${waitingTrace.seq}:expiry`;
+    const alreadyConsumed = await tx.runs.hasDedupeKey(runId, dedupeKey);
+    if (alreadyConsumed) {
+      return { kind: "duplicate", mechanism };
+    }
+
+    await tx.runs.recordDedupeKey(runId, dedupeKey);
+    await tx.waits.delete(runId, stepId);
+
+    if (wait.type === "approval") {
+      const task = await tx.approvals.get(wait.taskId);
+      if (task && task.status === "pending") {
+        await tx.approvals.put({ ...task, status: "expired", decidedAt: now.toISOString() });
+      }
+    }
+
+    const startedAt = new Date(waitingTrace.startedAt).getTime();
+    const errorMessage = `Wait on step "${stepId}" (type "${wait.type}") expired after its declared timeout with no resolving event (architecture §4.4.1's Expiry note).`;
+    const failedTrace: StepTrace = {
+      ...waitingTrace,
+      status: "failed",
+      error: errorMessage,
+      endedAt: now.toISOString(),
+      durationMs: Math.max(0, now.getTime() - startedAt),
+    };
+    const newTrace = [...run.trace];
+    newTrace[traceIndex] = failedTrace;
+
+    const updatedRun: RunRecord = { ...run, status: "running", trace: newTrace, updatedAt: now.toISOString() };
     const redacted = applyRedaction(config.redact, updatedRun, resolvedSecretRefs);
     await tx.runs.put(redacted);
     return { kind: "resumed", run: redacted, mechanism };

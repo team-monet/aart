@@ -25,9 +25,13 @@ export { cancelRun, executeRun, triggerRun } from "./run-lifecycle.js";
 
 // The scheduler-ticker seam (architecture §4.4.3/§4.7) — SEAMS.md: S1
 // exports `getDueWaits(store, now)` and the wait-claim resume operations;
-// S2 owns and runs the interval loop that calls them.
+// S2 owns and runs the interval loop that calls them. `getExpiredWaits`/
+// `failExpiredWait` are the wait-TIMEOUT-expiry sibling seam (architecture
+// §4.4.1's Expiry note) — a different terminal outcome from resume.
 export {
+  failExpiredWait,
   getDueWaits,
+  getExpiredWaits,
   listExternalJobWaits,
   resumeApproval,
   resumeBySignal,

@@ -107,7 +107,15 @@ function environmentOf(run: RunRecord): string | undefined {
   return typeof run.params?.environment === "string" ? run.params.environment : undefined;
 }
 
-async function finalizeTerminal(
+/**
+ * Exported (beyond this module's own internal use) so `engine.ts`'s
+ * `failExpiredWait` wrapper can finalize a run whose wait just expired
+ * (architecture §4.4.1's Expiry note) — the SAME finalization path a
+ * normal step failure takes (snapshot-capture-if-needed, terminal status,
+ * concurrency-queue release), just triggered from `wait/wait-machine.ts`'s
+ * `failExpiredWait` claim instead of `executeStep`'s own failure path.
+ */
+export async function finalizeTerminal(
   config: EngineConfig,
   run: RunRecord,
   workflow: Workflow,

@@ -42,6 +42,13 @@ function resumeApproval(config: WaitMachineConfig, runId: string, stepId: string
 
 **IMPORTANT — these standalone functions only perform the atomic CLAIM, they do NOT continue execution past the resumed step.** To actually advance the run to its next step (or its next wait/terminal status), call the SAME-NAMED method on a constructed `Engine` instance instead (`engine.resumeTimerWait(runId, stepId)` etc. — see Seam 4) — the `Engine`-bound versions wrap the standalone claim call and then run the step-loop forward. S2's ticker should use the `Engine`-bound methods in production; the standalone functions are exposed mainly for a caller that genuinely only wants the claim primitive (e.g. a lower-level test, or a future architecture where claim and continuation are split across processes).
 
+**Wait-TIMEOUT-expiry sibling seam (architecture §4.4.1's "Expiry note") — a DIFFERENT terminal outcome from resume, S2's ticker should sweep this too, on the same interval:**
+```ts
+function getExpiredWaits(store: AartStore, now: Date): Promise<Array<{ runId: string; stepId: string; wait: WaitCondition }>>
+function failExpiredWait(config: WaitMachineConfig, runId: string, stepId: string, resolvedSecretRefs?: ReadonlySet<string>): Promise<ResumeOutcome>
+```
+`getExpiredWaits` returns every outstanding wait carrying a `timeout` field (6 of the 7 `WaitCondition` members — `timer` has none) whose deadline (`WaitStore` row's `createdAt` + parsed `timeout` duration) has passed — this is DISTINCT from `getDueWaits` (which is `timer`-specific `resumeAt` due-ness). `failExpiredWait` is the SAME atomic-claim discipline as the resume mechanisms (mutually exclusive with them — whichever claims the wait row first wins) but marks the step `"failed"` instead of `"completed"`, and for an `approval` wait also sets the referenced `ApprovalTask.status = "expired"`. **Use `engine.getExpiredWaits(now?)`/`engine.failExpiredWait(runId, stepId)` (the `Engine`-bound versions) in production** — the bound `failExpiredWait` also finalizes the whole `RunRecord` as `"failed"` (snapshot capture, concurrency-queue release), which the standalone function alone does not do.
+
 ### Seam 2 — Wait-block-id vocabulary (architecture §4.4 step 1, spec §15.3)
 
 **Consumer:** S3 (`@aart/blocks-core`'s `wait.*`/`human.approval` block implementations).
@@ -112,10 +119,12 @@ interface Engine {
   resumeExternalJobResult(runId: string, stepId: string, resultPayload: unknown): Promise<ResumeOutcome>
   getDueWaits(now?: Date): Promise<DueWait[]>
   listExternalJobWaits(): Promise<Array<{...}>>
+  getExpiredWaits(now?: Date): Promise<Array<{...}>>
+  failExpiredWait(runId: string, stepId: string): Promise<ResumeOutcome>
 }
 ```
 
-Every `Engine`-bound resume method **continues execution past the resumed step** (re-derives `step.if`/`then`/`else`/`next` and runs the step-loop forward to the next wait/terminal status) — this is the version S2's ticker and trigger adapters should call, not the standalone claim-only functions in Seam 1.
+Every `Engine`-bound resume method **continues execution past the resumed step** (re-derives `step.if`/`then`/`else`/`next` and runs the step-loop forward to the next wait/terminal status) — this is the version S2's ticker and trigger adapters should call, not the standalone claim-only functions in Seam 1. `failExpiredWait` is the one exception: there's no "next step" for a failed wait to continue to, so the bound version finalizes the whole `RunRecord` as `"failed"` directly instead.
 
 ### Seam 5 — `RunRecord.params` internal-bookkeeping keys (not new schema fields — see AMENDMENTS.md's discipline on why)
 

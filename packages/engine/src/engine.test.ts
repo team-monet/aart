@@ -129,6 +129,32 @@ describe("createEngine — resume wrappers continue execution past the resumed s
     expect(outcome.run.status).toBe("completed");
   });
 
+  it("failExpiredWait finalizes the WHOLE RUN as failed (architecture §4.1's lifecycle diagram: waiting -> [timeout, no resolving event] -> failed), not just the step trace", async () => {
+    const { store, engine } = await setup();
+    const workflow = fixtureWorkflow({ execution: { type: "workflow", steps: [{ id: "wait_step", uses: "wait.for_signal", with: { name: "quote.received", correlationId: "corr1", timeout: "5s" } }, { id: "never_reached", uses: "test.echo" }] } });
+    await store.workflows.put(workflow);
+    const run = await engine.triggerRun({ workflow, trigger: fixtureTrigger(), inputs: {} });
+    const waiting = await engine.executeRun(run.runId);
+    expect(waiting.status).toBe("waiting");
+
+    const past = new Date(Date.now() + 10_000); // "now" 10s after entry — past the 5s timeout
+    const expired = await engine.getExpiredWaits(past);
+    expect(expired.map((e) => e.stepId)).toContain("wait_step");
+
+    const outcome = await engine.failExpiredWait(run.runId, "wait_step");
+    expect(outcome.kind).toBe("resumed");
+    if (outcome.kind !== "resumed") throw new Error("unreachable");
+    expect(outcome.run.status).toBe("failed"); // the RUN, not just the step
+    expect(outcome.run.error).toMatch(/expired/i);
+    expect(outcome.run.endedAt).toBeTruthy();
+    expect(outcome.run.snapshot.capturedAt).not.toBe(""); // finalization captured the snapshot
+    expect(outcome.run.trace.find((t) => t.stepId === "never_reached")).toBeUndefined(); // never dispatched
+
+    // A resolving signal arriving after expiry finds nothing left to resume.
+    const lateSignal = await engine.resumeBySignal({ id: "sig1", name: "quote.received", correlationId: "corr1", payload: {}, receivedAt: new Date().toISOString() });
+    expect(lateSignal.kind).toBe("unmatched");
+  });
+
   it("continues correctly through an if/then branch chosen at the wait step itself", async () => {
     const { store, engine } = await setup();
     // Both branches explicitly `next: "done"` to a shared join step — this
