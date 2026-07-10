@@ -1,9 +1,9 @@
 // browser.goto — spec §15.3 Browser group. The one browser.* block that
 // originates a NEW navigation to a caller-resolved URL, so it's one of the
 // egress-allowlist chokepoints (architecture §4.6 boundary note / ADR-09)
-// alongside http.request/http.download/web.read — the other 9 browser.*
-// blocks act on the already-navigated page for this run and don't
-// independently resolve a new origin.
+// alongside http.request/http.download/http.health_check/web.read — the
+// other 9 browser.* blocks act on the already-navigated page for this run
+// and don't independently resolve a new origin.
 import { z } from "zod";
 import { defineBlock } from "../lib/define-block.js";
 import { checkEgressAllowed } from "../lib/egress.js";

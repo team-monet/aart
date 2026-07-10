@@ -21,6 +21,7 @@
     "@aart/expr": "workspace:*",
     "@aart/types": "workspace:*",
     "playwright": "1.61.1",
+    "yaml": "2.8.1",
     "zod": "4.4.3"
   },
   "devDependencies": {
