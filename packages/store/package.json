@@ -1,0 +1,27 @@
+{
+  "name": "@aart/store",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "AartStore interface + fs adapter + migration framework + adapter-conformance suite + shared structured logger (architecture §5, §16). SQLite/Postgres adapters are Wave-1 scope (S2/S9) and live in packages/store/src/adapters/{sqlite,postgres}/** as a declared carve-out.",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc -b"
+  },
+  "dependencies": {
+    "@aart/types": "workspace:*",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "typescript": "5.9.3",
+    "vitest": "4.1.10"
+  }
+}

@@ -1,0 +1,292 @@
+// AartStore — architecture §5 (§28.3-anchored). 16 members (spec §28.3's 8
+// run-data members + 8 architecture-introduced control-plane members) plus
+// the cross-cutting `transact()` unit-of-work method (architecture §5.8).
+//
+// Neither spec nor architecture gives explicit method signatures for the
+// per-member sub-interfaces below (spec §28.3 gives one-line prose
+// contracts; architecture §5.3 gives SQL columns) — designing these method
+// shapes is this module's own job as the S0-frozen starting interface every
+// adapter (this package's fs adapter, and Wave-1's SQLite/Postgres
+// adapters) implements and every consuming package (S1 engine, S2 server,
+// S4 governance, S6 evidence, S7 registry) builds against. Kept
+// deliberately small and consistent (get/put/list plus the few query shapes
+// actually implied by how each store is used elsewhere in both docs) rather
+// than exhaustive — a Wave-1 session that needs one more query method adds
+// it through the amendment protocol (plan §7), which is the intended path,
+// not a sign this interface was designed wrong.
+import type {
+  Artifact,
+  ApprovalTask,
+  Correction,
+  Deployment,
+  Environment,
+  EvalExample,
+  EvalRun,
+  EvalSuite,
+  PackManifest,
+  PromptRegistryEntry,
+  RejectedTrigger,
+  RunRecord,
+  RunStatus,
+  Schedule,
+  SchemaRegistryEntry,
+  Signal,
+  StandingApproval,
+  WaitCondition,
+  Workflow,
+} from "@aart/types";
+
+// ---------------------------------------------------------------------------
+// 8 run-data members — spec §28.3
+// ---------------------------------------------------------------------------
+
+export interface WorkflowStore {
+  get(workflowId: string, version: string): Promise<Workflow | undefined>;
+  /** The latest (highest-`approval`-precedence-agnostic — just most-recently-put) version for a workflowId, if any. Convenience over listVersions + get; adapters may implement it however is natural for their storage model. */
+  getLatest(workflowId: string): Promise<Workflow | undefined>;
+  put(workflow: Workflow): Promise<void>;
+  listVersions(workflowId: string): Promise<string[]>;
+  /** Every known workflowId (each with at least one version stored). */
+  listWorkflowIds(): Promise<string[]>;
+}
+
+export interface RunStore {
+  get(runId: string): Promise<RunRecord | undefined>;
+  put(run: RunRecord): Promise<void>;
+  list(filter?: { status?: RunStatus; workflowId?: string }): Promise<RunRecord[]>;
+  /**
+   * The exactly-once resume dedupe ledger (architecture §4.4.2): has this
+   * exact key — `(runId, waitStepId, signal.name + signal.correlationId)`
+   * for signal-matched resume, or an equivalent caller-constructed key for
+   * scheduler-tick/direct-lookup resume (architecture §4.4.2's "scope of
+   * the atomic-claim rule" note: all three mechanisms, not just
+   * signal-matched) — already been recorded consumed for this run?
+   */
+  hasDedupeKey(runId: string, dedupeKey: string): Promise<boolean>;
+  /**
+   * Records a dedupe key as consumed. Callers are expected to call this
+   * together with `put()` inside the same `AartStore.transact()` call
+   * (architecture §5.8) — the fs adapter co-locates a run's dedupe-consumed
+   * set inside the same on-disk file as its RunRecord (see
+   * adapters/fs/runs.ts), so staging both writes through the same
+   * transaction buffer coalesces them into one atomic write-temp-then-
+   * rename, exactly satisfying architecture §4.4.2's "dedupe must be
+   * store-transactional or the exactly-once guarantee is fiction."
+   */
+  recordDedupeKey(runId: string, dedupeKey: string): Promise<void>;
+}
+
+export interface WaitStore {
+  get(runId: string, stepId: string): Promise<WaitCondition | undefined>;
+  put(runId: string, stepId: string, wait: WaitCondition, createdAt: string): Promise<void>;
+  delete(runId: string, stepId: string): Promise<void>;
+  list(): Promise<Array<{ runId: string; stepId: string; wait: WaitCondition; createdAt: string }>>;
+  /**
+   * The engine-owned query architecture §4.4.3/§4.7 names explicitly:
+   * `getDueWaits(now)` — every `timer`-type wait (and poll-mode
+   * `external_job` wait) whose deadline has passed, for S2's scheduler
+   * ticker to call. S1 exports the wrapping function; this is the store
+   * primitive it's built on.
+   */
+  listDue(now: string): Promise<Array<{ runId: string; stepId: string; wait: WaitCondition }>>;
+}
+
+export interface SignalStore {
+  /**
+   * Appends the durable, append-only audit record (architecture §5.2:
+   * `signals/<correlationId>__<receivedAt>.json`). Deliberately NOT staged
+   * by `transact()` (see AartStore.transact's own doc comment) — this
+   * write always lands immediately, matching the fs adapter's documented
+   * non-atomic gap (architecture §5.8).
+   */
+  append(signal: Signal): Promise<void>;
+  /** The check-at-creation lookup architecture §4.4/§5.6 requires: an unconsumed Signal matching (name, correlationId), if one already arrived before its wait was created. */
+  findUnconsumedMatch(name: string, correlationId: string): Promise<Signal | undefined>;
+  /** Marks the audit copy consumed — see `append`'s doc comment on the same non-atomicity. */
+  markConsumed(signalId: string): Promise<void>;
+  list(): Promise<Signal[]>;
+}
+
+export interface ArtifactStore {
+  put(artifact: Artifact, bytes: Uint8Array): Promise<void>;
+  getMetadata(artifactId: string): Promise<Artifact | undefined>;
+  getBytes(artifactId: string): Promise<Uint8Array | undefined>;
+  listByRun(runId: string): Promise<Artifact[]>;
+}
+
+export interface ApprovalStore {
+  get(id: string): Promise<ApprovalTask | undefined>;
+  put(task: ApprovalTask): Promise<void>;
+  list(filter?: { runId?: string; status?: ApprovalTask["status"] }): Promise<ApprovalTask[]>;
+}
+
+export interface CorrectionStore {
+  put(correction: Correction): Promise<void>;
+  list(filter?: { runId?: string; stepId?: string }): Promise<Correction[]>;
+}
+
+export interface EvalStore {
+  putSuite(suite: EvalSuite): Promise<void>;
+  getSuite(id: string): Promise<EvalSuite | undefined>;
+  listSuites(): Promise<EvalSuite[]>;
+  putExample(example: EvalExample): Promise<void>;
+  listExamples(suiteId: string): Promise<EvalExample[]>;
+  putRun(run: EvalRun): Promise<void>;
+  listRuns(filter?: { suiteId?: string; workflowId?: string }): Promise<EvalRun[]>;
+}
+
+// ---------------------------------------------------------------------------
+// 8 architecture-introduced control-plane members — architecture §5,
+// FLAGGED DIVERGENCE from spec §28.3 (which has 8 members total, not 16).
+// ---------------------------------------------------------------------------
+
+export interface DeploymentStore {
+  get(id: string): Promise<Deployment | undefined>;
+  put(deployment: Deployment): Promise<void>;
+  list(filter?: { environmentId?: string; workflowId?: string }): Promise<Deployment[]>;
+}
+
+export interface EnvironmentStore {
+  /** Architecture §5.3's SQL table primary-keys on `id`; architecture §5's one-line contract states "keyed by name" — both are real, so both lookups are exposed rather than picking one over the other. */
+  get(id: string): Promise<Environment | undefined>;
+  getByName(name: string): Promise<Environment | undefined>;
+  put(environment: Environment): Promise<void>;
+  list(): Promise<Environment[]>;
+}
+
+export interface ScheduleStore {
+  get(id: string): Promise<Schedule | undefined>;
+  put(schedule: Schedule): Promise<void>;
+  list(filter?: { workflowId?: string; paused?: boolean }): Promise<Schedule[]>;
+}
+
+export interface PromptRegistryStore {
+  get(name: string, version: string): Promise<PromptRegistryEntry | undefined>;
+  put(entry: PromptRegistryEntry): Promise<void>;
+  listVersions(name: string): Promise<string[]>;
+}
+
+export interface SchemaRegistryStore {
+  get(name: string, version: string): Promise<SchemaRegistryEntry | undefined>;
+  put(entry: SchemaRegistryEntry): Promise<void>;
+  listVersions(name: string): Promise<string[]>;
+}
+
+export interface PackManifestStore {
+  get(name: string, version: string): Promise<PackManifest | undefined>;
+  put(manifest: PackManifest): Promise<void>;
+  listVersions(name: string): Promise<string[]>;
+}
+
+export interface RejectedTriggerStore {
+  append(rejected: RejectedTrigger): Promise<void>;
+  list(filter?: { since?: string; reason?: RejectedTrigger["reason"] }): Promise<RejectedTrigger[]>;
+}
+
+export interface StandingApprovalStore {
+  get(id: string): Promise<StandingApproval | undefined>;
+  put(approval: StandingApproval): Promise<void>;
+  list(): Promise<StandingApproval[]>;
+}
+
+// ---------------------------------------------------------------------------
+// job_queue — architecture §5.3/§4.7. Explicitly NOT one of AartStore's 16
+// members ("engine/worker-internal plumbing... an implementation detail
+// behind @aart/store's claim/release methods", architecture §5.3). Its
+// SHAPE (including lease_expires_at/reclaim_count) is S0 scope per this
+// session's DoD; the actual claim-race-safety/reclaim-sweep/graceful-
+// shutdown BUSINESS LOGIC on top of these primitives is Wave-1 scope (S1's
+// dispatch/claim path, S2's worker liveness — architecture §4.7).
+// ---------------------------------------------------------------------------
+
+export interface JobQueueEntry {
+  runId: string;
+  claimedBy: string | null;
+  claimedAt: string | null;
+  priority: number;
+  leaseExpiresAt: string | null;
+  reclaimCount: number;
+}
+
+export interface JobQueueStore {
+  enqueue(runId: string, priority?: number): Promise<void>;
+  get(runId: string): Promise<JobQueueEntry | undefined>;
+  /** Every currently-claimable entry: never claimed, or claimed with an expired lease. Does NOT itself claim anything (no atomic compare-and-set) — that race-safe claim step is Wave-1's to build (fs is single-process, so ADR-05's "trivial for fs" note applies; a real claim primitive matters starting with the SQLite/Postgres adapters). */
+  listClaimable(now: string): Promise<JobQueueEntry[]>;
+  setClaim(runId: string, claimedBy: string, leaseExpiresAt: string): Promise<void>;
+  renewLease(runId: string, leaseExpiresAt: string): Promise<void>;
+  release(runId: string): Promise<void>;
+  incrementReclaimCount(runId: string): Promise<number>;
+  remove(runId: string): Promise<void>;
+}
+
+// ---------------------------------------------------------------------------
+// idempotency_ledger — architecture §4.2/§5.7. A dedicated table/collection,
+// deliberately not folded into step_traces (a resolved key must be
+// checkable before that attempt's StepTrace row exists). Also not one of
+// AartStore's 16 spec/architecture-enumerated members, for the same
+// "engine-owned mechanism, store-internal plumbing" reason as job_queue.
+// ---------------------------------------------------------------------------
+
+export interface IdempotencyLedgerEntry {
+  resolvedKey: string;
+  runId: string;
+  stepId: string;
+  recordedOutput: unknown;
+  createdAt: string;
+}
+
+export interface IdempotencyLedgerStore {
+  get(resolvedKey: string): Promise<IdempotencyLedgerEntry | undefined>;
+  put(entry: IdempotencyLedgerEntry): Promise<void>;
+}
+
+// ---------------------------------------------------------------------------
+// AartStore — the full interface. 16 members (spec's 8 run-data + this
+// architecture's 8 control-plane), `transact()`, plus the two store-internal
+// (non-counted) plumbing members above.
+// ---------------------------------------------------------------------------
+
+export interface AartStore {
+  // 8 run-data members — spec §28.3, verbatim member names
+  workflows: WorkflowStore;
+  runs: RunStore;
+  waits: WaitStore;
+  signals: SignalStore;
+  artifacts: ArtifactStore;
+  approvals: ApprovalStore;
+  corrections: CorrectionStore;
+  evals: EvalStore;
+  // 8 control-plane members — architecture-introduced, architecture §5
+  deployments: DeploymentStore;
+  environments: EnvironmentStore;
+  schedules: ScheduleStore;
+  promptRegistry: PromptRegistryStore;
+  schemaRegistry: SchemaRegistryStore;
+  packManifests: PackManifestStore;
+  rejectedTriggers: RejectedTriggerStore;
+  standingApprovals: StandingApprovalStore;
+  // store-internal plumbing — not counted among the 16 (architecture §5.3/§5.7)
+  jobQueue: JobQueueStore;
+  idempotencyLedger: IdempotencyLedgerStore;
+  /**
+   * Cross-cutting unit-of-work method (architecture §5.8). Every read/write
+   * performed through the `tx` view passed to `fn` either all commit
+   * together or all roll back together — this is what makes architecture
+   * §4.4.2's "dedupe-consumed + run-state-transition in a single store
+   * transaction" claim implementable.
+   *
+   * SQLite/Postgres adapters implement this with a real BEGIN/COMMIT/
+   * ROLLBACK. The fs adapter has no native cross-file transaction
+   * primitive (architecture §5.8) — see adapters/fs/index.ts for its
+   * concrete mechanism (buffer every write issued through `tx` in memory;
+   * flush each touched file atomically via write-temp-then-rename only if
+   * `fn` resolves; discard everything if `fn` throws) and, critically, its
+   * documented non-atomic gap: `tx.signals` writes are NOT staged — they
+   * always land immediately, independent of whether the rest of the
+   * transaction ultimately commits. This is a deliberate, accepted gap for
+   * local dev (fs adapter only), not an oversight — see the comment on
+   * SignalStore.append/markConsumed above and adapters/fs/index.ts.
+   */
+  transact<T>(fn: (tx: AartStore) => Promise<T>): Promise<T>;
+}
