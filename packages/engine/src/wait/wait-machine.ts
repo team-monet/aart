@@ -1,0 +1,335 @@
+// The wait/resume machine (architecture §4.4) — the durable-execution core.
+// Implements the full lifecycle: enterWait (persist-with-early-arrival-check,
+// architecture §4.4 step 3) and all three consolidated resume mechanisms
+// (§4.4.1: signal-matched / scheduler-tick / direct-lookup), each going
+// through the SAME atomic claim-and-transition primitive (§4.4.2's
+// "scope of the atomic-claim rule — all three mechanisms, not just
+// signal-matched").
+import type { AartStore } from "@aart/store";
+import type { RunRecord, Signal, StepTrace, WaitCondition } from "@aart/types";
+import { CorrelationError } from "@aart/types";
+import { applyRedaction } from "../redaction.js";
+import { assertSchemaVersionCompatible } from "../schema-version.js";
+import type { DueWait, ResumeMechanism, ResumeOutcome } from "../types.js";
+import { waitSignalCorrelation } from "./wait-blocks.js";
+
+export interface WaitMachineConfig {
+  store: AartStore;
+  redact: import("@aart/types").RedactFn;
+  now: () => Date;
+}
+
+/** Wraps an arbitrary resume payload into the `Record<string, unknown>` shape `StepTrace.outputs` requires (spec §19.2) — a payload that's already a plain object passes through; anything else (a primitive, an array, `undefined`) is wrapped under a `value` key rather than dropped. */
+function normalizePayloadToOutputs(payload: unknown): Record<string, unknown> {
+  if (payload !== null && typeof payload === "object" && !Array.isArray(payload)) {
+    return payload as Record<string, unknown>;
+  }
+  return { value: payload };
+}
+
+/** Finds the most recent `StepTrace` entry for `stepId` still in `status: "waiting"` — the entry `enterWait` pushed when this wait was first created, now being completed on resume. Throws (a genuine "how did we get here" condition, not a modeled `AartError`) if none is found — every non-immediately-resolved wait creates exactly one such entry, and `claimAndCompleteWait`'s dedupe check should already have short-circuited a second resume of the same step before this lookup ever runs on an already-completed entry. */
+function findWaitingTraceIndex(run: RunRecord, stepId: string): number {
+  for (let i = run.trace.length - 1; i >= 0; i--) {
+    const entry = run.trace[i]!;
+    if (entry.stepId === stepId && entry.status === "waiting") return i;
+  }
+  throw new Error(`No StepTrace with status "waiting" found for step "${stepId}" on run "${run.runId}" — cannot complete a wait that was never entered.`);
+}
+
+// ---------------------------------------------------------------------------
+// enterWait — architecture §4.4 steps 1-4
+// ---------------------------------------------------------------------------
+
+export interface EnterWaitOptions {
+  run: RunRecord;
+  stepId: string;
+  blockId: string;
+  resolvedInputs: Record<string, unknown>;
+  /** Already schema-version-stamped (architecture §4.7) — see `step-executor.ts`'s dispatch site. */
+  wait: WaitCondition;
+  resolvedSecretRefs: ReadonlySet<string>;
+}
+
+export interface EnterWaitResult {
+  run: RunRecord;
+  /** `true` if this run is now genuinely suspended (persisted `status: "waiting"`, a `WaitStore` row exists) and the caller (the step loop) must stop. `false` if the early-arrival check (architecture §4.4/§5.6) found an already-unconsumed matching `Signal` and resolved immediately — the caller should continue to the next step exactly as if this step had completed normally. */
+  suspended: boolean;
+}
+
+/**
+ * architecture §4.4 steps 1-4, including the early-arrival check (step 3):
+ * BEFORE persisting a new outstanding wait, checks `SignalStore` for an
+ * already-received, unconsumed match. Early-arrival is only meaningful for
+ * the four `WaitCondition` members that correlate against a `Signal` at all
+ * (`signal`/`webhook`/`queue`/`external_job`'s webhook subpath —
+ * `waitSignalCorrelation` returns `undefined` for `timer`/`manual`/`approval`,
+ * which skip the check entirely and always suspend).
+ */
+export async function enterWait(config: WaitMachineConfig, options: EnterWaitOptions): Promise<EnterWaitResult> {
+  const { run, stepId, blockId, resolvedInputs, wait, resolvedSecretRefs } = options;
+  const now = config.now();
+  const correlation = waitSignalCorrelation(wait);
+
+  if (correlation) {
+    const existingSignal = await config.store.signals.findUnconsumedMatch(correlation.name, correlation.correlationId);
+    if (existingSignal) {
+      // Early-arrival resolution — none of the wait bookkeeping below is
+      // ever persisted as outstanding; this step goes straight from
+      // "about to wait" to "completed" in one hop (architecture §4.4 step
+      // 3: "the wait resolves immediately... execution proceeds straight
+      // to step 8"). Marking the signal consumed is NOT staged through
+      // transact() — see SignalStore's own doc comment (types.ts) on this
+      // documented fs-adapter non-atomicity gap (architecture §5.8).
+      await config.store.signals.markConsumed(existingSignal.id);
+      const trace: StepTrace = {
+        seq: run.trace.length,
+        stepId,
+        block: blockId,
+        status: "completed",
+        inputs: resolvedInputs,
+        outputs: normalizePayloadToOutputs(existingSignal.payload),
+        startedAt: now.toISOString(),
+        endedAt: now.toISOString(),
+        durationMs: 0,
+      };
+      const updatedRun: RunRecord = { ...run, trace: [...run.trace, trace], updatedAt: now.toISOString() };
+      const redacted = applyRedaction(config.redact, updatedRun, resolvedSecretRefs);
+      await config.store.runs.put(redacted);
+      return { run: redacted, suspended: false };
+    }
+  }
+
+  // No early match (or this WaitCondition member never checks SignalStore
+  // at all) — persist the outstanding wait. `[DECISION]` NOT wrapped in
+  // `store.transact()`: unlike resume (which must atomically couple a
+  // dedupe-consume with a run-state transition, architecture §4.4.2), wait
+  // ENTRY has no analogous double-write race to close — the RunRecord put
+  // and the WaitStore put are two writes describing the SAME fact (this
+  // step is now waiting), and even under the fs adapter's non-transactional
+  // default a crash between them just means resume finds a RunRecord not
+  // yet reflecting "waiting" (safe: the run simply looks like it's still on
+  // the wait step, and re-entering the wait on a retry is idempotent — the
+  // early-arrival check above is unaffected by a partially-written prior
+  // attempt) or a WaitStore row with no matching RunRecord.waits entry
+  // (safe: nothing resumes a wait that was never durably recorded as
+  // "waiting" on the RunRecord side, so at worst this wait is never found
+  // by a resume attempt, which is the SAME failure shape as never having
+  // entered it in the first place — a clean, retryable gap, not a
+  // corruption). Using `transact()` anyway is still a reasonable batching
+  // choice; kept as two direct writes here for clarity that this path's
+  // correctness does not depend on atomicity the way resume's does.
+  const trace: StepTrace = {
+    seq: run.trace.length,
+    stepId,
+    block: blockId,
+    status: "waiting",
+    inputs: resolvedInputs,
+    startedAt: now.toISOString(),
+  };
+  const updatedRun: RunRecord = {
+    ...run,
+    status: "waiting",
+    waits: [...run.waits, wait],
+    trace: [...run.trace, trace],
+    updatedAt: now.toISOString(),
+  };
+  const redactedRun = applyRedaction(config.redact, updatedRun, resolvedSecretRefs);
+  const redactedWait = applyRedaction(config.redact, wait, resolvedSecretRefs);
+  await config.store.runs.put(redactedRun);
+  await config.store.waits.put(run.runId, stepId, redactedWait, now.toISOString());
+  return { run: redactedRun, suspended: true };
+}
+
+// ---------------------------------------------------------------------------
+// Resume — architecture §4.4 steps 6-9, §4.4.2's atomic claim (all three
+// mechanisms, per the "scope of the atomic-claim rule" note).
+// ---------------------------------------------------------------------------
+
+interface ClaimAndCompleteArgs {
+  runId: string;
+  stepId: string;
+  dedupeKey: string;
+  mechanism: ResumeMechanism;
+  outputs: Record<string, unknown>;
+  resolvedSecretRefs: ReadonlySet<string>;
+}
+
+/**
+ * The one atomic-claim primitive every resume mechanism funnels through
+ * (architecture §4.4.2's dedupe check + §4.4.2's "scope" extension to
+ * scheduler-tick/direct-lookup). Inside a single `store.transact()` call:
+ * dedupe-check → (if already consumed: no-op) → record dedupe key → delete
+ * the `WaitStore` row → complete the "waiting" `StepTrace` entry → set
+ * `RunRecord.status` back to `"running"` → persist. All of this commits
+ * together or none of it does (architecture §5.8) — "a crash between
+ * 'dedupe recorded' and 'run state advanced' cannot happen."
+ */
+async function claimAndCompleteWait(config: WaitMachineConfig, args: ClaimAndCompleteArgs): Promise<ResumeOutcome> {
+  const { runId, stepId, dedupeKey, mechanism, outputs, resolvedSecretRefs } = args;
+  const now = config.now();
+
+  return config.store.transact(async (tx) => {
+    const alreadyConsumed = await tx.runs.hasDedupeKey(runId, dedupeKey);
+    if (alreadyConsumed) {
+      return { kind: "duplicate", mechanism };
+    }
+    const run = await tx.runs.get(runId);
+    if (!run) {
+      return { kind: "unmatched", mechanism };
+    }
+    const wait = await tx.waits.get(runId, stepId);
+    if (!wait) {
+      // The WaitStore row is already gone. Distinguish "genuinely never
+      // existed for this (runId, stepId)" (unmatched) from "a concurrent
+      // resume already claimed and completed it" (duplicate — the second-
+      // line signal for the same outcome the dedupe-key check above is the
+      // PRIMARY guard for; this covers the race window an adapter without
+      // strict serializable isolation could expose between that check and
+      // this lookup) by checking whether a completed trace for this step
+      // already exists.
+      const alreadyCompleted = run.trace.some((t) => t.stepId === stepId && t.status === "completed");
+      return { kind: alreadyCompleted ? "duplicate" : "unmatched", mechanism };
+    }
+
+    assertSchemaVersionCompatible(run.schemaVersion, { runId, recordKind: "RunRecord" });
+    assertSchemaVersionCompatible(wait.schemaVersion, { runId, stepId, recordKind: "WaitCondition" });
+
+    await tx.runs.recordDedupeKey(runId, dedupeKey);
+    await tx.waits.delete(runId, stepId);
+
+    const traceIndex = findWaitingTraceIndex(run, stepId);
+    const waitingTrace = run.trace[traceIndex]!;
+    const startedAt = new Date(waitingTrace.startedAt).getTime();
+    const completedTrace: StepTrace = {
+      ...waitingTrace,
+      status: "completed",
+      outputs,
+      endedAt: now.toISOString(),
+      durationMs: Math.max(0, now.getTime() - startedAt),
+    };
+    const newTrace = [...run.trace];
+    newTrace[traceIndex] = completedTrace;
+
+    // `[DECISION]` `RunRecord.waits` is NOT pruned on resume — architecture
+    // §4.4 step 4 only ever says a WaitCondition "gets... appended" to it,
+    // with no removal instruction anywhere; treated here as an append-only
+    // HISTORY of every wait this run has entered (useful for a report to
+    // show the full "waited on X, then Y" sequence), not a "currently
+    // outstanding" set. The authoritative source for "is this run
+    // currently waiting, and on what" is `RunRecord.status` combined with
+    // `WaitStore` (which this function DOES correctly delete from, above)
+    // — `RunRecord.waits` doesn't need per-entry removal to stay correct
+    // for that purpose. This also sidesteps a real ambiguity: `WaitCondition`
+    // (spec §13.3) carries no `stepId` of its own, so two structurally-
+    // identical outstanding waits on different steps (e.g. two bare
+    // `{type: "manual"}` waits) would be indistinguishable by value alone
+    // for a filter-by-equality removal.
+    const updatedRun: RunRecord = {
+      ...run,
+      status: "running",
+      trace: newTrace,
+      updatedAt: now.toISOString(),
+    };
+    const redacted = applyRedaction(config.redact, updatedRun, resolvedSecretRefs);
+    await tx.runs.put(redacted);
+    return { kind: "resumed", run: redacted, mechanism };
+  });
+}
+
+/** **Signal-matched** resume (architecture §4.4.1 mechanism 1) — `signal`, `webhook`, `queue` fully, and `external_job`'s webhook sub-path (once whatever converted the provider's completion webhook into a `Signal` calls this with that `Signal`). Looks up the matching outstanding wait by `(name, correlationId)` across ALL waiting runs (architecture §4.4.2 step 1's "before runId is known" case) — architecture §4.4.2 step 2: zero matches is logged/inspectable, not a crash; more than one is a modeling error and fails loudly (`CorrelationError`). */
+export async function resumeBySignal(config: WaitMachineConfig, signal: Signal, resolvedSecretRefs: ReadonlySet<string> = new Set()): Promise<ResumeOutcome> {
+  const allWaits = await config.store.waits.list();
+  const matches = allWaits.filter((entry) => {
+    const correlation = waitSignalCorrelation(entry.wait);
+    return correlation !== undefined && correlation.name === signal.name && correlation.correlationId === signal.correlationId;
+  });
+
+  if (matches.length === 0) {
+    return { kind: "unmatched", mechanism: "signal-matched" };
+  }
+  if (matches.length > 1) {
+    throw new CorrelationError({
+      message: `Signal "${signal.name}"/"${signal.correlationId}" matched ${matches.length} outstanding waits — correlationIds must be unique per outstanding wait (architecture §4.4.2 step 2). Matches: ${matches.map((m) => `${m.runId}/${m.stepId}`).join(", ")}.`,
+      detail: { kind: "multipleWaitMatches", signalName: signal.name, correlationId: signal.correlationId, matches: matches.map((m) => ({ runId: m.runId, stepId: m.stepId })) },
+    });
+  }
+
+  const match = matches[0]!;
+  const dedupeKey = `${match.stepId}:signal:${signal.name}:${signal.correlationId}`;
+  return claimAndCompleteWait(config, {
+    runId: match.runId,
+    stepId: match.stepId,
+    dedupeKey,
+    mechanism: "signal-matched",
+    outputs: normalizePayloadToOutputs(signal.payload),
+    resolvedSecretRefs,
+  });
+}
+
+/** **Direct-lookup** resume (architecture §4.4.1 mechanism 3) for a `manual` wait — `aart_resume_run` with just a `runId`+`stepId`, no signal name needed. */
+export async function resumeManual(config: WaitMachineConfig, runId: string, stepId: string, payload: unknown = {}, resolvedSecretRefs: ReadonlySet<string> = new Set()): Promise<ResumeOutcome> {
+  return claimAndCompleteWait(config, {
+    runId,
+    stepId,
+    dedupeKey: `${stepId}:manual`,
+    mechanism: "direct-lookup",
+    outputs: normalizePayloadToOutputs(payload),
+    resolvedSecretRefs,
+  });
+}
+
+/** **Direct-lookup** resume (architecture §4.4.1 mechanism 3) for an `approval` wait — both authorship paths (CLI/dashboard human decision, and PR-merge-as-approval, architecture §7.2) write directly to `ApprovalStore` then call this, never a `Signal` (architecture §4.4.1's explicit statement: "approval... direct ApprovalStore write, either authorship path"). `task.status` must already be terminal (`approved`/`rejected`/`needs_changes`/`expired`) — the caller (governance's approval-write path, S4) is responsible for that state transition; this function only handles the RUN-side resume once it's happened. */
+export async function resumeApproval(config: WaitMachineConfig, runId: string, stepId: string, task: { id: string; status: string; decision?: unknown; reviewer?: string }, resolvedSecretRefs: ReadonlySet<string> = new Set()): Promise<ResumeOutcome> {
+  return claimAndCompleteWait(config, {
+    runId,
+    stepId,
+    dedupeKey: `${stepId}:approval:${task.id}`,
+    mechanism: "direct-lookup",
+    outputs: { status: task.status, decision: task.decision, reviewer: task.reviewer },
+    resolvedSecretRefs,
+  });
+}
+
+/** **Scheduler-tick** resume (architecture §4.4.1 mechanism 2) for a `timer` wait that `getDueWaits` reported as due. S2's ticker calls `getDueWaits(now)` on its interval, then this function for each due entry. */
+export async function resumeTimerWait(config: WaitMachineConfig, runId: string, stepId: string, resolvedSecretRefs: ReadonlySet<string> = new Set()): Promise<ResumeOutcome> {
+  const now = config.now();
+  return claimAndCompleteWait(config, {
+    runId,
+    stepId,
+    dedupeKey: `${stepId}:timer`,
+    mechanism: "scheduler-tick",
+    outputs: { resumedAt: now.toISOString() },
+    resolvedSecretRefs,
+  });
+}
+
+/** **Scheduler-tick** resume (architecture §4.4.1 mechanism 2) for `external_job`'s poll sub-path — called by S2's poll mechanism (spec §21.2/architecture §6.1's `poll` trigger, shared scheduler-ticker subsystem) once its polling determines the job is complete. Labeled `scheduler-tick` per architecture §4.4.1's explicit classification of this sub-path, even though the call shape is a direct claim (there is no `Signal`/`SignalStore` involvement for poll-mode `external_job` — see `wait/wait-blocks.ts`'s doc comment and `listExternalJobWaits` below). */
+export async function resumeExternalJobResult(config: WaitMachineConfig, runId: string, stepId: string, resultPayload: unknown, resolvedSecretRefs: ReadonlySet<string> = new Set()): Promise<ResumeOutcome> {
+  return claimAndCompleteWait(config, {
+    runId,
+    stepId,
+    dedupeKey: `${stepId}:external_job`,
+    mechanism: "scheduler-tick",
+    outputs: normalizePayloadToOutputs(resultPayload),
+    resolvedSecretRefs,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// The scheduler-ticker seam (architecture §4.4.3/§4.7) — S1 exports this,
+// S2 owns and runs the interval loop that calls it. See SEAMS.md.
+// ---------------------------------------------------------------------------
+
+/** Every `timer`-type wait whose `resumeAt` has passed, for S2's scheduler ticker to sweep on its interval and resolve via `resumeTimerWait`. A thin, documented wrapper over `WaitStore.listDue` (architecture §4.4.3) — S1's responsibility "ends at 'here is a queryable, correctly-claimable function over WaitStore.'" */
+export async function getDueWaits(store: AartStore, now: Date): Promise<DueWait[]> {
+  const due = await store.waits.listDue(now.toISOString());
+  return due
+    .filter((entry): entry is typeof entry & { wait: Extract<WaitCondition, { type: "timer" }> } => entry.wait.type === "timer")
+    .map((entry) => ({ runId: entry.runId, stepId: entry.stepId, wait: entry.wait }));
+}
+
+/** Every currently-outstanding `external_job` wait — for S2's poll mechanism to sweep on its own interval (no fixed deadline to filter by, unlike `timer` — see `DueWait`'s doc comment in types.ts) and, for each, poll the named provider's job-status endpoint, calling `resumeExternalJobResult` once a poll reports completion. */
+export async function listExternalJobWaits(store: AartStore): Promise<Array<{ runId: string; stepId: string; wait: Extract<WaitCondition, { type: "external_job" }> }>> {
+  const all = await store.waits.list();
+  return all.filter((entry): entry is typeof entry & { wait: Extract<WaitCondition, { type: "external_job" }> } => entry.wait.type === "external_job");
+}

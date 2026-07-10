@@ -1,9 +1,9 @@
 {
   "name": "@aart/engine",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "AART engine package. Stub scaffolded by S0 (Wave 0) — real implementation is Wave-1 scope; see aart_implementation_plan_v1.md for session ownership.",
+  "description": "AART run lifecycle state machine, step executor, and durable wait/resume machine (architecture §4). The architectural core of the runtime — ADR-02's entire custom-build burden.",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
@@ -16,7 +16,15 @@
   "scripts": {
     "build": "tsc -b"
   },
+  "dependencies": {
+    "@aart/expr": "workspace:*",
+    "@aart/store": "workspace:*",
+    "@aart/types": "workspace:*",
+    "isolated-vm": "7.0.0",
+    "zod": "4.4.3"
+  },
   "devDependencies": {
-    "typescript": "5.9.3"
+    "typescript": "5.9.3",
+    "vitest": "4.1.10"
   }
 }
