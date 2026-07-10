@@ -227,13 +227,31 @@ steps:
   },
 ];
 
+/** Whole-word tokens only (lowercased) — `.includes()` substring matching alone would let a short token like "on" false-positive-match inside an unrelated word like "python". */
+function wordSet(text: string): Set<string> {
+  return new Set(text.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean));
+}
+
+// Common connector words excluded from the token-overlap signal — two
+// unrelated phrases both containing "the"/"is"/"for" is noise, not real
+// conceptual overlap. Deliberately small (this is lexical matching over a
+// small hand-curated phrase list, architecture §10.5's own stated scope,
+// not a general-purpose NLP stopword list).
+export const STOPWORDS = new Set([
+  "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
+  "in", "on", "at", "to", "of", "for", "and", "or", "but", "with", "from",
+  "this", "that", "these", "those", "it", "its", "as", "by", "so", "if",
+]);
+
 function phraseScore(phrase: string, request: string): number {
   const p = phrase.toLowerCase().trim();
   const r = request.toLowerCase().trim();
   if (p === r) return 100;
   if (r.includes(p) || p.includes(r)) return 70;
-  const phraseTokens = p.split(/\s+/).filter(Boolean);
-  const overlap = phraseTokens.filter((t) => r.includes(t)).length;
+  const requestWords = wordSet(r);
+  const phraseTokens = p.split(/\s+/).filter((t) => t.length > 2 && !STOPWORDS.has(t));
+  if (phraseTokens.length === 0) return 0;
+  const overlap = phraseTokens.filter((t) => requestWords.has(t)).length;
   return overlap > 0 ? (overlap / phraseTokens.length) * 40 : 0;
 }
 

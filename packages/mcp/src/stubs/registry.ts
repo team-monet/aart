@@ -15,6 +15,12 @@
 // for anything more than lexical matching in the discovery tools either.
 import type { BlockCatalogEntry, BlockSearchResult, RegistryPort } from "../types.js";
 import { NATIVE_ALIASES } from "../catalog.js";
+import { STOPWORDS } from "../recipes.js";
+
+/** Whole-word tokens only — plain `.includes()` on short tokens would false-positive-match inside an unrelated word (e.g. "on" inside "python"). */
+function wordSet(text: string): Set<string> {
+  return new Set(text.toLowerCase().split(/[^a-z0-9.]+/).filter(Boolean));
+}
 
 function score(entry: BlockCatalogEntry, query: string, category?: string): number {
   if (category && entry.manifest.category !== category) return 0;
@@ -39,8 +45,13 @@ function score(entry: BlockCatalogEntry, query: string, category?: string): numb
 
   // token-overlap fallback — a query like "click a button" should still
   // surface browser.click via shared words even without a substring hit.
-  const queryTokens = q.split(/\s+/).filter(Boolean);
-  const overlap = queryTokens.filter((t) => description.includes(t) || id.includes(t)).length;
+  // Whole-word matching (wordSet), not raw .includes(), and stopword-length
+  // tokens excluded — same false-positive class recipes.ts's phraseScore
+  // guards against (a short token like "on" must not match inside "python").
+  const descriptionWords = wordSet(description);
+  const idWords = wordSet(id.replace(/\./g, " "));
+  const queryTokens = q.split(/\s+/).filter((t) => t.length > 2 && !STOPWORDS.has(t));
+  const overlap = queryTokens.filter((t) => descriptionWords.has(t) || idWords.has(t)).length;
   if (overlap > 0) best = Math.max(best, 10 + overlap * 5);
 
   return best;

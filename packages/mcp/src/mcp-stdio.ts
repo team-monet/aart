@@ -32,7 +32,7 @@ export interface McpStdioHandle {
   close(): Promise<void>;
 }
 
-export async function startMcpStdioServer(ctx: AartContext): Promise<McpStdioHandle> {
+export async function startMcpStdioServer(ctx: AartContext, transportOverride?: StdioServerTransport): Promise<McpStdioHandle> {
   const core = createMcpServer(ctx);
   const mcpServer = new McpServer({ name: "aart", version: "0.1.0" });
 
@@ -48,7 +48,11 @@ export async function startMcpStdioServer(ctx: AartContext): Promise<McpStdioHan
     });
   }
 
-  const transport = new StdioServerTransport();
+  // Real `aart mcp` runtime use always wants the default (real process
+  // stdin/stdout). Tests inject a fake transport instead — connecting a
+  // second real StdioServerTransport per test would fight over the actual
+  // process stdio.
+  const transport = transportOverride ?? new StdioServerTransport();
   await mcpServer.connect(transport);
 
   return {

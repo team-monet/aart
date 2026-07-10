@@ -38,7 +38,18 @@ export async function validateWorkflowHandler(ctx: AartContext, input: ValidateW
       workflow = compileWorkflowInput(input.workflow);
     } catch (err) {
       if (err instanceof YamlCompileError) {
-        return { ok: false, error: err.message, findings: (err.issues ?? []).map((i) => ({ class: "schema", path: "", message: i, severity: "error" })) };
+        // A compile failure (can't even reach a Workflow shape to check
+        // against the schema) is itself a class-1 (schema) validation
+        // finding — always at least one, falling back to the top-level
+        // compile error message when the compiler didn't itself produce a
+        // per-field issues[] breakdown (e.g. a missing top-level "steps").
+        const issues = err.issues.length > 0 ? err.issues : [err.message];
+        return {
+          ok: false,
+          valid: false,
+          error: err.message,
+          findings: issues.map((i) => ({ class: "schema", path: "", message: i, severity: "error" })),
+        };
       }
       throw err;
     }
