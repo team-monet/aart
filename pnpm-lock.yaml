@@ -59,9 +59,6 @@ importers:
       isolated-vm:
         specifier: 7.0.0
         version: 7.0.0
-      zod:
-        specifier: 4.4.3
-        version: 4.4.3
     devDependencies:
       typescript:
         specifier: 5.9.3
