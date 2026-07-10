@@ -28,6 +28,7 @@
 import type { AartStore } from "@aart/store";
 import type {
   ApprovalState,
+  ApprovalTask,
   Correction,
   EvalExample,
   EvalRun,
@@ -73,6 +74,20 @@ export interface TriggerRunInput {
   approvalMode?: RunRecord["approvalMode"];
 }
 export type TriggerRunFn = (input: TriggerRunInput) => Promise<RunRecord>;
+
+// S1 Seam 1/4 — resumeApproval. "approve human tasks" (§35.2) is the one
+// dashboard write action that must both update the ApprovalTask AND
+// actually resume the run waiting on it — a task-only update with no
+// effect on the run would silently strand the wait. Bound single-arg form
+// (matches `engine.resumeApproval(runId, stepId, task)`, the continuation-
+// capable version SEAMS.md says production callers should use, same
+// reasoning as triggerRun above).
+export type ResumeMechanism = "signal_matched" | "scheduler_tick" | "direct_lookup";
+export type ResumeOutcome =
+  | { kind: "resumed"; run: RunRecord; mechanism: ResumeMechanism }
+  | { kind: "duplicate"; mechanism: ResumeMechanism }
+  | { kind: "unmatched"; mechanism: ResumeMechanism };
+export type ResumeApprovalFn = (runId: string, stepId: string, task: { id: string; status: string; decision?: unknown; reviewer?: string }) => Promise<ResumeOutcome>;
 
 // ---------------------------------------------------------------------------
 // S4 @aart/governance seam — SEAMS.md "computePromotionState /
@@ -236,6 +251,15 @@ export type CreateEvalSuiteFn = (
   input: { name: string; description?: string; scorer: Scorer; examples?: EvalExample[]; tags?: string[] },
 ) => Promise<EvalSuite>;
 
+/** The ApprovalTask-record half of "approve human tasks" — trivial store glue (fetch, set status/reviewer/decision/decidedAt, persist), no policy logic, so — like `createEvalSuite` — this package's own real implementation rather than a swap-at-merge stub. The run-resuming half is the real seam (`resumeApproval` above); this only updates the task's own record. */
+export type DecideApprovalTaskFn = (
+  store: AartStore,
+  taskId: string,
+  status: "approved" | "rejected" | "needs_changes",
+  reviewer: string,
+  decision?: unknown,
+) => Promise<ApprovalTask>;
+
 // ---------------------------------------------------------------------------
 // The DI container every views/actions handler in this package receives.
 // ---------------------------------------------------------------------------
@@ -248,6 +272,8 @@ export interface DashboardDeps {
   listFlaggedRuns: ListFlaggedRunsFn;
 
   triggerRun: TriggerRunFn;
+  resumeApproval: ResumeApprovalFn;
+  decideApprovalTask: DecideApprovalTaskFn;
 
   computeApprovalState: ComputeApprovalStateFn;
   evaluatePromotionForEnvironment: EvaluatePromotionForEnvironmentFn;

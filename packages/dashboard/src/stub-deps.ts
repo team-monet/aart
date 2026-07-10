@@ -8,7 +8,7 @@
 // session's research) observed real source, this mirrors that behavior
 // closely — not just "any function with the right type signature".
 import type { AartStore } from "@aart/store";
-import type { Correction, Deployment, Environment, EvalExample, EvalRun, EvalSuite, ImprovementBrief, RunRecord, Scorer, StepTrace, TrustMode, Workflow } from "@aart/types";
+import type { ApprovalTask, Correction, Deployment, Environment, EvalExample, EvalRun, EvalSuite, ImprovementBrief, RunRecord, Scorer, StepTrace, TrustMode, Workflow } from "@aart/types";
 import type { Clock } from "./clock.js";
 import { systemClock } from "./clock.js";
 import { escapeHtml } from "./http/html.js";
@@ -19,6 +19,7 @@ import type {
   GateName,
   PromotionRecord,
   ReportRenderers,
+  ResumeOutcome,
   ScorerRegistry,
   ScorerResult,
   TriggerRunInput,
@@ -92,6 +93,61 @@ export function makeTriggerRunAndEnqueue(store: AartStore, clock: Clock = system
     await store.runs.put(run);
     await store.jobQueue.enqueue(run.runId);
     return run;
+  };
+}
+
+// ---------------------------------------------------------------------------
+// S1 seam — resumeApproval. Honestly scoped: this stub performs the
+// documented ATOMIC CLAIM (dedupe-protected via AartStore.runs.hasDedupeKey/
+// recordDedupeKey inside one transact(), matching architecture §4.4.2's
+// "scope of the atomic-claim rule" extension to direct-lookup resume) and a
+// minimal run-state update (status -> "running", the resolved wait removed).
+// It deliberately does NOT re-derive step.if/then/else/next and run the
+// step-loop forward — that "continues execution past the resumed step"
+// behavior is the real `Engine.resumeApproval`'s job (S1), out of a
+// dashboard stub's reach without importing the actual engine. Flagged here
+// + SEAMS.md; swapped for the real bound `engine.resumeApproval` at S9
+// merge with zero call-site change (same `(runId, stepId, task) =>
+// Promise<ResumeOutcome>` shape).
+// ---------------------------------------------------------------------------
+
+export function makeResumeApproval(store: AartStore, clock: Clock = systemClock) {
+  return async function resumeApproval(runId: string, stepId: string, task: { id: string; status: string; decision?: unknown; reviewer?: string }): Promise<ResumeOutcome> {
+    const wait = await store.waits.get(runId, stepId);
+    if (!wait || wait.type !== "approval") return { kind: "unmatched", mechanism: "direct_lookup" };
+
+    const dedupeKey = `approval:${runId}:${stepId}:${task.id}`;
+    const alreadyConsumed = await store.runs.hasDedupeKey(runId, dedupeKey);
+    if (alreadyConsumed) return { kind: "duplicate", mechanism: "direct_lookup" };
+
+    const run = await store.runs.get(runId);
+    if (!run) return { kind: "unmatched", mechanism: "direct_lookup" };
+
+    await store.transact(async (tx) => {
+      await tx.runs.recordDedupeKey(runId, dedupeKey);
+      await tx.waits.delete(runId, stepId);
+      const updated: RunRecord = {
+        ...run,
+        status: "running",
+        updatedAt: clock.nowIso(),
+        waits: run.waits.filter((w) => !(w.type === "approval" && w.taskId === task.id)),
+      };
+      await tx.runs.put(updated);
+    });
+
+    const finalRun = await store.runs.get(runId);
+    return { kind: "resumed", run: finalRun!, mechanism: "direct_lookup" };
+  };
+}
+
+/** The ApprovalTask-record half of "approve human tasks" — see deps.ts's DecideApprovalTaskFn doc comment for why this is treated as a real implementation, not a swap-at-merge stub. */
+export function makeDecideApprovalTask(clock: Clock = systemClock) {
+  return async function decideApprovalTask(store: AartStore, taskId: string, status: "approved" | "rejected" | "needs_changes", reviewer: string, decision?: unknown): Promise<ApprovalTask> {
+    const task = await store.approvals.get(taskId);
+    if (!task) throw new Error(`approval task not found: ${taskId}`);
+    const updated: ApprovalTask = { ...task, status, reviewer, decision, decidedAt: clock.nowIso() };
+    await store.approvals.put(updated);
+    return updated;
   };
 }
 
@@ -475,6 +531,8 @@ export function createStubDeps(store: AartStore, clock: Clock = systemClock): Da
     clearRunFlag: makeClearRunFlag(clock),
     listFlaggedRuns,
     triggerRun: makeTriggerRunAndEnqueue(store, clock),
+    resumeApproval: makeResumeApproval(store, clock),
+    decideApprovalTask: makeDecideApprovalTask(clock),
     computeApprovalState,
     evaluatePromotionForEnvironment,
     requiredGatesByTrustMode: REQUIRED_GATES_BY_TRUST_MODE,

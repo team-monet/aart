@@ -182,6 +182,83 @@ describe("evaluatePromotionForEnvironment", () => {
   });
 });
 
+describe("resumeApproval", () => {
+  it("returns unmatched when there's no approval wait at (runId, stepId)", async () => {
+    const { store, deps, cleanup } = await createTestFixture();
+    try {
+      const run = makeRun({ runId: "run-noapproval", status: "waiting" });
+      await store.runs.put(run);
+      const result = await deps.resumeApproval("run-noapproval", "step1", { id: "task-1", status: "approved" });
+      expect(result).toEqual({ kind: "unmatched", mechanism: "direct_lookup" });
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it("resumes on first decision: deletes the wait, records the dedupe key, and sets the run running", async () => {
+    const { store, deps, cleanup } = await createTestFixture();
+    try {
+      const run = makeRun({ runId: "run-approve", status: "waiting", waits: [{ type: "approval", taskId: "task-1", schemaVersion: 1 }] });
+      await store.runs.put(run);
+      await store.waits.put("run-approve", "step1", { type: "approval", taskId: "task-1", schemaVersion: 1 }, "2026-07-10T00:00:00.000Z");
+
+      const result = await deps.resumeApproval("run-approve", "step1", { id: "task-1", status: "approved", reviewer: "alice" });
+
+      expect(result.kind).toBe("resumed");
+      if (result.kind !== "resumed") throw new Error("unreachable");
+      expect(result.run.status).toBe("running");
+      expect(await store.waits.get("run-approve", "step1")).toBeUndefined();
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it("returns duplicate on a second decision for the same (runId, stepId, taskId)", async () => {
+    const { store, deps, cleanup } = await createTestFixture();
+    try {
+      const run = makeRun({ runId: "run-dup", status: "waiting", waits: [{ type: "approval", taskId: "task-1", schemaVersion: 1 }] });
+      await store.runs.put(run);
+      await store.waits.put("run-dup", "step1", { type: "approval", taskId: "task-1", schemaVersion: 1 }, "2026-07-10T00:00:00.000Z");
+      await deps.resumeApproval("run-dup", "step1", { id: "task-1", status: "approved" });
+
+      // Re-arm a wait row to prove dedupe (not just wait-absence) is what blocks the second call.
+      await store.waits.put("run-dup", "step1", { type: "approval", taskId: "task-1", schemaVersion: 1 }, "2026-07-10T00:00:00.000Z");
+      const second = await deps.resumeApproval("run-dup", "step1", { id: "task-1", status: "approved" });
+
+      expect(second).toEqual({ kind: "duplicate", mechanism: "direct_lookup" });
+    } finally {
+      await cleanup();
+    }
+  });
+});
+
+describe("decideApprovalTask", () => {
+  it("sets status/reviewer/decision/decidedAt on the ApprovalTask", async () => {
+    const { store, deps, cleanup } = await createTestFixture();
+    try {
+      await store.approvals.put({ id: "task-1", runId: "run-1", stepId: "step1", title: "Review", description: "d", status: "pending", createdAt: "2026-07-10T00:00:00.000Z" });
+
+      const updated = await deps.decideApprovalTask(store, "task-1", "approved", "alice", { note: "looks good" });
+
+      expect(updated.status).toBe("approved");
+      expect(updated.reviewer).toBe("alice");
+      expect(updated.decision).toEqual({ note: "looks good" });
+      expect(updated.decidedAt).toEqual(expect.any(String));
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it("throws for a nonexistent task id", async () => {
+    const { store, deps, cleanup } = await createTestFixture();
+    try {
+      await expect(deps.decideApprovalTask(store, "nope", "approved", "alice")).rejects.toThrow();
+    } finally {
+      await cleanup();
+    }
+  });
+});
+
 describe("approveOrDeprecateWorkflow", () => {
   it("action=approve recomputes approval from gates via computeApprovalState", async () => {
     const { store, deps, cleanup } = await createTestFixture();
