@@ -12,6 +12,7 @@ describe("browser.extract_text", () => {
   it("has complete, correctly-declared metadata", () => {
     expect(browserExtractTextBlock.manifest.id).toBe("browser.extract_text");
     expect(browserExtractTextBlock.manifest.capabilities).toEqual(["browser"]);
+    expect(browserExtractTextBlock.manifest.category).toBe("browser");
   });
 
   it("extracts the raw text content of a specific element", async () => {

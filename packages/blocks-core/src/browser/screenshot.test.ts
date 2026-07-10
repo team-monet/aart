@@ -2,7 +2,7 @@ import { afterAll, describe, expect, it } from "vitest";
 import { browserGotoBlock } from "./goto.js";
 import { browserScreenshotBlock } from "./screenshot.js";
 import { fakeExecutionContext } from "../test-support/fake-context.js";
-import { closeAllBrowserSessions } from "../lib/browser-session.js";
+import { closeAllBrowserSessions, getOrCreatePage } from "../lib/browser-session.js";
 
 describe("browser.screenshot", () => {
   afterAll(async () => {
@@ -41,5 +41,13 @@ describe("browser.screenshot", () => {
     await browserGotoBlock.execute({ url: "data:text/html,<div id='box' style='width:50px;height:50px;background:blue'></div>" }, ctx);
     const result = await browserScreenshotBlock.execute({ selector: "#box" }, ctx);
     expect(result).toMatchObject({ id: expect.any(String) });
+  });
+
+  it("rejects (throws) when a given selector matches nothing", async () => {
+    const ctx = fakeExecutionContext({ runId: "run-shot-missing" });
+    await browserGotoBlock.execute({ url: "data:text/html,<body>empty</body>" }, ctx);
+    const page = await getOrCreatePage(ctx.runId);
+    page.setDefaultTimeout(300);
+    await expect(browserScreenshotBlock.execute({ selector: "#does-not-exist" }, ctx)).rejects.toThrow();
   });
 });

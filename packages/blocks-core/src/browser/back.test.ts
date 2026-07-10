@@ -22,4 +22,11 @@ describe("browser.back", () => {
     const result = await browserBackBlock.execute({}, ctx);
     expect(result).toMatchObject({ title: "First" });
   });
+
+  it("resolves (does not throw) rather than erroring when there is no history to go back to", async () => {
+    const ctx = fakeExecutionContext({ runId: "run-back-empty" });
+    await browserGotoBlock.execute({ url: "data:text/html,<title>Only</title>" }, ctx);
+    const result = await browserBackBlock.execute({}, ctx);
+    expect(result).toEqual({ url: "about:blank", title: "" });
+  });
 });

@@ -5,8 +5,8 @@ import { getOrCreatePage } from "../lib/browser-session.js";
 
 const inputSchema = z.object({
   selector: z.string().describe('A CSS or Playwright selector, e.g. "#email".'),
-  value: z.string(),
-  timeoutMs: z.number().optional(),
+  value: z.string().describe("The text to fill into the matched element, replacing any existing value."),
+  timeoutMs: z.number().optional().describe("Max time to wait for the element to become fillable. Defaults to Playwright's own default (30000ms)."),
 });
 const outputSchema = z.object({
   filled: z.literal(true),

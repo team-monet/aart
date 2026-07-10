@@ -12,6 +12,7 @@ describe("browser.text_visible", () => {
   it("has complete, correctly-declared metadata", () => {
     expect(browserTextVisibleBlock.manifest.id).toBe("browser.text_visible");
     expect(browserTextVisibleBlock.manifest.capabilities).toEqual(["browser"]);
+    expect(browserTextVisibleBlock.manifest.category).toBe("browser");
   });
 
   it("returns true when the element is visible", async () => {

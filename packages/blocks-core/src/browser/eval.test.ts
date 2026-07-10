@@ -12,6 +12,7 @@ describe("browser.eval", () => {
   it("has complete, correctly-declared metadata", () => {
     expect(browserEvalBlock.manifest.id).toBe("browser.eval");
     expect(browserEvalBlock.manifest.capabilities).toEqual(["browser"]);
+    expect(browserEvalBlock.manifest.category).toBe("browser");
   });
 
   it("runs a script with no arg and returns its result", async () => {

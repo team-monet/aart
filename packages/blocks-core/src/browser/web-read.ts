@@ -12,6 +12,21 @@ import { defineBlock } from "../lib/define-block.js";
 import { getOrCreatePage } from "../lib/browser-session.js";
 import { checkEgressAllowed } from "../lib/egress.js";
 
+// In-page extraction, passed to page.evaluate as a STRING rather than a
+// typed arrow function: this package's tsconfig has `lib: ["ES2023"]` only
+// (no "dom" — confirmed via an isolated tsc probe against this exact
+// snippet), so a literal function referencing `document`/`HTMLElement`
+// fails to type-check here (TS2584/TS2304) even though it runs fine
+// inside the page's real DOM. A string is evaluated by Playwright as an
+// in-page expression, sidestepping that without touching this package's
+// frozen tsconfig — the same "script travels as a string, not as TS
+// source" idea browser.eval uses for caller-supplied scripts. (Runtime
+// behavior confirmed against playwright@1.61.1: this exact script returns
+// the <main>/<article> text when present, and falls back to <body>
+// otherwise.)
+const MAIN_CONTENT_SCRIPT =
+  "(() => { const main = document.querySelector('main, article') || document.body; return main ? main.innerText : ''; })()";
+
 const inputSchema = z.object({
   url: z.string().optional().describe("If given, navigates there first; otherwise reads this run's current page."),
 });
@@ -30,15 +45,14 @@ export const webReadBlock = defineBlock({
   inputSchema,
   outputSchema,
   execute: async (input, ctx) => {
-    const page = await getOrCreatePage(ctx.runId);
     if (input.url) {
       checkEgressAllowed(input.url);
+    }
+    const page = await getOrCreatePage(ctx.runId);
+    if (input.url) {
       await page.goto(input.url, { waitUntil: "load" });
     }
-    const text = await page.evaluate(() => {
-      const main = document.querySelector("main, article") ?? document.body;
-      return (main as HTMLElement).innerText;
-    });
+    const text = await page.evaluate<string>(MAIN_CONTENT_SCRIPT);
     return { text, url: page.url(), title: await page.title() };
   },
 });

@@ -7,7 +7,7 @@ import { defineBlock } from "../lib/define-block.js";
 import { getOrCreatePage } from "../lib/browser-session.js";
 
 const inputSchema = z.object({
-  selector: z.string(),
+  selector: z.string().describe('A CSS or Playwright selector identifying the element to extract text from, e.g. "#total".'),
   timeoutMs: z.number().optional().describe("Defaults to Playwright's own default (30000ms)."),
 });
 const outputSchema = z.object({

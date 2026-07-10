@@ -12,6 +12,7 @@ describe("browser.fill", () => {
   it("has complete, correctly-declared metadata", () => {
     expect(browserFillBlock.manifest.id).toBe("browser.fill");
     expect(browserFillBlock.manifest.capabilities).toEqual(["browser"]);
+    expect(browserFillBlock.manifest.category).toBe("browser");
   });
 
   it("fills a form input on the current page", async () => {

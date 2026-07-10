@@ -12,6 +12,7 @@ describe("browser.snapshot", () => {
   it("has complete, correctly-declared metadata", () => {
     expect(browserSnapshotBlock.manifest.id).toBe("browser.snapshot");
     expect(browserSnapshotBlock.manifest.capabilities).toEqual(["browser"]);
+    expect(browserSnapshotBlock.manifest.category).toBe("browser");
   });
 
   it("returns a structured (YAML-ish) accessibility snapshot mentioning interactive elements", async () => {
@@ -20,5 +21,11 @@ describe("browser.snapshot", () => {
     const result = (await browserSnapshotBlock.execute({}, ctx)) as { snapshot: string };
     expect(result.snapshot).toContain("button");
     expect(result.snapshot).toContain("Click me");
+  });
+
+  it("resolves without throwing for a page with no interactive elements", async () => {
+    const ctx = fakeExecutionContext({ runId: "run-snapshot-empty" });
+    await browserGotoBlock.execute({ url: "data:text/html,<body></body>" }, ctx);
+    await expect(browserSnapshotBlock.execute({}, ctx)).resolves.toBeDefined();
   });
 });
