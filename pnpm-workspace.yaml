@@ -1,0 +1,4 @@
+packages:
+  - "packages/*"
+allowBuilds:
+  isolated-vm: true

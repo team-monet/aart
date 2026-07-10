@@ -1,0 +1,19 @@
+{
+  "files": [],
+  "references": [
+    { "path": "packages/types" },
+    { "path": "packages/expr" },
+    { "path": "packages/store" },
+    { "path": "packages/engine" },
+    { "path": "packages/server" },
+    { "path": "packages/blocks-core" },
+    { "path": "packages/governance" },
+    { "path": "packages/mcp" },
+    { "path": "packages/cli" },
+    { "path": "packages/evidence" },
+    { "path": "packages/registry" },
+    { "path": "packages/llm" },
+    { "path": "packages/dashboard" },
+    { "path": "packages/familiarity-evals" }
+  ]
+}

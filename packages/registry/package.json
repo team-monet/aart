@@ -1,0 +1,22 @@
+{
+  "name": "@aart/registry",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "AART registry package. Stub scaffolded by S0 (Wave 0) — real implementation is Wave-1 scope; see aart_implementation_plan_v1.md for session ownership.",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc -b"
+  },
+  "devDependencies": {
+    "typescript": "5.9.3"
+  }
+}

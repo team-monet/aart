@@ -1,0 +1,30 @@
+{
+  "name": "aart-monorepo",
+  "private": true,
+  "version": "0.0.0",
+  "description": "AART — a governed workflow runtime. Monorepo root (workspace-only; nothing is published from here directly, see packages/cli).",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "packageManager": "pnpm@10.33.2",
+  "scripts": {
+    "build": "tsc -b tsconfig.build.json",
+    "typecheck": "tsc -b tsconfig.build.json --force",
+    "test": "vitest run --config vitest.workspace.ts",
+    "test:watch": "vitest --config vitest.workspace.ts",
+    "clean": "tsc -b tsconfig.build.json --clean && rm -rf packages/*/dist",
+    "changeset": "changeset",
+    "smoke:browser": "node scripts/smoke/browser.mjs",
+    "smoke:isolated-vm": "node scripts/smoke/isolated-vm.mjs",
+    "smoke": "pnpm run smoke:browser && pnpm run smoke:isolated-vm"
+  },
+  "devDependencies": {
+    "@changesets/cli": "2.31.0",
+    "@types/node": "26.1.1",
+    "isolated-vm": "7.0.0",
+    "playwright": "1.61.1",
+    "typescript": "5.9.3",
+    "vitest": "4.1.10"
+  }
+}
