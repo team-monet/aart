@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+env:
+  # Keep in sync with package.json engines.node / this repo's pinned dev toolchain.
+  NODE_VERSION: "22"
+  PNPM_VERSION: "10.33.2"
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # --- Platform smoke tests (implementation plan §2 / §6 Risk 3) ---
+      # Deliberately an EARLY, explicit step, before build/typecheck/test:
+      # Playwright and isolated-vm are both real cross-platform-friction
+      # dependencies (a browser binary download; a native V8-isolate addon
+      # compiled via node-gyp). Surfacing an install/runtime failure here,
+      # at the foundation layer, is the whole point — not discovering it
+      # whenever a later Wave-1 session's own tests first touch either one.
+      - name: Install Playwright's chromium browser (with OS deps)
+        run: npx playwright install --with-deps chromium
+
+      - name: Smoke test — headless browser (Playwright)
+        run: pnpm run smoke:browser
+
+      - name: Smoke test — isolated-vm
+        run: pnpm run smoke:isolated-vm
+
+      - name: Build
+        run: pnpm run build
+
+      - name: Typecheck
+        run: pnpm run typecheck
+
+      - name: Test
+        run: pnpm run test
