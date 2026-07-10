@@ -2,7 +2,15 @@
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
     "outDir": "dist",
-    "rootDir": "src"
+    "rootDir": "src",
+    // Adds "DOM" beyond the base "ES2023" lib — this package's browser.eval/
+    // web.read blocks pass real functions to Playwright's page.evaluate(),
+    // whose bodies run inside a browser page (document/HTMLElement, etc.),
+    // not this Node process. Scoped to this package only (an override, not
+    // a change to tsconfig.base.json), since it's the only package with
+    // Playwright-evaluated snippets to typecheck.
+    "lib": ["ES2023", "DOM"]
   },
-  "include": ["src"]
+  "include": ["src"],
+  "references": [{ "path": "../types" }, { "path": "../expr" }, { "path": "../evidence" }]
 }

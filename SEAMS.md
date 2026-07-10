@@ -490,3 +490,37 @@ export type RunSuccessFn = (workflow: unknown) => RunSuccessResult | Promise<Run
 ### E6 — Dry-run + connector-fake vocabulary (documented convention, not a function seam)
 
 `@aart/evidence`'s `evals/dry-run.ts` (`ConnectorFakeRegistry`, `isEffectfulCapability`, `DEFAULT_EFFECTFUL_CAPABILITIES = ["email.send", "command", "db.write"]` plus the `domain:<pattern>` family) is `@aart/evidence`'s OWN self-contained implementation of architecture §9.5's dry-run/connector-fake mechanism, scoped to running an eval suite's fixture steps — it does not depend on `@aart/engine` and `@aart/engine` does not depend on it. `@aart/engine`'s REAL dry-run check (architecture §9.5 point 1: `RunRecord.params.dryRun` checked at the dispatch boundary, architecture §4.2) is S1's separate responsibility. The two are meant to converge on the same VOCABULARY (a `dryRun` boolean, the same effectful-capability set, "fake ships alongside real under the same block name") by documented contract, not shared code. **Flagging this for S1/S9's awareness**: if S1's real effectful-capability set diverges from `DEFAULT_EFFECTFUL_CAPABILITIES` above, that's fine (it's a caller-overridable default, not a frozen enum) but worth reconciling explicitly during S9's integration pass so a workflow author's mental model of "what counts as effectful" doesn't differ between an eval dry-run and a real `RunRecord.params.dryRun` run.
+
+---
+
+## 2026-07-10 — S3 Core block packs
+
+### S3-E1 — Browser session lifecycle — `closeBrowserSession`/`closeAllBrowserSessions`, expected to be called by S1 (`@aart/engine`) / S2 (`@aart/server` worker)
+
+```ts
+// packages/blocks-core/src/lib/browser-session.ts
+export async function getOrCreatePage(runId: string): Promise<Page>;          // internal — used by browser.*/web.read blocks only
+export function getConsoleErrors(runId: string): string[] | undefined;        // internal — used by assert.no_console_errors only
+export function hasSession(runId: string): boolean;
+export async function closeBrowserSession(runId: string): Promise<void>;      // <-- the seam
+export async function closeAllBrowserSessions(): Promise<void>;               // <-- the seam
+```
+
+`BlockExecutionContext` (architecture §2.5, S0-frozen) carries no page/session handle and no run-completion or process-shutdown hook — it's `runId`/`stepId`/`resolveSecret`/`writeArtifact` only. But a real workflow's `browser.*` steps are a SEQUENCE acting on the same logical page (`browser.goto`, then `browser.click`, then `browser.screenshot`), and architecture §4.2 dispatches each step's block independently with no continuity primitive of its own. `@aart/blocks-core` supplies that continuity itself, process-side: one Playwright `BrowserContext`+`Page` per `runId`, created lazily on that run's first `browser.*`/`web.read` call (via a single **lazy**-launched shared headless Chromium — `playwright` is never `import()`-ed until the first browser block actually executes) and reused by every subsequent `browser.*` call in the same run. `assert.no_console_errors` reads the same per-run session's tracked `console.error`/`pageerror` output.
+
+Nothing in `@aart/blocks-core`'s own scope ever calls `closeBrowserSession`/`closeAllBrowserSessions` — this package has no run-completion or process-shutdown signal of its own to act on. **Expected consumer:** the engine (S1) once a run reaches a terminal status, and/or the worker process (S2, architecture §4.7's graceful-shutdown sequence) on `SIGTERM`, should call `closeBrowserSession(runId)` / `closeAllBrowserSessions()` respectively. Until wired in, a run's browser session is only ever cleaned up by explicit test teardown or process exit — this is a real, currently-unclosed resource-lifecycle gap, flagged here rather than silently left for S9's integration pass to discover. If S1/S2's real shape for "a run reached a terminal state" or "the worker is shutting down" doesn't fit a bare `closeBrowserSession(runId)` call (e.g. it wants a registered callback instead of being the caller), reconcile via this file / the amendment protocol rather than either side silently guessing.
+
+### S3-E2 — Block catalog composition — `createBlockCatalog`/`getBlockCatalog`, expected to be called by S1 (`@aart/engine`'s dispatch loop) and/or S9 (integration composition root)
+
+```ts
+// packages/blocks-core/src/catalog.ts
+export interface BlocksCoreDeps {
+  scorerRegistry?: ScorerRegistryPort;   // eval/scorer-registry-port.ts — injected into eval.run/eval.score
+  reportRenderers?: ReportRenderersPort; // artifact-report/report-renderers-port.ts — injected into report.summarize/markdown/json
+}
+export function createBlockCatalog(deps?: BlocksCoreDeps): BlockImplementation[]; // all 51 blocks
+export function getBlockCatalog(): BlockImplementation[];                        // createBlockCatalog({}) convenience default
+export function getBlockGroupCounts(): Record<string, number>;
+```
+
+This is `@aart/blocks-core`'s single assembly point — the array `@aart/engine`'s dispatch loop (architecture §4.2, "dispatch to block") needs to resolve a `step.uses` block id against. Every `BlockManifest`/`BlockImplementation` in the returned array is real and complete regardless of `deps` (manifest construction never depends on injection — only calling `execute()` on `eval.run`/`eval.score` without a resolvable `ScorerRegistryPort` throws `ScorerRegistryUnavailableError`). Once S9 merges S6's real `@aart/evidence`, the composition root should call `createBlockCatalog({ scorerRegistry: createScorerRegistry(...), reportRenderers: createReportRenderers(...) })` using S6's real exports (SEAMS.md E2/E3 above) — no block rewrite needed, per this session's own injected-boundary brief. Until that wiring exists, `getBlockCatalog()`/`createBlockCatalog({})` still work today: eval blocks lazy-`import("@aart/evidence")` at call time and throw a clear error while it's still S0's stub; report blocks lazy-`import` the same way but fall back to a real local renderer (`createFallbackReportRenderers`) instead of throwing.

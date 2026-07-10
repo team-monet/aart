@@ -1,9 +1,9 @@
 {
   "name": "@aart/blocks-core",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "AART blocks-core package. Stub scaffolded by S0 (Wave 0) — real implementation is Wave-1 scope; see aart_implementation_plan_v1.md for session ownership.",
+  "description": "AART core built-in block catalog (spec §15.1-15.3): browser/web/http/file/data/flow/wait/human/assert/artifact/report/command/eval — 51 blocks across 11 groups covering the 13 core-builtin namespaces (llm.* is @aart/llm/S7 per ADR-11). Every block implements the S0-frozen BlockManifest/BlockImplementation contract (architecture §2.5) verbatim.",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
@@ -16,7 +16,16 @@
   "scripts": {
     "build": "tsc -b"
   },
+  "dependencies": {
+    "@aart/evidence": "workspace:*",
+    "@aart/expr": "workspace:*",
+    "@aart/types": "workspace:*",
+    "playwright": "1.61.1",
+    "yaml": "2.8.1",
+    "zod": "4.4.3"
+  },
   "devDependencies": {
-    "typescript": "5.9.3"
+    "typescript": "5.9.3",
+    "vitest": "4.1.10"
   }
 }
