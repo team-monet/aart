@@ -51,7 +51,7 @@ import {
 } from "@aart/governance";
 import { createReportRenderers, recordCorrection as evidenceRecordCorrection, createEvalExampleFromCorrection as evidenceCreateEvalExampleFromCorrection, createScorerRegistry, runEvalSuite } from "@aart/evidence";
 import { computePackContentHash, findBlocks, type BlockCatalogEntry } from "@aart/registry";
-import { createLlmPack } from "@aart/llm";
+import { createLlmPack, type CreateLlmPackOptions } from "@aart/llm";
 import type { AartStore } from "@aart/store";
 import type { BlockImplementation, Signal, TrustMode, Workflow } from "@aart/types";
 import type { EnginePort, EvidencePort, GovernancePort, RegistryPort, ResumeOutcome } from "./types.js";
@@ -74,10 +74,17 @@ export interface RealCatalog {
   llmJudge: ReturnType<typeof createLlmPack>["llmJudge"];
 }
 
-export function buildRealCatalog(store: AartStore): RealCatalog {
+/** Passthrough to `@aart/llm`'s own per-provider options (each one's own `client`/`fetcher` injection point — see that package's provider adapters) — added for S9's flagship E2E tests (`examples/redacted-legacy-b`, `examples/redacted-legacy-a`), which need to inject a fake provider client/fetcher (no real LLM API key is assumed present in every environment this runs in) while still exercising the REAL `llm.extract`/`llm.classify` block dispatch, schema validation, and retry logic — only the actual network call is faked. Omitted entirely (the pre-existing default), production code gets real provider adapters reading real API keys from `options.llm?.*.apiKey` or the adapters' own env-var fallback. */
+export interface RealCatalogLlmOptions {
+  anthropic?: CreateLlmPackOptions["anthropic"];
+  openai?: CreateLlmPackOptions["openai"];
+  google?: CreateLlmPackOptions["google"];
+}
+
+export function buildRealCatalog(store: AartStore, llmOptions?: RealCatalogLlmOptions): RealCatalog {
   const scorerRegistryPlaceholder = createScorerRegistry(); // llmJudge wired in below, once the llm pack exists (chicken/egg: the registry needs llmJudge, the catalog's eval blocks need the registry)
   const reportRenderers = createReportRenderers(redactRecord);
-  const llmPack = createLlmPack({ store });
+  const llmPack = createLlmPack({ store, ...llmOptions });
 
   const coreBlocks = createBlockCatalog({ scorerRegistry: createScorerRegistry({ llmJudge: llmPack.llmJudge }), reportRenderers });
   void scorerRegistryPlaceholder;

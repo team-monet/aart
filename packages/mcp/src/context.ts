@@ -11,7 +11,7 @@ import path from "node:path";
 import { createFsStore, type AartStore } from "@aart/store";
 import type { TrustMode } from "@aart/types";
 import { BUILTIN_BLOCK_CATALOG } from "./catalog.js";
-import { buildRealCatalog, createRealEnginePort, createRealEvidencePort, createRealGovernancePort, createRealRegistryPort, createRealEngine } from "./real-context.js";
+import { buildRealCatalog, createRealEnginePort, createRealEvidencePort, createRealGovernancePort, createRealRegistryPort, createRealEngine, type RealCatalogLlmOptions } from "./real-context.js";
 import { createStubEngine } from "./stubs/engine.js";
 import { createStubEvidence } from "./stubs/evidence.js";
 import { createStubGovernance } from "./stubs/governance.js";
@@ -38,6 +38,8 @@ export interface CreateAartContextOptions {
   registry?: RegistryPort;
   trustMode?: TrustMode;
   now?: () => Date;
+  /** `createRealAartContext` only (ignored by `createAartContext`, which never constructs a real `@aart/llm` pack) — passthrough to `buildRealCatalog`'s own `RealCatalogLlmOptions` (real-context.ts), for injecting a fake provider client/fetcher in tests that need the REAL llm.extract/llm.classify block dispatch without a real API key. */
+  llm?: RealCatalogLlmOptions;
 }
 
 const VALID_TRUST_MODES: readonly TrustMode[] = ["dev", "governed", "strict", "production"];
@@ -105,7 +107,7 @@ export function createRealAartContext(options: CreateAartContextOptions = {}): A
   // provider adapters, assembles 56 block manifests), not free, so this
   // only happens when at least one port isn't explicitly overridden.
   const needsRealCatalog = !options.engine || !options.governance || !options.evidence || !options.registry;
-  const catalog = needsRealCatalog ? buildRealCatalog(store) : undefined;
+  const catalog = needsRealCatalog ? buildRealCatalog(store, options.llm) : undefined;
   const realEngine = !options.engine || !options.evidence ? createRealEngine(store, catalog!.blocks) : undefined;
 
   const governance = options.governance ?? createRealGovernancePort(catalog!.blocks, trustMode);
