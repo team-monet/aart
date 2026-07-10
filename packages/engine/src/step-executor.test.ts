@@ -1,0 +1,540 @@
+import { CapabilityDeniedError, IterationLimitExceededError } from "@aart/types";
+import type { AartStore } from "@aart/store";
+import { afterEach, describe, expect, it } from "vitest";
+import { executeStep } from "./step-executor.js";
+import { capabilityBlock, createTestStore, echoBlock, failingBlock, flakyBlock, hangingBlock, testEngineConfig, fixtureRun, fixtureWorkflow } from "./test-utils/fixtures.js";
+import type { EngineConfig } from "./types.js";
+
+const cleanups: Array<() => Promise<void>> = [];
+afterEach(async () => {
+  await Promise.all(cleanups.splice(0).map((fn) => fn()));
+});
+
+async function setup(configOverrides: Partial<EngineConfig> = {}): Promise<{ store: AartStore; config: EngineConfig }> {
+  const { store, cleanup } = await createTestStore();
+  cleanups.push(cleanup);
+  return { store, config: testEngineConfig(store, configOverrides) };
+}
+
+describe("executeStep — resolve with: + basic dispatch", () => {
+  it("resolves {{ }} expressions in with: and passes them to the block", async () => {
+    const { config } = await setup();
+    const run = fixtureRun({ inputs: { url: "http://x" } });
+    const workflow = fixtureWorkflow({ execution: { type: "workflow", steps: [{ id: "s1", uses: "test.echo", with: { target: "{{ inputs.url }}" } }] } });
+    const outcome = await executeStep(config, run, workflow, workflow.execution.steps[0]!, new Set(), undefined);
+    expect(outcome.kind).toBe("continue");
+    if (outcome.kind !== "continue") throw new Error("unreachable");
+    const trace = outcome.run.trace[0];
+    expect(trace).toMatchObject({ status: "completed", inputs: { target: "http://x" }, outputs: { echoed: { target: "http://x" } } });
+  });
+
+  it("determines nextStepId as the next sequential step when no if/next present", async () => {
+    const { config } = await setup();
+    const run = fixtureRun();
+    const workflow = fixtureWorkflow({ execution: { type: "workflow", steps: [{ id: "s1", uses: "test.echo" }, { id: "s2", uses: "test.echo" }] } });
+    const outcome = await executeStep(config, run, workflow, workflow.execution.steps[0]!, new Set(), undefined);
+    if (outcome.kind !== "continue") throw new Error("unreachable");
+    expect(outcome.nextStepId).toBe("s2");
+  });
+
+  it("nextStepId is undefined after the last step (signals run completion)", async () => {
+    const { config } = await setup();
+    const run = fixtureRun();
+    const workflow = fixtureWorkflow({ execution: { type: "workflow", steps: [{ id: "only", uses: "test.echo" }] } });
+    const outcome = await executeStep(config, run, workflow, workflow.execution.steps[0]!, new Set(), undefined);
+    if (outcome.kind !== "continue") throw new Error("unreachable");
+    expect(outcome.nextStepId).toBeUndefined();
+  });
+
+  it("throws when the block id has no registered BlockImplementation", async () => {
+    const { config } = await setup();
+    const run = fixtureRun();
+    const workflow = fixtureWorkflow({ execution: { type: "workflow", steps: [{ id: "s1", uses: "unknown.block" }] } });
+    await expect(executeStep(config, run, workflow, workflow.execution.steps[0]!, new Set(), undefined)).rejects.toThrow(/no blockimplementation registered/i);
+  });
+});
+
+describe("executeStep — if/then/else (spec §14.1, architecture §4.2 micro-decision #7)", () => {
+  it("if absent: always falls through to next/sequential, then/else never consulted", async () => {
+    const { config } = await setup();
+    const run = fixtureRun();
+    const workflow = fixtureWorkflow({ execution: { type: "workflow", steps: [{ id: "s1", uses: "test.echo", then: "should-not-be-used", else: "also-not-used" }, { id: "s2", uses: "test.echo" }] } });
+    const outcome = await executeStep(config, run, workflow, workflow.execution.steps[0]!, new Set(), undefined);
+    if (outcome.kind !== "continue") throw new Error("unreachable");
+    expect(outcome.nextStepId).toBe("s2");
+  });
+
+  it("if true: dispatches normally, then routes to then/next", async () => {
+    const { config } = await setup();
+    const run = fixtureRun({ inputs: { ok: true } });
+    const workflow = fixtureWorkflow({ execution: { type: "workflow", steps: [{ id: "s1", uses: "test.echo", if: "{{ inputs.ok }}", then: "yes-branch", else: "no-branch" }, { id: "yes-branch", uses: "test.echo" }, { id: "no-branch", uses: "test.echo" }] } });
+    const outcome = await executeStep(config, run, workflow, workflow.execution.steps[0]!, new Set(), undefined);
+    if (outcome.kind !== "continue") throw new Error("unreachable");
+    expect(outcome.nextStepId).toBe("yes-branch");
+    expect(outcome.run.trace[0]?.status).toBe("completed");
+  });
+
+  it("if false: SKIPS dispatch entirely, records a 'skipped' StepTrace, routes to else", async () => {
+    const { config } = await setup();
+    const run = fixtureRun({ inputs: { ok: false } });
+    const workflow = fixtureWorkflow({ execution: { type: "workflow", steps: [{ id: "s1", uses: "test.echo", if: "{{ inputs.ok }}", then: "yes-branch", else: "no-branch" }, { id: "yes-branch", uses: "test.echo" }, { id: "no-branch", uses: "test.echo" }] } });
+    const outcome = await executeStep(config, run, workflow, workflow.execution.steps[0]!, new Set(), undefined);
+    if (outcome.kind !== "continue") throw new Error("unreachable");
+    expect(outcome.nextStepId).toBe("no-branch");
+    expect(outcome.run.trace[0]).toMatchObject({ status: "skipped" });
+  });
+
+  it("if false with no else: falls through to sequential order", async () => {
+    const { config } = await setup();
+    const run = fixtureRun({ inputs: { ok: false } });
+    const workflow = fixtureWorkflow({ execution: { type: "workflow", steps: [{ id: "s1", uses: "test.echo", if: "{{ inputs.ok }}", then: "yes-branch" }, { id: "s2", uses: "test.echo" }] } });
+    const outcome = await executeStep(config, run, workflow, workflow.execution.steps[0]!, new Set(), undefined);
+    if (outcome.kind !== "continue") throw new Error("unreachable");
+    expect(outcome.nextStepId).toBe("s2");
+  });
+
+  it("explicit step.next always wins over then/else", async () => {
+    const { config } = await setup();
+    const run = fixtureRun({ inputs: { ok: true } });
+    const workflow = fixtureWorkflow({ execution: { type: "workflow", steps: [{ id: "s1", uses: "test.echo", if: "{{ inputs.ok }}", then: "yes-branch", next: "explicit-target" }, { id: "yes-branch", uses: "test.echo" }, { id: "explicit-target", uses: "test.echo" }] } });
+    const outcome = await executeStep(config, run, workflow, workflow.execution.steps[0]!, new Set(), undefined);
+    if (outcome.kind !== "continue") throw new Error("unreachable");
+    expect(outcome.nextStepId).toBe("explicit-target");
+  });
+});
+
+describe("executeStep — guarded back-edges: maxIterations (spec §18.2)", () => {
+  it("allows execution up to maxIterations, then throws IterationLimitExceededError on the next attempt", async () => {
+    const { config } = await setup();
+    const workflow = fixtureWorkflow({ execution: { type: "workflow", steps: [{ id: "loop", uses: "test.echo", maxIterations: 2, next: "loop" }] } });
+    let run = fixtureRun();
+    const step = workflow.execution.steps[0]!;
+
+    const first = await executeStep(config, run, workflow, step, new Set(), undefined);
+    if (first.kind !== "continue") throw new Error("unreachable");
+    run = first.run;
+    expect(run.trace.filter((t) => t.stepId === "loop")).toHaveLength(1);
+
+    const second = await executeStep(config, run, workflow, step, new Set(), undefined);
+    if (second.kind !== "continue") throw new Error("unreachable");
+    run = second.run;
+    expect(run.trace.filter((t) => t.stepId === "loop")).toHaveLength(2);
+
+    // Third attempt: priorExecutions (2) >= maxIterations (2) -> throws.
+    await expect(executeStep(config, run, workflow, step, new Set(), undefined)).rejects.toThrow(IterationLimitExceededError);
+  });
+
+  it("the thrown error's detail distinguishes the guardedBackEdge kind from forEach's", async () => {
+    const { config } = await setup();
+    const workflow = fixtureWorkflow({ execution: { type: "workflow", steps: [{ id: "loop", uses: "test.echo", maxIterations: 1 }] } });
+    const run = fixtureRun({ trace: [{ seq: 0, stepId: "loop", block: "test.echo", status: "completed", inputs: {}, outputs: {}, startedAt: "t", endedAt: "t" }] });
+    try {
+      await executeStep(config, run, workflow, workflow.execution.steps[0]!, new Set(), undefined);
+      expect.fail("expected executeStep to throw");
+    } catch (err) {
+      expect(err).toBeInstanceOf(IterationLimitExceededError);
+      expect((err as IterationLimitExceededError).detail).toMatchObject({ kind: "guardedBackEdge", stepId: "loop", maxIterations: 1, priorExecutions: 1 });
+    }
+  });
+
+  it("the counter derives from persisted trace history, so it's correct even with no in-memory state carried over (restart-safety of the counter itself)", async () => {
+    const { config } = await setup();
+    const workflow = fixtureWorkflow({ execution: { type: "workflow", steps: [{ id: "loop", uses: "test.echo", maxIterations: 3 }] } });
+    // A run whose trace ALREADY shows 3 prior executions, as if reloaded fresh from a store after a restart.
+    const run = fixtureRun({
+      trace: [0, 1, 2].map((i) => ({ seq: i, stepId: "loop", block: "test.echo", status: "completed" as const, inputs: {}, outputs: {}, startedAt: "t", endedAt: "t" })),
+    });
+    await expect(executeStep(config, run, workflow, workflow.execution.steps[0]!, new Set(), undefined)).rejects.toThrow(IterationLimitExceededError);
+  });
+});
+
+describe("executeStep — guarded back-edges: until (spec §18.2, architecture §4.2)", () => {
+  it("until false: the back-edge (next) IS taken", async () => {
+    const { config } = await setup();
+    const workflow = fixtureWorkflow({
+      execution: { type: "workflow", steps: [{ id: "rescan", uses: "test.echo", with: { done: false }, maxIterations: 6, until: "{{ steps.rescan.outputs.echoed.done }}", next: "recheck_wait" }, { id: "recheck_wait", uses: "test.echo" }] },
+    });
+    const outcome = await executeStep(config, fixtureRun(), workflow, workflow.execution.steps[0]!, new Set(), undefined);
+    if (outcome.kind !== "continue") throw new Error("unreachable");
+    expect(outcome.nextStepId).toBe("recheck_wait");
+  });
+
+  it("until true: the back-edge is SUPPRESSED — falls through as if next were absent", async () => {
+    const { config } = await setup();
+    const workflow = fixtureWorkflow({
+      execution: {
+        type: "workflow",
+        steps: [
+          { id: "rescan", uses: "test.echo", with: { done: true }, maxIterations: 6, until: "{{ steps.rescan.outputs.echoed.done }}", next: "recheck_wait" },
+          { id: "recheck_wait", uses: "test.echo" },
+          { id: "after_loop", uses: "test.echo" },
+        ],
+      },
+    });
+    const outcome = await executeStep(config, fixtureRun(), workflow, workflow.execution.steps[0]!, new Set(), undefined);
+    if (outcome.kind !== "continue") throw new Error("unreachable");
+    // Falls through to sequential order (the step AFTER "rescan" in array
+    // order is "recheck_wait" — until suppresses the explicit `next`
+    // back-edge, not skips past the immediately-following step too).
+    expect(outcome.nextStepId).toBe("recheck_wait");
+  });
+
+  it("until is evaluated against THIS step's own freshly-produced output", async () => {
+    const { config } = await setup();
+    // No explicit `next` at all on step 2 in this variant — prove `until`
+    // only matters when paired with `next` by omitting `next`: the
+    // sequential fallthrough should be identical regardless of until's value
+    // when there's no back-edge to suppress in the first place.
+    const workflow = fixtureWorkflow({ execution: { type: "workflow", steps: [{ id: "s1", uses: "test.echo", until: "{{ steps.s1.outputs.echoed }}" }, { id: "s2", uses: "test.echo" }] } });
+    const outcome = await executeStep(config, fixtureRun(), workflow, workflow.execution.steps[0]!, new Set(), undefined);
+    if (outcome.kind !== "continue") throw new Error("unreachable");
+    expect(outcome.nextStepId).toBe("s2");
+  });
+});
+
+describe("executeStep — forEach/as (spec §14.1 R7, architecture §4.2)", () => {
+  it("runs the step body once per resolved array element, sequentially", async () => {
+    const { config } = await setup();
+    const run = fixtureRun({ inputs: { items: ["a", "b", "c"] } });
+    const workflow = fixtureWorkflow({ execution: { type: "workflow", steps: [{ id: "each", uses: "test.echo", forEach: "{{ inputs.items }}", as: "item", with: { value: "{{ steps.item }}" } }] } });
+    const outcome = await executeStep(config, run, workflow, workflow.execution.steps[0]!, new Set(), undefined);
+    if (outcome.kind !== "continue") throw new Error("unreachable");
+
+    const subTraces = outcome.run.trace.filter((t) => t.stepId.startsWith("each["));
+    expect(subTraces.map((t) => t.stepId)).toEqual(["each[0]", "each[1]", "each[2]"]);
+    expect(subTraces.map((t) => t.outputs)).toEqual([{ echoed: { value: "a" } }, { echoed: { value: "b" } }, { echoed: { value: "c" } }]);
+  });
+
+  it("records ONE aggregate trace entry under the plain step id, with outputs.items as the array of per-iteration outputs", async () => {
+    const { config } = await setup();
+    const run = fixtureRun({ inputs: { items: [1, 2] } });
+    const workflow = fixtureWorkflow({ execution: { type: "workflow", steps: [{ id: "each", uses: "test.echo", forEach: "{{ inputs.items }}", as: "item", with: { value: "{{ steps.item }}" } }] } });
+    const outcome = await executeStep(config, run, workflow, workflow.execution.steps[0]!, new Set(), undefined);
+    if (outcome.kind !== "continue") throw new Error("unreachable");
+
+    const aggregate = outcome.run.trace.find((t) => t.stepId === "each");
+    expect(aggregate).toBeDefined();
+    expect(aggregate?.status).toBe("completed");
+    expect(aggregate?.outputs).toEqual({ items: [{ echoed: { value: 1 } }, { echoed: { value: 2 } }] });
+  });
+
+  it("a downstream step can reference {{ steps.each.outputs.items }} for the aggregate result", async () => {
+    const { config } = await setup();
+    const run = fixtureRun({ inputs: { items: [10, 20] } });
+    const workflow = fixtureWorkflow({
+      execution: {
+        type: "workflow",
+        steps: [
+          { id: "each", uses: "test.echo", forEach: "{{ inputs.items }}", as: "item", with: { value: "{{ steps.item }}" } },
+          { id: "after", uses: "test.echo", with: { count: "{{ steps.each.outputs.items }}" } },
+        ],
+      },
+    });
+    const first = await executeStep(config, run, workflow, workflow.execution.steps[0]!, new Set(), undefined);
+    if (first.kind !== "continue") throw new Error("unreachable");
+    const second = await executeStep(config, first.run, workflow, workflow.execution.steps[1]!, new Set(), undefined);
+    if (second.kind !== "continue") throw new Error("unreachable");
+    expect(second.run.trace.find((t) => t.stepId === "after")?.inputs).toEqual({ count: [{ echoed: { value: 10 } }, { echoed: { value: 20 } }] });
+  });
+
+  it("defaults the binding name to 'item' when as: is absent", async () => {
+    const { config } = await setup();
+    const run = fixtureRun({ inputs: { items: ["x"] } });
+    const workflow = fixtureWorkflow({ execution: { type: "workflow", steps: [{ id: "each", uses: "test.echo", forEach: "{{ inputs.items }}", with: { value: "{{ steps.item }}" } }] } });
+    const outcome = await executeStep(config, run, workflow, workflow.execution.steps[0]!, new Set(), undefined);
+    if (outcome.kind !== "continue") throw new Error("unreachable");
+    expect(outcome.run.trace.find((t) => t.stepId === "each[0]")?.outputs).toEqual({ echoed: { value: "x" } });
+  });
+
+  it("fails fast: an iteration failure stops remaining iterations and marks the aggregate + step outcome as failed", async () => {
+    const { store, config } = await setup();
+    let calls = 0;
+    config.blocks["test.fail-second"] = {
+      manifest: { id: "test.fail-second", version: "1.0.0", capabilities: [], inputSchema: {}, outputSchema: {}, description: "fails on call 2" },
+      execute: async () => {
+        calls += 1;
+        if (calls === 2) throw new Error("boom on second item");
+        return { ok: true };
+      },
+    };
+    const run = fixtureRun({ inputs: { items: ["a", "b", "c"] } });
+    const workflow = fixtureWorkflow({ execution: { type: "workflow", steps: [{ id: "each", uses: "test.fail-second", forEach: "{{ inputs.items }}", as: "item" }] } });
+    const outcome = await executeStep(config, run, workflow, workflow.execution.steps[0]!, new Set(), undefined);
+    expect(outcome.kind).toBe("failed");
+    if (outcome.kind !== "failed") throw new Error("unreachable");
+    // Only 2 of 3 iterations attempted (fail-fast — the 3rd never runs).
+    expect(outcome.run.trace.filter((t) => t.stepId.startsWith("each["))).toHaveLength(2);
+    expect(outcome.run.trace.find((t) => t.stepId === "each")?.status).toBe("failed");
+    void store;
+  });
+});
+
+describe("executeStep — forEach array-size upper bound (architecture §4.2 admission-control gap closure)", () => {
+  it("throws IterationLimitExceededError with detail.kind 'forEach' when the resolved array exceeds the configured limit", async () => {
+    const { config } = await setup({ forEachArrayLimit: 3 });
+    const run = fixtureRun({ inputs: { items: [1, 2, 3, 4] } });
+    const workflow = fixtureWorkflow({ execution: { type: "workflow", steps: [{ id: "each", uses: "test.echo", forEach: "{{ inputs.items }}" }] } });
+    try {
+      await executeStep(config, run, workflow, workflow.execution.steps[0]!, new Set(), undefined);
+      expect.fail("expected executeStep to throw");
+    } catch (err) {
+      expect(err).toBeInstanceOf(IterationLimitExceededError);
+      expect((err as IterationLimitExceededError).detail).toMatchObject({ kind: "forEach", limit: 3, actual: 4 });
+    }
+  });
+
+  it("does not throw when the array is exactly at the limit", async () => {
+    const { config } = await setup({ forEachArrayLimit: 2 });
+    const run = fixtureRun({ inputs: { items: [1, 2] } });
+    const workflow = fixtureWorkflow({ execution: { type: "workflow", steps: [{ id: "each", uses: "test.echo", forEach: "{{ inputs.items }}" }] } });
+    await expect(executeStep(config, run, workflow, workflow.execution.steps[0]!, new Set(), undefined)).resolves.toMatchObject({ kind: "continue" });
+  });
+
+  it("is distinct from the guarded-back-edge maxIterations breach (same error class, different detail.kind — implementation plan S1 DoD)", async () => {
+    const { config } = await setup({ forEachArrayLimit: 1 });
+    const run = fixtureRun({ inputs: { items: [1, 2] } });
+    const workflow = fixtureWorkflow({ execution: { type: "workflow", steps: [{ id: "each", uses: "test.echo", forEach: "{{ inputs.items }}" }] } });
+    try {
+      await executeStep(config, run, workflow, workflow.execution.steps[0]!, new Set(), undefined);
+      expect.fail("expected executeStep to throw");
+    } catch (err) {
+      expect(err).toBeInstanceOf(IterationLimitExceededError);
+      expect((err as IterationLimitExceededError).detail?.kind).not.toBe("guardedBackEdge");
+    }
+  });
+});
+
+describe("executeStep — retry (spec §30.3, architecture §4.2)", () => {
+  it("retries on a retryOn-matching error class and succeeds within maxAttempts", async () => {
+    const failing = flakyBlock("test.flaky1", 2); // fails twice, succeeds on 3rd
+    const { config } = await setup({ blocks: { [failing.manifest.id]: failing } });
+    const workflow = fixtureWorkflow({ execution: { type: "workflow", steps: [{ id: "s1", uses: "test.flaky1", retry: { maxAttempts: 3, backoff: "exponential", retryOn: ["UnknownError"] } }] } });
+    const outcome = await executeStep(config, fixtureRun(), workflow, workflow.execution.steps[0]!, new Set(), undefined);
+    expect(outcome.kind).toBe("continue");
+    if (outcome.kind !== "continue") throw new Error("unreachable");
+    expect(outcome.run.trace[0]).toMatchObject({ status: "completed", outputs: { attempts: 3 } });
+  });
+
+  it("does not retry when retryOn doesn't match the error class, failing on the first attempt", async () => {
+    const failing = failingBlock("test.fail-always");
+    const { config } = await setup({ blocks: { [failing.manifest.id]: failing } });
+    const workflow = fixtureWorkflow({ execution: { type: "workflow", steps: [{ id: "s1", uses: "test.fail-always", retry: { maxAttempts: 5, backoff: "exponential", retryOn: ["HttpServerError"] } }] } });
+    const outcome = await executeStep(config, fixtureRun(), workflow, workflow.execution.steps[0]!, new Set(), undefined);
+    expect(outcome.kind).toBe("failed");
+  });
+
+  it("gives up after maxAttempts even when every failure matches retryOn", async () => {
+    const failing = failingBlock("test.fail-always2");
+    const { config } = await setup({ blocks: { [failing.manifest.id]: failing } });
+    const workflow = fixtureWorkflow({ execution: { type: "workflow", steps: [{ id: "s1", uses: "test.fail-always2", retry: { maxAttempts: 3, backoff: "exponential", retryOn: ["UnknownError"] } }] } });
+    const outcome = await executeStep(config, fixtureRun(), workflow, workflow.execution.steps[0]!, new Set(), undefined);
+    expect(outcome.kind).toBe("failed");
+  });
+
+  it("maps 'timeout'/'5xx'/'4xx' retryOn tokens to their errorClass via the normalized taxonomy (architecture micro-decision #9)", async () => {
+    let calls = 0;
+    const block500 = {
+      manifest: { id: "test.http500", version: "1.0.0", capabilities: [], inputSchema: {}, outputSchema: {}, description: "fixture" },
+      execute: async () => {
+        calls += 1;
+        if (calls === 1) {
+          const err = new Error("server error") as Error & { status: number };
+          err.status = 503;
+          throw err;
+        }
+        return { ok: true };
+      },
+    };
+    const { config } = await setup({ blocks: { "test.http500": block500 } });
+    const workflow = fixtureWorkflow({ execution: { type: "workflow", steps: [{ id: "s1", uses: "test.http500", retry: { maxAttempts: 2, backoff: "exponential", retryOn: ["5xx"] } }] } });
+    const outcome = await executeStep(config, fixtureRun(), workflow, workflow.execution.steps[0]!, new Set(), undefined);
+    expect(outcome.kind).toBe("continue");
+    expect(calls).toBe(2);
+  });
+
+  it("no retry policy at all: a single failing attempt fails the step immediately", async () => {
+    const failing = failingBlock("test.no-retry-policy");
+    const { config } = await setup({ blocks: { [failing.manifest.id]: failing } });
+    const workflow = fixtureWorkflow({ execution: { type: "workflow", steps: [{ id: "s1", uses: "test.no-retry-policy" }] } });
+    const outcome = await executeStep(config, fixtureRun(), workflow, workflow.execution.steps[0]!, new Set(), undefined);
+    expect(outcome.kind).toBe("failed");
+  });
+});
+
+describe("executeStep — timeout (architecture §4.2, per-attempt not cumulative)", () => {
+  it("a step exceeding its timeout fails with a TimeoutError-classified failure", async () => {
+    const hanging = hangingBlock("test.hangs", 500);
+    const { config } = await setup({ blocks: { [hanging.manifest.id]: hanging } });
+    const workflow = fixtureWorkflow({ execution: { type: "workflow", steps: [{ id: "s1", uses: "test.hangs", timeout: "100ms" }] } });
+    const outcome = await executeStep(config, fixtureRun(), workflow, workflow.execution.steps[0]!, new Set(), undefined);
+    expect(outcome.kind).toBe("failed");
+    if (outcome.kind !== "failed") throw new Error("unreachable");
+    expect(outcome.error.message).toMatch(/timeout|exceeded/i);
+  }, 10_000);
+
+  it("a step well within its timeout completes normally", async () => {
+    const { config } = await setup();
+    const workflow = fixtureWorkflow({ execution: { type: "workflow", steps: [{ id: "s1", uses: "test.echo", timeout: "5s" }] } });
+    const outcome = await executeStep(config, fixtureRun(), workflow, workflow.execution.steps[0]!, new Set(), undefined);
+    expect(outcome.kind).toBe("continue");
+  });
+
+  it("timeout applies freshly per-attempt, not cumulatively (architecture micro-decision #10)", async () => {
+    // Each individual attempt is fast (50ms) and within a 200ms per-attempt
+    // budget; 3 attempts * 50ms = 150ms total would EXCEED a hypothetical
+    // cumulative 100ms budget but should NOT trip a per-attempt 200ms one.
+    let calls = 0;
+    const block = {
+      manifest: { id: "test.slow-then-ok", version: "1.0.0", capabilities: [], inputSchema: {}, outputSchema: {}, description: "fixture" },
+      execute: () =>
+        new Promise((resolve, reject) => {
+          calls += 1;
+          setTimeout(() => {
+            if (calls < 3) reject(new Error("not yet"));
+            else resolve({ ok: true });
+          }, 50);
+        }),
+    };
+    const { config } = await setup({ blocks: { "test.slow-then-ok": block } });
+    const workflow = fixtureWorkflow({ execution: { type: "workflow", steps: [{ id: "s1", uses: "test.slow-then-ok", timeout: "200ms", retry: { maxAttempts: 3, backoff: "exponential", retryOn: ["UnknownError"] } }] } });
+    const outcome = await executeStep(config, fixtureRun(), workflow, workflow.execution.steps[0]!, new Set(), undefined);
+    expect(outcome.kind).toBe("continue");
+    expect(calls).toBe(3);
+  }, 10_000);
+});
+
+describe("executeStep — idempotencyKey (spec §30.2)", () => {
+  it("first execution with a resolved idempotencyKey runs the block and records the ledger entry", async () => {
+    const { store, config } = await setup();
+    const run = fixtureRun({ runId: "run-idem-1" });
+    const workflow = fixtureWorkflow({ execution: { type: "workflow", steps: [{ id: "send", uses: "test.echo", idempotencyKey: "{{ run.id }}:send", with: { to: "a@b.com" } }] } });
+    const outcome = await executeStep(config, run, workflow, workflow.execution.steps[0]!, new Set(), undefined);
+    if (outcome.kind !== "continue") throw new Error("unreachable");
+    expect(outcome.run.trace[0]?.outputs).toEqual({ echoed: { to: "a@b.com" } });
+    await expect(store.idempotencyLedger.get("run-idem-1:send")).resolves.toBeDefined();
+  });
+
+  it("a second execution with the SAME resolved key replays the recorded output instead of re-executing the block", async () => {
+    let executeCount = 0;
+    const countingBlock = {
+      manifest: { id: "test.counting", version: "1.0.0", capabilities: [], inputSchema: {}, outputSchema: {}, description: "fixture" },
+      execute: async () => {
+        executeCount += 1;
+        return { sentCount: executeCount };
+      },
+    };
+    const { config } = await setup({ blocks: { "test.counting": countingBlock } });
+    const run = fixtureRun({ runId: "run-idem-2" });
+    const workflow = fixtureWorkflow({ execution: { type: "workflow", steps: [{ id: "send", uses: "test.counting", idempotencyKey: "{{ run.id }}:send" }] } });
+
+    const first = await executeStep(config, run, workflow, workflow.execution.steps[0]!, new Set(), undefined);
+    if (first.kind !== "continue") throw new Error("unreachable");
+    expect(first.run.trace[0]?.outputs).toEqual({ sentCount: 1 });
+
+    // Simulate a retry of the SAME step (e.g. after a crash/reclaim) by
+    // executing it again against a run whose trace was reset for this step
+    // (a fresh attempt), same resolved key.
+    const secondAttemptRun = { ...run, trace: [] };
+    const second = await executeStep(config, secondAttemptRun, workflow, workflow.execution.steps[0]!, new Set(), undefined);
+    if (second.kind !== "continue") throw new Error("unreachable");
+    expect(second.run.trace[0]?.outputs).toEqual({ sentCount: 1 }); // REPLAYED, not sentCount: 2
+    expect(executeCount).toBe(1); // block.execute was called exactly once, ever
+  });
+
+  it("a step with no idempotencyKey always re-executes (no protection — architecture's documented at-least-once boundary)", async () => {
+    let executeCount = 0;
+    const countingBlock = {
+      manifest: { id: "test.counting2", version: "1.0.0", capabilities: [], inputSchema: {}, outputSchema: {}, description: "fixture" },
+      execute: async () => {
+        executeCount += 1;
+        return { n: executeCount };
+      },
+    };
+    const { config } = await setup({ blocks: { "test.counting2": countingBlock } });
+    const workflow = fixtureWorkflow({ execution: { type: "workflow", steps: [{ id: "s1", uses: "test.counting2" }] } });
+    await executeStep(config, fixtureRun(), workflow, workflow.execution.steps[0]!, new Set(), undefined);
+    await executeStep(config, fixtureRun(), workflow, workflow.execution.steps[0]!, new Set(), undefined);
+    expect(executeCount).toBe(2);
+  });
+
+  it("a FAILED attempt is not recorded to the idempotency ledger (only successful completions are)", async () => {
+    const failing = failingBlock("test.fail-idem");
+    const { store, config } = await setup({ blocks: { [failing.manifest.id]: failing } });
+    const run = fixtureRun({ runId: "run-idem-3" });
+    const workflow = fixtureWorkflow({ execution: { type: "workflow", steps: [{ id: "s1", uses: "test.fail-idem", idempotencyKey: "{{ run.id }}:s1" }] } });
+    await executeStep(config, run, workflow, workflow.execution.steps[0]!, new Set(), undefined);
+    await expect(store.idempotencyLedger.get("run-idem-3:s1")).resolves.toBeUndefined();
+  });
+});
+
+describe("executeStep — capability dispatch (architecture §4.6, ADR-09)", () => {
+  it("allows a step whose block's declared capabilities are permitted", async () => {
+    const block = capabilityBlock("test.needs-browser", ["browser"]);
+    const { config } = await setup({
+      blocks: { [block.manifest.id]: block },
+      capabilityCheck: (declared, granted) => declared.every((d) => granted.includes(d)),
+      getGrantedCapabilities: async () => ["browser", "http"],
+    });
+    const workflow = fixtureWorkflow({ execution: { type: "workflow", steps: [{ id: "s1", uses: "test.needs-browser" }] } });
+    const outcome = await executeStep(config, fixtureRun(), workflow, workflow.execution.steps[0]!, new Set(), undefined);
+    expect(outcome.kind).toBe("continue");
+  });
+
+  it("denies (throws CapabilityDeniedError) a step whose declared capability is not granted", async () => {
+    const block = capabilityBlock("test.needs-command", ["command"]);
+    const { config } = await setup({
+      blocks: { [block.manifest.id]: block },
+      capabilityCheck: (declared, granted) => declared.every((d) => granted.includes(d)),
+      getGrantedCapabilities: async () => ["browser"],
+    });
+    const workflow = fixtureWorkflow({ execution: { type: "workflow", steps: [{ id: "s1", uses: "test.needs-command" }] } });
+    await expect(executeStep(config, fixtureRun(), workflow, workflow.execution.steps[0]!, new Set(), undefined)).rejects.toThrow(CapabilityDeniedError);
+  });
+
+  it("the default always-allow stub never blocks any capability (implementation plan S1 DoD's stub)", async () => {
+    const block = capabilityBlock("test.needs-everything", ["command", "db.write", "secrets:ANYTHING"]);
+    const { config } = await setup({ blocks: { [block.manifest.id]: block } });
+    const workflow = fixtureWorkflow({ execution: { type: "workflow", steps: [{ id: "s1", uses: "test.needs-everything" }] } });
+    const outcome = await executeStep(config, fixtureRun(), workflow, workflow.execution.steps[0]!, new Set(), undefined);
+    expect(outcome.kind).toBe("continue");
+  });
+});
+
+describe("executeStep — redaction routing (architecture §4.2/§7.9)", () => {
+  it("routes the persisted RunRecord through the injected RedactFn, threading resolvedSecretRefs", async () => {
+    const { store } = await setup();
+    let seenRefs: ReadonlySet<string> | undefined;
+    const config = testEngineConfig(store, {
+      redact: (record, resolvedSecretRefs) => {
+        seenRefs = resolvedSecretRefs;
+        return record;
+      },
+      resolveSecret: async (name) => `secret-value-for-${name}`,
+    });
+    const workflow = fixtureWorkflow({ execution: { type: "workflow", steps: [{ id: "s1", uses: "test.echo", with: { apiKey: "{{ secrets.API_KEY }}" } }] } });
+    const resolvedSecretRefs = new Set<string>();
+    await executeStep(config, fixtureRun(), workflow, workflow.execution.steps[0]!, resolvedSecretRefs, undefined);
+    expect(seenRefs).toBe(resolvedSecretRefs);
+    expect(resolvedSecretRefs.has("API_KEY")).toBe(true);
+  });
+
+  it("a secret value never reaches the persisted store when a real (non-identity) redactor is wired in (architecture §7.9 — proving the routing is real, not merely declared)", async () => {
+    const { store } = await setup();
+    const scanAndReplace = (record: unknown, resolvedSecretRefs: ReadonlySet<string>): unknown => {
+      let json = JSON.stringify(record);
+      for (const ref of resolvedSecretRefs) json = json.split(`secret-value-for-${ref}`).join(`[REDACTED:${ref}]`);
+      return JSON.parse(json);
+    };
+    const config = testEngineConfig(store, { redact: scanAndReplace, resolveSecret: async (name) => `secret-value-for-${name}` });
+    const workflow = fixtureWorkflow({ execution: { type: "workflow", steps: [{ id: "s1", uses: "test.echo", with: { apiKey: "{{ secrets.API_KEY }}" } }] } });
+    const run = fixtureRun();
+    await store.runs.put(run);
+    const outcome = await executeStep(config, run, workflow, workflow.execution.steps[0]!, new Set(), undefined);
+    if (outcome.kind !== "continue") throw new Error("unreachable");
+
+    const persisted = await store.runs.get(run.runId);
+    const persistedJson = JSON.stringify(persisted);
+    expect(persistedJson).not.toContain("secret-value-for-API_KEY");
+    expect(persistedJson).toContain("[REDACTED:API_KEY]");
+  });
+});

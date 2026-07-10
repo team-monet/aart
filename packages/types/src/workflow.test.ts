@@ -95,4 +95,19 @@ describe("WorkflowSchema", () => {
     const result = WorkflowSchema.safeParse({ ...baseWorkflow, approval: "published" });
     expect(result.success).toBe(false);
   });
+
+  it("accepts architecture-introduced concurrency (spec §30.1, AMENDMENTS.md A16)", () => {
+    const parsed = WorkflowSchema.parse({ ...baseWorkflow, concurrency: { key: "{{ inputs.caseId }}", policy: "queue" } });
+    expect(parsed.concurrency).toEqual({ key: "{{ inputs.caseId }}", policy: "queue" });
+  });
+
+  it("defaults concurrency to undefined (not present) when omitted", () => {
+    const parsed = WorkflowSchema.parse(baseWorkflow);
+    expect(parsed.concurrency).toBeUndefined();
+  });
+
+  it("rejects a concurrency.policy value outside the 4-value ConcurrencyPolicy enum", () => {
+    const result = WorkflowSchema.safeParse({ ...baseWorkflow, concurrency: { key: "{{ inputs.caseId }}", policy: "retry_later" } });
+    expect(result.success).toBe(false);
+  });
 });

@@ -1,0 +1,83 @@
+// Concurrency policies (architecture §4.3, spec §30.1). Enforcement point:
+// "at trigger time, before a new RunRecord is written as pending, the
+// engine's trigger-intake path resolves the concurrency key and checks the
+// store for other non-terminal (pending/running/waiting) runs of the same
+// workflow+key." This module is that check, plus the `queue` policy's
+// release-on-completion hook (`releaseQueuedRuns`, called by
+// `run-lifecycle.ts` whenever a run reaches a terminal status).
+import { resolveExpression } from "@aart/expr";
+import type { AartStore } from "@aart/store";
+import type { RunRecord, Workflow } from "@aart/types";
+
+const NON_TERMINAL_STATUSES = new Set<RunRecord["status"]>(["pending", "running", "waiting"]);
+
+/** Resolves `workflow.concurrency.key` (architecture §4.3, `{{ }}` against `inputs.*`) — `undefined` if the workflow declares no `concurrency` block at all (the "no constraint" default, equivalent to `policy: "allow"`). */
+export async function resolveConcurrencyKey(workflow: Workflow, inputs: Record<string, unknown>): Promise<string | undefined> {
+  if (!workflow.concurrency) return undefined;
+  const resolved = await resolveExpression(workflow.concurrency.key, { inputs });
+  return typeof resolved === "string" ? resolved : String(resolved);
+}
+
+export type ConcurrencyDecision =
+  | { action: "allow" }
+  | { action: "queue"; blockingRun: RunRecord }
+  | { action: "cancel_existing"; existingRun: RunRecord }
+  | { action: "reject" };
+
+/**
+ * The trigger-intake decision (architecture §4.3's four policies). Looks up
+ * every non-terminal run of `workflow.id` and compares `params.concurrencyKey`
+ * (this package's own bookkeeping — see `run-lifecycle.ts`'s doc comment on
+ * why the resolved key is stashed there rather than needing a new `RunRecord`
+ * field) against the newly-resolved `key`. Returns `{ action: "allow" }`
+ * when the workflow declares no `concurrency` block, or when no other
+ * non-terminal run shares this exact key.
+ */
+export async function decideConcurrency(store: AartStore, workflow: Workflow, key: string | undefined): Promise<ConcurrencyDecision> {
+  if (!workflow.concurrency || key === undefined) {
+    return { action: "allow" };
+  }
+  const candidates = await store.runs.list({ workflowId: workflow.id });
+  const existing = candidates.find((r) => NON_TERMINAL_STATUSES.has(r.status) && r.params?.concurrencyKey === key);
+  if (!existing) {
+    return { action: "allow" };
+  }
+  switch (workflow.concurrency.policy) {
+    case "allow":
+      return { action: "allow" };
+    case "queue":
+      return { action: "queue", blockingRun: existing };
+    case "cancel_existing":
+      return { action: "cancel_existing", existingRun: existing };
+    case "reject_new":
+      return { action: "reject" };
+    default: {
+      const exhaustiveCheck: never = workflow.concurrency.policy;
+      throw new Error(`Unhandled ConcurrencyPolicy: ${exhaustiveCheck}`);
+    }
+  }
+}
+
+/**
+ * Called whenever a run reaches a terminal status (`run-lifecycle.ts`) —
+ * finds the oldest still-`pending`, still-queued (`params.waitingOnConcurrency
+ * === true`) run sharing this workflow+key, if any, and releases it onto
+ * `job_queue` so a worker can claim it. `[DECISION]` releases at most ONE
+ * queued run per completion (not every queued run at once) — `queue`'s
+ * whole point (spec §30.1) is serializing runs of the same key, so releasing
+ * more than one at a time would defeat it; the newly-released run's own
+ * eventual completion will in turn release the next one in line (FIFO by
+ * `startedAt`).
+ */
+export async function releaseQueuedRuns(store: AartStore, workflowId: string, key: string): Promise<RunRecord | undefined> {
+  const candidates = await store.runs.list({ workflowId, status: "pending" });
+  const queued = candidates
+    .filter((r) => r.params?.waitingOnConcurrency === true && r.params?.concurrencyKey === key)
+    .sort((a, b) => a.startedAt.localeCompare(b.startedAt));
+  const next = queued[0];
+  if (!next) return undefined;
+  const released: RunRecord = { ...next, params: { ...next.params, waitingOnConcurrency: false } };
+  await store.runs.put(released);
+  await store.jobQueue.enqueue(released.runId);
+  return released;
+}

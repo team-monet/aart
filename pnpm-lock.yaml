@@ -46,10 +46,26 @@ importers:
         version: 5.9.3
 
   packages/engine:
+    dependencies:
+      '@aart/expr':
+        specifier: workspace:*
+        version: link:../expr
+      '@aart/store':
+        specifier: workspace:*
+        version: link:../store
+      '@aart/types':
+        specifier: workspace:*
+        version: link:../types
+      isolated-vm:
+        specifier: 7.0.0
+        version: 7.0.0
     devDependencies:
       typescript:
         specifier: 5.9.3
         version: 5.9.3
+      vitest:
+        specifier: 4.1.10
+        version: 4.1.10(@types/node@26.1.1)(vite@8.1.4(@types/node@26.1.1))
 
   packages/evidence:
     devDependencies:

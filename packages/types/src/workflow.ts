@@ -1,6 +1,6 @@
 // Workflow, WorkflowStep, Field, Example — spec §14.1.
 import { z } from "zod";
-import { ApprovalStateSchema, GatesSchema, RetryPolicySchema } from "./governance.js";
+import { ApprovalStateSchema, ConcurrencyPolicySchema, GatesSchema, RetryPolicySchema } from "./governance.js";
 
 export const FieldSchema = z.object({
   name: z.string(),
@@ -64,5 +64,22 @@ export const WorkflowSchema = z.object({
   // time. See AMENDMENTS.md.
   needsReview: z.boolean().optional(),
   promotionBlocked: z.boolean().optional(),
+  // Architecture-introduced (S1/Wave-1 amendment — see AMENDMENTS.md A16),
+  // same flag-and-add pattern as needsReview/promotionBlocked immediately
+  // above and RunRecord.flag (run.ts)/Trigger.dedupeKey (trigger.ts): spec
+  // §30.1 shows `concurrency: { key, policy }` as a "per workflow" YAML
+  // example, and architecture §4.3 fully designs the enforcement semantics
+  // for all four ConcurrencyPolicy values against this exact shape, but
+  // neither document ever adds a field for it to spec §14.1's literal
+  // Workflow TS block — without a home on the canonical type, the engine's
+  // trigger-intake path (architecture §4.3) has no way to read a workflow's
+  // declared concurrency policy at all. `key` is a `{{ }}` expression
+  // resolved against `inputs.*` at trigger time (architecture §4.3).
+  concurrency: z
+    .object({
+      key: z.string(),
+      policy: ConcurrencyPolicySchema,
+    })
+    .optional(),
 });
 export type Workflow = z.infer<typeof WorkflowSchema>;
