@@ -1,10 +1,11 @@
-import type { WorkflowStep } from "@aart/types";
+import type { StandingApproval, WorkflowStep } from "@aart/types";
 import { describe, expect, it } from "vitest";
 import {
   type CapabilityClosureLookup,
   checkCapability,
   compareRiskTiers,
   computeCapabilityClosure,
+  getGrantedCapabilities,
   maxRiskTier,
   riskForCapability,
 } from "./capability.js";
@@ -145,5 +146,86 @@ describe("checkCapability — the real CapabilityCheck implementation (architect
   it("matches the CapabilityCheck type's exact 2-arg (declared, granted) => boolean signature", () => {
     expect(checkCapability.length).toBe(2);
     expect(typeof checkCapability(["x"], ["x"])).toBe("boolean");
+  });
+});
+
+describe("getGrantedCapabilities — the granted-set policy query architecture §4.6's dispatch pseudocode calls", () => {
+  it("dev mode grants the full closure unconditionally, even when draft — dev 'runs with a warning', it is not capability-gated", () => {
+    const granted = getGrantedCapabilities({
+      trustMode: "dev",
+      approvalState: "draft",
+      capabilityClosure: ["command", "browser"],
+      riskTier: "High",
+    });
+    expect(granted).toEqual(["command", "browser"]);
+  });
+
+  it("governed/strict/production grant the full closure once the version is globally approved", () => {
+    const granted = getGrantedCapabilities({
+      trustMode: "production",
+      approvalState: "approved",
+      capabilityClosure: ["http"],
+      riskTier: "Medium",
+    });
+    expect(granted).toEqual(["http"]);
+  });
+
+  it("grants NOTHING for a draft, non-dev-mode workflow with no matching standing approval — fail-closed by default", () => {
+    const granted = getGrantedCapabilities({
+      trustMode: "governed",
+      approvalState: "draft",
+      capabilityClosure: ["http"],
+      riskTier: "Medium",
+    });
+    expect(granted).toEqual([]);
+  });
+
+  it("grants the full closure for a draft workflow when a matching standing approval covers it (architecture §7.5)", () => {
+    const standingApproval: StandingApproval = {
+      id: "sa_1",
+      maxRiskTier: "Medium",
+      capabilities: ["http", "browser"],
+      grantedBy: "ops@example.com",
+      expiresAt: "2099-01-01T00:00:00.000Z",
+    };
+    const granted = getGrantedCapabilities({
+      trustMode: "governed",
+      approvalState: "draft",
+      capabilityClosure: ["http"],
+      riskTier: "Medium",
+      standingApprovals: [standingApproval],
+      now: "2026-07-10T00:00:00.000Z",
+    });
+    expect(granted).toEqual(["http"]);
+  });
+
+  it("still grants nothing for a draft workflow whose risk exceeds every standing approval's maxRiskTier", () => {
+    const standingApproval: StandingApproval = {
+      id: "sa_1",
+      maxRiskTier: "Low",
+      capabilities: ["command"],
+      grantedBy: "ops@example.com",
+      expiresAt: "2099-01-01T00:00:00.000Z",
+    };
+    const granted = getGrantedCapabilities({
+      trustMode: "governed",
+      approvalState: "draft",
+      capabilityClosure: ["command"],
+      riskTier: "High",
+      standingApprovals: [standingApproval],
+      now: "2026-07-10T00:00:00.000Z",
+    });
+    expect(granted).toEqual([]);
+  });
+
+  it("feeds checkCapability correctly end-to-end: a declared set within the granted closure passes, one outside it fails", () => {
+    const granted = getGrantedCapabilities({
+      trustMode: "production",
+      approvalState: "approved",
+      capabilityClosure: ["http", "browser"],
+      riskTier: "Medium",
+    });
+    expect(checkCapability(["http"], granted)).toBe(true);
+    expect(checkCapability(["command"], granted)).toBe(false);
   });
 });

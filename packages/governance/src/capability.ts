@@ -1,21 +1,16 @@
-// Capability model + risk-from-closure (architecture §7.4, spec §31.0-31.1)
-// and the REAL CapabilityCheck implementation (architecture §4.6, ADR-09) —
-// replacing S1's always-allow stub.
-import type { BaseCapability, CapabilityCheck, WorkflowStep } from "@aart/types";
+// Capability model + risk-from-closure (architecture §7.4, spec §31.0-31.1),
+// the REAL CapabilityCheck implementation (architecture §4.6, ADR-09) —
+// replacing S1's always-allow stub — and the granted-capabilities policy
+// query architecture §4.6's dispatch pseudocode calls
+// `governance.getGrantedCapabilities(workflowVersion, environment)`.
+import type { BaseCapability, CapabilityCheck, StandingApproval, TrustMode, WorkflowStep } from "@aart/types";
+import { findMatchingStandingApproval } from "./standing-approvals.js";
 
-export const RISK_TIERS = ["Low", "Low-medium", "Medium", "High"] as const;
-export type RiskTier = (typeof RISK_TIERS)[number];
-
-const RISK_TIER_RANK: Readonly<Record<RiskTier, number>> = { Low: 0, "Low-medium": 1, Medium: 2, High: 3 };
-
-export function compareRiskTiers(a: RiskTier, b: RiskTier): number {
-  return RISK_TIER_RANK[a] - RISK_TIER_RANK[b];
-}
-
-/** Ceiling, not average — architecture §7.4: "closure risk is a ceiling function, not an average." */
-export function maxRiskTier(tiers: readonly RiskTier[]): RiskTier {
-  return tiers.reduce<RiskTier>((max, t) => (compareRiskTiers(t, max) > 0 ? t : max), "Low");
-}
+// Risk-tier primitives live in risk-tiers.ts (a leaf module standing-
+// approvals.ts also depends on) and are re-exported here so every existing
+// `from "./capability.js"` import site keeps working unchanged.
+export { RISK_TIERS, compareRiskTiers, maxRiskTier, type RiskTier } from "./risk-tiers.js";
+import { maxRiskTier, type RiskTier } from "./risk-tiers.js";
 
 /**
  * spec §31.1's risk table, verbatim, PLUS two governance-owned
@@ -144,3 +139,41 @@ export const checkCapability: CapabilityCheck = (declared, granted) => {
   const grantedSet = new Set(granted);
   return declared.every((capability) => grantedSet.has(capability));
 };
+
+export interface GrantedCapabilitiesInput {
+  readonly trustMode: TrustMode;
+  readonly approvalState: "draft" | "approved" | "deprecated";
+  readonly capabilityClosure: readonly string[];
+  readonly riskTier: RiskTier;
+  readonly standingApprovals?: readonly StandingApproval[];
+  readonly now?: string;
+}
+
+/**
+ * Resolves the `granted` set architecture §4.6's dispatch pseudocode calls
+ * `governance.getGrantedCapabilities(workflowVersion, environment)`. Unlike
+ * `checkCapability`/`redactRecord`/`computeApprovalState`/
+ * `computePromotionState` — each given an EXACT signature by the source
+ * documents — this exact function is not; its shape here is governance's
+ * own design fill for a genuine gap (same spirit as S0's
+ * AMENDMENTS.md-documented store-method-signature gaps). See SEAMS.md.
+ *
+ * `dev` mode grants the full declared closure unconditionally — dev "runs
+ * with a warning" (spec §17.2); it is not capability-gated, the warning IS
+ * the enforcement. Every other mode grants the full closure only if the
+ * version is globally approved OR a standing approval covers it
+ * (architecture §7.5); otherwise NOTHING is granted, so any step declaring
+ * any capability fails the engine's `declared ⊆ granted` dispatch check —
+ * fail-closed by default, matching this package's stated ethos ("an
+ * under-declared capability is a security hole").
+ */
+export function getGrantedCapabilities(input: GrantedCapabilitiesInput): string[] {
+  if (input.trustMode === "dev") return [...input.capabilityClosure];
+  if (input.approvalState === "approved") return [...input.capabilityClosure];
+  const now = input.now ?? new Date().toISOString();
+  const match = findMatchingStandingApproval(
+    { riskTier: input.riskTier, capabilityClosure: input.capabilityClosure, now },
+    input.standingApprovals ?? [],
+  );
+  return match ? [...input.capabilityClosure] : [];
+}

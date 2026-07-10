@@ -1,6 +1,6 @@
 // Standing approvals (architecture §7.5, spec §17.6).
 import type { StandingApproval } from "@aart/types";
-import { compareRiskTiers, type RiskTier } from "./capability.js";
+import { compareRiskTiers, isRiskTierName, type RiskTier } from "./risk-tiers.js";
 
 export interface StandingApprovalMatchInput {
   readonly riskTier: RiskTier;
@@ -12,10 +12,6 @@ export interface StandingApprovalMatchInput {
 function isSubset(subset: readonly string[], superset: readonly string[]): boolean {
   const supSet = new Set(superset);
   return subset.every((item) => supSet.has(item));
-}
-
-function isRiskTierName(value: string): value is RiskTier {
-  return value === "Low" || value === "Low-medium" || value === "Medium" || value === "High";
 }
 
 /**
