@@ -577,7 +577,7 @@ async function executeWaitDispatch(
   if (step.uses === "human.approval") {
     const taskId = crypto.randomUUID();
     const now = (config.now?.() ?? new Date()).toISOString();
-    // A37 redaction fix: title/description come from `resolvedWith` — the
+    // A41 redaction fix: title/description come from `resolvedWith` — the
     // step's `with:` block AFTER template resolution (resolveWithRecord,
     // called by executeStep before dispatch) — so a workflow author
     // referencing `{{ secrets.X }}` in a human.approval step's title/

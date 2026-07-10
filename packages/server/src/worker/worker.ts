@@ -80,16 +80,37 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
       logger.info("run finished (completed, or reached a checkpoint the engine will resume later)", { runId });
       claimedRunIds.delete(runId);
       await maybeFlagPoison(runId);
-      // Best-effort backstop, reached ONLY on a NORMAL (non-throwing)
-      // completion: if the engine's own completion path didn't already
-      // remove/release the job_queue entry (e.g. a checkpoint that doesn't
-      // clear its own claim), don't leave it dangling until the reclaim
-      // sweep's next tick notices the lease is still nominally valid —
-      // release it now. A run correctly checkpointed into `waiting` by the
-      // engine has already had its claim released as part of that
-      // checkpoint (S1's job); this call is then a harmless no-op against
-      // an already-gone job_queue entry.
-      await options.store.jobQueue.release(runId).catch(() => undefined);
+      // S10 completion fix (root AMENDMENTS.md — found by the load/soak E2E,
+      // the first real-process test to ever push MULTIPLE runs through a
+      // real worker's claim loop). This comment's own prior text assumed "a
+      // run correctly checkpointed into waiting has already had its claim
+      // released... as part of that checkpoint (S1's job)" — FALSE, verified
+      // directly: @aart/engine's wait-machine.ts/run-lifecycle.ts never call
+      // any `store.jobQueue.*` method except `enqueue` (at trigger time,
+      // once). job_queue lifecycle for a CLAIMED run is entirely this
+      // package's own responsibility, unconditionally, not a rare backstop.
+      //
+      // Was `.release(runId)`, which clears `claimedBy` but leaves the ROW
+      // present — `listClaimable`'s contract ("never claimed, or claimed
+      // with an expired lease") cannot distinguish a released row from one
+      // that was never claimed at all, so a released run stayed claimable
+      // FOREVER. `executeClaimedRun` on an already-terminal/already-waiting
+      // run is a correct, cheap, no-op success (run-lifecycle.ts's own
+      // `executeRun`: "already waiting/completed/failed/cancelled — idempotent
+      // no-op"), so nothing ever threw — the claim loop just re-claimed,
+      // re-executed-as-a-no-op, and re-released the SAME already-finished
+      // run in a tight cycle, forever, while every OTHER genuinely pending
+      // run in job_queue starved. `.remove()` instead: once a claimed run's
+      // `executeClaimedRun` call returns successfully, its status is always
+      // one of completed/failed/cancelled/waiting (executeRun's own loop
+      // never returns while still "running") — NONE of those benefit from
+      // staying claimable. A `waiting` run resumes via a completely separate
+      // mechanism (resumeManual/resumeBySignal/resumeApproval/
+      // resumeTimerWait, each of which drives execution forward itself,
+      // engine.ts's `continueAfterResume` calling `runStepsLoop` directly —
+      // never by a worker re-claiming it from job_queue), so removing its
+      // entry here doesn't strand it.
+      await options.store.jobQueue.remove(runId).catch(() => undefined);
     } catch (err) {
       // Deliberately do NOT release the claim here. An exception escaping
       // executeClaimedRun is exactly the "worker died mid-step" shape

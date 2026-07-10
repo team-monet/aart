@@ -203,21 +203,24 @@ describe("worker-kill E2E — SIGKILL a real worker process DURING step executio
       expect(finalRun?.trace).toHaveLength(1);
       expect(finalRun?.trace[0]).toMatchObject({ stepId: "slow", status: "completed", outputs: { attempt: 2, resumedAfterKill: true } });
 
-      // worker.ts's own executeOneClaim backstop RELEASES (not removes) the
-      // job_queue entry on a normal completion (run-lifecycle.ts's own
-      // finalization never touches job_queue at all — enqueue is the only
-      // call it ever makes; job_queue lifecycle past that point is entirely
-      // @aart/server's/the worker's responsibility) - claimedBy goes back
-      // to null, but the row (and its now-accurate reclaimCount: 1,
-      // preserved from the earlier sweep) persists. Polled, not a single
-      // read: executeOneClaim keeps running (maybeFlagPoison's own store
-      // read, then this release call) for a moment after the run's own
-      // status already flipped to "completed" — see waitFor's own comment.
+      // worker.ts's own executeOneClaim backstop REMOVES the job_queue
+      // entry entirely on a normal completion (root AMENDMENTS.md — a real
+      // bug found by the load/soak E2E: this used to RELEASE, not remove,
+      // which left a claimedBy: null row indistinguishable from "never
+      // claimed" to listClaimable — an already-finished run stayed
+      // claimable forever, worker.ts's earlier version endlessly
+      // reclaiming and re-no-op-executing it. Fixed to remove(); this
+      // test's own final assertion updated to match the corrected, now-
+      // genuinely-correct behavior). Polled, not a single read:
+      // executeOneClaim keeps running (maybeFlagPoison's own store read,
+      // then this remove call) for a moment after the run's own status
+      // already flipped to "completed" — see waitFor's own comment.
       const finalJobQueueEntry = await waitFor(async () => {
         const entry = await store.jobQueue.get(runId);
-        return entry?.claimedBy === null ? entry : undefined;
+        return entry === undefined ? { gone: true } : undefined;
       }, 5_000);
-      expect(finalJobQueueEntry).toMatchObject({ claimedBy: null, reclaimCount: 1 });
+      expect(finalJobQueueEntry).toEqual({ gone: true });
+      expect(await store.jobQueue.get(runId)).toBeUndefined();
     },
     30_000,
   );

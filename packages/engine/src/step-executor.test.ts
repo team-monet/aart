@@ -658,7 +658,7 @@ describe("executeStep — redaction routing (architecture §4.2/§7.9)", () => {
     expect(persistedJson).toContain("[REDACTED]");
   });
 
-  // A37 fix (root AMENDMENTS.md, S10 Completion): executeWaitDispatch's
+  // A41 fix (root AMENDMENTS.md, S10 Completion): executeWaitDispatch's
   // human.approval branch built and persisted a brand-new ApprovalTask
   // directly via config.store.approvals.put(...) using resolvedWith's
   // POST-resolution title/description — the one persist call site in this
@@ -668,7 +668,7 @@ describe("executeStep — redaction routing (architecture §4.2/§7.9)", () => {
   // step's title/description would have had the raw resolved secret value
   // persisted, unredacted, into a NEW store collection (approvals) never
   // covered by enterWait's own (separate) WaitCondition redaction.
-  it("a human.approval step's newly-created ApprovalTask is redacted the same as the rest of the persisted state (A37 — this call site used to bypass applyRedaction entirely)", async () => {
+  it("a human.approval step's newly-created ApprovalTask is redacted the same as the rest of the persisted state (A41 — this call site used to bypass applyRedaction entirely)", async () => {
     const { store } = await setup();
     const scanAndReplace = (record: unknown, resolvedSecretRefs: ReadonlySet<string>): unknown => {
       let json = JSON.stringify(record);
