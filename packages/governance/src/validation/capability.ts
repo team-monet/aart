@@ -4,7 +4,7 @@
 // enforce — same capability data, different point in the lifecycle:
 // validation tells the author 'this will need approval,' dispatch
 // actually blocks execution."
-import { getGrantedCapabilities, type CapabilityClosureResult } from "../capability.js";
+import type { CapabilityClosureResult } from "../capability.js";
 import type { ValidationFinding } from "./types.js";
 
 export interface CapabilityValidationContext {
@@ -34,6 +34,3 @@ export function validateCapabilities(closure: CapabilityClosureResult, context: 
     severity: "error",
   }));
 }
-
-/** getGrantedCapabilities is re-exported here purely for validation-callers' convenience — same function, no behavior change. */
-export { getGrantedCapabilities };
