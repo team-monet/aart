@@ -22,12 +22,26 @@ describe("createTrackingSecretResolver", () => {
     await expect(tracking("API_KEY")).resolves.toBe("value-of-API_KEY");
   });
 
-  it("records every successfully-resolved name into the shared set (architecture §7.9's 'resolved secret refs' set)", async () => {
+  // S9 integration fix (see this function's own doc comment + root
+  // AMENDMENTS.md's dedicated entry): this used to track the resolved
+  // NAME ("API_KEY") instead of the resolved VALUE ("value-of-API_KEY") -
+  // silently defeating @aart/governance's real redactRecord, which scans
+  // for literal VALUE occurrences per its own documented contract. Caught
+  // by a genuine end-to-end test against the real redactRecord
+  // (packages/mcp/src/real-context.test.ts), not this package's own mocks.
+  it("records every successfully-resolved VALUE into the shared set (architecture §7.9's 'resolved secret refs' set — 'populated... at the moment the resolver returns A VALUE')", async () => {
     const resolvedRefs = new Set<string>();
     const tracking = createTrackingSecretResolver(async (name) => `value-of-${name}`, resolvedRefs);
     await tracking("API_KEY");
     await tracking("DB_PASSWORD");
-    expect(resolvedRefs).toEqual(new Set(["API_KEY", "DB_PASSWORD"]));
+    expect(resolvedRefs).toEqual(new Set(["value-of-API_KEY", "value-of-DB_PASSWORD"]));
+  });
+
+  it("does NOT track the resolved value when the wrapped resolver returns undefined (Set<string> - only defined string values are trackable/redactable)", async () => {
+    const resolvedRefs = new Set<string>();
+    const tracking = createTrackingSecretResolver(async () => undefined, resolvedRefs);
+    await tracking("MAYBE_MISSING");
+    expect(resolvedRefs.size).toBe(0);
   });
 
   it("accumulates across multiple calls within the same set (segment-scoped, not per-call)", async () => {

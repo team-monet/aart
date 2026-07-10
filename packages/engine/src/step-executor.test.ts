@@ -611,6 +611,11 @@ describe("executeStep — capability dispatch (architecture §4.6, ADR-09)", () 
 });
 
 describe("executeStep — redaction routing (architecture §4.2/§7.9)", () => {
+  // S9 integration fix (see createTrackingSecretResolver's own doc comment
+  // + root AMENDMENTS.md's dedicated entry): resolvedSecretRefs now
+  // correctly holds the resolved VALUE ("secret-value-for-API_KEY"), not
+  // the resolved NAME ("API_KEY") - matching @aart/governance's real
+  // redactRecord's documented contract exactly.
   it("routes the persisted RunRecord through the injected RedactFn, threading resolvedSecretRefs", async () => {
     const { store } = await setup();
     let seenRefs: ReadonlySet<string> | undefined;
@@ -625,14 +630,18 @@ describe("executeStep — redaction routing (architecture §4.2/§7.9)", () => {
     const resolvedSecretRefs = new Set<string>();
     await executeStep(config, fixtureRun(), workflow, workflow.execution.steps[0]!, resolvedSecretRefs, undefined);
     expect(seenRefs).toBe(resolvedSecretRefs);
-    expect(resolvedSecretRefs.has("API_KEY")).toBe(true);
+    expect(resolvedSecretRefs.has("secret-value-for-API_KEY")).toBe(true);
+    expect(resolvedSecretRefs.has("API_KEY")).toBe(false); // the bug this fix closes: the NAME must NOT be what gets tracked
   });
 
   it("a secret value never reaches the persisted store when a real (non-identity) redactor is wired in (architecture §7.9 — proving the routing is real, not merely declared)", async () => {
     const { store } = await setup();
+    // Matches @aart/governance's real redactRecord's actual contract now
+    // (scans for literal VALUE occurrences directly - no name-to-value
+    // reconstruction needed, unlike the pre-fix version of this test).
     const scanAndReplace = (record: unknown, resolvedSecretRefs: ReadonlySet<string>): unknown => {
       let json = JSON.stringify(record);
-      for (const ref of resolvedSecretRefs) json = json.split(`secret-value-for-${ref}`).join(`[REDACTED:${ref}]`);
+      for (const value of resolvedSecretRefs) json = json.split(value).join("[REDACTED]");
       return JSON.parse(json);
     };
     const config = testEngineConfig(store, { redact: scanAndReplace, resolveSecret: async (name) => `secret-value-for-${name}` });
@@ -645,7 +654,7 @@ describe("executeStep — redaction routing (architecture §4.2/§7.9)", () => {
     const persisted = await store.runs.get(run.runId);
     const persistedJson = JSON.stringify(persisted);
     expect(persistedJson).not.toContain("secret-value-for-API_KEY");
-    expect(persistedJson).toContain("[REDACTED:API_KEY]");
+    expect(persistedJson).toContain("[REDACTED]");
   });
 });
 
@@ -686,9 +695,11 @@ describe("executeStep — ctx.recordLlmCall wiring (S9 reconciliation ledger ite
 
   it("recorded LlmCallMetadata is redacted the same as the rest of the persisted RunRecord (architecture §7.9 - no separate call site needed, same chokepoint)", async () => {
     const { store } = await setup();
+    // Matches @aart/governance's real redactRecord's actual contract now
+    // (scans for literal VALUE occurrences directly).
     const scanAndReplace = (record: unknown, resolvedSecretRefs: ReadonlySet<string>): unknown => {
       let json = JSON.stringify(record);
-      for (const ref of resolvedSecretRefs) json = json.split(`secret-value-for-${ref}`).join(`[REDACTED:${ref}]`);
+      for (const value of resolvedSecretRefs) json = json.split(value).join("[REDACTED]");
       return JSON.parse(json);
     };
     // Contrived but proves the point: ANY string field on LlmCallMetadata
@@ -717,6 +728,6 @@ describe("executeStep — ctx.recordLlmCall wiring (S9 reconciliation ledger ite
     const persisted = await store.runs.get(run.runId);
     const persistedJson = JSON.stringify(persisted);
     expect(persistedJson).not.toContain("secret-value-for-PROMPT_NAME");
-    expect(persistedJson).toContain("[REDACTED:PROMPT_NAME]");
+    expect(persistedJson).toContain("[REDACTED]");
   });
 });

@@ -33,21 +33,44 @@ export const throwingSecretResolver: SecretResolver = (name) => {
 };
 
 /**
- * Wraps a real `SecretResolver` so that every name it successfully resolves
- * is recorded into `resolvedRefs` (architecture §7.9: "a per-run 'resolved
- * secret refs' set populated at the moment @aart/expr's injected secret
- * resolver... returns a value"). `resolvedRefs` is scoped to one execution
- * segment (one `triggerRun`/`resumeWait` call, from wherever it starts to
- * wherever it stops at a wait/terminal status) — see `engine.ts` for where
- * a fresh `Set` is created per segment. Callers pass the SAME set to every
- * `applyRedaction` call made during that segment, so a secret resolved by
- * an earlier step is still redacted from a later step's persisted output
- * that happens to echo it back.
+ * Wraps a real `SecretResolver` so that every VALUE it successfully
+ * resolves is recorded into `resolvedRefs` (architecture §7.9: "a per-run
+ * 'resolved secret refs' set populated at the moment @aart/expr's injected
+ * secret resolver... returns a value" — literally the resolved VALUE, not
+ * the symbolic name/ref that was looked up). `resolvedRefs` is scoped to
+ * one execution segment (one `triggerRun`/`resumeWait` call, from wherever
+ * it starts to wherever it stops at a wait/terminal status) — see
+ * `engine.ts` for where a fresh `Set` is created per segment. Callers pass
+ * the SAME set to every `applyRedaction` call made during that segment, so
+ * a secret resolved by an earlier step is still redacted from a later
+ * step's persisted output that happens to echo it back.
+ *
+ * S9 integration fix (found via a genuine end-to-end test against the REAL
+ * @aart/governance redactRecord, not this package's own mocks — see
+ * root AMENDMENTS.md's dedicated entry on this): this previously tracked
+ * `name` (the symbolic ref/argument passed to the resolver) instead of
+ * `value` (what the resolver actually returned). `@aart/governance`'s real
+ * `redactRecord` — the frozen `RedactFn` contract's only real
+ * implementation — scans a persisted record for literal occurrences of
+ * each SET MEMBER, documented explicitly as "resolved secret VALUES (not
+ * names)". Tracking names instead of values meant `resolvedSecretRefs`
+ * held strings like `"API_KEY"` instead of the actual secret value that
+ * could appear in output data — `redactRecord` would then search for the
+ * literal substring `"API_KEY"` (which essentially never coincidentally
+ * appears in real data) instead of the real secret value, so redaction
+ * silently redacted NOTHING in the real merged system despite every test
+ * in this package's own (pre-integration) suite passing — those tests used
+ * mock redactors that derived their own search value FROM the tracked name
+ * (e.g. `` `secret-value-for-${ref}` ``), which happened to round-trip
+ * correctly against a same-shaped mock resolver without ever exercising
+ * the real value-based contract. This is exactly the class of bug a
+ * hardening wave's genuine cross-package integration testing exists to
+ * catch that per-package testing against fakes structurally cannot.
  */
 export function createTrackingSecretResolver(resolver: SecretResolver, resolvedRefs: Set<string>): SecretResolver {
   return async (name: string) => {
     const value = await resolver(name);
-    resolvedRefs.add(name);
+    if (typeof value === "string") resolvedRefs.add(value);
     return value;
   };
 }
