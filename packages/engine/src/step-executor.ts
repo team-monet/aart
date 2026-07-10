@@ -4,7 +4,7 @@
 // next. Wait-type block ids (wait/wait-blocks.ts) are intercepted before
 // normal dispatch and handed to wait/wait-machine.ts instead.
 import type { ExprContext, ResolveOptions } from "@aart/expr";
-import type { LlmCallMetadata, RetryPolicy, RunRecord, StepTrace, WaitCondition, Workflow, WorkflowStep } from "@aart/types";
+import type { ApprovalTask, LlmCallMetadata, RetryPolicy, RunRecord, StepTrace, WaitCondition, Workflow, WorkflowStep } from "@aart/types";
 import { AartError, DEFAULT_EFFECTFUL_CAPABILITIES, isEffectfulCapability, IterationLimitExceededError, TimeoutError } from "@aart/types";
 import { checkCapabilityDispatch, alwaysEmptyGrantedCapabilities } from "./capability.js";
 import { parseDurationMs } from "./duration.js";
@@ -373,9 +373,34 @@ async function executeForEachStep(
   return { traces: [...traces, aggregate], failed };
 }
 
-/** Appends `newTraces` to `run.trace`, redacts, persists, and returns the updated `RunRecord`. Every step-completion path (normal, forEach, skipped) funnels through this one function so persistence + redaction happen identically everywhere. */
+/**
+ * Appends `newTraces` to `run.trace`, refreshes `run.artifacts`, redacts,
+ * persists, and returns the updated `RunRecord`. Every step-completion path
+ * (normal, forEach, skipped) funnels through this one function so
+ * persistence + redaction happen identically everywhere.
+ *
+ * S10 completion fix, found while building the verify-loop E2E (a REAL
+ * aart_verify call against a REAL browser.screenshot step — the class of
+ * bug per-package testing against stubs structurally cannot catch, same
+ * story as A27's redaction bug): `RunRecord.artifacts` was set to `[]` at
+ * run creation (run-lifecycle.ts) and then NEVER updated anywhere — a block
+ * calling `ctx.writeArtifact` genuinely persists real bytes to
+ * `store.artifacts` (step-executor.ts's `buildBlockContext`), but nothing
+ * ever reflected that write back onto the RunRecord itself, so every
+ * evidence report (`@aart/evidence`'s `renderModelFacing`, which builds
+ * `artifactRefs` from `run.artifacts`) silently showed zero artifacts for
+ * every run, no matter how many screenshots/downloads/reports a workflow
+ * actually captured. Refreshing from `store.artifacts.listByRun(runId)`
+ * here — rather than threading artifact-collection through `dispatchOnce`'s
+ * own closures, the way `capturedLlmCall` works — means this is correct
+ * regardless of how many artifacts a step wrote (zero, one, or several)
+ * without adding new per-call bookkeeping: by the time this function runs,
+ * `dispatchOnce` has already returned, so any `writeArtifact` calls the
+ * step made are already durably in the store, ready to query.
+ */
 async function appendTracesAndPersist(config: EngineConfig, run: RunRecord, newTraces: StepTrace[], resolvedSecretRefs: ReadonlySet<string>): Promise<RunRecord> {
-  const updated: RunRecord = { ...run, trace: [...run.trace, ...newTraces], updatedAt: (config.now?.() ?? new Date()).toISOString() };
+  const artifacts = await config.store.artifacts.listByRun(run.runId);
+  const updated: RunRecord = { ...run, trace: [...run.trace, ...newTraces], artifacts, updatedAt: (config.now?.() ?? new Date()).toISOString() };
   const redacted = applyRedaction(config.redact, updated, resolvedSecretRefs);
   await config.store.runs.put(redacted);
   return redacted;
@@ -552,7 +577,19 @@ async function executeWaitDispatch(
   if (step.uses === "human.approval") {
     const taskId = crypto.randomUUID();
     const now = (config.now?.() ?? new Date()).toISOString();
-    await config.store.approvals.put({
+    // A37 redaction fix: title/description come from `resolvedWith` — the
+    // step's `with:` block AFTER template resolution (resolveWithRecord,
+    // called by executeStep before dispatch) — so a workflow author
+    // referencing `{{ secrets.X }}` in a human.approval step's title/
+    // description would otherwise persist the raw resolved secret value
+    // into a brand-new ApprovalTask row right here, never redacted: this
+    // was the one persist call site in this file that built its record and
+    // called `config.store.X.put(...)` directly without first routing
+    // through `applyRedaction`, even though `resolvedSecretRefs` is already
+    // a live parameter of this very function. ApprovalTask is a separate
+    // store collection from the WaitCondition `enterWait` redacts below, so
+    // that later redaction never covered this earlier write.
+    const approvalTask: ApprovalTask = {
       id: taskId,
       runId: run.runId,
       stepId: step.id,
@@ -560,7 +597,8 @@ async function executeWaitDispatch(
       description: typeof resolvedWith.description === "string" ? resolvedWith.description : "",
       status: "pending",
       createdAt: now,
-    });
+    };
+    await config.store.approvals.put(applyRedaction(config.redact, approvalTask, resolvedSecretRefs));
     wait = { type: "approval", taskId, timeout: typeof resolvedWith.timeout === "string" ? resolvedWith.timeout : undefined, schemaVersion };
   } else {
     wait = buildWaitConditionFromBlock(step.uses as Exclude<WaitBlockId, "human.approval">, resolvedWith, schemaVersion);

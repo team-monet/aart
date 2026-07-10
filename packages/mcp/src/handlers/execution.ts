@@ -89,7 +89,7 @@ async function ensureVerifyWorkflow(ctx: AartContext, expect: string | undefined
     ? [
         { id: "open", uses: "browser.goto", with: { url: "{{ inputs.url }}" } },
         { id: "read", uses: "web.read" },
-        { id: "assert", uses: "assert.contains", with: { value: "{{ steps.read.outputs.text }}", expected: "{{ inputs.expect }}" } },
+        { id: "assert", uses: "assert.contains", with: { actual: "{{ steps.read.outputs.text }}", expected: "{{ inputs.expect }}" } },
         { id: "screenshot", uses: "browser.screenshot", with: { name: "verify" } },
       ]
     : [
