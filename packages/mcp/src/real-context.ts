@@ -247,6 +247,40 @@ export function createRealEnginePort(engine: Engine): EnginePort {
 // (fail-closed, not fail-open): a workflow this WOULD grant a capability to
 // via a standing approval instead validates/diffs as if no standing
 // approval applied — under-granting, never over-granting.
+//
+// `ValidationContext.packSealChecks` (reconciliation ledger item 12) is left
+// unpopulated here too, for a genuine (not lazily-deferred) reason distinct
+// from `standingApprovals` above — verified, not assumed:
+//   1. @aart/registry's real computePackSealChecks(store, packs,
+//      packageManager) is I/O-bound async (a store read + a package
+//      install per pack) — the exact same sync/async wall standingApprovals
+//      hits, for the same reason (this port's validateWorkflow has no
+//      Promise-wrapped call site to await one).
+//   2. Even setting (1) aside, there is today no DATA to feed it: this
+//      module's own buildRealCatalog only folds @aart/blocks-core +
+//      @aart/llm into the catalog (documented gap, item 13) — no
+//      pack-delivered block is ever resolvable via `blocks`/`entries`
+//      today, so walking a workflow's steps for `packName` references
+//      (BlockCatalogEntry.packName) always yields the empty set, on a
+//      fresh dev store or any other. A helper that does this walk would be
+//      dead code with nothing to call it into, so none is added.
+//   3. Independent of (1)/(2): AartStore.packManifests has no "current/
+//      latest version of pack X" primitive (get() requires an exact
+//      version; listVersions() returns every known version, unordered by
+//      contract) and no Workflow field pins which pack version it depends
+//      on — "which (name, version) pairs does this workflow use" has no
+//      well-defined answer yet even with real installed packs. Resolving
+//      that is a data-model decision (a pack-version-pinning field, and/or
+//      a "latest" convention) beyond this integration pass's mandate.
+// Same resolution shape as EngineConfig.computePackHashes (item 8) above,
+// applied consistently rather than re-litigated: real DI plumbing exists on
+// governance's side (ValidationContext.packSealChecks is a real, already-
+// wired optional field — validateCapabilities already reads it), but there
+// is nothing correct to compute from here until item 13's catalog gap AND
+// a pack-version-pinning primitive both land. Until then, omitting the
+// field is the CORRECT output (not a stand-in for one), not just the
+// convenient one — validateCapabilities treats a missing packSealChecks
+// identically to an empty array (`context.packSealChecks ?? []`).
 // ---------------------------------------------------------------------------
 
 export function createRealGovernancePort(blocks: BlockRegistry, trustMode: TrustMode): GovernancePort {
