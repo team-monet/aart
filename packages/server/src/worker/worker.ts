@@ -53,20 +53,29 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
     try {
       await options.engine.executeClaimedRun(runId, workerId);
       logger.info("run finished (completed, or reached a checkpoint the engine will resume later)", { runId });
-    } catch (err) {
-      logger.error("executeClaimedRun threw", { runId, error: err instanceof Error ? err.message : String(err) });
-    } finally {
       claimedRunIds.delete(runId);
-      // Best-effort backstop: if the engine's own completion path didn't
-      // already remove/release the job_queue entry (e.g. a run that
-      // errored before reaching any checkpoint), don't leave a claim
-      // dangling until the reclaim sweep's next tick notices the lease is
-      // still nominally valid — release it now so another worker (or this
-      // one) can pick it up promptly. A run correctly checkpointed into
-      // `waiting` by the engine has already had its claim released as part
-      // of that checkpoint (S1's job); this call is then a harmless no-op
-      // against an already-gone job_queue entry.
+      // Best-effort backstop, reached ONLY on a NORMAL (non-throwing)
+      // completion: if the engine's own completion path didn't already
+      // remove/release the job_queue entry (e.g. a checkpoint that doesn't
+      // clear its own claim), don't leave it dangling until the reclaim
+      // sweep's next tick notices the lease is still nominally valid —
+      // release it now. A run correctly checkpointed into `waiting` by the
+      // engine has already had its claim released as part of that
+      // checkpoint (S1's job); this call is then a harmless no-op against
+      // an already-gone job_queue entry.
       await options.store.jobQueue.release(runId).catch(() => undefined);
+    } catch (err) {
+      // Deliberately do NOT release the claim here. An exception escaping
+      // executeClaimedRun is exactly the "worker died mid-step" shape
+      // architecture §4.7's lease/reclaim machinery exists for —
+      // releasing immediately would let this (or another) worker re-claim
+      // and re-throw in a tight loop with no backoff and no bound,
+      // bypassing the bounded reclaim_count -> reclaim_exhausted
+      // protection this package already built (worker/reclaim.ts). Leaving
+      // the lease in place lets it expire naturally and routes through
+      // that existing, bounded mechanism instead of a second, weaker one.
+      logger.error("executeClaimedRun threw — leaving the claim in place for the lease/reclaim-sweep mechanism to handle (architecture §4.7)", { runId, error: err instanceof Error ? err.message : String(err) });
+      claimedRunIds.delete(runId);
     }
   }
 

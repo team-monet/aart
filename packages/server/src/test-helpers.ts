@@ -86,12 +86,20 @@ export function flushAsync(ms = 20): Promise<void> {
  * fake-clock-scheduled polling loops (e.g. `gracefulShutdown`'s internal
  * `sleep` between drain checks) to their natural conclusion without a real
  * wall-clock wait.
+ *
+ * Always advances at least once, even if `condition()` is already true on
+ * entry: a caller like `gracefulShutdown` may already be blocked awaiting
+ * its own internal fake-clock-scheduled `sleep()` when the EXTERNAL
+ * condition (e.g. `claimedRunIds.size === 0`) becomes true — that internal
+ * sleep only resolves (letting the caller's loop re-check and exit) once
+ * its own pending timer is advanced past. Checking-then-returning without
+ * ever advancing would leave that internal sleep permanently pending.
  */
 export async function driveClockUntil(clock: ReturnType<typeof createFakeClock>, condition: () => boolean, stepMs = 250, maxSteps = 100): Promise<void> {
   for (let i = 0; i < maxSteps; i++) {
-    if (condition()) return;
     clock.advance(stepMs);
     await flushAsync();
+    if (condition()) return;
   }
 }
 

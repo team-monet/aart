@@ -62,11 +62,29 @@ describe("worker-level maxConcurrentRuns admission control (architecture §4.3)"
   it("does not claim beyond the configured cap, regardless of how much work is queued", async () => {
     const clock = createFakeClock();
     fx = await createTestFixture(clock);
-    for (let i = 0; i < 5; i++) await fx.store.jobQueue.enqueue(`run_${i}`);
+    // Realistic pairing: a job_queue entry always has a backing RunRecord
+    // (createFakeEngine.startRun always writes both together) — this is
+    // what lets the fake engine actually COMPLETE (and remove) each claim
+    // rather than no-op-and-release it back to claimable, which would
+    // otherwise busy-loop the claim cap check into meaninglessness.
+    for (let i = 0; i < 5; i++) {
+      await fx.store.runs.put(fixtureRunRecord(`run_${i}`, clock));
+      await fx.store.jobQueue.enqueue(`run_${i}`);
+    }
 
     const worker = await startWorker({ store: fx.store, engine: fx.engine, clock, maxConcurrentRuns: 2, installSignalHandler: false, healthPort: 0, claimPollMs: 1000 });
     workers.push(worker);
     expect(worker.claimedRunIds.size).toBeLessThanOrEqual(2);
+    await flushAsync();
+    // All 5 eventually complete (each claim slot frees up and reclaims the
+    // next queued job) — proving the cap bounds CONCURRENCY, not total
+    // throughput.
+    for (let i = 0; i < 30 && (await fx.store.runs.list({ status: "completed" })).length < 5; i++) {
+      await worker.claimTick();
+      await flushAsync();
+    }
+    const completed = await fx.store.runs.list({ status: "completed" });
+    expect(completed.length).toBe(5);
   }, 15000);
 });
 
