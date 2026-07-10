@@ -1,9 +1,9 @@
 {
   "name": "@aart/mcp",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "AART mcp package. Stub scaffolded by S0 (Wave 0) — real implementation is Wave-1 scope; see aart_implementation_plan_v1.md for session ownership.",
+  "description": "AART MCP tool surface — 21 tools, core/extended mode-gated registration, result-affordance pattern, YAML uses/with compiler, init-agent, recipes (architecture §10, spec §32-34). Shared composition root also consumed by @aart/cli (architecture §10.3's 'shared by @aart/cli' note) so CLI and MCP never diverge into two implementations of the same action.",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
@@ -16,7 +16,17 @@
   "scripts": {
     "build": "tsc -b"
   },
+  "dependencies": {
+    "@aart/expr": "workspace:*",
+    "@aart/store": "workspace:*",
+    "@aart/types": "workspace:*",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "js-yaml": "4.3.0",
+    "zod": "4.4.3"
+  },
   "devDependencies": {
-    "typescript": "5.9.3"
+    "@types/js-yaml": "^4.0.9",
+    "typescript": "5.9.3",
+    "vitest": "4.1.10"
   }
 }
