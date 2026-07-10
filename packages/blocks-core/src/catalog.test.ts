@@ -138,9 +138,10 @@ describe("createBlockCatalog", () => {
     expect(byId.get("assert.equals")?.capabilities).toEqual([]);
     expect(byId.get("assert.artifact_exists")?.capabilities).toEqual(["file.read"]);
     expect(byId.get("assert.no_console_errors")?.capabilities).toEqual(["browser"]);
-    // Wait/human wait-shaped blocks construct a value, they don't perform
-    // I/O themselves — all capability-free, including human.approval and
-    // human.correct (both wait-shaped) and human.review (a marker).
+    // Wait blocks + human.approval construct a value, they don't perform
+    // I/O themselves — all capability-free. human.correct/human.review are
+    // synchronous markers (NOT wait-shaped — see human/correct.ts's S9
+    // integration note for why human.correct isn't), also capability-free.
     for (const id of ["wait.for_signal", "wait.until", "wait.for_webhook", "wait.for_external_job", "wait.for_queue", "wait.manual", "human.approval", "human.correct", "human.review"]) {
       expect(byId.get(id)?.capabilities, id).toEqual([]);
     }
