@@ -2,3 +2,4 @@ packages:
   - "packages/*"
 allowBuilds:
   isolated-vm: true
+  esbuild: true

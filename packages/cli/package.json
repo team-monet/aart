@@ -21,14 +21,24 @@
     "access": "public"
   },
   "scripts": {
-    "build": "tsc -b"
+    "build": "tsc -b",
+    "build:publish": "tsc -b && node scripts/build-publish.mjs"
   },
   "dependencies": {
-    "@aart/mcp": "workspace:*",
-    "@aart/store": "workspace:*",
-    "@aart/types": "workspace:*"
+    "@anthropic-ai/sdk": "^0.70.0",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "ajv": "^8.17.1",
+    "isolated-vm": "7.0.0",
+    "js-yaml": "4.3.0",
+    "playwright": "1.61.1",
+    "yaml": "2.8.1",
+    "zod": "4.4.3"
   },
   "devDependencies": {
+    "@aart/mcp": "workspace:*",
+    "@aart/store": "workspace:*",
+    "@aart/types": "workspace:*",
+    "esbuild": "0.27.7",
     "typescript": "5.9.3",
     "vitest": "4.1.10"
   }
