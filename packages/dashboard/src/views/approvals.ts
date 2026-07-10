@@ -6,7 +6,7 @@
 import type { AartStore } from "@aart/store";
 import type { ApprovalTask } from "@aart/types";
 import type { DashboardDeps, ResumeOutcome } from "../deps.js";
-import { escapeHtml, form, hiddenField, page, table } from "../http/html.js";
+import { escapeHtml, form, page, table } from "../http/html.js";
 
 export function renderApprovalQueuePage(tasks: ApprovalTask[]): string {
   const rows = tasks

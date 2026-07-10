@@ -19,7 +19,6 @@ import { renderBlocksPage, renderPacksPage } from "./views/blocks-packs.js";
 import {
   blockPromotionAction,
   clearNeedsReviewAction,
-  correctionKey,
   createEvalExampleFromCorrectionAction,
   createIssueForAgentAction,
   findCorrectionByKey,
