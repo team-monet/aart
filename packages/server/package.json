@@ -18,6 +18,7 @@
   },
   "dependencies": {
     "@aart/expr": "workspace:*",
+    "@aart/governance": "workspace:*",
     "@aart/store": "workspace:*",
     "@aart/types": "workspace:*",
     "zod": "4.4.3"

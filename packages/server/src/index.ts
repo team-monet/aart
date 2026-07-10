@@ -21,14 +21,21 @@ export { createFakeEngine, type EngineBoundary, type ResumeResult, type StartRun
 export { clearRunFlag, listFlaggedRuns, type ClearRunFlagResult } from "./flags.js";
 
 // --- environments / deployments / promotion (architecture ADR-06/ADR-07) ---
+// S9 integration (reconciliation ledger item 2): computeApprovalState/
+// computePromotionState/evaluatePromotionForEnvironment/PromotionRecord/
+// REQUIRED_GATES_BY_MODE are @aart/governance's real exports, re-exported
+// here (via promotion.js) unchanged - this package no longer carries its
+// own mirror. See promotion.ts's own header comment for the full story.
 export { registerEnvironment, rollbackDeployment, type RegisterEnvironmentParams, type RollbackResult } from "./environments.js";
 export {
   computeApprovalState,
   computePromotionState,
+  evaluatePromotionForEnvironment,
   promoteWorkflowVersionToEnvironment,
   requiredGatesForEnvironment,
-  REQUIRED_GATES_BY_TRUST_MODE,
-  type GateKey,
+  REQUIRED_GATES_BY_MODE,
+  type GateName,
+  type PromotionEvaluation,
   type PromotionRecord,
   type PromoteToEnvironmentParams,
   type PromoteToEnvironmentResult,

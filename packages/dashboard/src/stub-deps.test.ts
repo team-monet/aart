@@ -133,7 +133,11 @@ describe("computeApprovalState", () => {
 describe("evaluatePromotionForEnvironment", () => {
   const gates = { validate: "passed", readiness: "passed", evals: "pending", riskReview: "pending", humanReview: "pending" } as const;
 
-  it("refuses (kind: blocked) when the workflow is promotionBlocked, regardless of gates", async () => {
+  // S9 integration (reconciliation ledger item 2): deps.evaluatePromotionForEnvironment
+  // is now @aart/governance's real function - its discriminated union uses
+  // a `blocked: true|false` boolean flag, not this package's former local
+  // `{kind: "blocked"|"evaluated"}` shape.
+  it("refuses (blocked: true) when the workflow is promotionBlocked, regardless of gates", async () => {
     const { deps, cleanup } = await createTestFixture();
     try {
       const result = deps.evaluatePromotionForEnvironment({
@@ -143,7 +147,7 @@ describe("evaluatePromotionForEnvironment", () => {
         requiredGatesForEnvironment: ["validate"],
         environment: "prod",
       });
-      expect(result).toEqual({ kind: "blocked" });
+      expect(result).toEqual({ blocked: true, reason: "promotion_blocked", environment: "prod" });
     } finally {
       await cleanup();
     }
@@ -159,7 +163,7 @@ describe("evaluatePromotionForEnvironment", () => {
         requiredGatesForEnvironment: ["validate", "readiness"],
         environment: "prod",
       });
-      expect(result).toEqual({ kind: "evaluated", record: { environment: "prod", promoted: true, globalApproval: "approved", requiredGates: ["validate", "readiness"], unmetGates: [] } });
+      expect(result).toEqual({ blocked: false, record: { environment: "prod", promoted: true, globalApproval: "approved", requiredGates: ["validate", "readiness"], unmetGates: [] } });
     } finally {
       await cleanup();
     }
@@ -175,7 +179,7 @@ describe("evaluatePromotionForEnvironment", () => {
         requiredGatesForEnvironment: ["validate", "evals"],
         environment: "prod",
       });
-      expect(result).toEqual({ kind: "evaluated", record: { environment: "prod", promoted: false, globalApproval: "approved", requiredGates: ["validate", "evals"], unmetGates: ["evals"] } });
+      expect(result).toEqual({ blocked: false, record: { environment: "prod", promoted: false, globalApproval: "approved", requiredGates: ["validate", "evals"], unmetGates: ["evals"] } });
     } finally {
       await cleanup();
     }

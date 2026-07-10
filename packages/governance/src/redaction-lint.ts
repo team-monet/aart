@@ -80,8 +80,17 @@ function isGuardedByInjectedRedactFn(window: string, boundIdentifiers: ReadonlyS
   for (const name of boundIdentifiers) {
     const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     // Matches `redact(`, `this.redact(`, `this.#redact(`, `self.redact(` —
-    // any plain or member-access call of a RedactFn-bound identifier.
-    if (new RegExp(`(?:\\bthis\\.#?|\\b)${escaped}\\s*\\(`).test(window)) return true;
+    // any plain or member-access CALL of a RedactFn-bound identifier — OR
+    // `identifier,`/`identifier)` — the identifier PASSED AS AN ARGUMENT to
+    // a shared helper that itself calls it (e.g. @aart/engine's real
+    // pattern: `applyRedaction(config.redact, record, secretRefs)`,
+    // redaction.ts, rather than every one of engine's dozen-plus persist
+    // call sites repeating `config.redact(...)` inline). Verified against
+    // the real merged @aart/engine at S9 integration time: the direct-call
+    // form alone produced 15 false-positive findings across
+    // run-lifecycle.ts/step-executor.ts/wait-machine.ts/concurrency.ts, all
+    // genuinely-redacted call sites routed through this exact indirection.
+    if (new RegExp(`(?:\\bthis\\.#?|\\b)${escaped}\\s*[(,)]`).test(window)) return true;
   }
   return false;
 }

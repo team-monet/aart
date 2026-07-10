@@ -1,29 +1,33 @@
 // createStubDeps — the default DashboardDeps implementation this package's
-// own tests and any local/dev run use until Wave-1's real siblings land.
-// Every function here matches its sibling's documented signature EXACTLY
-// (see deps.ts's per-group citations) so the S9 merge swap is a value
-// replacement, never a call-site rewrite. Where behavior is faithfully
-// reproducible from a sibling's own SEAMS.md prose or (for S2's flags.ts
-// and promotion.ts, read directly from the sibling worktree during this
-// session's research) observed real source, this mirrors that behavior
-// closely — not just "any function with the right type signature".
+// own tests and any local/dev run use until the remaining Wave-1 siblings'
+// composition-root wiring lands (evidence/engine — reconciliation ledger
+// items 3/5). Every function here matches its sibling's documented
+// signature EXACTLY (see deps.ts's per-group citations) so each remaining
+// swap is a value replacement, never a call-site rewrite.
+//
+// S9 integration (reconciliation ledger item 2): the promotion group
+// (computeApprovalState/evaluatePromotionForEnvironment/
+// REQUIRED_GATES_BY_TRUST_MODE/promoteWorkflowVersionToEnvironment) is no
+// longer this package's own mirror — bound directly to @aart/governance's
+// and @aart/server's real, now-merged exports below. This is the first of
+// several groups in this file to make that swap; the rest (evidence's
+// report renderers/scorer registry/runEvalSuite, engine's triggerRun/
+// resumeApproval) remain local mirrors until their own composition-root
+// wiring lands.
 import type { AartStore } from "@aart/store";
-import type { ApprovalTask, Correction, Deployment, Environment, EvalExample, EvalRun, EvalSuite, ImprovementBrief, RunRecord, Scorer, StepTrace, TrustMode, Workflow } from "@aart/types";
+import type { ApprovalTask, Correction, EvalExample, EvalRun, EvalSuite, ImprovementBrief, RunRecord, Scorer, StepTrace, Workflow } from "@aart/types";
+import { computeApprovalState, evaluatePromotionForEnvironment, REQUIRED_GATES_BY_MODE } from "@aart/governance";
+import { promoteWorkflowVersionToEnvironment } from "@aart/server";
 import type { Clock } from "./clock.js";
 import { systemClock } from "./clock.js";
 import { escapeHtml } from "./http/html.js";
 import { generateId } from "./ids.js";
-import type {
-  ClearRunFlagResult,
-  DashboardDeps,
-  GateName,
-  PromotionRecord,
-  ReportRenderers,
-  ResumeOutcome,
-  ScorerRegistry,
-  ScorerResult,
-  TriggerRunInput,
-} from "./deps.js";
+import type { ClearRunFlagResult, DashboardDeps, GateName, ReportRenderers, ResumeOutcome, ScorerRegistry, ScorerResult, TriggerRunInput } from "./deps.js";
+
+export { computeApprovalState, evaluatePromotionForEnvironment, promoteWorkflowVersionToEnvironment };
+/** @deprecated kept as an alias during S9 integration in case any external caller imported this package's former locally-named constant directly; use `REQUIRED_GATES_BY_MODE` (re-exported from `@aart/governance` via this module) going forward. */
+export const REQUIRED_GATES_BY_TRUST_MODE = REQUIRED_GATES_BY_MODE;
+export { REQUIRED_GATES_BY_MODE };
 
 // ---------------------------------------------------------------------------
 // S2 seam — mirrors packages/server/src/flags.ts's clearRunFlag/
@@ -152,54 +156,12 @@ export function makeDecideApprovalTask(clock: Clock = systemClock) {
 }
 
 // ---------------------------------------------------------------------------
-// S4 seam — computeApprovalState / evaluatePromotionForEnvironment. Gate
-// logic (`gatesSatisfy`) mirrors S2's own observed mirror of S4's §7.1
-// contract exactly: a required gate is satisfied by "passed" OR "waived".
-// ---------------------------------------------------------------------------
-
-function gatesSatisfy(gates: Workflow["gates"], required: readonly GateName[]): boolean {
-  return required.every((g) => gates[g] === "passed" || gates[g] === "waived");
-}
-
-export function computeApprovalState(gates: Workflow["gates"], requiredGatesForMode: readonly GateName[]): "draft" | "approved" {
-  return gatesSatisfy(gates, requiredGatesForMode) ? "approved" : "draft";
-}
-
-export function evaluatePromotionForEnvironment(params: {
-  workflow: Pick<Workflow, "promotionBlocked">;
-  globalApproval: Workflow["approval"];
-  gates: Workflow["gates"];
-  requiredGatesForEnvironment: readonly GateName[];
-  environment: string;
-}): { kind: "blocked" } | { kind: "evaluated"; record: PromotionRecord } {
-  if (params.workflow.promotionBlocked) return { kind: "blocked" };
-  const unmetGates = params.requiredGatesForEnvironment.filter((g) => !(params.gates[g] === "passed" || params.gates[g] === "waived"));
-  const promoted = params.globalApproval === "approved" && unmetGates.length === 0;
-  return {
-    kind: "evaluated",
-    record: {
-      environment: params.environment,
-      promoted,
-      globalApproval: params.globalApproval,
-      requiredGates: params.requiredGatesForEnvironment,
-      unmetGates,
-    },
-  };
-}
-
-/** architecture §7.3's trust-mode→required-gates table, mirrored from S2's own observed `REQUIRED_GATES_BY_TRUST_MODE` constant (itself flagged there as a mirror — see this package's SEAMS.md). */
-export const REQUIRED_GATES_BY_TRUST_MODE: Record<TrustMode, readonly GateName[]> = {
-  dev: [],
-  governed: ["validate", "humanReview"],
-  strict: ["validate", "humanReview"],
-  production: ["validate", "readiness", "evals", "riskReview", "humanReview"],
-};
-
-// ---------------------------------------------------------------------------
-// S8 gap-fill — approveOrDeprecateWorkflow / promoteWorkflowVersionToEnvironment.
-// See deps.ts's doc comment on these two types for why no sibling SEAMS.md
-// entry exists yet. The POLICY decision routes through the two S4 functions
-// above; this is only the "fetch + persist" glue around them.
+// S8 gap-fill — approveOrDeprecateWorkflow. See deps.ts's doc comment for
+// why no sibling SEAMS.md entry exists for this one (no owning function
+// publishes "write Workflow.approval" — only the pure gate computation).
+// The POLICY decision routes through @aart/governance's real
+// computeApprovalState (imported above); this is only the "fetch + persist"
+// glue around it.
 // ---------------------------------------------------------------------------
 
 export function makeApproveOrDeprecateWorkflow(clock: Clock = systemClock) {
@@ -214,48 +176,17 @@ export function makeApproveOrDeprecateWorkflow(clock: Clock = systemClock) {
   };
 }
 
-function resolveTrustMode(environment: Environment): "dev" | "governed" | "strict" | "production" {
-  const trustMode = environment.config["trustMode"];
-  return trustMode === "dev" || trustMode === "governed" || trustMode === "strict" || trustMode === "production" ? trustMode : "governed";
-}
-
-export function makePromoteWorkflowVersionToEnvironment(clock: Clock = systemClock) {
-  return async function promoteWorkflowVersionToEnvironment(
-    store: AartStore,
-    params: { workflowId: string; workflowVersion: string; environmentId: string; triggerConfig?: Record<string, unknown> },
-  ) {
-    const workflow = await store.workflows.get(params.workflowId, params.workflowVersion);
-    if (!workflow) return { kind: "workflow_not_found" as const };
-    const environment = await store.environments.get(params.environmentId);
-    if (!environment) return { kind: "environment_not_found" as const };
-
-    const requiredGatesForEnvironment = REQUIRED_GATES_BY_TRUST_MODE[resolveTrustMode(environment)];
-    const evaluation = evaluatePromotionForEnvironment({
-      workflow,
-      globalApproval: workflow.approval,
-      gates: workflow.gates,
-      requiredGatesForEnvironment,
-      environment: environment.id,
-    });
-    if (evaluation.kind === "blocked") return { kind: "blocked_by_promotion_block" as const };
-    if (!evaluation.record.promoted) return { kind: "not_promoted" as const, record: evaluation.record };
-
-    const existingForEnv = await store.deployments.list({ environmentId: params.environmentId, workflowId: params.workflowId });
-    const existing = existingForEnv.find((d) => d.workflowVersion === params.workflowVersion);
-    const deployment: Deployment = existing
-      ? { ...existing, triggerConfig: params.triggerConfig ?? existing.triggerConfig }
-      : {
-          id: generateId("dep"),
-          workflowId: params.workflowId,
-          workflowVersion: params.workflowVersion,
-          environmentId: params.environmentId,
-          triggerConfig: params.triggerConfig ?? {},
-          createdAt: clock.nowIso(),
-        };
-    await store.deployments.put(deployment);
-    return { kind: "promoted" as const, record: evaluation.record, deployment };
-  };
-}
+// promoteWorkflowVersionToEnvironment: S9 integration (reconciliation
+// ledger item 2) — this package's former local
+// makePromoteWorkflowVersionToEnvironment (its own fetch/eligibility/
+// Deployment-create-or-refresh reimplementation) is deleted; @aart/server's
+// real promoteWorkflowVersionToEnvironment (imported above, re-exported
+// from this module) does the identical job for real, including the
+// Deployment persistence this package's own version used to duplicate.
+// Bound directly into DashboardDeps below with zero wrapper needed - its
+// real signature `(store, params, clock?)` already satisfies this
+// package's `PromoteWorkflowVersionToEnvironmentFn` 2-arg type (the
+// optional 3rd param defaults to systemClock server-side).
 
 // ---------------------------------------------------------------------------
 // S6 seam E4 — correction capture + 6 outcomes + 2 complements. Behavior
@@ -549,7 +480,18 @@ export function createStubDeps(store: AartStore, clock: Clock = systemClock): Da
     createScorerRegistry,
     runEvalSuite,
     approveOrDeprecateWorkflow: makeApproveOrDeprecateWorkflow(clock),
-    promoteWorkflowVersionToEnvironment: makePromoteWorkflowVersionToEnvironment(clock),
+    // Explicit wrapper (not a bare reference) so this DashboardDeps
+    // instance's own injected `clock` threads through to the Deployment
+    // record's `createdAt` - matching every other clock-sensitive field in
+    // this container (e.g. clearRunFlag/resumeApproval above). Adapts this
+    // package's own (narrower) Clock into @aart/server's Clock shape -
+    // server's Clock additionally requires `setTimeout` (its own
+    // ticker/lease/reclaim timer-driven logic needs it) which
+    // promoteWorkflowVersionToEnvironment itself never calls (verified: it
+    // only ever calls `.nowIso()`), so the adapter's setTimeout is
+    // deliberately a structural-typing satisfier only, never invoked.
+    promoteWorkflowVersionToEnvironment: (store, params) =>
+      promoteWorkflowVersionToEnvironment(store, params, { ...clock, setTimeout: () => ({ cancel() {} }) }),
     createEvalSuite,
   };
 }

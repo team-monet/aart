@@ -6,8 +6,8 @@
 // field."
 import { afterEach, describe, expect, it } from "vitest";
 import type { Gates, Workflow } from "@aart/types";
-import { computeApprovalState, computePromotionState, promoteWorkflowVersionToEnvironment, requiredGatesForEnvironment, REQUIRED_GATES_BY_TRUST_MODE } from "./promotion.js";
-import { createFakeClock, createTestFixture, type TestFixture } from "./test-helpers.js";
+import { computeApprovalState, computePromotionState, promoteWorkflowVersionToEnvironment, requiredGatesForEnvironment, REQUIRED_GATES_BY_MODE } from "./promotion.js";
+import { createTestFixture, type TestFixture } from "./test-helpers.js";
 
 let fx: TestFixture | undefined;
 afterEach(async () => {
@@ -20,11 +20,11 @@ const allPassedGates: Gates = { validate: "passed", readiness: "passed", evals: 
 
 describe("computeApprovalState — pure, 2-arg (architecture §7.1)", () => {
   it("approved once every required gate is passed or waived", () => {
-    expect(computeApprovalState(partialGates, REQUIRED_GATES_BY_TRUST_MODE.governed)).toBe("approved");
+    expect(computeApprovalState(partialGates, REQUIRED_GATES_BY_MODE.governed)).toBe("approved");
   });
 
   it("draft when a required gate hasn't passed", () => {
-    expect(computeApprovalState(partialGates, REQUIRED_GATES_BY_TRUST_MODE.production)).toBe("draft");
+    expect(computeApprovalState(partialGates, REQUIRED_GATES_BY_MODE.production)).toBe("draft");
   });
 
   it("a waived gate satisfies the requirement same as passed", () => {
@@ -33,26 +33,27 @@ describe("computeApprovalState — pure, 2-arg (architecture §7.1)", () => {
   });
 });
 
+// S9 integration (reconciliation ledger item 2): computePromotionState is
+// now @aart/governance's real (4-arg, no clock) function, re-exported
+// unchanged - `environment` is a plain string (an id, matching this
+// package's own convention - see promotion.ts's header comment), not an
+// Environment object; the output no longer carries environmentId/
+// environmentName/computedAt (governance's shape has no timestamp - a
+// PromotionRecord is always computed fresh, never persisted).
 describe("computePromotionState — pure, 4-arg, never touches global approval (architecture §7.1/ADR-07)", () => {
   it("promoted requires BOTH global approval AND the environment's own required gates", () => {
-    const clock = createFakeClock();
-    const env = { id: "env_1", name: "staging", config: {} };
-    const record = computePromotionState("approved", allPassedGates, REQUIRED_GATES_BY_TRUST_MODE.governed, env, clock);
+    const record = computePromotionState("approved", allPassedGates, REQUIRED_GATES_BY_MODE.governed, "env_1");
     expect(record.promoted).toBe(true);
   });
 
   it("NOT promoted when global approval is still draft, even if gates would otherwise satisfy the environment", () => {
-    const clock = createFakeClock();
-    const env = { id: "env_1", name: "staging", config: {} };
-    const record = computePromotionState("draft", allPassedGates, REQUIRED_GATES_BY_TRUST_MODE.governed, env, clock);
+    const record = computePromotionState("draft", allPassedGates, REQUIRED_GATES_BY_MODE.governed, "env_1");
     expect(record.promoted).toBe(false);
   });
 
   it("is a pure function — has no store/side effects (same inputs, same output, called repeatedly)", () => {
-    const clock = createFakeClock();
-    const env = { id: "env_1", name: "prod", config: {} };
-    const r1 = computePromotionState("approved", partialGates, REQUIRED_GATES_BY_TRUST_MODE.production, env, clock);
-    const r2 = computePromotionState("approved", partialGates, REQUIRED_GATES_BY_TRUST_MODE.production, env, clock);
+    const r1 = computePromotionState("approved", partialGates, REQUIRED_GATES_BY_MODE.production, "env_1");
+    const r2 = computePromotionState("approved", partialGates, REQUIRED_GATES_BY_MODE.production, "env_1");
     expect(r1).toEqual(r2);
   });
 });
@@ -137,10 +138,10 @@ describe("promoteWorkflowVersionToEnvironment — staging vs production divergen
 
 describe("requiredGatesForEnvironment", () => {
   it("defaults to governed when config.trustMode is absent", () => {
-    expect(requiredGatesForEnvironment({ id: "e", name: "n", config: {} })).toEqual(REQUIRED_GATES_BY_TRUST_MODE.governed);
+    expect(requiredGatesForEnvironment({ id: "e", name: "n", config: {} })).toEqual(REQUIRED_GATES_BY_MODE.governed);
   });
 
   it("reads trustMode from the environment's config bag", () => {
-    expect(requiredGatesForEnvironment({ id: "e", name: "n", config: { trustMode: "production" } })).toEqual(REQUIRED_GATES_BY_TRUST_MODE.production);
+    expect(requiredGatesForEnvironment({ id: "e", name: "n", config: { trustMode: "production" } })).toEqual(REQUIRED_GATES_BY_MODE.production);
   });
 });

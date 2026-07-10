@@ -76,6 +76,12 @@ importers:
 
   packages/dashboard:
     dependencies:
+      '@aart/governance':
+        specifier: workspace:*
+        version: link:../governance
+      '@aart/server':
+        specifier: workspace:*
+        version: link:../server
       '@aart/store':
         specifier: workspace:*
         version: link:../store
@@ -252,6 +258,9 @@ importers:
       '@aart/expr':
         specifier: workspace:*
         version: link:../expr
+      '@aart/governance':
+        specifier: workspace:*
+        version: link:../governance
       '@aart/store':
         specifier: workspace:*
         version: link:../store

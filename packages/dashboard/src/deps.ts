@@ -3,28 +3,35 @@
 // SAME underlying functions the MCP/CLI surfaces call... the dashboard is a
 // third client of those functions, not a parallel implementation."
 //
-// None of @aart/server (S2), @aart/governance (S4), @aart/evidence (S6), or
-// @aart/engine (S1) has landed in THIS worktree (each is a concurrent
-// Wave-1 session on its own branch — see AMENDMENTS.md/SEAMS.md protocol);
-// this package therefore does not take a package.json dependency on any of
-// them. Instead, every cross-session function this dashboard calls is
-// modeled here as a narrow function-type seam matching that sibling's
-// OWN published SEAMS.md signature exactly (cited per group below), + a
-// deliberately swappable DI container (`DashboardDeps`) that `views/`
-// and `actions/`-shaped handlers receive and call through.
+// Originally, none of @aart/server (S2), @aart/governance (S4), @aart/evidence
+// (S6), or @aart/engine (S1) had landed in this package's own worktree (each
+// was a concurrent Wave-1 session on its own branch — see AMENDMENTS.md/
+// SEAMS.md protocol), so every cross-session function this dashboard calls
+// was modeled here as a narrow function-type seam + a deliberately
+// swappable DI container (`DashboardDeps`) that `views/`/`actions/`-shaped
+// handlers receive and call through, matching that sibling's OWN published
+// SEAMS.md signature exactly.
 //
-// This is the same pattern @aart/server itself used for S1's engine
-// (`engine/boundary.ts`'s `EngineBoundary` + `createFakeEngine`) and for
-// S4's governance functions (`promotion.ts`'s flagged local mirror) —
-// established, precedented, not a dashboard-specific invention.
+// S9 integration (reconciliation ledger item 2): the promotion-related
+// group below (`PromotionRecord`/`PromotionEvaluation`/
+// `EvaluatePromotionForEnvironmentFn`) is no longer this package's own
+// mirror — it's imported directly from the real, now-merged
+// `@aart/governance`. This dashboard's own local `PromotionRecord` had
+// ALREADY independently converged on governance's exact field shape before
+// this reconciliation (confirmed structurally identical), which is part of
+// why governance's shape was ratified as canonical over @aart/server's
+// former, differently-shaped local mirror (root AMENDMENTS.md A26). The DI
+// container SHAPE (a swappable `DashboardDeps`) is unchanged — this is a
+// value-source swap, not an architecture change; `views/`/`actions/` call
+// sites are unaffected since nothing in this package pattern-matched on
+// the old locally-invented `{kind:"blocked"|"evaluated"}` discriminant
+// (grep-verified before this change).
 //
-// AT S9 MERGE TIME: replace `createStubDeps`'s fields one-by-one with the
-// real imports (`import { clearRunFlag } from "@aart/server"`, etc.) — the
-// function TYPES here are written to match the real signatures exactly, so
-// no call site in `views/`/`actions/` needs to change, only the values
-// passed into `DashboardDeps`. See this package's SEAMS.md for the fields
-// that are genuine gaps (no sibling has published a seam yet) vs. fields
-// that mirror an already-published signature.
+// Every OTHER field below still follows the original pattern (a narrow
+// function-type seam, real imports swapped in one group at a time as each
+// sibling's composition-root wiring lands) — see this package's SEAMS.md
+// for which fields are genuine dashboard-owned gap-fills vs. which mirror
+// an already-published sibling signature.
 import type { AartStore } from "@aart/store";
 import type {
   ApprovalState,
@@ -43,8 +50,10 @@ import type {
   TrustMode,
   Workflow,
 } from "@aart/types";
+import type { PromotionEvaluation, PromotionRecord } from "@aart/governance";
 
 export type GateName = keyof Gates;
+export type { PromotionEvaluation, PromotionRecord };
 
 // ---------------------------------------------------------------------------
 // S2 @aart/server seam — SEAMS.md "clearRunFlag — the flagged-run clear
@@ -90,27 +99,18 @@ export type ResumeOutcome =
 export type ResumeApprovalFn = (runId: string, stepId: string, task: { id: string; status: string; decision?: unknown; reviewer?: string }) => Promise<ResumeOutcome>;
 
 // ---------------------------------------------------------------------------
-// S4 @aart/governance seam — SEAMS.md "computePromotionState /
-// evaluatePromotionForEnvironment" entry. `computeApprovalState` 2-arg form
-// per this package's own injection brief. `PromotionRecord`'s field shape
-// is explicitly NOT frozen anywhere (S4's own SEAMS.md note) — the shape
-// below is copied verbatim from S4's documented "reasonable fill".
-// `PromotionEvaluation`'s exact return shape for the refusal wrapper isn't
-// spelled out in S4's SEAMS.md excerpt either; modeled here as a
-// blocked/evaluated discriminated union, this package's own reasonable
-// fill for THAT narrower gap — see SEAMS.md.
+// @aart/governance's real exports (S9 integration, reconciliation ledger
+// item 2) — computeApprovalState (2-arg), evaluatePromotionForEnvironment,
+// PromotionRecord/PromotionEvaluation (imported above, re-exported for this
+// package's own consumers). Governance's `evaluatePromotionForEnvironment`
+// returns `{blocked:true; reason; environment} | {blocked:false; record}` —
+// grep-verified before this change that no view/action in this package
+// pattern-matched on the FORMER locally-invented `{kind:"blocked"|
+// "evaluated"}` shape, so this is a value-source swap only.
 // ---------------------------------------------------------------------------
 
 export type ComputeApprovalStateFn = (gates: Gates, requiredGatesForMode: readonly GateName[]) => ApprovalState;
 
-export interface PromotionRecord {
-  environment: string;
-  promoted: boolean;
-  globalApproval: ApprovalState;
-  requiredGates: readonly GateName[];
-  unmetGates: readonly GateName[];
-}
-export type PromotionEvaluation = { kind: "blocked" } | { kind: "evaluated"; record: PromotionRecord };
 export type EvaluatePromotionForEnvironmentFn = (params: {
   workflow: Pick<Workflow, "promotionBlocked">;
   globalApproval: ApprovalState;
@@ -277,7 +277,7 @@ export interface DashboardDeps {
 
   computeApprovalState: ComputeApprovalStateFn;
   evaluatePromotionForEnvironment: EvaluatePromotionForEnvironmentFn;
-  /** architecture §7.3's trust-mode→required-gates table. Not itself given a literal value by either source doc for this session to cite verbatim; mirrors S2's own observed `REQUIRED_GATES_BY_TRUST_MODE` constant (itself flagged there as a mirror of S4's table) — see SEAMS.md. */
+  /** architecture §7.3's trust-mode→required-gates table — @aart/governance's real REQUIRED_GATES_BY_MODE as of S9 integration (reconciliation ledger item 2); this field's own name is unchanged (dashboard-internal DI naming), only its bound value. */
   requiredGatesByTrustMode: Record<TrustMode, readonly GateName[]>;
 
   recordCorrection: RecordCorrectionFn;
