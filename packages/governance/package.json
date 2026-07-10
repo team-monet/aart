@@ -1,9 +1,9 @@
 {
   "name": "@aart/governance",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "AART governance package. Stub scaffolded by S0 (Wave 0) — real implementation is Wave-1 scope; see aart_implementation_plan_v1.md for session ownership.",
+  "description": "AART governance: approval/gates lifecycle, trust modes, capability/risk closure, standing approvals, semantic risk diff, 5-class validation engine, and the two named-critical security chokepoints (redaction, redaction-bypass lint) — architecture §7, spec §16.2-16.3/§17/§18/§31.",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
@@ -12,11 +12,21 @@
       "default": "./dist/index.js"
     }
   },
+  "bin": {
+    "aart-governance-lint": "./dist/redaction-lint-cli.js"
+  },
   "files": ["dist"],
   "scripts": {
-    "build": "tsc -b"
+    "build": "tsc -b",
+    "lint:redaction": "node --enable-source-maps dist/redaction-lint-cli.js"
+  },
+  "dependencies": {
+    "@aart/store": "workspace:*",
+    "@aart/types": "workspace:*",
+    "zod": "4.4.3"
   },
   "devDependencies": {
-    "typescript": "5.9.3"
+    "typescript": "5.9.3",
+    "vitest": "4.1.10"
   }
 }
