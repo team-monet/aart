@@ -1,0 +1,23 @@
+{
+  "name": "@aart/expr",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "AART {{ }} expression resolver (spec §14.3, architecture §3). Deliberately leaf-level: zero dependency on @aart/types, @aart/engine, or @aart/governance — testable in total isolation.",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc -b"
+  },
+  "devDependencies": {
+    "typescript": "5.9.3",
+    "vitest": "4.1.10"
+  }
+}
