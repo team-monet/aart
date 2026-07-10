@@ -42,3 +42,18 @@ export class MissingOutputSchemaError extends AartError {
 export class MissingPromptError extends AartError {
   readonly errorClass = "MissingPromptError" as const;
 }
+
+/** A `prompts.<name>`/`schemas.<name>` ref string didn't follow that syntax (architecture §12.2/spec §22.2). */
+export class InvalidRegistryRefError extends AartError {
+  readonly errorClass = "InvalidRegistryRefError" as const;
+}
+
+/** A `prompts.<name>`/`schemas.<name>` ref resolved to zero registered versions. */
+export class UnresolvedRegistryRefError extends AartError {
+  readonly errorClass = "UnresolvedRegistryRefError" as const;
+}
+
+/** Attempted to register a (name, version) pair that already exists with DIFFERENT content — registry entries are immutable once published (architecture §12.2: "independently versioned... a prompt can be revised without touching the workflow", which only holds if an existing version's content never silently changes under it). Re-registering the SAME content for an existing (name, version) is a no-op, not an error. */
+export class RegistryVersionImmutableError extends AartError {
+  readonly errorClass = "RegistryVersionImmutableError" as const;
+}
