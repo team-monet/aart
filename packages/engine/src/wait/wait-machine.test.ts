@@ -393,8 +393,11 @@ describe("THE REQUIRED TEST — exactly-once resume's transaction boundary holds
     expect(putCallCount).toBe(1); // confirms the injected failure point was actually reached, not skipped
 
     // Re-read through the REAL (unwrapped) store — neither half of the
-    // "commit together or not at all" pair landed.
-    await expect(store.runs.hasDedupeKey(run.runId, "wait_step:manual")).resolves.toBe(false);
+    // "commit together or not at all" pair landed. Dedupe key format is
+    // `${stepId}:${traceEntrySeq}:${suffix}` (wait-machine.ts's
+    // claimAndCompleteWait doc comment explains the seq incorporation);
+    // this run's single "wait_step" entry is trace seq 0.
+    await expect(store.runs.hasDedupeKey(run.runId, "wait_step:0:manual")).resolves.toBe(false);
     const reloadedRun = await store.runs.get(run.runId);
     expect(reloadedRun?.status).toBe("waiting"); // NOT advanced to "running"
     const waitRow = await store.waits.get(run.runId, "wait_step");

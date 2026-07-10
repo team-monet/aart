@@ -148,7 +148,13 @@ export async function enterWait(config: WaitMachineConfig, options: EnterWaitOpt
 interface ClaimAndCompleteArgs {
   runId: string;
   stepId: string;
-  dedupeKey: string;
+  /**
+   * A short, mechanism-specific token (e.g. `"timer"`, `"manual"`,
+   * `"signal:<name>:<correlationId>"`) folded into the ACTUAL dedupe key
+   * alongside the waiting trace entry's own `seq` — see the `seq`
+   * incorporation below for why the suffix ALONE isn't sufficient.
+   */
+  dedupeKeySuffix: string;
   mechanism: ResumeMechanism;
   outputs: Record<string, unknown>;
   resolvedSecretRefs: ReadonlySet<string>;
@@ -158,21 +164,33 @@ interface ClaimAndCompleteArgs {
  * The one atomic-claim primitive every resume mechanism funnels through
  * (architecture §4.4.2's dedupe check + §4.4.2's "scope" extension to
  * scheduler-tick/direct-lookup). Inside a single `store.transact()` call:
- * dedupe-check → (if already consumed: no-op) → record dedupe key → delete
- * the `WaitStore` row → complete the "waiting" `StepTrace` entry → set
- * `RunRecord.status` back to `"running"` → persist. All of this commits
- * together or none of it does (architecture §5.8) — "a crash between
- * 'dedupe recorded' and 'run state advanced' cannot happen."
+ * find the waiting trace entry → dedupe-check (keyed by THAT ENTRY's own
+ * `seq`, not just stepId+mechanism — see below) → (if already consumed:
+ * no-op) → record dedupe key → delete the `WaitStore` row → complete the
+ * "waiting" `StepTrace` entry → set `RunRecord.status` back to `"running"`
+ * → persist. All of this commits together or none of it does (architecture
+ * §5.8) — "a crash between 'dedupe recorded' and 'run state advanced'
+ * cannot happen."
+ *
+ * `[DECISION]` (a bug caught by this session's own guarded-loop fixture
+ * test, see this session's report): the dedupe key incorporates the
+ * waiting `StepTrace` entry's own `seq`, not just `stepId`+mechanism-
+ * suffix. A guarded back-edge (spec §18.2) can re-enter the SAME `stepId`
+ * many times across a run's lifetime (`rescan` → `recheck_wait` →
+ * `rescan` → `recheck_wait` → ...) — each cycle's wait is a
+ * genuinely NEW, distinct wait instance on the same step id. A dedupe key
+ * of just `"recheck_wait:timer"` would collide across cycles: cycle 1's
+ * resume would record it consumed, and cycle 2's otherwise-legitimate
+ * resume of the SAME step id (a different wait, a different trace entry)
+ * would be incorrectly reported `"duplicate"` and never actually resume.
+ * `seq` is unique per trace-entry push, including for a repeatedly-
+ * re-entered step, so folding it in makes each cycle's dedupe key unique.
  */
 async function claimAndCompleteWait(config: WaitMachineConfig, args: ClaimAndCompleteArgs): Promise<ResumeOutcome> {
-  const { runId, stepId, dedupeKey, mechanism, outputs, resolvedSecretRefs } = args;
+  const { runId, stepId, dedupeKeySuffix, mechanism, outputs, resolvedSecretRefs } = args;
   const now = config.now();
 
   return config.store.transact(async (tx) => {
-    const alreadyConsumed = await tx.runs.hasDedupeKey(runId, dedupeKey);
-    if (alreadyConsumed) {
-      return { kind: "duplicate", mechanism };
-    }
     const run = await tx.runs.get(runId);
     if (!run) {
       return { kind: "unmatched", mechanism };
@@ -180,13 +198,15 @@ async function claimAndCompleteWait(config: WaitMachineConfig, args: ClaimAndCom
     const wait = await tx.waits.get(runId, stepId);
     if (!wait) {
       // The WaitStore row is already gone. Distinguish "genuinely never
-      // existed for this (runId, stepId)" (unmatched) from "a concurrent
-      // resume already claimed and completed it" (duplicate — the second-
-      // line signal for the same outcome the dedupe-key check above is the
-      // PRIMARY guard for; this covers the race window an adapter without
-      // strict serializable isolation could expose between that check and
-      // this lookup) by checking whether a completed trace for this step
-      // already exists.
+      // existed for this (runId, stepId)" (unmatched) from "already
+      // claimed and completed, by this call or a racing one" (duplicate)
+      // by checking whether a completed trace for this step already
+      // exists. This is the fallback for the race window an adapter
+      // without strict serializable isolation could expose between two
+      // concurrent transactions both observing "wait still present" —
+      // the seq-keyed dedupe check below is the PRIMARY guard for that
+      // window; this covers the case where the row is ALREADY gone by the
+      // time this attempt even looks.
       const alreadyCompleted = run.trace.some((t) => t.stepId === stepId && t.status === "completed");
       return { kind: alreadyCompleted ? "duplicate" : "unmatched", mechanism };
     }
@@ -194,11 +214,17 @@ async function claimAndCompleteWait(config: WaitMachineConfig, args: ClaimAndCom
     assertSchemaVersionCompatible(run.schemaVersion, { runId, recordKind: "RunRecord" });
     assertSchemaVersionCompatible(wait.schemaVersion, { runId, stepId, recordKind: "WaitCondition" });
 
+    const traceIndex = findWaitingTraceIndex(run, stepId);
+    const waitingTrace = run.trace[traceIndex]!;
+    const dedupeKey = `${stepId}:${waitingTrace.seq}:${dedupeKeySuffix}`;
+    const alreadyConsumed = await tx.runs.hasDedupeKey(runId, dedupeKey);
+    if (alreadyConsumed) {
+      return { kind: "duplicate", mechanism };
+    }
+
     await tx.runs.recordDedupeKey(runId, dedupeKey);
     await tx.waits.delete(runId, stepId);
 
-    const traceIndex = findWaitingTraceIndex(run, stepId);
-    const waitingTrace = run.trace[traceIndex]!;
     const startedAt = new Date(waitingTrace.startedAt).getTime();
     const completedTrace: StepTrace = {
       ...waitingTrace,
@@ -280,11 +306,10 @@ export async function resumeBySignal(config: WaitMachineConfig, signal: Signal, 
   }
 
   const match = matches[0]!;
-  const dedupeKey = `${match.stepId}:signal:${signal.name}:${signal.correlationId}`;
   return claimAndCompleteWait(config, {
     runId: match.runId,
     stepId: match.stepId,
-    dedupeKey,
+    dedupeKeySuffix: `signal:${signal.name}:${signal.correlationId}`,
     mechanism: "signal-matched",
     outputs: normalizePayloadToOutputs(signal.payload),
     resolvedSecretRefs,
@@ -296,7 +321,7 @@ export async function resumeManual(config: WaitMachineConfig, runId: string, ste
   return claimAndCompleteWait(config, {
     runId,
     stepId,
-    dedupeKey: `${stepId}:manual`,
+    dedupeKeySuffix: "manual",
     mechanism: "direct-lookup",
     outputs: normalizePayloadToOutputs(payload),
     resolvedSecretRefs,
@@ -308,7 +333,7 @@ export async function resumeApproval(config: WaitMachineConfig, runId: string, s
   return claimAndCompleteWait(config, {
     runId,
     stepId,
-    dedupeKey: `${stepId}:approval:${task.id}`,
+    dedupeKeySuffix: `approval:${task.id}`,
     mechanism: "direct-lookup",
     outputs: { status: task.status, decision: task.decision, reviewer: task.reviewer },
     resolvedSecretRefs,
@@ -321,7 +346,7 @@ export async function resumeTimerWait(config: WaitMachineConfig, runId: string, 
   return claimAndCompleteWait(config, {
     runId,
     stepId,
-    dedupeKey: `${stepId}:timer`,
+    dedupeKeySuffix: "timer",
     mechanism: "scheduler-tick",
     outputs: { resumedAt: now.toISOString() },
     resolvedSecretRefs,
@@ -333,7 +358,7 @@ export async function resumeExternalJobResult(config: WaitMachineConfig, runId: 
   return claimAndCompleteWait(config, {
     runId,
     stepId,
-    dedupeKey: `${stepId}:external_job`,
+    dedupeKeySuffix: "external_job",
     mechanism: "scheduler-tick",
     outputs: normalizePayloadToOutputs(resultPayload),
     resolvedSecretRefs,
