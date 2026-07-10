@@ -219,7 +219,23 @@ export function lintSource(filePath: string, source: string, extraBoundIdentifie
 // nonsensical — that output is the lint's findings about OTHER code, never
 // application record data (StepTrace/RunRecord/ApprovalTask/etc.) that
 // could carry a secret.
-const SELF_EXCLUDED_BASENAMES = new Set(["redaction-lint.ts", "redaction-lint-cli.ts"]);
+//
+// A41 fix: `redaction-lint-suppressions.ts` joins this set for the identical
+// reason, discovered the moment that file's suppression list first held real
+// entries — every `RedactionLintSuppression.snippet` is a VERBATIM QUOTE of
+// another file's own source line (so `applySuppressions` can exact-match
+// it), which means a suppression justifying e.g. a `store.runs.put(...)`
+// call site necessarily contains the literal substring `store.runs.put(` as
+// a STRING LITERAL inside this file — exactly the shape STORE_WRITE_PATTERN
+// (and CONSOLE_CALL_PATTERN) match against, with no way to distinguish "a
+// quoted snippet describing a call site elsewhere" from "an actual call
+// site here" using this lint's line-based heuristics. This file's own
+// content is the lint's configuration DATA about other code, never
+// application record data itself — the same category the original two
+// exclusions exist for, extending this file-scope config rather than
+// weakening any detection pattern (the regexes/heuristics themselves are
+// unchanged).
+const SELF_EXCLUDED_BASENAMES = new Set(["redaction-lint.ts", "redaction-lint-cli.ts", "redaction-lint-suppressions.ts"]);
 
 async function* walkTsFiles(dir: string): AsyncGenerator<string> {
   let entries: Array<{ name: string; isDirectory(): boolean; isFile(): boolean }>;

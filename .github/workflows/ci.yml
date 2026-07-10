@@ -78,16 +78,20 @@ jobs:
         run: pnpm run test
 
       # S9 integration, reconciliation ledger item 14 (root AMENDMENTS.md
-      # A29). continue-on-error: informational for now, not a merge
-      # blocker — this lint's first-ever repo-wide run surfaced a real
-      # cross-file precision gap (fixed, see A29) but 187 findings remain
-      # untriaged as of this session (a mix of stub/fake-data false
-      # positives and call sites genuinely needing individual review).
-      # Flip to blocking once a follow-up session finishes that triage to
-      # a trustworthy zero — see A29's own note.
+      # A29 -> A41). BLOCKING: A29 flagged 187 untriaged findings and left
+      # this step informational (continue-on-error) until a follow-up
+      # session finished the triage. A41 (this session) triaged the full
+      # 186-finding repo-wide baseline to a trustworthy zero — 1 genuine
+      # redaction bypass fixed as real code (@aart/engine's
+      # executeWaitDispatch, a human.approval step's ApprovalTask now
+      # routes through applyRedaction), 185 reviewed and suppressed with
+      # individual justifications in
+      # packages/governance/src/redaction-lint-suppressions.ts. The lint
+      # now exits 0 on a clean run and exits 1 both on any new, unreviewed
+      # finding and on any suppression entry that goes stale (its guarded
+      # code changed since review) — see A41 for the full taxonomy.
       - name: Lint — redaction bypass scan
         run: pnpm run lint:redaction
-        continue-on-error: true
 
       # S9 integration, reconciliation ledger item 14 (root AMENDMENTS.md
       # A30). Fake-model harness verification, not a real-model baseline —
