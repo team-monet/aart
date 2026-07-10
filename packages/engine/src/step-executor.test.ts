@@ -1,8 +1,20 @@
 import { CapabilityDeniedError, IterationLimitExceededError } from "@aart/types";
-import type { AartStore } from "@aart/store";
+import type { AartStore, BlockImplementation } from "@aart/types";
 import { afterEach, describe, expect, it } from "vitest";
 import { executeStep } from "./step-executor.js";
-import { capabilityBlock, createTestStore, echoBlock, failingBlock, flakyBlock, hangingBlock, testEngineConfig, fixtureRun, fixtureWorkflow } from "./test-utils/fixtures.js";
+import {
+  capabilityBlock,
+  createTestStore,
+  echoBlock,
+  failingBlock,
+  fixtureLlmCallMetadata,
+  flakyBlock,
+  hangingBlock,
+  llmLikeBlock,
+  testEngineConfig,
+  fixtureRun,
+  fixtureWorkflow,
+} from "./test-utils/fixtures.js";
 import type { EngineConfig } from "./types.js";
 
 const cleanups: Array<() => Promise<void>> = [];
@@ -536,5 +548,77 @@ describe("executeStep — redaction routing (architecture §4.2/§7.9)", () => {
     const persistedJson = JSON.stringify(persisted);
     expect(persistedJson).not.toContain("secret-value-for-API_KEY");
     expect(persistedJson).toContain("[REDACTED:API_KEY]");
+  });
+});
+
+describe("executeStep — ctx.recordLlmCall wiring (S9 reconciliation ledger item 6, SEAMS.md L3 - @aart/llm's proposed extension, now actually wired into real dispatch)", () => {
+  it("attaches the block's recorded LlmCallMetadata to the completed StepTrace's llmCall field", async () => {
+    const { config } = await setup({ blocks: { [llmLikeBlock.manifest.id]: llmLikeBlock } });
+    const workflow = fixtureWorkflow({ execution: { type: "workflow", steps: [{ id: "s1", uses: "test.llm-like" }] } });
+    const outcome = await executeStep(config, fixtureRun(), workflow, workflow.execution.steps[0]!, new Set(), undefined);
+    if (outcome.kind !== "continue") throw new Error("unreachable");
+    const trace = outcome.run.trace[0];
+    expect(trace?.llmCall).toEqual(fixtureLlmCallMetadata());
+    // The block's plain output is untouched - recordLlmCall is a side
+    // channel, not a wrapper around the return value ({{ steps.X.outputs.* }}
+    // ergonomics stay correct).
+    expect(trace?.outputs).toMatchObject({ output: "fixture llm output" });
+  });
+
+  it("a non-llm block that never calls recordLlmCall leaves StepTrace.llmCall undefined (no spurious attachment)", async () => {
+    const { config } = await setup();
+    const workflow = fixtureWorkflow({ execution: { type: "workflow", steps: [{ id: "s1", uses: "test.echo" }] } });
+    const outcome = await executeStep(config, fixtureRun(), workflow, workflow.execution.steps[0]!, new Set(), undefined);
+    if (outcome.kind !== "continue") throw new Error("unreachable");
+    expect(outcome.run.trace[0]?.llmCall).toBeUndefined();
+  });
+
+  it("a failed dispatch never attaches llmCall (recordLlmCall is only ever reached after a successful call)", async () => {
+    const failingLlmLike: BlockImplementation = {
+      manifest: { id: "test.llm-like-failing", version: "1.0.0", capabilities: ["llm"], inputSchema: {}, outputSchema: {}, description: "Fails before ever calling recordLlmCall." },
+      execute: async () => {
+        throw new Error("simulated llm call failure");
+      },
+    };
+    const { config } = await setup({ blocks: { [failingLlmLike.manifest.id]: failingLlmLike } });
+    const workflow = fixtureWorkflow({ execution: { type: "workflow", steps: [{ id: "s1", uses: "test.llm-like-failing" }] } });
+    const outcome = await executeStep(config, fixtureRun(), workflow, workflow.execution.steps[0]!, new Set(), undefined);
+    expect(outcome.kind).toBe("failed");
+  });
+
+  it("recorded LlmCallMetadata is redacted the same as the rest of the persisted RunRecord (architecture §7.9 - no separate call site needed, same chokepoint)", async () => {
+    const { store } = await setup();
+    const scanAndReplace = (record: unknown, resolvedSecretRefs: ReadonlySet<string>): unknown => {
+      let json = JSON.stringify(record);
+      for (const ref of resolvedSecretRefs) json = json.split(`secret-value-for-${ref}`).join(`[REDACTED:${ref}]`);
+      return JSON.parse(json);
+    };
+    // Contrived but proves the point: ANY string field on LlmCallMetadata
+    // (here, promptRef) gets swept by the value-scan-and-replace redactor,
+    // not just a hardcoded/allowlisted field name (architecture §7.9: "never
+    // a field-name allowlist").
+    const leakyLlmLike: BlockImplementation = {
+      manifest: { id: "test.llm-like-leaky", version: "1.0.0", capabilities: ["llm"], inputSchema: {}, outputSchema: {}, description: "Records metadata containing a resolved secret value." },
+      execute: async (_resolvedInputs, ctx) => {
+        const secretValue = await ctx.resolveSecret("PROMPT_NAME");
+        (ctx as unknown as { recordLlmCall?: (m: unknown) => void }).recordLlmCall?.(fixtureLlmCallMetadata({ promptRef: `resolved: ${secretValue}` }));
+        return { ok: true };
+      },
+    };
+    const config = testEngineConfig(store, {
+      blocks: { [leakyLlmLike.manifest.id]: leakyLlmLike },
+      redact: scanAndReplace,
+      resolveSecret: async (name) => `secret-value-for-${name}`,
+    });
+    const workflow = fixtureWorkflow({ execution: { type: "workflow", steps: [{ id: "s1", uses: "test.llm-like-leaky" }] } });
+    const run = fixtureRun();
+    await store.runs.put(run);
+    const outcome = await executeStep(config, run, workflow, workflow.execution.steps[0]!, new Set(), undefined);
+    if (outcome.kind !== "continue") throw new Error("unreachable");
+
+    const persisted = await store.runs.get(run.runId);
+    const persistedJson = JSON.stringify(persisted);
+    expect(persistedJson).not.toContain("secret-value-for-PROMPT_NAME");
+    expect(persistedJson).toContain("[REDACTED:PROMPT_NAME]");
   });
 });

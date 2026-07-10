@@ -4,7 +4,7 @@
 // next. Wait-type block ids (wait/wait-blocks.ts) are intercepted before
 // normal dispatch and handed to wait/wait-machine.ts instead.
 import type { ExprContext, ResolveOptions } from "@aart/expr";
-import type { BlockExecutionContext, RetryPolicy, RunRecord, StepTrace, WaitCondition, Workflow, WorkflowStep } from "@aart/types";
+import type { LlmCallMetadata, RetryPolicy, RunRecord, StepTrace, WaitCondition, Workflow, WorkflowStep } from "@aart/types";
 import { AartError, IterationLimitExceededError, TimeoutError } from "@aart/types";
 import { checkCapabilityDispatch, alwaysEmptyGrantedCapabilities } from "./capability.js";
 import { parseDurationMs } from "./duration.js";
@@ -12,7 +12,7 @@ import { buildExprContext, resolveArrayExpression, resolveBooleanExpression, res
 import { checkIdempotency, recordIdempotency } from "./idempotency.js";
 import { applyRedaction, createTrackingSecretResolver, throwingSecretResolver } from "./redaction.js";
 import { CURRENT_ENGINE_SCHEMA_VERSION } from "./schema-version.js";
-import type { EngineConfig } from "./types.js";
+import type { EngineBlockExecutionContext, EngineConfig } from "./types.js";
 import { enterWait, type WaitMachineConfig } from "./wait/wait-machine.js";
 import { buildWaitConditionFromBlock, isWaitBlockId, type WaitBlockId } from "./wait/wait-blocks.js";
 
@@ -118,7 +118,21 @@ async function dispatchWithRetry(
   return { error: lastError, attempts: maxAttempts };
 }
 
-function buildBlockContext(config: EngineConfig, runId: string, stepId: string, secretResolver: ReturnType<typeof createTrackingSecretResolver>): BlockExecutionContext {
+/**
+ * `onRecordLlmCall`, if given, is called synchronously whenever the
+ * dispatched block invokes `ctx.recordLlmCall?.(metadata)` (S9 integration,
+ * reconciliation ledger item 6, SEAMS.md L3 — `@aart/llm`'s `llm.*` blocks'
+ * proposed extension point, now actually wired). `dispatchOnce` passes a
+ * closure that captures the metadata into a local variable it attaches to
+ * the step's `StepTrace` after dispatch completes.
+ */
+function buildBlockContext(
+  config: EngineConfig,
+  runId: string,
+  stepId: string,
+  secretResolver: ReturnType<typeof createTrackingSecretResolver>,
+  onRecordLlmCall: (metadata: LlmCallMetadata) => void,
+): EngineBlockExecutionContext {
   return {
     runId,
     stepId,
@@ -135,6 +149,7 @@ function buildBlockContext(config: EngineConfig, runId: string, stepId: string, 
       );
       return { id, path };
     },
+    recordLlmCall: onRecordLlmCall,
   };
 }
 
@@ -167,7 +182,14 @@ async function dispatchOnce(
   }
 
   const secretResolver = createTrackingSecretResolver(config.resolveSecret ?? throwingSecretResolver, resolvedSecretRefs);
-  const ctx = buildBlockContext(config, run.runId, stepIdForTrace, secretResolver);
+  // S9 integration (reconciliation ledger item 6): captures ctx.recordLlmCall's
+  // argument, if the dispatched block calls it (e.g. @aart/llm's llm.*
+  // blocks) — attached to the trace entry below once dispatch completes.
+  // A non-llm block simply never calls it, leaving this undefined.
+  let capturedLlmCall: LlmCallMetadata | undefined;
+  const ctx = buildBlockContext(config, run.runId, stepIdForTrace, secretResolver, (metadata) => {
+    capturedLlmCall = metadata;
+  });
   const timeoutMs = step.timeout ? parseDurationMs(step.timeout) : undefined;
   const computeDelay = config.computeRetryDelayMs ?? defaultComputeRetryDelayMs;
 
@@ -176,6 +198,10 @@ async function dispatchOnce(
   const durationMs = Math.max(0, new Date(endedAt).getTime() - new Date(startedAt).getTime());
 
   if (error) {
+    // llmCall metadata is only ever built by @aart/llm's blocks AFTER a
+    // successful call+validate (core.ts's llmCall/llmExtract/etc.) — a
+    // thrown error means recordLlmCall was never reached, so there's
+    // nothing to attach here even on a genuinely-failed LLM call.
     return { seq, stepId: stepIdForTrace, block: step.uses, status: "failed", inputs: resolvedInputs, error: error.message, startedAt, endedAt, durationMs };
   }
 
@@ -183,7 +209,18 @@ async function dispatchOnce(
   if (resolvedIdempotencyKey !== undefined) {
     await recordIdempotency(config.store, resolvedIdempotencyKey, run.runId, stepIdForTrace, outputs, now());
   }
-  return { seq, stepId: stepIdForTrace, block: step.uses, status: "completed", inputs: resolvedInputs, outputs, startedAt, endedAt, durationMs };
+  return {
+    seq,
+    stepId: stepIdForTrace,
+    block: step.uses,
+    status: "completed",
+    inputs: resolvedInputs,
+    outputs,
+    startedAt,
+    endedAt,
+    durationMs,
+    ...(capturedLlmCall !== undefined ? { llmCall: capturedLlmCall } : {}),
+  };
 }
 
 async function executeForEachStep(

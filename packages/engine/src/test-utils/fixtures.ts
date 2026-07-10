@@ -7,12 +7,12 @@ import { promises as fs } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createFsStore, type AartStore } from "@aart/store";
-import type { BlockImplementation, RunRecord, Trigger, Workflow } from "@aart/types";
+import type { BlockImplementation, LlmCallMetadata, RunRecord, Trigger, Workflow } from "@aart/types";
 import { identityRedactFn } from "../redaction.js";
 import { alwaysAllowCapabilityCheck } from "../capability.js";
 import { CURRENT_ENGINE_SCHEMA_VERSION } from "../schema-version.js";
 import { uncapturedSnapshot } from "../snapshot.js";
-import type { EngineConfig } from "../types.js";
+import type { EngineBlockExecutionContext, EngineConfig } from "../types.js";
 
 let seq = 0;
 export function uniqueId(prefix: string): string {
@@ -70,6 +70,20 @@ export function fixtureRun(overrides: Partial<RunRecord> = {}): RunRecord {
 export const echoBlock: BlockImplementation = {
   manifest: { id: "test.echo", version: "1.0.0", capabilities: [], inputSchema: {}, outputSchema: {}, description: "Echoes its input." },
   execute: async (resolvedInputs) => ({ echoed: resolvedInputs }),
+};
+
+/** Fixture default `LlmCallMetadata` — a stand-in for a real llm.* block's post-call metadata (S9 reconciliation ledger item 6). */
+export function fixtureLlmCallMetadata(overrides: Partial<LlmCallMetadata> = {}): LlmCallMetadata {
+  return { provider: "anthropic", model: "claude-sonnet-5", promptRef: "prompts.fixture", promptVersion: "1.0.0", tokensIn: 10, tokensOut: 5, latencyMs: 42, ...overrides };
+}
+
+/** Mimics @aart/llm's llm.* blocks' real shape (packages/llm/src/blocks/core.ts): returns a plain output AND, if the real dispatch context supplies `recordLlmCall`, calls it with fixture metadata — for testing the engine's own recordLlmCall wiring (SEAMS.md L3, S9 reconciliation ledger item 6) without a real @aart/llm dependency. */
+export const llmLikeBlock: BlockImplementation = {
+  manifest: { id: "test.llm-like", version: "1.0.0", capabilities: ["llm"], inputSchema: {}, outputSchema: {}, description: "Mimics an llm.* block's ctx.recordLlmCall usage." },
+  execute: async (resolvedInputs, ctx) => {
+    (ctx as EngineBlockExecutionContext).recordLlmCall?.(fixtureLlmCallMetadata());
+    return { output: "fixture llm output", resolvedInputs };
+  },
 };
 
 /** Always throws — for testing failure/retry-exhaustion paths. `message` defaults to a distinctive string so assertions can match on it. */

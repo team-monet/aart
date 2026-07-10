@@ -10,12 +10,29 @@ import type {
   BlockExecutionContext,
   BlockImplementation,
   CapabilityCheck,
+  LlmCallMetadata,
   RedactFn,
   RunRecord,
   Signal,
   Trigger,
   Workflow,
 } from "@aart/types";
+
+/**
+ * S9 integration (reconciliation ledger item 6, SEAMS.md L3): `@aart/llm`'s
+ * `llm.*` blocks optional-chain-call `ctx.recordLlmCall?.(metadata)` against
+ * exactly this shape (`packages/llm/src/blocks/core.ts`'s
+ * `LlmBlockExecutionContext` — structurally identical, declared separately
+ * here rather than imported so `@aart/engine` stays block-catalog-agnostic,
+ * matching this file's own stated design: "the engine itself is
+ * block-catalog-agnostic, it only knows the BlockImplementation contract").
+ * Real dispatch (step-executor.ts's `buildBlockContext`) now supplies this
+ * method for every block, not just `llm.*` ones — a non-`llm.*` block that
+ * never calls it is unaffected (the method is simply never invoked).
+ */
+export interface EngineBlockExecutionContext extends BlockExecutionContext {
+  recordLlmCall?(metadata: LlmCallMetadata): void;
+}
 
 /**
  * Every block this engine instance can dispatch to, keyed by `BlockManifest.id`
