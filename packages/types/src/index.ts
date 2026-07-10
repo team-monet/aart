@@ -18,3 +18,4 @@ export * from "./report.js";
 export * from "./store-records.js";
 export * from "./errors.js";
 export * from "./json-schema.js";
+export * from "./dry-run.js";

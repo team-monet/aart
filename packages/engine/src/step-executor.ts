@@ -5,7 +5,7 @@
 // normal dispatch and handed to wait/wait-machine.ts instead.
 import type { ExprContext, ResolveOptions } from "@aart/expr";
 import type { LlmCallMetadata, RetryPolicy, RunRecord, StepTrace, WaitCondition, Workflow, WorkflowStep } from "@aart/types";
-import { AartError, IterationLimitExceededError, TimeoutError } from "@aart/types";
+import { AartError, DEFAULT_EFFECTFUL_CAPABILITIES, isEffectfulCapability, IterationLimitExceededError, TimeoutError } from "@aart/types";
 import { checkCapabilityDispatch, alwaysEmptyGrantedCapabilities } from "./capability.js";
 import { parseDurationMs } from "./duration.js";
 import { buildExprContext, resolveArrayExpression, resolveBooleanExpression, resolveStringExpression, resolveWithRecord } from "./expr-context.js";
@@ -193,7 +193,22 @@ async function dispatchOnce(
   const timeoutMs = step.timeout ? parseDurationMs(step.timeout) : undefined;
   const computeDelay = config.computeRetryDelayMs ?? defaultComputeRetryDelayMs;
 
-  const { output, error } = await dispatchWithRetry(() => impl.execute(resolvedInputs, ctx), step.retry, timeoutMs, computeDelay, { stepId: stepIdForTrace });
+  // Dry-run mode (S9 integration, reconciliation ledger item 7; architecture
+  // §9.5 point 1): a run-level RunRecord.params.dryRun flag, checked here at
+  // the dispatch boundary against the block's declared capabilities. An
+  // effectful block's REAL handler is swapped for a recording stub that
+  // logs "would have called X with args Y" and returns a synthetic success,
+  // without making the real call — architecture §9.5's literal semantics.
+  // Non-effectful blocks (most of the catalog) are entirely unaffected by
+  // dryRun, even inside a dry-run — only the capability-gated subset fakes.
+  const isDryRun = run.params?.["dryRun"] === true;
+  const effectfulCapabilities = config.effectfulCapabilities ?? DEFAULT_EFFECTFUL_CAPABILITIES;
+  const shouldFake = isDryRun && impl.manifest.capabilities.some((c) => isEffectfulCapability(c, effectfulCapabilities));
+  const dispatch = shouldFake
+    ? async (): Promise<unknown> => ({ dryRun: true, wouldHaveCalled: step.uses, args: resolvedInputs })
+    : (): Promise<unknown> => impl.execute(resolvedInputs, ctx);
+
+  const { output, error } = await dispatchWithRetry(dispatch, step.retry, timeoutMs, computeDelay, { stepId: stepIdForTrace });
   const endedAt = now().toISOString();
   const durationMs = Math.max(0, new Date(endedAt).getTime() - new Date(startedAt).getTime());
 
@@ -206,7 +221,12 @@ async function dispatchOnce(
   }
 
   const outputs = output !== null && typeof output === "object" && !Array.isArray(output) ? (output as Record<string, unknown>) : { value: output };
-  if (resolvedIdempotencyKey !== undefined) {
+  // A faked (dry-run) dispatch never records idempotency: recording a
+  // synthetic "would have called X" result under the real idempotencyKey
+  // would wrongly short-circuit a LATER, genuinely real invocation of this
+  // same step into skipping the actual effectful action idempotencyKey
+  // exists to gate in the first place.
+  if (resolvedIdempotencyKey !== undefined && !shouldFake) {
     await recordIdempotency(config.store, resolvedIdempotencyKey, run.runId, stepIdForTrace, outputs, now());
   }
   return {

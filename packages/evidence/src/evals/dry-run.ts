@@ -14,18 +14,17 @@
 // real implementation, registered under the same block name"), scoped to
 // running an eval suite's fixture "workflow" (a caller-supplied ordered
 // list of steps) end-to-end with no @aart/engine/@aart/blocks-core
-// dependency. The two converge on the same vocabulary (dryRun flag,
-// effectful-capability set, same-block-name fake registration) by
-// documented contract, not by shared code — they run in genuinely
-// different processes (engine executes real deployed workflows; this runs
-// eval-suite fixtures) — see this task's report and SEAMS.md.
-export const DEFAULT_EFFECTFUL_CAPABILITIES: readonly string[] = ["email.send", "command", "db.write"];
-
-/** `domain:<pattern>`-gated capabilities are effectful by family, not exact string match (architecture §9.5's own list: "any domain:<pattern>-gated external write"). */
-export function isEffectfulCapability(capability: string, effectfulCapabilities: readonly string[] = DEFAULT_EFFECTFUL_CAPABILITIES): boolean {
-  if (effectfulCapabilities.includes(capability)) return true;
-  return capability.startsWith("domain:");
-}
+// dependency. The two run in genuinely different processes (engine
+// executes real deployed workflows; this runs eval-suite fixtures), but
+// as of S9 integration (reconciliation ledger item 7) they converge on the
+// SAME vocabulary via SHARED CODE, not just documented contract:
+// `DEFAULT_EFFECTFUL_CAPABILITIES`/`isEffectfulCapability` now live in
+// `@aart/types` (dry-run.ts) — re-exported here for zero call-site churn
+// in this package's own consumers/tests. Root SEAMS.md's E6 entry flagged
+// this exact divergence risk in advance ("worth reconciling explicitly
+// during S9's integration pass") — this closes it.
+export { DEFAULT_EFFECTFUL_CAPABILITIES, isEffectfulCapability } from "@aart/types";
+import { DEFAULT_EFFECTFUL_CAPABILITIES, isEffectfulCapability } from "@aart/types";
 
 export interface ConnectorFakeEntry<TInput = unknown, TOutput = unknown> {
   blockId: string;

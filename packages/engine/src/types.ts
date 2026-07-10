@@ -136,6 +136,17 @@ export interface EngineConfig {
    * transition (resource cleanup is best-effort, not correctness-critical).
    */
   onRunTerminal?: (runId: string) => void | Promise<void>;
+  /**
+   * S9 integration (reconciliation ledger item 7): the effectful-capability
+   * set architecture §9.5's dry-run mechanism checks a dispatched block's
+   * declared capabilities against (`step-executor.ts`'s `dispatchOnce`).
+   * Defaults to `@aart/types`'s `DEFAULT_EFFECTFUL_CAPABILITIES`
+   * (`["email.send", "command", "db.write"]` plus the `domain:<pattern>`
+   * family via `isEffectfulCapability`) — the same shared source
+   * `@aart/evidence`'s own eval-suite-fixture dry-run mechanism now also
+   * imports, closing the divergence risk root SEAMS.md's E6 entry flagged.
+   */
+  effectfulCapabilities?: readonly string[];
 }
 
 /** `triggerRun`'s input (architecture §4.3's trigger-intake path; also what S2's trigger adapters call — "trigger adapters call into the engine's run-intake function," implementation plan S2 consumed-interfaces note). */

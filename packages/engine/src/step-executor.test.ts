@@ -479,6 +479,104 @@ describe("executeStep — idempotencyKey (spec §30.2)", () => {
   });
 });
 
+describe("executeStep — dry-run mode (S9 reconciliation ledger item 7, architecture §9.5 point 1 - RunRecord.params.dryRun)", () => {
+  function effectfulBlock(id: string, capability: string): BlockImplementation {
+    return {
+      manifest: { id, version: "1.0.0", capabilities: [capability], inputSchema: {}, outputSchema: {}, description: "fixture effectful block" },
+      execute: async () => {
+        throw new Error(`${id}: REAL handler was called - dry-run should have faked this dispatch instead`);
+      },
+    };
+  }
+
+  it("fakes an effectful block's dispatch under dryRun: true, never calling the real handler, returning the documented synthetic shape", async () => {
+    const { config } = await setup({ blocks: { "test.send-email": effectfulBlock("test.send-email", "email.send") } });
+    const run = fixtureRun({ params: { dryRun: true } });
+    const workflow = fixtureWorkflow({ execution: { type: "workflow", steps: [{ id: "s1", uses: "test.send-email", with: { to: "a@b.com" } }] } });
+    const outcome = await executeStep(config, run, workflow, workflow.execution.steps[0]!, new Set(), undefined);
+    if (outcome.kind !== "continue") throw new Error("unreachable");
+    expect(outcome.run.trace[0]?.status).toBe("completed");
+    // architecture §9.5's literal semantics: "logs 'would have called X with
+    // args Y'... returns a synthetic success".
+    expect(outcome.run.trace[0]?.outputs).toMatchObject({ dryRun: true, wouldHaveCalled: "test.send-email", args: { to: "a@b.com" } });
+  });
+
+  it("each of the three named-literal effectful capabilities (email.send, command, db.write) fakes correctly", async () => {
+    for (const capability of ["email.send", "command", "db.write"]) {
+      const blockId = `test.effectful-${capability.replace(".", "-")}`;
+      const { config } = await setup({ blocks: { [blockId]: effectfulBlock(blockId, capability) } });
+      const run = fixtureRun({ params: { dryRun: true } });
+      const workflow = fixtureWorkflow({ execution: { type: "workflow", steps: [{ id: "s1", uses: blockId }] } });
+      const outcome = await executeStep(config, run, workflow, workflow.execution.steps[0]!, new Set(), undefined);
+      if (outcome.kind !== "continue") throw new Error(`unreachable for capability ${capability}`);
+      expect(outcome.run.trace[0]?.outputs).toMatchObject({ dryRun: true });
+    }
+  });
+
+  it("a domain:<pattern>-gated capability is also treated as effectful (architecture §9.5: 'any domain:<pattern>-gated external write')", async () => {
+    const { config } = await setup({ blocks: { "test.webhook": effectfulBlock("test.webhook", "domain:api.example.com") } });
+    const run = fixtureRun({ params: { dryRun: true } });
+    const workflow = fixtureWorkflow({ execution: { type: "workflow", steps: [{ id: "s1", uses: "test.webhook" }] } });
+    const outcome = await executeStep(config, run, workflow, workflow.execution.steps[0]!, new Set(), undefined);
+    if (outcome.kind !== "continue") throw new Error("unreachable");
+    expect(outcome.run.trace[0]?.outputs).toMatchObject({ dryRun: true });
+  });
+
+  it("a NON-effectful block still calls its REAL handler even under dryRun: true (dry-run only fakes the effectful subset)", async () => {
+    const { config } = await setup(); // test.echo, no declared capabilities
+    const run = fixtureRun({ params: { dryRun: true } });
+    const workflow = fixtureWorkflow({ execution: { type: "workflow", steps: [{ id: "s1", uses: "test.echo", with: { x: 1 } }] } });
+    const outcome = await executeStep(config, run, workflow, workflow.execution.steps[0]!, new Set(), undefined);
+    if (outcome.kind !== "continue") throw new Error("unreachable");
+    expect(outcome.run.trace[0]?.outputs).toEqual({ echoed: { x: 1 } }); // the REAL echo output, not a dryRun stub
+  });
+
+  it("an effectful block's REAL handler still runs when dryRun is absent/false (no accidental faking outside dry-run)", async () => {
+    let realHandlerCalled = false;
+    const block: BlockImplementation = {
+      manifest: { id: "test.send-email-real", version: "1.0.0", capabilities: ["email.send"], inputSchema: {}, outputSchema: {}, description: "fixture" },
+      execute: async () => {
+        realHandlerCalled = true;
+        return { sent: true };
+      },
+    };
+    const { config } = await setup({ blocks: { [block.manifest.id]: block } });
+    const workflow = fixtureWorkflow({ execution: { type: "workflow", steps: [{ id: "s1", uses: "test.send-email-real" }] } });
+    await executeStep(config, fixtureRun(), workflow, workflow.execution.steps[0]!, new Set(), undefined); // no params.dryRun at all
+    expect(realHandlerCalled).toBe(true);
+  });
+
+  it("a faked dispatch never records idempotency, so a LATER real dispatch of the same key still performs the real action", async () => {
+    let realCallCount = 0;
+    const block: BlockImplementation = {
+      manifest: { id: "test.send-email-idem", version: "1.0.0", capabilities: ["email.send"], inputSchema: {}, outputSchema: {}, description: "fixture" },
+      execute: async () => {
+        realCallCount += 1;
+        return { sent: true, callNumber: realCallCount };
+      },
+    };
+    const { store, config } = await setup({ blocks: { [block.manifest.id]: block } });
+    const workflow = fixtureWorkflow({ execution: { type: "workflow", steps: [{ id: "send", uses: "test.send-email-idem", idempotencyKey: "{{ run.id }}:send" }] } });
+
+    // First: a DRY RUN of this step — must NOT record idempotency, must NOT call the real handler.
+    const dryRunRun = fixtureRun({ runId: "run-dryrun-idem", params: { dryRun: true } });
+    const dryOutcome = await executeStep(config, dryRunRun, workflow, workflow.execution.steps[0]!, new Set(), undefined);
+    if (dryOutcome.kind !== "continue") throw new Error("unreachable");
+    expect(dryOutcome.run.trace[0]?.outputs).toMatchObject({ dryRun: true });
+    expect(realCallCount).toBe(0);
+    await expect(store.idempotencyLedger.get("run-dryrun-idem:send")).resolves.toBeUndefined();
+
+    // Second: a REAL dispatch of the SAME resolved idempotencyKey — must
+    // actually call the real handler (not short-circuited by the dry run's
+    // synthetic result, which would be the bug this test guards against).
+    const realRun = fixtureRun({ runId: "run-dryrun-idem" }); // same runId -> same resolved key
+    const realOutcome = await executeStep(config, realRun, workflow, workflow.execution.steps[0]!, new Set(), undefined);
+    if (realOutcome.kind !== "continue") throw new Error("unreachable");
+    expect(realOutcome.run.trace[0]?.outputs).toEqual({ sent: true, callNumber: 1 });
+    expect(realCallCount).toBe(1);
+  });
+});
+
 describe("executeStep — capability dispatch (architecture §4.6, ADR-09)", () => {
   it("allows a step whose block's declared capabilities are permitted", async () => {
     const block = capabilityBlock("test.needs-browser", ["browser"]);
