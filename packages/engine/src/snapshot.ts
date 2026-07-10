@@ -21,11 +21,34 @@ import type { BlockRegistry } from "./types.js";
  * engine's own block registry (a real, correct source for "what version is
  * this block reference currently resolved to," since the registry IS the
  * concrete resolved set of block implementations this engine instance
- * dispatches against). `packHashes` is left an empty record — pack content-
- * hashing is `@aart/registry`'s (S7's) scope, not yet built in this wave;
- * see this session's final report.
+ * dispatches against).
+ *
+ * `packHashes` (S9 integration, root AMENDMENTS.md/reconciliation ledger
+ * item 8): computed via the optional `EngineConfig.computePackHashes` DI
+ * seam (types.ts), the same "process-lifetime injected function, sensible
+ * no-op default" pattern `redact`/`capabilityCheck`/`getGrantedCapabilities`
+ * already use. Defaults to `alwaysEmptyPackHashes` (this file) — an empty
+ * record, today's pre-integration behavior, so any caller/test that hasn't
+ * wired pack hashing keeps working unchanged. The frozen `BlockManifest`
+ * (@aart/types) carries no pack-provenance field (verified directly — no
+ * `packName` on the type), so THIS function cannot itself tell which
+ * `step.uses` block ids are pack-delivered; that knowledge lives only in
+ * whoever assembled `blocks` (the composition root merging @aart/blocks-core's
+ * core catalog with @aart/registry's pack-manifest-derived blocks) — hence
+ * the caller-supplied-function shape rather than this module trying to
+ * derive it from `blocks` alone. The real composition-root wiring
+ * (@aart/registry's `computePackContentHash`, hash.ts) is S9's composition
+ * root, not this package's own tests.
  */
 const UNCAPTURED_SNAPSHOT: ExecutionSnapshot = { definitions: null, resolvedVersions: {}, packHashes: {}, capturedAt: "" };
+
+/** Default `computePackHashes` — no pack-provenance data available, matching this field's pre-integration empty-record behavior exactly. */
+export async function alwaysEmptyPackHashes(): Promise<Record<string, string>> {
+  return {};
+}
+
+/** Computes the content hash of every pack a workflow's steps reference. Caller-supplied (see module doc comment above) rather than derived here, since the frozen `BlockManifest` carries no pack-provenance field. */
+export type ComputePackHashes = (workflow: Workflow, blocks: BlockRegistry) => Promise<Record<string, string>>;
 
 /** A `RunRecord.snapshot` value indicating "not yet captured" — every `RunRecord` must have SOME `snapshot` value (the field is non-optional on the frozen type), so this sentinel (`capturedAt: ""`) is what a freshly-created run starts with. */
 export function uncapturedSnapshot(): ExecutionSnapshot {
@@ -57,11 +80,16 @@ function computeResolvedVersions(workflow: Workflow, blocks: BlockRegistry): Rec
   return resolved;
 }
 
-export function captureExecutionSnapshot(workflow: Workflow, blocks: BlockRegistry, now: Date): ExecutionSnapshot {
+export async function captureExecutionSnapshot(
+  workflow: Workflow,
+  blocks: BlockRegistry,
+  now: Date,
+  computePackHashes: ComputePackHashes = alwaysEmptyPackHashes,
+): Promise<ExecutionSnapshot> {
   return {
     definitions: workflow,
     resolvedVersions: computeResolvedVersions(workflow, blocks),
-    packHashes: {},
+    packHashes: await computePackHashes(workflow, blocks),
     capturedAt: now.toISOString(),
   };
 }

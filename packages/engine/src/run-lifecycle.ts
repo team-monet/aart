@@ -131,7 +131,7 @@ export async function finalizeTerminal(
   // in the step-loop below, right before dispatching a wait-type step); a
   // run that never waited captures it here, at its first terminal status.
   if (!isSnapshotCaptured(updated.snapshot)) {
-    updated = { ...updated, snapshot: captureExecutionSnapshot(workflow, config.blocks, now) };
+    updated = { ...updated, snapshot: await captureExecutionSnapshot(workflow, config.blocks, now, config.computePackHashes) };
   }
   updated = { ...updated, status, error: errorMessage, endedAt: now.toISOString(), updatedAt: now.toISOString() };
   const redacted = applyRedaction(config.redact, updated, resolvedSecretRefs);
@@ -226,7 +226,7 @@ export async function runStepsLoop(config: EngineConfig, initialRun: RunRecord, 
 
     if (!isSnapshotCaptured(run.snapshot) && isWaitBlockId(step.uses)) {
       const now = config.now?.() ?? new Date();
-      const withSnapshot: RunRecord = { ...run, snapshot: captureExecutionSnapshot(workflow, config.blocks, now) };
+      const withSnapshot: RunRecord = { ...run, snapshot: await captureExecutionSnapshot(workflow, config.blocks, now, config.computePackHashes) };
       run = applyRedaction(config.redact, withSnapshot, resolvedSecretRefs);
       await config.store.runs.put(run);
     }
@@ -324,7 +324,7 @@ export async function cancelRun(config: EngineConfig, runId: string): Promise<Ru
     trace: [...run.trace, ...skippedTraces],
     endedAt: now,
     updatedAt: now,
-    snapshot: isSnapshotCaptured(run.snapshot) ? run.snapshot : captureExecutionSnapshot(workflow, config.blocks, nowDate),
+    snapshot: isSnapshotCaptured(run.snapshot) ? run.snapshot : await captureExecutionSnapshot(workflow, config.blocks, nowDate, config.computePackHashes),
   };
   const redacted = applyRedaction(config.redact, updated, resolvedSecretRefs);
   await config.store.runs.put(redacted);

@@ -101,6 +101,8 @@ export interface EngineConfig {
   now?: () => Date;
   /** Pure function computing a retry backoff delay in ms, given the (1-based) attempt number about to be retried and the step's `RetryPolicy`. Defaults to `backoff === "exponential"` doubling from a 50ms base, `0` for any other/absent `backoff` value (spec §30.3 only confirms "exponential"; architecture leaves the rest of the enum open, §A10). Override in tests to return `0` for fast, deterministic retry tests. */
   computeRetryDelayMs?: (attempt: number, backoff: string | undefined) => number;
+  /** S9 integration (reconciliation ledger item 8): computes `ExecutionSnapshot.packHashes` at snapshot-capture time (snapshot.ts). Defaults to `alwaysEmptyPackHashes` (today's pre-integration behavior — an empty record) since the frozen `BlockManifest` carries no pack-provenance field this package could use to derive it unassisted; the real composition root wires @aart/registry's `computePackContentHash` here, fed whatever pack-provenance mapping that root's own catalog assembly maintains. */
+  computePackHashes?: import("./snapshot.js").ComputePackHashes;
 }
 
 /** `triggerRun`'s input (architecture §4.3's trigger-intake path; also what S2's trigger adapters call — "trigger adapters call into the engine's run-intake function," implementation plan S2 consumed-interfaces note). */

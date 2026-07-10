@@ -10,6 +10,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./sqlite": {
+      "types": "./dist/adapters/sqlite/index.d.ts",
+      "default": "./dist/adapters/sqlite/index.js"
     }
   },
   "files": ["dist"],

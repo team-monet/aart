@@ -32,31 +32,42 @@ describe("uncapturedSnapshot / isSnapshotCaptured", () => {
 });
 
 describe("captureExecutionSnapshot (architecture §4.5, spec §19.1)", () => {
-  it("captures the resolved Workflow object as `definitions`", () => {
+  it("captures the resolved Workflow object as `definitions`", async () => {
     const workflow = fixtureWorkflow();
-    const snapshot = captureExecutionSnapshot(workflow, {}, new Date());
+    const snapshot = await captureExecutionSnapshot(workflow, {}, new Date());
     expect(snapshot.definitions).toEqual(workflow);
   });
 
-  it("resolves the concrete version for a floating block reference from the engine's own block registry (this session's DoD test requirement)", () => {
+  it("resolves the concrete version for a floating block reference from the engine's own block registry (this session's DoD test requirement)", async () => {
     const workflow = fixtureWorkflow({
       execution: { type: "workflow", steps: [{ id: "s1", uses: "browser.click" }, { id: "s2", uses: "http.request" }] },
     });
     const blocks: BlockRegistry = { "browser.click": block("browser.click", "2.3.1"), "http.request": block("http.request", "1.0.0") };
-    const snapshot = captureExecutionSnapshot(workflow, blocks, new Date());
+    const snapshot = await captureExecutionSnapshot(workflow, blocks, new Date());
     expect(snapshot.resolvedVersions).toEqual({ "browser.click": "2.3.1", "http.request": "1.0.0" });
   });
 
-  it("omits a step's block id from resolvedVersions when it isn't in the registry (e.g. a wait-block id, handled structurally rather than via a registered BlockImplementation)", () => {
+  it("omits a step's block id from resolvedVersions when it isn't in the registry (e.g. a wait-block id, handled structurally rather than via a registered BlockImplementation)", async () => {
     const workflow = fixtureWorkflow({ execution: { type: "workflow", steps: [{ id: "s1", uses: "wait.manual" }] } });
-    const snapshot = captureExecutionSnapshot(workflow, {}, new Date());
+    const snapshot = await captureExecutionSnapshot(workflow, {}, new Date());
     expect(snapshot.resolvedVersions).toEqual({});
   });
 
-  it("sets capturedAt to the given now()", () => {
+  it("sets capturedAt to the given now()", async () => {
     const now = new Date("2027-03-01T12:00:00.000Z");
-    const snapshot = captureExecutionSnapshot(fixtureWorkflow(), {}, now);
+    const snapshot = await captureExecutionSnapshot(fixtureWorkflow(), {}, now);
     expect(snapshot.capturedAt).toBe("2027-03-01T12:00:00.000Z");
+  });
+
+  it("packHashes defaults to an empty record when no computePackHashes is injected (S9 reconciliation ledger item 8's default)", async () => {
+    const snapshot = await captureExecutionSnapshot(fixtureWorkflow(), {}, new Date());
+    expect(snapshot.packHashes).toEqual({});
+  });
+
+  it("packHashes uses the injected computePackHashes function when supplied", async () => {
+    const workflow = fixtureWorkflow();
+    const snapshot = await captureExecutionSnapshot(workflow, {}, new Date(), async () => ({ "some-pack": "sha256:abc123" }));
+    expect(snapshot.packHashes).toEqual({ "some-pack": "sha256:abc123" });
   });
 });
 

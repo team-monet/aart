@@ -61,9 +61,12 @@ export async function resolveTriggerMapping(triggerMapping: Record<string, strin
  * carve-out — `packages/store/src/types.ts` is S0-owned). This checks
  * already-created runs' own embedded `trigger.dedupeKey` for a match,
  * scoped to `workflowId` to bound the scan. Documented, flagged limitation
- * (linear in that workflow's run count, not an indexed lookup) — see this
- * task's final report for the proposed proper fix (a small dedicated store
- * member `AartStore` should grow via the amendment protocol).
+ * (linear in that workflow's run count, not an indexed lookup) — root
+ * AMENDMENTS.md A20, S9 resolution 2026-07-10: DEFERRED, accepted for v1.
+ * The proposed fix (a small dedicated `RunStore.findByDedupeKey` member,
+ * adapter-implementable as an indexed lookup) is a real `AartStore`
+ * interface-shape change deferred until a workflow's per-workflow run
+ * count makes this scan actually matter in practice - revisit there.
  */
 async function findRunByDedupeKey(store: AartStore, workflowId: string, dedupeKey: string): Promise<string | undefined> {
   const runs = await store.runs.list({ workflowId });
