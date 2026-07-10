@@ -1,9 +1,9 @@
 {
   "name": "@aart/server",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "AART server package. Stub scaffolded by S0 (Wave 0) — real implementation is Wave-1 scope; see aart_implementation_plan_v1.md for session ownership.",
+  "description": "AART server package (architecture §0.1-0.3, §6, §14): control plane (aart server), runtime-plane worker bin (aart worker), the 13 trigger adapters, the scheduler ticker + lease/reclaim/graceful-shutdown runtime, bundle production logic, and environment/deployment/promotion records.",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
@@ -16,7 +16,14 @@
   "scripts": {
     "build": "tsc -b"
   },
+  "dependencies": {
+    "@aart/expr": "workspace:*",
+    "@aart/store": "workspace:*",
+    "@aart/types": "workspace:*",
+    "zod": "4.4.3"
+  },
   "devDependencies": {
-    "typescript": "5.9.3"
+    "typescript": "5.9.3",
+    "vitest": "4.1.10"
   }
 }
