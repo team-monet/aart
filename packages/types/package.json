@@ -1,0 +1,26 @@
+{
+  "name": "@aart/types",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "AART canonical Zod schemas + derived JSON Schema. Single source of truth for every wire/store type in the system (architecture §2). S0-frozen interface — see AMENDMENTS.md at repo root for the post-freeze-change protocol.",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc -b"
+  },
+  "dependencies": {
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "typescript": "5.9.3",
+    "vitest": "4.1.10"
+  }
+}
