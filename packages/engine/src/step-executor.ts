@@ -215,16 +215,21 @@ async function executeForEachStep(
     const item = array[index];
     // See this module's design note (report + code comments in wait-blocks.ts
     // for the analogous choice): the current element is injected into the
-    // `steps` root under the `as` name — `@aart/expr`'s grammar has no
-    // dedicated forEach-binding root (it's closed to
-    // inputs/steps/trigger/run/secrets, architecture §3.1), and `steps` is
-    // already a plain object this package constructs itself, so this is a
-    // non-invasive way to make `{{ item.field }}`-style references resolve
-    // for the current iteration without an @aart/expr change. NOTE: if a
-    // real step in this workflow happens to share an id with `as`, this
-    // iteration's synthetic binding shadows it for the duration of this
-    // dispatch — an authoring collision to avoid, not one this engine
-    // guards against structurally.
+    // `steps` root under the `as` name — `@aart/expr`'s grammar is CLOSED to
+    // exactly 5 roots (inputs/steps/trigger/run/secrets, architecture §3.1)
+    // with no dedicated forEach-binding root, and the parser rejects any
+    // other identifier as a root outright (a bare `{{ item }}` is a parse
+    // error, not a lookup miss) — so a per-iteration binding cannot be its
+    // own root without modifying the frozen @aart/expr package. Nesting it
+    // under the EXISTING `steps` root (itself a plain object this package
+    // already constructs, architecture §3.2's "@aart/expr... just walks
+    // whatever object graph it's handed") is the non-invasive alternative:
+    // an author/step references the current element as `{{ steps.item }}`
+    // (or `{{ steps.item.someField }}`), using `as`'s given name in place of
+    // "item" as the key. NOTE: if a real step in this workflow happens to
+    // share an id with `as`, this iteration's synthetic binding shadows it
+    // for the duration of this dispatch — an authoring collision to avoid,
+    // not one this engine guards against structurally.
     const iterationContext: ExprContext = {
       ...baseContext,
       steps: { ...(baseContext.steps as Record<string, unknown>), [asName]: item },

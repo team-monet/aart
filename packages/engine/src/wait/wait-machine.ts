@@ -236,7 +236,32 @@ async function claimAndCompleteWait(config: WaitMachineConfig, args: ClaimAndCom
   });
 }
 
-/** **Signal-matched** resume (architecture §4.4.1 mechanism 1) — `signal`, `webhook`, `queue` fully, and `external_job`'s webhook sub-path (once whatever converted the provider's completion webhook into a `Signal` calls this with that `Signal`). Looks up the matching outstanding wait by `(name, correlationId)` across ALL waiting runs (architecture §4.4.2 step 1's "before runId is known" case) — architecture §4.4.2 step 2: zero matches is logged/inspectable, not a crash; more than one is a modeling error and fails loudly (`CorrelationError`). */
+/**
+ * **Signal-matched** resume (architecture §4.4.1 mechanism 1) — `signal`,
+ * `webhook`, `queue` fully, and `external_job`'s webhook sub-path (once
+ * whatever converted the provider's completion webhook into a `Signal`
+ * calls this with that `Signal`). Looks up the matching outstanding wait by
+ * `(name, correlationId)` across ALL waiting runs (architecture §4.4.2 step
+ * 1's "before runId is known" case) — architecture §4.4.2 step 2: zero
+ * matches is logged/inspectable, not a crash; more than one is a modeling
+ * error and fails loudly (`CorrelationError`).
+ *
+ * **Scope note on redelivery** (see this session's report for the fuller
+ * rationale): once a wait is resumed, its `WaitStore` row is deleted (by
+ * `claimAndCompleteWait`) — a signal redelivered AFTER that point (a fresh
+ * `Signal.id`, same `name`/`correlationId`, arriving once nothing is left
+ * to correlate against) is reported `kind: "unmatched"`, not `"duplicate"`.
+ * This is the honest classification: `"duplicate"` is architecture §4.4.2's
+ * dedupe-KEY-ledger outcome for a redelivery that STILL finds a live,
+ * not-yet-claimed wait (the window `claimAndCompleteWait`'s dedupe check
+ * genuinely closes, proven by the direct-lookup mechanisms below and by
+ * `enterWait`'s crash-simulation test) — this package does not maintain a
+ * separate, unbounded, run-independent index of every correlation ever
+ * resolved purely to relabel a post-cleanup redelivery as "duplicate"
+ * instead of "unmatched." Both outcomes are non-crashing and safe; the
+ * correctness property that actually matters — the run is never advanced
+ * twice — holds under either label.
+ */
 export async function resumeBySignal(config: WaitMachineConfig, signal: Signal, resolvedSecretRefs: ReadonlySet<string> = new Set()): Promise<ResumeOutcome> {
   const allWaits = await config.store.waits.list();
   const matches = allWaits.filter((entry) => {

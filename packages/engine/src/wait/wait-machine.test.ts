@@ -1,0 +1,437 @@
+// The wait/resume machine's own test suite — architecture §4.4, the
+// implementation plan's own framing: "the highest-risk code in the whole
+// system." Tests against the REAL S0 fs adapter (createFsStore), not a
+// hand-rolled mock, per this session's DoD ("it should pass its own tests
+// against the fs adapter from S0").
+import type { AartStore } from "@aart/store";
+import { CorrelationError } from "@aart/types";
+import { afterEach, describe, expect, it } from "vitest";
+import { identityRedactFn } from "../redaction.js";
+import { CURRENT_ENGINE_SCHEMA_VERSION } from "../schema-version.js";
+import { createTestStore, fixtureRun, uniqueId } from "../test-utils/fixtures.js";
+import { enterWait, getDueWaits, listExternalJobWaits, resumeApproval, resumeBySignal, resumeExternalJobResult, resumeManual, resumeTimerWait, type WaitMachineConfig } from "./wait-machine.js";
+
+const cleanups: Array<() => Promise<void>> = [];
+afterEach(async () => {
+  await Promise.all(cleanups.splice(0).map((fn) => fn()));
+});
+
+async function setup(): Promise<{ store: AartStore; config: WaitMachineConfig }> {
+  const { store, cleanup } = await createTestStore();
+  cleanups.push(cleanup);
+  return { store, config: { store, redact: identityRedactFn, now: () => new Date() } };
+}
+
+describe("enterWait — no early match (architecture §4.4 steps 1-4)", () => {
+  it("persists RunRecord.status = waiting, appends the WaitCondition to RunRecord.waits, and creates a WaitStore row", async () => {
+    const { store, config } = await setup();
+    const run = fixtureRun({ status: "running" });
+    await store.runs.put(run);
+
+    const wait = { type: "signal" as const, name: "quote.received", correlationId: "corr1", schemaVersion: CURRENT_ENGINE_SCHEMA_VERSION };
+    const result = await enterWait(config, { run, stepId: "wait_step", blockId: "wait.for_signal", resolvedInputs: { name: "quote.received", correlationId: "corr1" }, wait, resolvedSecretRefs: new Set() });
+
+    expect(result.suspended).toBe(true);
+    expect(result.run.status).toBe("waiting");
+    expect(result.run.waits).toContainEqual(wait);
+
+    const persisted = await store.runs.get(run.runId);
+    expect(persisted?.status).toBe("waiting");
+    const waitRow = await store.waits.get(run.runId, "wait_step");
+    expect(waitRow).toEqual(wait);
+  });
+
+  it("records a StepTrace with status 'waiting' for the wait step, capturing resolvedInputs and startedAt", async () => {
+    const { store, config } = await setup();
+    const run = fixtureRun({ status: "running" });
+    await store.runs.put(run);
+
+    const wait = { type: "manual" as const, schemaVersion: CURRENT_ENGINE_SCHEMA_VERSION };
+    const result = await enterWait(config, { run, stepId: "approve", blockId: "wait.manual", resolvedInputs: { note: "please review" }, wait, resolvedSecretRefs: new Set() });
+
+    const trace = result.run.trace.find((t) => t.stepId === "approve");
+    expect(trace).toMatchObject({ block: "wait.manual", status: "waiting", inputs: { note: "please review" } });
+    expect(trace?.startedAt).toBeTruthy();
+    expect(trace?.endedAt).toBeUndefined();
+  });
+
+  it("timer/manual/approval-shaped waits never touch SignalStore — no early-arrival check performed", async () => {
+    const { store, config } = await setup();
+    const run = fixtureRun({ status: "running" });
+    await store.runs.put(run);
+    // A signal that WOULD match if this were a signal-correlated type, to
+    // prove it's genuinely ignored for a `timer` wait specifically.
+    await store.signals.append({ id: uniqueId("sig"), name: "irrelevant", correlationId: "irrelevant", payload: {}, receivedAt: new Date().toISOString() });
+
+    const wait = { type: "timer" as const, resumeAt: new Date(Date.now() + 60_000).toISOString(), schemaVersion: CURRENT_ENGINE_SCHEMA_VERSION };
+    const result = await enterWait(config, { run, stepId: "recheck_wait", blockId: "wait.until", resolvedInputs: {}, wait, resolvedSecretRefs: new Set() });
+    expect(result.suspended).toBe(true);
+    expect(result.run.status).toBe("waiting");
+  });
+});
+
+describe("enterWait — early-arrival resolution (architecture §4.4 step 3 / §5.6)", () => {
+  it("resolves IMMEDIATELY when an unconsumed Signal already matches — does not persist an outstanding wait", async () => {
+    const { store, config } = await setup();
+    const run = fixtureRun({ status: "running" });
+    await store.runs.put(run);
+
+    const signal = { id: uniqueId("sig"), name: "quote.received", correlationId: "corr1", payload: { price: 42 }, receivedAt: new Date().toISOString() };
+    await store.signals.append(signal);
+
+    const wait = { type: "signal" as const, name: "quote.received", correlationId: "corr1", schemaVersion: CURRENT_ENGINE_SCHEMA_VERSION };
+    const result = await enterWait(config, { run, stepId: "wait_step", blockId: "wait.for_signal", resolvedInputs: {}, wait, resolvedSecretRefs: new Set() });
+
+    expect(result.suspended).toBe(false);
+    expect(result.run.status).toBe("running"); // unchanged from before — never flipped to "waiting"
+    expect(result.run.waits).toEqual([]); // never appended — "none of a/b/c is persisted as an outstanding wait"
+
+    const waitRow = await store.waits.get(run.runId, "wait_step");
+    expect(waitRow).toBeUndefined();
+
+    const trace = result.run.trace.find((t) => t.stepId === "wait_step");
+    expect(trace).toMatchObject({ status: "completed", outputs: { price: 42 } });
+  });
+
+  it("marks the early-arrival signal consumed (a second identical wait-entry attempt would NOT find it again)", async () => {
+    const { store, config } = await setup();
+    const run = fixtureRun({ status: "running" });
+    await store.runs.put(run);
+    const signal = { id: uniqueId("sig"), name: "quote.received", correlationId: "corr1", payload: { price: 1 }, receivedAt: new Date().toISOString() };
+    await store.signals.append(signal);
+
+    const wait = { type: "signal" as const, name: "quote.received", correlationId: "corr1", schemaVersion: CURRENT_ENGINE_SCHEMA_VERSION };
+    await enterWait(config, { run, stepId: "wait_step", blockId: "wait.for_signal", resolvedInputs: {}, wait, resolvedSecretRefs: new Set() });
+
+    await expect(store.signals.findUnconsumedMatch("quote.received", "corr1")).resolves.toBeUndefined();
+  });
+});
+
+describe("resumeBySignal — signal-matched mechanism (architecture §4.4.1)", () => {
+  it("resumes the correct run: transitions status back to running, completes the waiting StepTrace with the signal's payload", async () => {
+    const { store, config } = await setup();
+    const run = fixtureRun({ status: "running" });
+    await store.runs.put(run);
+    const wait = { type: "signal" as const, name: "quote.received", correlationId: "corr1", schemaVersion: CURRENT_ENGINE_SCHEMA_VERSION };
+    await enterWait(config, { run, stepId: "wait_step", blockId: "wait.for_signal", resolvedInputs: {}, wait, resolvedSecretRefs: new Set() });
+
+    const signal = { id: uniqueId("sig"), name: "quote.received", correlationId: "corr1", payload: { price: 99 }, receivedAt: new Date().toISOString() };
+    const outcome = await resumeBySignal(config, signal);
+
+    expect(outcome.kind).toBe("resumed");
+    if (outcome.kind !== "resumed") throw new Error("unreachable");
+    expect(outcome.mechanism).toBe("signal-matched");
+    expect(outcome.run.status).toBe("running");
+    const trace = outcome.run.trace.find((t) => t.stepId === "wait_step");
+    expect(trace).toMatchObject({ status: "completed", outputs: { price: 99 } });
+
+    // WaitStore row is gone — resumed exactly once.
+    await expect(store.waits.get(run.runId, "wait_step")).resolves.toBeUndefined();
+  });
+
+  it("redelivery of the same logical signal AFTER the wait has already been fully resolved and cleaned up does NOT double-advance the run — reported as unmatched (safe/inspectable), not an error, and critically not a second 'resumed'", async () => {
+    // [DESIGN NOTE, see this session's report]: this is deliberately NOT
+    // asserting `kind: "duplicate"` here. Architecture §4.4.2's dedupe
+    // ledger is keyed `(runId, waitStepId, ...)` — inherently run-scoped —
+    // and its own worked description ("the same signal is delivered twice")
+    // is the race where BOTH deliveries still find the SAME live,
+    // not-yet-deleted WaitStore row (the window this dedupe key genuinely
+    // closes; exercised directly via resumeManual/resumeTimerWait/
+    // resumeApproval below, and via the crash-simulation test, since those
+    // are handed an explicit runId/stepId rather than re-deriving one from
+    // a correlation scan). Once a wait is fully resolved, its WaitStore row
+    // is deleted (by design — see wait-machine.ts's doc comment on why
+    // RunRecord.waits itself is never pruned but WaitStore IS), so a LATER
+    // redelivery (a fresh Signal.id, arriving after full cleanup) has
+    // nothing left to correlate against via `resumeBySignal`'s own
+    // list-scan — there is no durable, unbounded "every correlation ever
+    // resolved" index this package maintains. The correctness property that
+    // actually matters — the run is NOT advanced a second time — is what
+    // this test proves; "unmatched" (architecture §4.4.2 step 2's own
+    // documented safe outcome: "log unmatched signal for later inspection")
+    // is the honest classification for this case, not a fabricated
+    // "duplicate."
+    const { store, config } = await setup();
+    const run = fixtureRun({ status: "running" });
+    await store.runs.put(run);
+    const wait = { type: "signal" as const, name: "quote.received", correlationId: "corr1", schemaVersion: CURRENT_ENGINE_SCHEMA_VERSION };
+    await enterWait(config, { run, stepId: "wait_step", blockId: "wait.for_signal", resolvedInputs: {}, wait, resolvedSecretRefs: new Set() });
+
+    const signal = { id: uniqueId("sig"), name: "quote.received", correlationId: "corr1", payload: { price: 5 }, receivedAt: new Date().toISOString() };
+    const first = await resumeBySignal(config, signal);
+    expect(first.kind).toBe("resumed");
+    if (first.kind !== "resumed") throw new Error("unreachable");
+    const runIdAfterFirst = first.run.updatedAt;
+
+    const redelivered = { ...signal, id: uniqueId("sig") };
+    const second = await resumeBySignal(config, redelivered);
+    expect(second.kind).toBe("unmatched");
+
+    // The critical invariant: the run's persisted state is byte-for-byte
+    // unchanged by the redelivery — it was NOT re-advanced or re-mutated.
+    const reloaded = await store.runs.get(run.runId);
+    expect(reloaded?.updatedAt).toBe(runIdAfterFirst);
+    expect(reloaded?.trace.filter((t) => t.stepId === "wait_step")).toHaveLength(1); // exactly one completion, not two
+  });
+
+  // Genuine duplicate-delivery protection (the dedupe ledger's actual
+  // documented window — architecture §4.4.2) is proven by the
+  // direct-lookup mechanisms below (resumeManual/resumeApproval/
+  // resumeTimerWait — each called twice with the SAME explicit
+  // runId/stepId, correctly returning "duplicate" on the second call) and
+  // by the dedicated crash-simulation test at the bottom of this file.
+
+  it("a zero-match signal is unmatched, not a crash (architecture §4.4.2 step 2: 'log unmatched signal for later inspection')", async () => {
+    const { config } = await setup();
+    const outcome = await resumeBySignal(config, { id: uniqueId("sig"), name: "nothing.waits.on.this", correlationId: "x", payload: {}, receivedAt: new Date().toISOString() });
+    expect(outcome).toEqual({ kind: "unmatched", mechanism: "signal-matched" });
+  });
+
+  it("more than one matching outstanding wait fails loudly with CorrelationError (a modeling error — correlationIds should be unique per outstanding wait)", async () => {
+    const { store, config } = await setup();
+    const runA = fixtureRun({ status: "running" });
+    const runB = fixtureRun({ status: "running" });
+    await store.runs.put(runA);
+    await store.runs.put(runB);
+    const wait = { type: "signal" as const, name: "dup.name", correlationId: "dup-corr", schemaVersion: CURRENT_ENGINE_SCHEMA_VERSION };
+    await enterWait(config, { run: runA, stepId: "s", blockId: "wait.for_signal", resolvedInputs: {}, wait, resolvedSecretRefs: new Set() });
+    await enterWait(config, { run: runB, stepId: "s", blockId: "wait.for_signal", resolvedInputs: {}, wait, resolvedSecretRefs: new Set() });
+
+    await expect(resumeBySignal(config, { id: uniqueId("sig"), name: "dup.name", correlationId: "dup-corr", payload: {}, receivedAt: new Date().toISOString() })).rejects.toThrow(CorrelationError);
+  });
+});
+
+describe("resumeManual — direct-lookup mechanism", () => {
+  it("resumes a manual wait with the supplied payload as output", async () => {
+    const { store, config } = await setup();
+    const run = fixtureRun({ status: "running" });
+    await store.runs.put(run);
+    await enterWait(config, { run, stepId: "manual_step", blockId: "wait.manual", resolvedInputs: {}, wait: { type: "manual", schemaVersion: CURRENT_ENGINE_SCHEMA_VERSION }, resolvedSecretRefs: new Set() });
+
+    const outcome = await resumeManual(config, run.runId, "manual_step", { resumedBy: "operator" });
+    expect(outcome.kind).toBe("resumed");
+    if (outcome.kind !== "resumed") throw new Error("unreachable");
+    expect(outcome.mechanism).toBe("direct-lookup");
+    expect(outcome.run.trace.find((t) => t.stepId === "manual_step")?.outputs).toEqual({ resumedBy: "operator" });
+  });
+
+  it("a second manual resume of the same step is a duplicate no-op", async () => {
+    const { store, config } = await setup();
+    const run = fixtureRun({ status: "running" });
+    await store.runs.put(run);
+    await enterWait(config, { run, stepId: "manual_step", blockId: "wait.manual", resolvedInputs: {}, wait: { type: "manual", schemaVersion: CURRENT_ENGINE_SCHEMA_VERSION }, resolvedSecretRefs: new Set() });
+
+    await resumeManual(config, run.runId, "manual_step");
+    const second = await resumeManual(config, run.runId, "manual_step");
+    expect(second.kind).toBe("duplicate");
+  });
+
+  it("resuming a step that was never waited on is unmatched", async () => {
+    const { store, config } = await setup();
+    const run = fixtureRun({ status: "running" });
+    await store.runs.put(run);
+    const outcome = await resumeManual(config, run.runId, "never_waited");
+    expect(outcome.kind).toBe("unmatched");
+  });
+});
+
+describe("resumeApproval — direct-lookup mechanism (architecture §4.4.1: 'direct ApprovalStore write, either authorship path')", () => {
+  it("resumes an approval wait, recording status/decision/reviewer as output", async () => {
+    const { store, config } = await setup();
+    const run = fixtureRun({ status: "running" });
+    await store.runs.put(run);
+    await enterWait(config, { run, stepId: "review", blockId: "human.approval", resolvedInputs: { title: "Review extraction" }, wait: { type: "approval", taskId: "task-1", schemaVersion: CURRENT_ENGINE_SCHEMA_VERSION }, resolvedSecretRefs: new Set() });
+
+    const outcome = await resumeApproval(config, run.runId, "review", { id: "task-1", status: "approved", decision: { note: "looks good" }, reviewer: "jane@example.com" });
+    expect(outcome.kind).toBe("resumed");
+    if (outcome.kind !== "resumed") throw new Error("unreachable");
+    expect(outcome.run.trace.find((t) => t.stepId === "review")?.outputs).toEqual({ status: "approved", decision: { note: "looks good" }, reviewer: "jane@example.com" });
+  });
+
+  it("a duplicate approval resume (e.g. a re-processed webhook for the same decision) is a no-op", async () => {
+    const { store, config } = await setup();
+    const run = fixtureRun({ status: "running" });
+    await store.runs.put(run);
+    await enterWait(config, { run, stepId: "review", blockId: "human.approval", resolvedInputs: {}, wait: { type: "approval", taskId: "task-1", schemaVersion: CURRENT_ENGINE_SCHEMA_VERSION }, resolvedSecretRefs: new Set() });
+    await resumeApproval(config, run.runId, "review", { id: "task-1", status: "approved" });
+    const second = await resumeApproval(config, run.runId, "review", { id: "task-1", status: "approved" });
+    expect(second.kind).toBe("duplicate");
+  });
+});
+
+describe("resumeTimerWait — scheduler-tick mechanism", () => {
+  it("resumes a due timer wait", async () => {
+    const { store, config } = await setup();
+    const run = fixtureRun({ status: "running" });
+    await store.runs.put(run);
+    await enterWait(config, { run, stepId: "recheck_wait", blockId: "wait.until", resolvedInputs: {}, wait: { type: "timer", resumeAt: new Date(Date.now() - 1000).toISOString(), schemaVersion: CURRENT_ENGINE_SCHEMA_VERSION }, resolvedSecretRefs: new Set() });
+
+    const outcome = await resumeTimerWait(config, run.runId, "recheck_wait");
+    expect(outcome.kind).toBe("resumed");
+    if (outcome.kind !== "resumed") throw new Error("unreachable");
+    expect(outcome.mechanism).toBe("scheduler-tick");
+    expect(outcome.run.status).toBe("running");
+  });
+
+  it("resuming the same timer wait a second time (e.g. two scheduler ticks both observing it as due before the first tick's resume commits) is a duplicate no-op — the atomic-claim rule extends beyond signal-matched (architecture §4.4.2's scope note)", async () => {
+    // Sequential, not concurrent (Promise.all): the fs adapter (architecture
+    // §5.1/§5.8) is the local-dev convenience adapter and does not claim to
+    // serialize genuinely concurrent transact() calls against each other —
+    // that guarantee is SQLite/Postgres's job (ADR-03's consequences;
+    // implementation plan Risk 2's "naive fs adapter... would pass simple
+    // tests but fail under concurrent-access conditions"). What IS
+    // guaranteed, on every adapter, is that a SECOND resume attempt against
+    // an already-resolved wait is a no-op — exactly what this test proves.
+    const { store, config } = await setup();
+    const run = fixtureRun({ status: "running" });
+    await store.runs.put(run);
+    await enterWait(config, { run, stepId: "recheck_wait", blockId: "wait.until", resolvedInputs: {}, wait: { type: "timer", resumeAt: new Date(Date.now() - 1000).toISOString(), schemaVersion: CURRENT_ENGINE_SCHEMA_VERSION }, resolvedSecretRefs: new Set() });
+
+    const a = await resumeTimerWait(config, run.runId, "recheck_wait");
+    const b = await resumeTimerWait(config, run.runId, "recheck_wait");
+    const kinds = [a.kind, b.kind];
+    expect(kinds).toEqual(["resumed", "duplicate"]);
+  });
+});
+
+describe("resumeExternalJobResult — scheduler-tick mechanism (external_job's poll sub-path)", () => {
+  it("resumes an external_job wait once S2's poll mechanism reports completion", async () => {
+    const { store, config } = await setup();
+    const run = fixtureRun({ status: "running" });
+    await store.runs.put(run);
+    await enterWait(config, { run, stepId: "wait_batch", blockId: "wait.for_external_job", resolvedInputs: {}, wait: { type: "external_job", provider: "openai_batch", jobId: "job-1", schemaVersion: CURRENT_ENGINE_SCHEMA_VERSION }, resolvedSecretRefs: new Set() });
+
+    const outcome = await resumeExternalJobResult(config, run.runId, "wait_batch", { results: ["a", "b"] });
+    expect(outcome.kind).toBe("resumed");
+    if (outcome.kind !== "resumed") throw new Error("unreachable");
+    expect(outcome.run.trace.find((t) => t.stepId === "wait_batch")?.outputs).toEqual({ results: ["a", "b"] });
+  });
+});
+
+describe("getDueWaits — the S2 scheduler-ticker seam (architecture §4.4.3/§4.7)", () => {
+  it("returns only timer waits whose resumeAt has passed, excluding future timers and non-timer waits", async () => {
+    const { store, config } = await setup();
+    const runA = fixtureRun({ status: "running" });
+    const runB = fixtureRun({ status: "running" });
+    const runC = fixtureRun({ status: "running" });
+    await store.runs.put(runA);
+    await store.runs.put(runB);
+    await store.runs.put(runC);
+
+    await enterWait(config, { run: runA, stepId: "due", blockId: "wait.until", resolvedInputs: {}, wait: { type: "timer", resumeAt: new Date(Date.now() - 1000).toISOString(), schemaVersion: CURRENT_ENGINE_SCHEMA_VERSION }, resolvedSecretRefs: new Set() });
+    await enterWait(config, { run: runB, stepId: "not_due", blockId: "wait.until", resolvedInputs: {}, wait: { type: "timer", resumeAt: new Date(Date.now() + 60_000).toISOString(), schemaVersion: CURRENT_ENGINE_SCHEMA_VERSION }, resolvedSecretRefs: new Set() });
+    await enterWait(config, { run: runC, stepId: "not_a_timer", blockId: "wait.manual", resolvedInputs: {}, wait: { type: "manual", schemaVersion: CURRENT_ENGINE_SCHEMA_VERSION }, resolvedSecretRefs: new Set() });
+
+    const due = await getDueWaits(store, new Date());
+    expect(due.map((d) => d.stepId)).toContain("due");
+    expect(due.map((d) => d.stepId)).not.toContain("not_due");
+    expect(due.map((d) => d.stepId)).not.toContain("not_a_timer");
+  });
+});
+
+describe("listExternalJobWaits — S2's poll-mechanism sweep query", () => {
+  it("returns only external_job waits", async () => {
+    const { store, config } = await setup();
+    const runA = fixtureRun({ status: "running" });
+    const runB = fixtureRun({ status: "running" });
+    await store.runs.put(runA);
+    await store.runs.put(runB);
+    await enterWait(config, { run: runA, stepId: "job_wait", blockId: "wait.for_external_job", resolvedInputs: {}, wait: { type: "external_job", provider: "p", jobId: "j1", schemaVersion: CURRENT_ENGINE_SCHEMA_VERSION }, resolvedSecretRefs: new Set() });
+    await enterWait(config, { run: runB, stepId: "manual_wait", blockId: "wait.manual", resolvedInputs: {}, wait: { type: "manual", schemaVersion: CURRENT_ENGINE_SCHEMA_VERSION }, resolvedSecretRefs: new Set() });
+
+    const jobs = await listExternalJobWaits(store);
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0]).toMatchObject({ stepId: "job_wait" });
+  });
+});
+
+describe("THE REQUIRED TEST — exactly-once resume's transaction boundary holds under a simulated crash (architecture §4.4.2/§5.8)", () => {
+  it("a crash between 'dedupe recorded' and 'run state advanced' leaves NEITHER change persisted — the dedupe key is not consumed AND the run is still waiting", async () => {
+    const { store, config } = await setup();
+    const run = fixtureRun({ status: "running" });
+    await store.runs.put(run);
+    await enterWait(config, { run, stepId: "wait_step", blockId: "wait.for_signal", resolvedInputs: {}, wait: { type: "signal", name: "n", correlationId: "c", schemaVersion: CURRENT_ENGINE_SCHEMA_VERSION }, resolvedSecretRefs: new Set() });
+
+    // Wraps the REAL store's transact() so that, inside the SAME real
+    // transaction claimAndCompleteWait opens, the final `tx.runs.put(...)`
+    // call (the run-state-advance write, coming strictly after
+    // `recordDedupeKey`/`waits.delete` in wait-machine.ts's own write
+    // order) throws — simulating a crash precisely between "dedupe
+    // recorded" and "run state advanced." This is NOT a mock store: every
+    // read/write up to the injected failure point goes through the real fs
+    // adapter; only the one call is intercepted.
+    class SimulatedCrash extends Error {}
+    let putCallCount = 0;
+    const crashingStore: AartStore = {
+      ...store,
+      transact: (fn) =>
+        store.transact(async (tx) => {
+          // NOTE: `tx.runs` is a class instance (`FsRunStore`) — its
+          // methods live on the prototype, not as own-enumerable
+          // properties, so `{ ...tx.runs, put: ... }` would silently drop
+          // every OTHER method (get/list/hasDedupeKey/recordDedupeKey).
+          // Bind each real method explicitly instead of spreading.
+          const wrappedTx: AartStore = {
+            ...tx,
+            runs: {
+              get: tx.runs.get.bind(tx.runs),
+              list: tx.runs.list.bind(tx.runs),
+              hasDedupeKey: tx.runs.hasDedupeKey.bind(tx.runs),
+              recordDedupeKey: tx.runs.recordDedupeKey.bind(tx.runs),
+              put: async () => {
+                putCallCount += 1;
+                throw new SimulatedCrash("crash between dedupe-recorded and run-state-advanced");
+              },
+            },
+          };
+          return fn(wrappedTx);
+        }),
+    };
+    const crashingConfig: WaitMachineConfig = { ...config, store: crashingStore };
+
+    await expect(resumeManual(crashingConfig, run.runId, "wait_step")).rejects.toThrow(SimulatedCrash);
+    expect(putCallCount).toBe(1); // confirms the injected failure point was actually reached, not skipped
+
+    // Re-read through the REAL (unwrapped) store — neither half of the
+    // "commit together or not at all" pair landed.
+    await expect(store.runs.hasDedupeKey(run.runId, "wait_step:manual")).resolves.toBe(false);
+    const reloadedRun = await store.runs.get(run.runId);
+    expect(reloadedRun?.status).toBe("waiting"); // NOT advanced to "running"
+    const waitRow = await store.waits.get(run.runId, "wait_step");
+    expect(waitRow).toBeDefined(); // NOT deleted — resume never actually committed
+  });
+
+  it("after the simulated crash, a SUBSEQUENT genuine resume attempt succeeds cleanly (the failed attempt left no partial state to trip over)", async () => {
+    const { store, config } = await setup();
+    const run = fixtureRun({ status: "running" });
+    await store.runs.put(run);
+    await enterWait(config, { run, stepId: "wait_step", blockId: "wait.manual", resolvedInputs: {}, wait: { type: "manual", schemaVersion: CURRENT_ENGINE_SCHEMA_VERSION }, resolvedSecretRefs: new Set() });
+
+    class SimulatedCrash extends Error {}
+    let shouldCrash = true;
+    const crashingStore: AartStore = {
+      ...store,
+      transact: (fn) =>
+        store.transact(async (tx) => {
+          const wrappedTx: AartStore = {
+            ...tx,
+            runs: {
+              get: tx.runs.get.bind(tx.runs),
+              list: tx.runs.list.bind(tx.runs),
+              hasDedupeKey: tx.runs.hasDedupeKey.bind(tx.runs),
+              recordDedupeKey: tx.runs.recordDedupeKey.bind(tx.runs),
+              put: (r) => (shouldCrash ? Promise.reject(new SimulatedCrash("crash")) : tx.runs.put(r)),
+            },
+          };
+          return fn(wrappedTx);
+        }),
+    };
+    const crashingConfig: WaitMachineConfig = { ...config, store: crashingStore };
+
+    await expect(resumeManual(crashingConfig, run.runId, "wait_step")).rejects.toThrow(SimulatedCrash);
+
+    shouldCrash = false;
+    const outcome = await resumeManual(crashingConfig, run.runId, "wait_step");
+    expect(outcome.kind).toBe("resumed");
+  });
+});
