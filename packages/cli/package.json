@@ -23,7 +23,13 @@
   "scripts": {
     "build": "tsc -b"
   },
+  "dependencies": {
+    "@aart/mcp": "workspace:*",
+    "@aart/store": "workspace:*",
+    "@aart/types": "workspace:*"
+  },
   "devDependencies": {
-    "typescript": "5.9.3"
+    "typescript": "5.9.3",
+    "vitest": "4.1.10"
   }
 }
