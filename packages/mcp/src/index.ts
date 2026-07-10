@@ -5,7 +5,7 @@
 // two implementations of the same action (architecture's three-clients
 // principle).
 
-export { createAartContext, resolveTrustModeFromEnv, type AartContext, type CreateAartContextOptions } from "./context.js";
+export { createAartContext, createRealAartContext, resolveTrustModeFromEnv, type AartContext, type CreateAartContextOptions } from "./context.js";
 
 export type {
   AutoApprovalState,

@@ -202,9 +202,27 @@ importers:
 
   packages/mcp:
     dependencies:
+      '@aart/blocks-core':
+        specifier: workspace:*
+        version: link:../blocks-core
+      '@aart/engine':
+        specifier: workspace:*
+        version: link:../engine
+      '@aart/evidence':
+        specifier: workspace:*
+        version: link:../evidence
       '@aart/expr':
         specifier: workspace:*
         version: link:../expr
+      '@aart/governance':
+        specifier: workspace:*
+        version: link:../governance
+      '@aart/llm':
+        specifier: workspace:*
+        version: link:../llm
+      '@aart/registry':
+        specifier: workspace:*
+        version: link:../registry
       '@aart/store':
         specifier: workspace:*
         version: link:../store

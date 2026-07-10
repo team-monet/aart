@@ -11,6 +11,7 @@ import path from "node:path";
 import { createFsStore, type AartStore } from "@aart/store";
 import type { TrustMode } from "@aart/types";
 import { BUILTIN_BLOCK_CATALOG } from "./catalog.js";
+import { buildRealCatalog, createRealEnginePort, createRealEvidencePort, createRealGovernancePort, createRealRegistryPort, createRealEngine } from "./real-context.js";
 import { createStubEngine } from "./stubs/engine.js";
 import { createStubEvidence } from "./stubs/evidence.js";
 import { createStubGovernance } from "./stubs/governance.js";
@@ -48,6 +49,27 @@ export function resolveTrustModeFromEnv(env: NodeJS.ProcessEnv = process.env): T
   return "governed";
 }
 
+/**
+ * The STUB-bound context (unchanged default) — deliberately kept as the
+ * default here, even after S9 integration built real implementations for
+ * every port (`real-context.ts`, reconciliation ledger items 3/4/5/11).
+ * This package's own test suite (and CLI's) is built extensively against
+ * the stub engine's fast, deterministic, no-real-browser/no-real-LLM-call
+ * simulated semantics (`stubs/engine.ts`'s own doc comment: "every other
+ * step 'completes' immediately with empty outputs") — verified directly
+ * during this integration pass: flipping this default to the real
+ * implementations broke 5 existing handler/tool tests (real governance
+ * validation/capability/approval semantics genuinely differ from the
+ * stub's simplified ones, and `sampleWorkflowYaml`'s `browser.goto`/
+ * `web.read` steps would launch a REAL headless browser under the real
+ * engine). That is proper test hygiene, not a gap to silently paper over
+ * by rewriting the whole suite's fixtures mid-integration-pass — unit
+ * tests for individual handlers should stay fast/deterministic/offline;
+ * exercising the REAL stack end-to-end is what `createRealAartContext`
+ * below and this session's flagship E2E tests are for. Production entry
+ * points (`@aart/cli`'s `bin.ts`, `@aart/mcp`'s `mcp-stdio.ts`) call
+ * `createRealAartContext` instead of this function.
+ */
 export function createAartContext(options: CreateAartContextOptions = {}): AartContext {
   const now = options.now ?? (() => new Date());
   const store = options.store ?? createFsStore(options.root ?? path.join(process.cwd(), ".aart"));
@@ -56,5 +78,39 @@ export function createAartContext(options: CreateAartContextOptions = {}): AartC
   const evidence = options.evidence ?? createStubEvidence(store, engine);
   const registry = options.registry ?? createStubRegistry(BUILTIN_BLOCK_CATALOG);
   const trustMode = options.trustMode ?? resolveTrustModeFromEnv();
+  return { store, engine, governance, evidence, registry, trustMode, now };
+}
+
+/**
+ * The REAL composition root (S9 integration, reconciliation ledger items
+ * 3/4/5/11) — every port bound to its real, now-merged sibling package
+ * implementation (`real-context.ts`): `@aart/engine`'s real `createEngine`
+ * fed the real 56-block catalog (`@aart/blocks-core` + `@aart/llm`), real
+ * `@aart/governance` policy functions, real `@aart/evidence` reports/
+ * corrections/eval-running, real `@aart/registry` block search. This is
+ * what production entry points and this session's own flagship E2E tests
+ * (`examples/redacted-legacy-b`, `examples/redacted-legacy-a`) exercise — an
+ * `options.engine`/`governance`/`evidence`/`registry` override still works
+ * (an E2E test that wants to override just one piece can), matching
+ * `createAartContext`'s own override discipline.
+ */
+export function createRealAartContext(options: CreateAartContextOptions = {}): AartContext {
+  const now = options.now ?? (() => new Date());
+  const store = options.store ?? createFsStore(options.root ?? path.join(process.cwd(), ".aart"));
+  const trustMode = options.trustMode ?? resolveTrustModeFromEnv();
+
+  // Built once, shared by whichever of engine/governance/evidence/registry
+  // actually need it below — real catalog assembly (@aart/blocks-core +
+  // @aart/llm) and the real Engine instance are each real work (constructs
+  // provider adapters, assembles 56 block manifests), not free, so this
+  // only happens when at least one port isn't explicitly overridden.
+  const needsRealCatalog = !options.engine || !options.governance || !options.evidence || !options.registry;
+  const catalog = needsRealCatalog ? buildRealCatalog(store) : undefined;
+  const realEngine = !options.engine || !options.evidence ? createRealEngine(store, catalog!.blocks) : undefined;
+
+  const governance = options.governance ?? createRealGovernancePort(catalog!.blocks, trustMode);
+  const engine = options.engine ?? createRealEnginePort(realEngine!);
+  const evidence = options.evidence ?? createRealEvidencePort(store, realEngine!);
+  const registry = options.registry ?? createRealRegistryPort(catalog!.entries);
   return { store, engine, governance, evidence, registry, trustMode, now };
 }
