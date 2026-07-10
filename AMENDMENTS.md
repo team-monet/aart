@@ -55,7 +55,6 @@ Implementation plan §2 says S0 "just creates the directory + a README stub." Re
 
 ---
 
-<<<<<<< HEAD
 ## 2026-07-10 — S1 Engine + durable execution
 
 ### A16 — `Workflow.concurrency` added to the canonical type
