@@ -34,7 +34,7 @@ describe("human.correct", () => {
   it("does not require a description", async () => {
     const result = await humanCorrectBlock.execute({ title: "x", currentValue: 1 }, fakeExecutionContext());
     expect(result).toMatchObject({ title: "x", currentValue: 1 });
-    expect(result.description).toBeUndefined();
+    expect((result as { description?: unknown }).description).toBeUndefined();
   });
 
   it("passes arbitrary currentValue shapes through unchanged (objects, arrays, primitives, null)", async () => {

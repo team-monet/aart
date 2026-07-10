@@ -17,6 +17,6 @@ describe("wait.until", () => {
 
   it("produces output that validates against the frozen WaitConditionTimerSchema once a schemaVersion is stamped on (the engine's job, not this block's)", async () => {
     const result = await waitUntilBlock.execute({ resumeAt: "2026-08-01T09:00:00Z" }, fakeExecutionContext());
-    expect(() => WaitConditionTimerSchema.parse({ ...result, schemaVersion: 1 })).not.toThrow();
+    expect(() => WaitConditionTimerSchema.parse({ ...(result as Record<string, unknown>), schemaVersion: 1 })).not.toThrow();
   });
 });

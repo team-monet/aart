@@ -151,6 +151,21 @@ importers:
 
   packages/familiarity-evals:
     dependencies:
+      '@aart/blocks-core':
+        specifier: workspace:*
+        version: link:../blocks-core
+      '@aart/engine':
+        specifier: workspace:*
+        version: link:../engine
+      '@aart/governance':
+        specifier: workspace:*
+        version: link:../governance
+      '@aart/llm':
+        specifier: workspace:*
+        version: link:../llm
+      '@aart/store':
+        specifier: workspace:*
+        version: link:../store
       '@aart/types':
         specifier: workspace:*
         version: link:../types
@@ -199,6 +214,9 @@ importers:
         specifier: 4.4.3
         version: 4.4.3
     devDependencies:
+      '@aart/engine':
+        specifier: workspace:*
+        version: link:../engine
       typescript:
         specifier: 5.9.3
         version: 5.9.3

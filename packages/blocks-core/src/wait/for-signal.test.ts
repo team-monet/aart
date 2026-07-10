@@ -25,6 +25,6 @@ describe("wait.for_signal", () => {
 
   it("produces output that validates against the frozen WaitConditionSignalSchema once a schemaVersion is stamped on (the engine's job, not this block's)", async () => {
     const result = await waitForSignalBlock.execute({ name: "x", correlationId: "y" }, fakeExecutionContext());
-    expect(() => WaitConditionSignalSchema.parse({ ...result, schemaVersion: 1 })).not.toThrow();
+    expect(() => WaitConditionSignalSchema.parse({ ...(result as Record<string, unknown>), schemaVersion: 1 })).not.toThrow();
   });
 });

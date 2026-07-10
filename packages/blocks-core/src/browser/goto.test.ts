@@ -26,7 +26,7 @@ describe("browser.goto", () => {
     const ctx = fakeExecutionContext({ runId: "run-goto-continuity" });
     await browserGotoBlock.execute({ url: "data:text/html,<title>First</title>" }, ctx);
     const second = await browserGotoBlock.execute({ url: "data:text/html,<title>Second</title>" }, ctx);
-    expect(second.title).toBe("Second");
+    expect(second).toMatchObject({ title: "Second" });
   });
 
   it("rejects navigation to a domain outside a configured egress allowlist", async () => {

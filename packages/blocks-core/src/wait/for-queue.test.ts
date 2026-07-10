@@ -25,6 +25,6 @@ describe("wait.for_queue", () => {
 
   it("produces output that validates against the frozen WaitConditionQueueSchema once a schemaVersion is stamped on (the engine's job, not this block's)", async () => {
     const result = await waitForQueueBlock.execute({ queue: "x", correlationId: "y" }, fakeExecutionContext());
-    expect(() => WaitConditionQueueSchema.parse({ ...result, schemaVersion: 1 })).not.toThrow();
+    expect(() => WaitConditionQueueSchema.parse({ ...(result as Record<string, unknown>), schemaVersion: 1 })).not.toThrow();
   });
 });

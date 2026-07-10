@@ -14,9 +14,15 @@
   },
   "files": ["dist"],
   "scripts": {
-    "build": "tsc -b"
+    "build": "tsc -b",
+    "eval:ci-gate": "node dist/ci-gate.js"
   },
   "dependencies": {
+    "@aart/blocks-core": "workspace:*",
+    "@aart/engine": "workspace:*",
+    "@aart/governance": "workspace:*",
+    "@aart/llm": "workspace:*",
+    "@aart/store": "workspace:*",
     "@aart/types": "workspace:*"
   },
   "devDependencies": {

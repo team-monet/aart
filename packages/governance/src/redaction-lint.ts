@@ -139,10 +139,41 @@ function findEnclosingBlockStart(i: number, startDepth: readonly number[], endDe
  * suite can exercise it against controlled fixture strings — including a
  * fixture reproducing the engine's exact constructor-injection pattern —
  * without needing separately-compilable fixture files on disk.
+ *
+ * `extraBoundIdentifiers` (S9 integration, reconciliation ledger item 14 —
+ * "triage remaining findings to zero"): a genuine precision gap found while
+ * actually running this lint repo-wide for the first time (not merely
+ * assumed fixed from this file's own single-file test suite, all of which
+ * deliberately keep a RedactFn-typed declaration and its usage in the SAME
+ * fixture string). @aart/engine's real structure declares `redact:
+ * RedactFn` exactly ONCE (EngineConfig, types.ts) and every OTHER engine
+ * file (run-lifecycle.ts, step-executor.ts, wait/wait-machine.ts,
+ * concurrency.ts) only ever sees `config.redact` — a property access with
+ * NO local `: RedactFn` type annotation for `findRedactFnBoundIdentifiers`
+ * (which only scans THIS file's own source) to find. Per-file scanning
+ * therefore found ZERO bound identifiers in every one of those files, so
+ * `isGuardedByInjectedRedactFn` could never match, misflagging every
+ * genuinely-guarded call site in them — 100+ of the 205 findings a first
+ * real repo-wide run produced, confirmed by direct inspection (e.g.
+ * run-lifecycle.ts:95's flagged `store.runs.put(redacted)` sits ONE LINE
+ * after `const redacted = applyRedaction(config.redact, ...)` in the same
+ * function). `lintRedactionBypass` below now computes bound identifiers
+ * ACROSS every file in one scan batch first, then passes that combined set
+ * in here — a `RedactFn`-typed field name is a small, stable vocabulary
+ * (mirroring how a human reviewer would recognize `config.redact` as the
+ * injected redactor once they've seen `EngineConfig.redact: RedactFn`
+ * declared ANYWHERE in the codebase, not only in the file currently being
+ * read). Optional and additive — every existing call site/test that omits
+ * this parameter behaves identically to before (this file's own single-
+ * fixture tests deliberately keep declaration+usage together, so they
+ * never needed cross-file identifiers and still don't).
  */
-export function lintSource(filePath: string, source: string): RedactionLintFinding[] {
+export function lintSource(filePath: string, source: string, extraBoundIdentifiers?: ReadonlySet<string>): RedactionLintFinding[] {
   const findings: RedactionLintFinding[] = [];
   const boundIdentifiers = findRedactFnBoundIdentifiers(source);
+  if (extraBoundIdentifiers) {
+    for (const name of extraBoundIdentifiers) boundIdentifiers.add(name);
+  }
   const isMcpFile = filePath.includes(`${sep}mcp${sep}`) || filePath.includes("/mcp/");
   const lines = source.split("\n");
   const { startDepth, endDepth } = computeLineDepths(lines);
@@ -231,12 +262,29 @@ async function* walkTsFiles(dir: string): AsyncGenerator<string> {
  * exists as a script nobody wired in").
  */
 export async function lintRedactionBypass(rootDirs: readonly string[]): Promise<RedactionLintFinding[]> {
-  const findings: RedactionLintFinding[] = [];
+  // Two passes over the same file list (see lintSource's own doc comment
+  // on extraBoundIdentifiers for why): first read every file ONCE into
+  // memory and union each one's own RedactFn-bound identifiers into one
+  // repo-wide set, THEN lint each file against that combined set — a file
+  // that only ever USES `config.redact` (never locally declaring `redact:
+  // RedactFn` itself) still gets credit for the injection pattern once
+  // some OTHER scanned file's interface declaration establishes `redact`
+  // as a real RedactFn-bound name.
+  const files: Array<{ path: string; source: string }> = [];
   for (const root of rootDirs) {
     for await (const file of walkTsFiles(root)) {
-      const source = await fs.readFile(file, "utf8");
-      findings.push(...lintSource(file, source));
+      files.push({ path: file, source: await fs.readFile(file, "utf8") });
     }
+  }
+
+  const repoWideBoundIdentifiers = new Set<string>();
+  for (const { source } of files) {
+    for (const name of findRedactFnBoundIdentifiers(source)) repoWideBoundIdentifiers.add(name);
+  }
+
+  const findings: RedactionLintFinding[] = [];
+  for (const { path, source } of files) {
+    findings.push(...lintSource(path, source, repoWideBoundIdentifiers));
   }
   return findings;
 }

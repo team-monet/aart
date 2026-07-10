@@ -34,6 +34,6 @@ describe("human.approval", () => {
 
   it("produces output whose WaitCondition-shaped fields validate against the frozen WaitConditionApprovalSchema once a schemaVersion is stamped on (title/description are this block's own documented extension beyond the frozen shape, and are permissively ignored by .parse on a non-strict zod object)", async () => {
     const result = await humanApprovalBlock.execute({ title: "x", description: "y" }, fakeExecutionContext());
-    expect(() => WaitConditionApprovalSchema.parse({ ...result, schemaVersion: 1 })).not.toThrow();
+    expect(() => WaitConditionApprovalSchema.parse({ ...(result as Record<string, unknown>), schemaVersion: 1 })).not.toThrow();
   });
 });

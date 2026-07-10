@@ -25,6 +25,6 @@ describe("wait.for_webhook", () => {
 
   it("produces output that validates against the frozen WaitConditionWebhookSchema once a schemaVersion is stamped on (the engine's job, not this block's)", async () => {
     const result = await waitForWebhookBlock.execute({ event: "x", correlationId: "y" }, fakeExecutionContext());
-    expect(() => WaitConditionWebhookSchema.parse({ ...result, schemaVersion: 1 })).not.toThrow();
+    expect(() => WaitConditionWebhookSchema.parse({ ...(result as Record<string, unknown>), schemaVersion: 1 })).not.toThrow();
   });
 });

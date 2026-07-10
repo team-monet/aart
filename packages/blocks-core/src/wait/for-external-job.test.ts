@@ -25,6 +25,6 @@ describe("wait.for_external_job", () => {
 
   it("produces output that validates against the frozen WaitConditionExternalJobSchema once a schemaVersion is stamped on (the engine's job, not this block's)", async () => {
     const result = await waitForExternalJobBlock.execute({ provider: "x", jobId: "y" }, fakeExecutionContext());
-    expect(() => WaitConditionExternalJobSchema.parse({ ...result, schemaVersion: 1 })).not.toThrow();
+    expect(() => WaitConditionExternalJobSchema.parse({ ...(result as Record<string, unknown>), schemaVersion: 1 })).not.toThrow();
   });
 });

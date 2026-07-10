@@ -1,5 +1,6 @@
 import { CapabilityDeniedError, IterationLimitExceededError } from "@aart/types";
-import type { AartStore, BlockImplementation } from "@aart/types";
+import type { BlockImplementation } from "@aart/types";
+import type { AartStore } from "@aart/store";
 import { afterEach, describe, expect, it } from "vitest";
 import { executeStep } from "./step-executor.js";
 import {

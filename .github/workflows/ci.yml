@@ -49,5 +49,35 @@ jobs:
       - name: Typecheck
         run: pnpm run typecheck
 
+      # S9 integration, reconciliation ledger item 14 — tsconfig.base.json
+      # excludes *.test.ts from the tsc -b build above (correctly: test
+      # files aren't shipped package output), which meant NO test file in
+      # this repo had ever been type-checked by anything other than
+      # vitest's own looser, non-type-checking transform. This is a
+      # separate --noEmit pass over every package's *.test.ts too. See
+      # root AMENDMENTS.md A31 for the real, previously-hidden type errors
+      # this caught on its first run.
+      - name: Typecheck — test files
+        run: pnpm run typecheck:tests
+
       - name: Test
         run: pnpm run test
+
+      # S9 integration, reconciliation ledger item 14 (root AMENDMENTS.md
+      # A29). continue-on-error: informational for now, not a merge
+      # blocker — this lint's first-ever repo-wide run surfaced a real
+      # cross-file precision gap (fixed, see A29) but 187 findings remain
+      # untriaged as of this session (a mix of stub/fake-data false
+      # positives and call sites genuinely needing individual review).
+      # Flip to blocking once a follow-up session finishes that triage to
+      # a trustworthy zero — see A29's own note.
+      - name: Lint — redaction bypass scan
+        run: pnpm run lint:redaction
+        continue-on-error: true
+
+      # S9 integration, reconciliation ledger item 14 (root AMENDMENTS.md
+      # A30). Fake-model harness verification, not a real-model baseline —
+      # no LLM provider API key is available in CI as configured today.
+      # See A30's own disclosure.
+      - name: Familiarity-evals CI gate (fake model)
+        run: pnpm run eval:familiarity

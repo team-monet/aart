@@ -11,13 +11,16 @@
   "scripts": {
     "build": "tsc -b tsconfig.build.json",
     "typecheck": "tsc -b tsconfig.build.json --force",
+    "typecheck:tests": "tsc --noEmit -p tsconfig.test-typecheck.json",
     "test": "vitest run --config vitest.workspace.ts",
     "test:watch": "vitest --config vitest.workspace.ts",
     "clean": "tsc -b tsconfig.build.json --clean && rm -rf packages/*/dist",
     "changeset": "changeset",
     "smoke:browser": "node scripts/smoke/browser.mjs",
     "smoke:isolated-vm": "node scripts/smoke/isolated-vm.mjs",
-    "smoke": "pnpm run smoke:browser && pnpm run smoke:isolated-vm"
+    "smoke": "pnpm run smoke:browser && pnpm run smoke:isolated-vm",
+    "lint:redaction": "node packages/governance/dist/redaction-lint-cli.js",
+    "eval:familiarity": "pnpm --filter @aart/familiarity-evals run eval:ci-gate"
   },
   "devDependencies": {
     "@changesets/cli": "2.31.0",

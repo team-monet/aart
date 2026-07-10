@@ -24,6 +24,7 @@
     "zod": "4.4.3"
   },
   "devDependencies": {
+    "@aart/engine": "workspace:*",
     "typescript": "5.9.3",
     "vitest": "4.1.10"
   }

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { EngineBlockExecutionContext } from "@aart/engine";
 import { createProviderRegistry, type LlmCallParams, type ProviderAdapter } from "../provider.js";
 import { createLlmJudge, createLlmJudgeBlock, LLM_JUDGE_MANIFEST, llmJudgeCore, type LlmJudgeDeps, type LlmJudgeFn, type LlmJudgeInput, type LlmJudgeOutput } from "./judge.js";
 
@@ -89,7 +90,8 @@ describe("llm.judge block — the workflow-step surface", () => {
     const deps: LlmJudgeDeps = { providers: createProviderRegistry([adapter]) };
     const block = createLlmJudgeBlock(deps);
     const calls: unknown[] = [];
-    await block.execute({ model: "anthropic/claude-sonnet-5", actual: "x", expected: "y" }, { ...fakeCtx(), recordLlmCall: (m: unknown) => calls.push(m) });
+    const ctx: EngineBlockExecutionContext = { ...fakeCtx(), recordLlmCall: (m: unknown) => calls.push(m) };
+    await block.execute({ model: "anthropic/claude-sonnet-5", actual: "x", expected: "y" }, ctx);
     expect(calls).toHaveLength(1);
   });
 });

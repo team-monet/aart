@@ -10,6 +10,7 @@ export { createEngine, type Engine } from "./engine.js";
 export type {
   BlockRegistry,
   DueWait,
+  EngineBlockExecutionContext,
   EngineConfig,
   GetGrantedCapabilities,
   ResumeMechanism,
