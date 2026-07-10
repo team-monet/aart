@@ -8,4 +8,19 @@ Scaffolded empty by S0 (Wave 0 "Foundation") alongside `AMENDMENTS.md`. S0's own
 
 ---
 
-*(No entries yet — Wave 1 hasn't started.)*
+## 2026-07-10 — S3 Core block packs
+
+### S3-E1 — Browser session lifecycle — `closeBrowserSession`/`closeAllBrowserSessions`, expected to be called by S1 (`@aart/engine`) / S2 (`@aart/server` worker)
+
+```ts
+// packages/blocks-core/src/lib/browser-session.ts
+export async function getOrCreatePage(runId: string): Promise<Page>;          // internal — used by browser.*/web.read blocks only
+export function getConsoleErrors(runId: string): string[] | undefined;        // internal — used by assert.no_console_errors only
+export function hasSession(runId: string): boolean;
+export async function closeBrowserSession(runId: string): Promise<void>;      // <-- the seam
+export async function closeAllBrowserSessions(): Promise<void>;               // <-- the seam
+```
+
+`BlockExecutionContext` (architecture §2.5, S0-frozen) carries no page/session handle and no run-completion or process-shutdown hook — it's `runId`/`stepId`/`resolveSecret`/`writeArtifact` only. But a real workflow's `browser.*` steps are a SEQUENCE acting on the same logical page (`browser.goto`, then `browser.click`, then `browser.screenshot`), and architecture §4.2 dispatches each step's block independently with no continuity primitive of its own. `@aart/blocks-core` supplies that continuity itself, process-side: one Playwright `BrowserContext`+`Page` per `runId`, created lazily on that run's first `browser.*`/`web.read` call (via a single **lazy**-launched shared headless Chromium — `playwright` is never `import()`-ed until the first browser block actually executes) and reused by every subsequent `browser.*` call in the same run. `assert.no_console_errors` reads the same per-run session's tracked `console.error`/`pageerror` output.
+
+Nothing in `@aart/blocks-core`'s own scope ever calls `closeBrowserSession`/`closeAllBrowserSessions` — this package has no run-completion or process-shutdown signal of its own to act on. **Expected consumer:** the engine (S1) once a run reaches a terminal status, and/or the worker process (S2, architecture §4.7's graceful-shutdown sequence) on `SIGTERM`, should call `closeBrowserSession(runId)` / `closeAllBrowserSessions()` respectively. Until wired in, a run's browser session is only ever cleaned up by explicit test teardown or process exit — this is a real, currently-unclosed resource-lifecycle gap, flagged here rather than silently left for S9's integration pass to discover. If S1/S2's real shape for "a run reached a terminal state" or "the worker is shutting down" doesn't fit a bare `closeBrowserSession(runId)` call (e.g. it wants a registered callback instead of being the caller), reconcile via this file / the amendment protocol rather than either side silently guessing.
