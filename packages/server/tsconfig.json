@@ -5,5 +5,10 @@
     "rootDir": "src"
   },
   "include": ["src"],
-  "references": [{ "path": "../types" }, { "path": "../store" }, { "path": "../expr" }]
+  "references": [
+    { "path": "../types" },
+    { "path": "../store" },
+    { "path": "../expr" },
+    { "path": "../governance" }
+  ]
 }

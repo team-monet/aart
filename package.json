@@ -9,6 +9,7 @@
   },
   "packageManager": "pnpm@10.33.2",
   "scripts": {
+    "check:tsconfig-refs": "node scripts/check-tsconfig-references.mjs",
     "build": "tsc -b tsconfig.build.json",
     "typecheck": "tsc -b tsconfig.build.json --force",
     "typecheck:tests": "tsc --noEmit -p tsconfig.test-typecheck.json",

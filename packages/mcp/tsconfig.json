@@ -5,5 +5,15 @@
     "rootDir": "src"
   },
   "include": ["src"],
-  "references": [{ "path": "../types" }, { "path": "../expr" }, { "path": "../store" }]
+  "references": [
+    { "path": "../types" },
+    { "path": "../expr" },
+    { "path": "../store" },
+    { "path": "../blocks-core" },
+    { "path": "../engine" },
+    { "path": "../evidence" },
+    { "path": "../governance" },
+    { "path": "../llm" },
+    { "path": "../registry" }
+  ]
 }

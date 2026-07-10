@@ -43,6 +43,20 @@ jobs:
       - name: Smoke test — isolated-vm
         run: pnpm run smoke:isolated-vm
 
+      # S10 completion session — root AMENDMENTS.md A34. Structural guard:
+      # `tsc -b` derives build order from each package's OWN tsconfig.json
+      # "references", not from package.json "dependencies". A mismatch
+      # between the two is invisible from a warm dist/ and can even survive
+      # a clean build by accident (incidental position in tsconfig.build
+      # .json's own reference list can happen to build the real dependency
+      # first anyway) — it only reliably surfaces as a cascading wall of
+      # TS2307 errors. Runs BEFORE Build, deliberately: plain node, no
+      # build/typecheck dependency, so it fails fast and legibly instead of
+      # a future workspace-dependency addition silently becoming a
+      # cascading tsc dump someone has to reverse-engineer.
+      - name: Check tsconfig.json project references match package.json dependencies
+        run: pnpm run check:tsconfig-refs
+
       - name: Build
         run: pnpm run build
 
