@@ -1,9 +1,41 @@
-// @aart/registry — stub scaffolded by S0 (Wave 0 "Foundation").
-//
-// This package is intentionally empty. It is Wave-1 scope; see
-// aart_implementation_plan_v1.md for which session owns building it and
-// aart_architecture_v1.md §1's package table for its responsibility and
-// primary spec-section anchor. S0's job was only to give the owning
-// session a real, buildable directory to write into — not to guess at
-// this package's shape.
-export {};
+// @aart/registry — pack manifest/hash/import/approval-flow-wiring +
+// discovery (architecture §11, spec §16/§44). See SEAMS.md for the
+// governance (S4) convergence point and AMENDMENTS.md for design gaps this
+// package had to fill.
+export { canonicalize, computePackContentHash } from "./hash.js";
+export {
+  authorPack,
+  installPack,
+  PackNameMismatchError,
+  type AuthorPackInput,
+} from "./import.js";
+export {
+  buildPackManifest,
+  InvalidPackNameError,
+  npmPackageNameFor,
+  packNameFromNpmPackage,
+  PACK_NPM_PREFIX,
+  PackManifestParseError,
+  parsePackManifestYaml,
+  RawPackManifestSchema,
+  recomputePackManifest,
+  type RawPackManifest,
+} from "./manifest.js";
+export {
+  createFakePackageManager,
+  createLinkedPackageManager,
+  PackageNotFoundError,
+  type InstalledPackageFiles,
+  type PackageManagerAdapter,
+} from "./package-manager.js";
+export {
+  findBlocks,
+  searchLocalCatalog,
+  searchRemoteIndex,
+  type BlockCatalogEntry,
+  type BlockSearchResult,
+  type DiscoveryScope,
+  type FindBlocksInput,
+  type RemoteRegistryIndexEntry,
+} from "./discovery.js";
+export { computePackSealChecks, type PackSealCheck, type PackVersionRef } from "./pack-seal.js";

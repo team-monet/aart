@@ -1,9 +1,9 @@
 {
   "name": "@aart/registry",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "AART registry package. Stub scaffolded by S0 (Wave 0) — real implementation is Wave-1 scope; see aart_implementation_plan_v1.md for session ownership.",
+  "description": "Pack manifest/hashing/import/approval-flow-wiring + discovery (spec §16, §44; architecture §11).",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
@@ -16,7 +16,14 @@
   "scripts": {
     "build": "tsc -b"
   },
+  "dependencies": {
+    "@aart/types": "workspace:*",
+    "@aart/store": "workspace:*",
+    "yaml": "^2.6.1",
+    "zod": "4.4.3"
+  },
   "devDependencies": {
-    "typescript": "5.9.3"
+    "typescript": "5.9.3",
+    "vitest": "4.1.10"
   }
 }
