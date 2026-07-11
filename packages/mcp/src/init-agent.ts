@@ -14,6 +14,40 @@
 // (aart_* naming, spec §32-34's core/extended tool surface and
 // register -> validate -> run/verify loop, spec §17.5's mode-aware
 // approval surfaces) while keeping the same motivation-leading voice.
+//
+// AMENDMENTS.md A54 — the `binPath` option and the npx-registry trap it
+// closes: `npx -y <packageName> mcp` (this module's original, and still
+// default-when-no-`binPath`, shape) resolves `packageName` against the
+// **npm registry**, not against whatever `aart` binary is actually running
+// `init-agent` right now. Verified directly, from a genuine from-clone
+// build (clone -> pnpm install -> build -> build:publish -> pack -> install
+// into an isolated prefix, zero access to any other install of this repo):
+// with that freshly-built `aart` on PATH and working correctly standalone,
+// `npx -y @team-monet/aart --help` still fetched and ran npm's currently-
+// published `@team-monet/aart@0.9.0` — an older, architecturally different
+// release (commander-based CLI, `-w/--workspace` instead of `--root`, no
+// `run`/`register`/`validate --registered`/`deploy`/`bundle` surface this
+// build has) — not the just-built one, even though the just-built one
+// resolves fine as a bare `aart` command from the exact same shell. A coding
+// agent that spawns its MCP server from a freshly-authored `.mcp.json`
+// therefore silently gets the WRONG, incompatible `aart mcp` — no error, no
+// warning, just a stdio server that doesn't understand this repo's tools.
+// `binPath`, when supplied, sidesteps registry resolution entirely: the
+// generated config invokes `node <binPath> mcp` directly, so it always
+// starts the exact binary that generated it, regardless of npm registry
+// state — self-consistent by construction, the same fix TEST-DRIVE.md's own
+// hand-written `.mcp.json` workaround already applied manually (a hard-coded
+// absolute path to one specific dev machine's build). `@team-monet/aart`
+// (packages/cli's `initAgentCommand`, the actual `aart init-agent` a user
+// runs) always supplies it, resolved from `process.argv[1]` — this is where
+// the fix actually lands for real users. This module's own default (no
+// `binPath`: the original `npx` form) is preserved for two reasons: it's
+// what a genuinely-published, version-matched install should use once
+// 1.0.0 ships (`--npx` at the CLI layer opts back into it deliberately),
+// and changing this pure function's zero-argument behavior would have
+// broken its own existing unit tests' documented contract for no reason —
+// the CLI layer is the one place that actually knows how it was invoked, so
+// that's where the safe-by-default choice belongs.
 import type { TrustMode } from "@aart/types";
 
 export interface McpConfig {
@@ -30,10 +64,22 @@ export interface InitAgentOutputs {
 }
 
 export interface GenerateInitAgentOptions {
-  /** Defaults to "@team-monet/aart" (ADR-18 — the one published package). */
+  /** Defaults to "@team-monet/aart" (ADR-18 — the one published package). Only affects the `npx` form (no `binPath`) — irrelevant to the `binPath` form, which invokes a concrete file, not a package name. */
   packageName?: string;
   /** Surfaced in the instructions' approval section so the generated file matches the project's actual configured mode rather than describing all four generically. */
   trustMode?: TrustMode;
+  /**
+   * Absolute path to the `aart` entrypoint that is CURRENTLY RUNNING
+   * `init-agent` (e.g. `process.argv[1]`, resolved by `@team-monet/aart`'s
+   * `initAgentCommand`). When given, the generated MCP config invokes this
+   * exact file directly (`{ command: "node", args: [binPath, "mcp"] }`)
+   * instead of resolving `packageName` against the npm registry via `npx`
+   * — see this module's header comment for the trap this closes. Omit to
+   * get the original `npx -y <packageName> mcp` form (this function's
+   * default, unchanged) — correct only when `packageName` is genuinely
+   * published at a version matching the running build.
+   */
+  binPath?: string;
 }
 
 const APPROVAL_SECTION_BY_MODE: Record<TrustMode, string> = {
@@ -50,16 +96,17 @@ export function generateInitAgentOutputs(options: GenerateInitAgentOptions = {})
   const packageName = options.packageName ?? "@team-monet/aart";
   const trustMode = options.trustMode ?? "governed";
 
-  // spec §27.2's exact shape: { "command": "npx", "args": ["-y", "@team-monet/aart", "mcp"] }
-  // — wrapped in the standard `mcpServers.<name>` envelope real MCP clients
-  // (Claude Code / Claude Desktop `.mcp.json`) expect, so the generated file
-  // is directly usable, not just illustrative.
+  // `binPath` given -> point straight at the running binary (`node
+  // <binPath> mcp`), sidestepping npm-registry resolution entirely (see
+  // this module's header comment for the npx-registry trap this avoids).
+  // No `binPath` -> spec §27.2's original shape: { "command": "npx", "args":
+  // ["-y", "@team-monet/aart", "mcp"] } — wrapped in the standard
+  // `mcpServers.<name>` envelope real MCP clients (Claude Code / Claude
+  // Desktop `.mcp.json`) expect either way, so the generated file is
+  // directly usable, not just illustrative.
   const mcpConfig: McpConfig = {
     mcpServers: {
-      aart: {
-        command: "npx",
-        args: ["-y", packageName, "mcp"],
-      },
+      aart: options.binPath ? { command: "node", args: [options.binPath, "mcp"] } : { command: "npx", args: ["-y", packageName, "mcp"] },
     },
   };
 

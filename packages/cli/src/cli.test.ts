@@ -151,6 +151,55 @@ describe("aart init / aart init-agent", () => {
     const instructions = await readFile(instructionsOut, "utf8");
     expect(instructions).toContain("Shell runs and is forgotten");
   });
+
+  describe("aart init-agent's generated MCP config — AMENDMENTS.md A54 (the npx-registry trap)", () => {
+    it("defaults to the self-referencing `node <binPath> mcp` form, not `npx` — the actual fix: a real `aart` invocation always has a real process.argv[1] to point at", async () => {
+      tc = await createTestCli();
+      const mcpConfigOut = join(tc.cwd, ".mcp.json");
+      const outcome = await run(["init-agent", "--mcp-config-out", mcpConfigOut, "--instructions-out", join(tc.cwd, "AGENTS.md")], {
+        cliContext: tc.cli,
+      });
+      expect(outcome.ok).toBe(true);
+      const config = JSON.parse(await readFile(mcpConfigOut, "utf8"));
+      expect(config.mcpServers.aart.command).toBe("node");
+      expect(config.mcpServers.aart.args).toEqual([process.argv[1], "mcp"]);
+    });
+
+    it("--bin-path overrides the default explicitly", async () => {
+      tc = await createTestCli();
+      const mcpConfigOut = join(tc.cwd, ".mcp.json");
+      const outcome = await run(
+        ["init-agent", "--bin-path", "/opt/aart/dist/bin.js", "--mcp-config-out", mcpConfigOut, "--instructions-out", join(tc.cwd, "AGENTS.md")],
+        { cliContext: tc.cli },
+      );
+      expect(outcome.ok).toBe(true);
+      const config = JSON.parse(await readFile(mcpConfigOut, "utf8"));
+      expect(config.mcpServers.aart).toEqual({ command: "node", args: ["/opt/aart/dist/bin.js", "mcp"] });
+    });
+
+    it("--npx opts back into the original registry-resolved form (correct once @team-monet/aart is genuinely published at a matching version)", async () => {
+      tc = await createTestCli();
+      const mcpConfigOut = join(tc.cwd, ".mcp.json");
+      const outcome = await run(["init-agent", "--npx", "--mcp-config-out", mcpConfigOut, "--instructions-out", join(tc.cwd, "AGENTS.md")], {
+        cliContext: tc.cli,
+      });
+      expect(outcome.ok).toBe(true);
+      const config = JSON.parse(await readFile(mcpConfigOut, "utf8"));
+      expect(config.mcpServers.aart).toEqual({ command: "npx", args: ["-y", "@team-monet/aart", "mcp"] });
+    });
+
+    it("--npx --package names a different registry package", async () => {
+      tc = await createTestCli();
+      const mcpConfigOut = join(tc.cwd, ".mcp.json");
+      const outcome = await run(
+        ["init-agent", "--npx", "--package", "@custom/aart", "--mcp-config-out", mcpConfigOut, "--instructions-out", join(tc.cwd, "AGENTS.md")],
+        { cliContext: tc.cli },
+      );
+      expect(outcome.ok).toBe(true);
+      const config = JSON.parse(await readFile(mcpConfigOut, "utf8"));
+      expect(config.mcpServers.aart.args).toEqual(["-y", "@custom/aart", "mcp"]);
+    });
+  });
 });
 
 describe("aart diff", () => {

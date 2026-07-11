@@ -9,8 +9,12 @@ inside this session (AMENDMENTS.md A49) — nothing here is aspirational.
 
 See also: [`TEST-DRIVE.md`](./TEST-DRIVE.md) for the authoring-loop walkthrough
 (register → validate → run → approve → promote → deploy) this document
-assumes you already know; [`AMENDMENTS.md`](./AMENDMENTS.md) for the
-decision trail behind every `[DECISION]` referenced here.
+assumes you already know; [`AUTHORING.md`](./AUTHORING.md) if you're setting
+up a SEPARATE machine to author/govern workflows with a coding agent and
+ship the result here (build-from-source, `aart init-agent`/MCP wiring, then
+the exact `scp`-the-bundle handoff into this document's Path A/B);
+[`AMENDMENTS.md`](./AMENDMENTS.md) for the decision trail behind every
+`[DECISION]` referenced here.
 
 ## Contents
 

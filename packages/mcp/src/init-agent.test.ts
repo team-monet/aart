@@ -22,6 +22,28 @@ describe("generateInitAgentOutputs", () => {
     expect(mcpConfig.mcpServers.aart.args).toEqual(["-y", "@custom/aart", "mcp"]);
   });
 
+  describe("binPath (AMENDMENTS.md A54 — the npx-registry trap)", () => {
+    it("given a binPath, points the MCP config straight at it via `node`, not `npx`", () => {
+      const { mcpConfig } = generateInitAgentOutputs({ binPath: "/opt/aart/dist/bin.js" });
+      expect(mcpConfig.mcpServers.aart).toEqual({ command: "node", args: ["/opt/aart/dist/bin.js", "mcp"] });
+    });
+
+    it("without a binPath, still falls back to the original npx/registry form (this function's own default; @team-monet/aart's CLI is the layer that always supplies binPath for real invocations — see init-agent.ts's header comment)", () => {
+      const { mcpConfig } = generateInitAgentOutputs();
+      expect(mcpConfig.mcpServers.aart.command).toBe("npx");
+    });
+
+    it("packageName is ignored once binPath is given — the config names a file, not a package", () => {
+      const { mcpConfig } = generateInitAgentOutputs({ binPath: "/opt/aart/dist/bin.js", packageName: "@custom/aart" });
+      expect(mcpConfig.mcpServers.aart.args).toEqual(["/opt/aart/dist/bin.js", "mcp"]);
+    });
+
+    it("mcpConfigJson still round-trips through JSON.parse to mcpConfig in the binPath form", () => {
+      const { mcpConfig, mcpConfigJson } = generateInitAgentOutputs({ binPath: "/opt/aart/dist/bin.js" });
+      expect(JSON.parse(mcpConfigJson)).toEqual(mcpConfig);
+    });
+  });
+
   it("instructions embed the motivation-leading quote verbatim (v0.x prototype prior art, architecture §10.4)", () => {
     const { instructions } = generateInitAgentOutputs();
     expect(instructions).toContain("Shell runs and is forgotten. AART runs and is kept.");

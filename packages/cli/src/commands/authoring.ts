@@ -76,8 +76,31 @@ export async function initCommand(_tokens: Tokenized, cli: CliContext): Promise<
   return { ok: true, message: "AART project initialized." };
 }
 
+/**
+ * `binPath` for `generateInitAgentOutputs` (`@aart/mcp`, see its own header
+ * comment for the npx-registry trap this closes): defaults to
+ * `process.argv[1]` — the path Node was actually launched with, which for a
+ * real `aart init-agent` invocation is the installed `aart` entrypoint
+ * itself (a global-install shim, an isolated-prefix `.bin/aart` symlink, or
+ * a direct `node dist/bin.js`, whichever this process IS) — always
+ * self-consistent, no npm-registry guesswork. `--npx` opts back into the
+ * original registry-resolved form (correct once `packageName` is genuinely
+ * published at a matching version); `--bin-path <path>` overrides the
+ * default explicitly, mainly for tests that invoke this command in-process
+ * (where `process.argv[1]` is the test runner's own script, not a
+ * meaningful `aart` path).
+ */
+function resolveBinPath(tokens: Tokenized): string | undefined {
+  if (flagBoolean(tokens.flags, "npx")) return undefined;
+  return flagString(tokens.flags, "bin-path") ?? process.argv[1];
+}
+
 export async function initAgentCommand(tokens: Tokenized, cli: CliContext): Promise<HandlerResult> {
-  const outputs = generateInitAgentOutputs({ trustMode: cli.aart.trustMode, packageName: flagString(tokens.flags, "package") });
+  const outputs = generateInitAgentOutputs({
+    trustMode: cli.aart.trustMode,
+    packageName: flagString(tokens.flags, "package"),
+    binPath: resolveBinPath(tokens),
+  });
   const cwd = flagString(tokens.flags, "cwd") ?? process.cwd();
   const mcpConfigPath = flagString(tokens.flags, "mcp-config-out") ?? join(cwd, ".mcp.json");
   const instructionsPath = flagString(tokens.flags, "instructions-out") ?? join(cwd, "AGENTS.md");
