@@ -1,0 +1,16 @@
+# Gitleaks config for AART.
+#
+# The redaction test suites deliberately contain secret-SHAPED fixture strings
+# (e.g. "sk-live-..." markers) — they exist precisely to prove the redaction
+# machinery scrubs values of that shape. They are synthetic, never real
+# credentials (verified at push time, 2026-07-11, AMENDMENTS A53). Allowlist
+# them by path so history scans stay clean; any NEW file hit is still reported.
+
+[allowlist]
+paths = [
+  '''packages/governance/src/redact\.test\.ts''',
+  '''packages/governance/src/redact-adversarial\.test\.ts''',
+  '''packages/evidence/src/redact\.test\.ts''',
+  '''packages/mcp/src/redaction-adversarial\.test\.ts''',
+  '''packages/dashboard/src/server\.test\.ts''',
+]

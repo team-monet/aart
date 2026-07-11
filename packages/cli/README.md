@@ -77,4 +77,4 @@ This is an early (`0.x`) release. The core engine, governance model, and block c
 
 ## License
 
-Not yet finalized — no license has been chosen for this project as of this release. Do not treat the absence of a `LICENSE` file as permission to use, copy, or redistribute this software; treat it as all-rights-reserved until a license is published.
+[Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0) — see the `LICENSE` file at the repository root.
