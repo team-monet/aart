@@ -8,9 +8,12 @@
 // was a concurrent Wave-1 session on its own branch — see AMENDMENTS.md/
 // SEAMS.md protocol), so every cross-session function this dashboard calls
 // was modeled here as a narrow function-type seam + a deliberately
-// swappable DI container (`DashboardDeps`) that `views/`/`actions/`-shaped
-// handlers receive and call through, matching that sibling's OWN published
-// SEAMS.md signature exactly.
+// swappable DI container (`DashboardDeps`) that route handlers receive and
+// call through, matching that sibling's OWN published SEAMS.md signature
+// exactly. (Originally consumed by this package's own `views/`/`actions/`
+// modules, one per domain — deleted once server.ts's JSON-API rewrite made
+// them dead code; `server.ts`'s route handlers are the DI container's only
+// consumer now, same DashboardDeps shape, no call-site change.)
 //
 // S9 integration (reconciliation ledger item 2): the promotion-related
 // group below (`PromotionRecord`/`PromotionEvaluation`/
@@ -22,9 +25,9 @@
 // why governance's shape was ratified as canonical over @aart/server's
 // former, differently-shaped local mirror (root AMENDMENTS.md A26). The DI
 // container SHAPE (a swappable `DashboardDeps`) is unchanged — this is a
-// value-source swap, not an architecture change; `views/`/`actions/` call
-// sites are unaffected since nothing in this package pattern-matched on
-// the old locally-invented `{kind:"blocked"|"evaluated"}` discriminant
+// value-source swap, not an architecture change; every call site was
+// unaffected since nothing in this package pattern-matched on the old
+// locally-invented `{kind:"blocked"|"evaluated"}` discriminant
 // (grep-verified before this change).
 //
 // Every OTHER field below still follows the original pattern (a narrow
@@ -122,9 +125,9 @@ export type EvaluatePromotionForEnvironmentFn = (params: {
 // ---------------------------------------------------------------------------
 // @aart/governance's real semanticRiskDiff (S9 integration, reconciliation
 // ledger item 13) — replaces this package's former computeSimpleStepDiff
-// (views/workflows.ts), which that function's own doc comment already
-// flagged as "a deliberately SIMPLIFIED stand-in... until the real
-// capability-closure-based diff can be wired in." `SemanticRiskDiff`
+// (the now-deleted views/workflows.ts), which that function's own doc
+// comment already flagged as "a deliberately SIMPLIFIED stand-in... until
+// the real capability-closure-based diff can be wired in." `SemanticRiskDiff`
 // (re-exported below) is governance's real, richer result shape (added/
 // removed/modified steps, capabilityChanged, newCapabilities/newSecrets/
 // newDomains, riskFrom/riskTo/riskIncreased) — see risk-diff.ts. Takes
@@ -280,7 +283,7 @@ export type DecideApprovalTaskFn = (
 ) => Promise<ApprovalTask>;
 
 // ---------------------------------------------------------------------------
-// The DI container every views/actions handler in this package receives.
+// The DI container every route handler in this package receives (server.ts).
 // ---------------------------------------------------------------------------
 
 export interface DashboardDeps {

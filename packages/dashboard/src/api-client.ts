@@ -77,7 +77,7 @@ export interface WaitingRunEntry {
   createdAt: string;
 }
 
-/** `GET /workflows/:id`'s real shape (`packages/server/src/http/server.ts`) — the full record for one version (latest by default, or a specific one via `getWorkflow`'s own `version` param) plus every known version, so the Workflow detail page (views/workflows.ts) never needs a second round trip to render version history. */
+/** `GET /workflows/:id`'s real shape (`packages/server/src/http/server.ts`) — the full record for one version (latest by default, or a specific one via `getWorkflow`'s own `version` param) plus every known version, so the Workflow detail page (frontend/src/pages/WorkflowsPage.tsx) never needs a second round trip to render version history. */
 export interface WorkflowDetail {
   workflow: Workflow;
   versions: string[];
@@ -123,7 +123,7 @@ export interface ApiClient {
   listWaitingRuns(): Promise<WaitingRunEntry[]>;
   listFlaggedRunsViaApi(): Promise<RunRecord[]>;
   listWorkflowIds(): Promise<string[]>;
-  /** The full record for one workflow (latest version, or `version` if given) plus its version history — `undefined` if the workflow (or that specific version) doesn't exist. Backs the Workflow detail page (views/workflows.ts). */
+  /** The full record for one workflow (latest version, or `version` if given) plus its version history — `undefined` if the workflow (or that specific version) doesn't exist. Backs the Workflow detail page (frontend/src/pages/WorkflowsPage.tsx). */
   getWorkflow(id: string, version?: string): Promise<WorkflowDetail | undefined>;
   listEnvironments(): Promise<Environment[]>;
   listDeployments(): Promise<Deployment[]>;

@@ -1,8 +1,11 @@
 // Real block catalog + capability-closure lookup for this package's own
 // data sources (S9 integration, reconciliation ledger item 13):
-//   - the Blocks page (views/blocks-packs.ts) — real manifest listing.
+//   - server.ts's GET /api/blocks, /api/blocks/:id — real manifest listing
+//     (no dedicated SPA page consumes these yet — the founder's SPA
+//     rewrite hasn't added a Blocks/Packs page; see AMENDMENTS.md).
 //   - @aart/governance's semanticRiskDiff (stub-deps.ts) — real capability
-//     closures for the risk-diff page.
+//     closures for the Workflow detail page's risk-diff tool
+//     (frontend/src/pages/WorkflowsPage.tsx).
 // Mirrors packages/mcp/src/real-context.ts's buildCapabilityClosureLookup/
 // buildRealCatalog, applied to this package rather than imported from
 // @aart/mcp: architecture's three-client principle (§13.2) means
@@ -24,11 +27,10 @@
 // Pack-delivered blocks are not (reconciliation ledger item 13's own
 // tracked gap, shared with item 12's identical blocker — no
 // pack-enumeration primitive exists on a fresh store; see this package's
-// SEAMS.md/views/blocks-packs.ts for the Packs-page half of this, which
-// stays a deliberately-pending page for that reason) — a workflow step
-// referencing a pack-delivered block resolves as unresolved in the
-// capability closure, same documented simplification real-context.ts's
-// own lookup carries.
+// SEAMS.md for the Packs half of this, which stays a deliberately-pending
+// gap for that reason) — a workflow step referencing a pack-delivered
+// block resolves as unresolved in the capability closure, same documented
+// simplification real-context.ts's own lookup carries.
 import { createBlockCatalog } from "@aart/blocks-core";
 import { computeCapabilityClosure, type CapabilityClosureLookup, type CapabilityClosureNode, type CapabilityClosureResult } from "@aart/governance";
 import { createLlmPack } from "@aart/llm";
@@ -41,12 +43,12 @@ function realBlockImplementations(store: AartStore) {
   return [...coreBlocks, ...llmBlocks];
 }
 
-/** The real core-builtin block catalog's manifests (56: 51 @aart/blocks-core + 5 @aart/llm) — what the Blocks page (views/blocks-packs.ts) renders. */
+/** The real core-builtin block catalog's manifests (56: 51 @aart/blocks-core + 5 @aart/llm) — what GET /api/blocks (server.ts) returns. */
 export function listBlockManifests(store: AartStore): BlockManifest[] {
   return realBlockImplementations(store).map((impl) => impl.manifest);
 }
 
-/** A single block's real manifest by id, for the Block detail page (views/blocks-packs.ts) — `undefined` if `id` isn't in the real catalog (same core-builtins-only scope as `listBlockManifests`, no pack-delivered blocks). */
+/** A single block's real manifest by id, for GET /api/blocks/:id (server.ts) — `undefined` if `id` isn't in the real catalog (same core-builtins-only scope as `listBlockManifests`, no pack-delivered blocks). */
 export function getBlockManifest(store: AartStore, id: string): BlockManifest | undefined {
   return realBlockImplementations(store).find((impl) => impl.manifest.id === id)?.manifest;
 }

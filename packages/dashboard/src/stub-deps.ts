@@ -20,9 +20,9 @@
 // identically-shaped lookup — see that file's doc comment for why each
 // client builds its own rather than one client depending on another's
 // composition root). This package's former computeSimpleStepDiff
-// (views/workflows.ts) is deleted, not kept alongside — its own doc
-// comment already called itself "a deliberately SIMPLIFIED stand-in...
-// until the real capability-closure-based diff can be wired in."
+// (the now-deleted views/workflows.ts) is deleted, not kept alongside —
+// its own doc comment already called itself "a deliberately SIMPLIFIED
+// stand-in... until the real capability-closure-based diff can be wired in."
 //
 // Still local mirrors (unrelated reconciliation items — evidence's report
 // renderers/scorer registry/runEvalSuite, engine's triggerRun/

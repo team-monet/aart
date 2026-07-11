@@ -10,24 +10,13 @@
 // every writable action (trigger a run, approve/promote/block/mark a
 // workflow, decide an approval task, record/act on a correction, create/run
 // an eval suite, clear a run's flag) called `deps.X(store, ...)` directly
-// against a SEPARATE, locally-constructed `AartStore` handle — exactly the
-// class of bug root AMENDMENTS.md A43 found and fixed for workflow/block
-// detail (a dashboard process whose own store handle points at a
-// different, possibly-misconfigured root than the server process's own
-// store silently shows wrong/empty data, or in a write's case, silently
-// writes to the WRONG place, or a `riskReview` decision gets misattributed
-// to `humanReview` because a second, divergent reimplementation drifted
-// from the real one — root AMENDMENTS.md A46's flagged finding). Every one
-// of those actions now has a real implementation server-side
-// (`packages/server/src/http/server.ts`) and this file calls it through
-// `api` — the dashboard's ONLY connection to data is the server it points
-// at, full stop. `store`/`deps` remain in `DashboardConfig` (both OPTIONAL
-// now, see config.ts) for the two things that are genuinely never
-// store-path-dependent: the Blocks/Packs pages' pure in-memory capability
-// catalog, and Run detail's pure report-rendering transform.
+// against a SEPARATE, locally-constructed `AartStore` handle.
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { existsSync } from "node:fs";
+import fs from "node:fs/promises";
+import { fileURLToPath } from "node:url";
 import { createFsStore, type AartStore } from "@aart/store";
 import type { ApiClient } from "./api-client.js";
 import type { DashboardConfig } from "./config.js";
@@ -36,17 +25,44 @@ import type { Clock } from "./clock.js";
 import { systemClock } from "./clock.js";
 import type { DashboardDeps } from "./deps.js";
 import { createStubDeps } from "./stub-deps.js";
-import { redirect, Router, sendHtml, sendJson } from "./http/router.js";
-import { escapeHtml, page } from "./http/html.js";
-import { renderApprovalQueuePage } from "./views/approvals.js";
+import { Router, sendJson } from "./http/router.js";
 import { getBlockManifest, listBlockManifests } from "./capability-catalog.js";
-import { renderBlockDetailPage, renderBlocksPage, renderPacksPage } from "./views/blocks-packs.js";
-import { renderCorrectionQueuePage, renderRecordCorrectionFormPage } from "./views/corrections.js";
-import { renderCreateEvalFormPage, renderEvalDashboardPage } from "./views/evals.js";
-import { renderFlaggedRunsPage } from "./views/flags.js";
-import { renderDeploymentsPage, renderEnvironmentsPage, renderSecretsStatusPage, renderTriggerConfigsPage, renderWorkerHealthPage, type WorkerHealthEntry } from "./views/production.js";
-import { listRunsFilterFromQuery, renderArtifactsPage, renderRunDetailPage, renderRunsListPage, renderTriggerFormPage, renderWaitingRunsPage } from "./views/runs.js";
-import { renderRiskDiffPage, renderWorkflowDetailPage, renderWorkflowsListPage } from "./views/workflows.js";
+import type { RunRecord, RunStatus } from "@aart/types";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+const MIME_TYPES: Record<string, string> = {
+  ".html": "text/html; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".js": "application/javascript; charset=utf-8",
+  ".json": "application/json; charset=utf-8",
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".gif": "image/gif",
+  ".svg": "image/svg+xml",
+  ".ico": "image/x-icon",
+  ".webp": "image/webp",
+  ".woff": "font/woff",
+  ".woff2": "font/woff2",
+  ".ttf": "font/ttf",
+};
+
+function getFrontendDir(): string | undefined {
+  const paths = [
+    path.join(__dirname, "frontend"),
+    path.join(__dirname, "../frontend/dist"),
+    path.resolve(__dirname, "../../frontend/dist"),
+    path.resolve(__dirname, "../dist/frontend"),
+  ];
+  for (const p of paths) {
+    if (existsSync(path.join(p, "index.html"))) {
+      return p;
+    }
+  }
+  return undefined;
+}
 
 function str(body: Record<string, unknown>, key: string, fallback = ""): string {
   const v = body[key];
@@ -63,162 +79,181 @@ function parseJsonField(body: Record<string, unknown>, key: string): Record<stri
   }
 }
 
+function listRunsFilterFromQuery(query: URLSearchParams): { status?: RunStatus; workflowId?: string } {
+  const status = query.get("status");
+  const workflowId = query.get("workflowId");
+  const filter: { status?: RunStatus; workflowId?: string } = {};
+  if (status) filter.status = status as RunStatus;
+  if (workflowId) filter.workflowId = workflowId;
+  return filter;
+}
+
+// The redaction chokepoint (architecture §7.9) — every run-bearing API
+// response routes through `deps.redact` before serialization, matching the
+// pre-A47 server-rendered surface's "values NEVER shown" invariant (the old
+// views/runs.ts's renderRunDetailPage/renderArtifactsPage received an
+// already-redacted `run` from their caller; the JSON surface must give the
+// same guarantee to whatever renders it now, including the SPA's raw `run`
+// field which — unlike `reportHtml` below — has no renderer of its own
+// forcing it through redact()). `resolvedSecretRefs` is `new Set()`, the
+// same default `packages/evidence/src/redact.ts`'s `applyRedaction` and
+// this package's own `createReportRenderers` use for a POST-PERSIST read:
+// the engine has already redacted every persisted RunRecord at write time
+// (architecture §7.9), so this call is defense-in-depth, not the primary
+// scrub — but it IS the chokepoint every consumer must still go through,
+// per that same architecture note, and `deps.redact` is real (not the
+// identity stub) in production (server composition, not this package).
+function redactRun(deps: DashboardDeps, run: RunRecord): RunRecord {
+  return deps.redact(run, new Set()) as RunRecord;
+}
+function redactRuns(deps: DashboardDeps, runs: readonly RunRecord[]): RunRecord[] {
+  return runs.map((run) => redactRun(deps, run));
+}
+
 export function buildDashboardRouter(store: AartStore, api: ApiClient, deps: DashboardDeps, clock: Clock, workerUrls: readonly string[]): Router {
   const router = new Router();
 
-  // -- v1 read-only pages (architecture §13.1) -------------------------------
+  // -- API endpoints (JSON only) -------------------------------------------
 
-  router.get("/", (ctx) => redirect(ctx.res, "/runs"));
+  router.get("/health", (ctx) => sendJson(ctx.res, 200, { status: "ok" }));
+  router.get("/api/health", (ctx) => sendJson(ctx.res, 200, { status: "ok" }));
 
-  router.get("/runs/trigger", async (ctx) => {
-    sendHtml(ctx.res, 200, renderTriggerFormPage(await api.listWorkflowIds()));
-  });
-  router.post("/runs/trigger", async (ctx, body) => {
+  router.post("/api/runs/trigger", async (ctx, body) => {
     const inputs = parseJsonField(body, "inputs");
     const environment = str(body, "environment") || undefined;
-    const run = await api.triggerRun({ workflowId: str(body, "workflowId"), workflowVersion: str(body, "workflowVersion") || undefined, inputs, environment });
-    redirect(ctx.res, `/runs/${encodeURIComponent(run.runId)}`);
+    const run = await api.triggerRun({
+      workflowId: str(body, "workflowId"),
+      workflowVersion: str(body, "workflowVersion") || undefined,
+      inputs,
+      environment
+    });
+    sendJson(ctx.res, 200, run);
   });
 
-  router.get("/runs", async (ctx) => {
+  router.get("/api/runs", async (ctx) => {
     const runs = await api.listRuns(listRunsFilterFromQuery(ctx.query));
-    sendHtml(ctx.res, 200, renderRunsListPage(runs));
+    sendJson(ctx.res, 200, redactRuns(deps, runs));
   });
 
-  router.get("/runs/:id", async (ctx) => {
+  router.get("/api/runs/:id", async (ctx) => {
     const run = await api.getRun(ctx.params["id"]!);
     if (!run) {
-      sendHtml(ctx.res, 404, page("Not Found", "<p>No such run.</p>"));
+      sendJson(ctx.res, 404, { error: "No such run." });
       return;
     }
     const renderers = deps.createReportRenderers(deps.redact);
-    sendHtml(ctx.res, 200, renderRunDetailPage(run, renderers.html(run)));
+    sendJson(ctx.res, 200, {
+      run: redactRun(deps, run),
+      reportHtml: renderers.html(run)
+    });
   });
 
-  router.get("/workflows", async (ctx) => {
-    sendHtml(ctx.res, 200, renderWorkflowsListPage(await api.listWorkflowIds()));
+  router.get("/api/workflows", async (ctx) => {
+    const workflows = await api.listWorkflowIds();
+    sendJson(ctx.res, 200, workflows);
   });
 
-  // Reads through `api` (S2's now-enriched GET /workflows/:id), not a
-  // second directly-constructed store handle — see views/workflows.ts's
-  // header comment for why that used to be a real, reproduced bug (root
-  // AMENDMENTS.md A43), not just a hypothetical one. `?version=` lets the
-  // Versions section (rendered below) drill into any past version, not
-  // just latest.
-  router.get("/workflows/:id", async (ctx) => {
+  router.get("/api/workflows/:id", async (ctx) => {
     const id = ctx.params["id"]!;
     const detail = await api.getWorkflow(id, ctx.query.get("version") ?? undefined);
     if (!detail) {
-      sendHtml(ctx.res, 404, page("Not Found", "<p>No such workflow.</p>"));
+      sendJson(ctx.res, 404, { error: "No such workflow." });
       return;
     }
     const recentRuns = await api.listRuns({ workflowId: id });
-    sendHtml(ctx.res, 200, renderWorkflowDetailPage(detail.workflow, detail.versions, recentRuns));
+    sendJson(ctx.res, 200, {
+      workflow: detail.workflow,
+      versions: detail.versions,
+      recentRuns
+    });
   });
 
-  router.post("/workflows/:id/approve", async (ctx, body) => {
+  router.post("/api/workflows/:id/approve", async (ctx, body) => {
     const id = ctx.params["id"]!;
     const action = str(body, "action") === "deprecate" ? "deprecate" : "approve";
     const trustMode = (str(body, "trustMode", "governed") as Parameters<ApiClient["approveOrDeprecateWorkflow"]>[3]) || "governed";
     await api.approveOrDeprecateWorkflow(id, str(body, "version"), action, trustMode);
-    redirect(ctx.res, `/workflows/${encodeURIComponent(id)}`);
+    sendJson(ctx.res, 200, { success: true });
   });
 
-  router.post("/workflows/:id/promote", async (ctx, body) => {
+  router.post("/api/workflows/:id/promote", async (ctx, body) => {
     const id = ctx.params["id"]!;
     await api.promoteWorkflow(id, str(body, "version"), str(body, "environmentId"));
-    redirect(ctx.res, `/workflows/${encodeURIComponent(id)}`);
+    sendJson(ctx.res, 200, { success: true });
   });
 
-  router.post("/workflows/:id/risk-diff", async (ctx, body) => {
+  router.post("/api/workflows/:id/risk-diff", async (ctx, body) => {
     const id = ctx.params["id"]!;
     const fromVersion = str(body, "fromVersion");
     const toVersion = str(body, "toVersion");
     const [from, to] = await Promise.all([api.getWorkflow(id, fromVersion), api.getWorkflow(id, toVersion)]);
     if (!from || !to) {
-      sendHtml(ctx.res, 404, page("Not Found", "<p>One or both workflow versions not found.</p>"));
+      sendJson(ctx.res, 404, { error: "One or both workflow versions not found." });
       return;
     }
-    sendHtml(ctx.res, 200, renderRiskDiffPage(id, fromVersion, toVersion, deps.semanticRiskDiff(from.workflow, to.workflow)));
+    const diff = deps.semanticRiskDiff(from.workflow, to.workflow);
+    sendJson(ctx.res, 200, diff);
   });
 
-  router.post("/workflows/:id/block-promotion", async (ctx, body) => {
+  router.post("/api/workflows/:id/block-promotion", async (ctx, body) => {
     await api.blockPromotion(ctx.params["id"]!, str(body, "version"));
-    redirect(ctx.res, `/workflows/${encodeURIComponent(ctx.params["id"]!)}`);
+    sendJson(ctx.res, 200, { success: true });
   });
-  router.post("/workflows/:id/unblock-promotion", async (ctx, body) => {
+  router.post("/api/workflows/:id/unblock-promotion", async (ctx, body) => {
     await api.unblockPromotion(ctx.params["id"]!, str(body, "version"));
-    redirect(ctx.res, `/workflows/${encodeURIComponent(ctx.params["id"]!)}`);
+    sendJson(ctx.res, 200, { success: true });
   });
-  router.post("/workflows/:id/mark-needs-review", async (ctx, body) => {
+  router.post("/api/workflows/:id/mark-needs-review", async (ctx, body) => {
     await api.markNeedsReview(ctx.params["id"]!, str(body, "version"));
-    redirect(ctx.res, `/workflows/${encodeURIComponent(ctx.params["id"]!)}`);
+    sendJson(ctx.res, 200, { success: true });
   });
-  router.post("/workflows/:id/clear-needs-review", async (ctx, body) => {
+  router.post("/api/workflows/:id/clear-needs-review", async (ctx, body) => {
     await api.clearNeedsReview(ctx.params["id"]!, str(body, "version"));
-    redirect(ctx.res, `/workflows/${encodeURIComponent(ctx.params["id"]!)}`);
+    sendJson(ctx.res, 200, { success: true });
   });
-  router.post("/workflows/:id/trigger-improvement", async (ctx, body) => {
+  router.post("/api/workflows/:id/trigger-improvement", async (ctx, body) => {
     await api.triggerImprovementProposal(ctx.params["id"]!, str(body, "version"));
-    redirect(ctx.res, `/workflows/${encodeURIComponent(ctx.params["id"]!)}`);
+    sendJson(ctx.res, 200, { success: true });
   });
 
-  // Blocks/Packs — the one pair of pages that legitimately still takes
-  // `store` (capability-catalog.ts's own doc comment: a pure, static,
-  // in-memory construction from @aart/blocks-core/@aart/llm manifests,
-  // never filesystem-path-dependent — confirmed by A43's own investigation
-  // and unchanged by this session). `store` here is whatever
-  // `startDashboard` resolved (the caller's real one, or the internal
-  // always-valid placeholder — see startDashboard's own doc comment) —
-  // either way this route never performs I/O through it.
-  router.get("/blocks", (ctx) => sendHtml(ctx.res, 200, renderBlocksPage(listBlockManifests(store))));
-  // Block detail — previously not a route at all (no view, no link from
-  // the Blocks list above); a founder test drive confirmed there was no
-  // way to reach it (root AMENDMENTS.md A43). Reads the same real, local,
-  // in-memory catalog `/blocks` already does (@aart/blocks-core + @aart/llm
-  // manifests) — never store-path-dependent the way workflow detail used
-  // to be, so this one was purely a missing feature, not a wiring bug.
-  router.get("/blocks/:id", (ctx) => {
+  router.get("/api/blocks", (ctx) => {
+    sendJson(ctx.res, 200, listBlockManifests(store));
+  });
+  router.get("/api/blocks/:id", (ctx) => {
     const manifest = getBlockManifest(store, ctx.params["id"]!);
     if (!manifest) {
-      sendHtml(ctx.res, 404, page("Not Found", "<p>No such block.</p>"));
+      sendJson(ctx.res, 404, { error: "No such block." });
       return;
     }
-    sendHtml(ctx.res, 200, renderBlockDetailPage(manifest));
+    sendJson(ctx.res, 200, manifest);
   });
-  router.get("/packs", (ctx) => sendHtml(ctx.res, 200, renderPacksPage()));
-
-  router.get("/artifacts", async (ctx) => {
-    sendHtml(ctx.res, 200, renderArtifactsPage(await api.listRuns()));
+  router.get("/api/packs", (ctx) => {
+    sendJson(ctx.res, 200, { message: "Pending integration" });
   });
 
-  // -- v2 (architecture §13.2) -------------------------------------------
-
-  router.get("/waiting-runs", async (ctx) => {
-    sendHtml(ctx.res, 200, renderWaitingRunsPage(await api.listWaitingRuns(), clock.now()));
+  router.get("/api/artifacts", async (ctx) => {
+    const runs = await api.listRuns();
+    sendJson(ctx.res, 200, redactRuns(deps, runs));
   });
 
-  router.get("/approvals", async (ctx) => {
-    sendHtml(ctx.res, 200, renderApprovalQueuePage(await api.listApprovals("pending")));
+  router.get("/api/waiting-runs", async (ctx) => {
+    const waitingRuns = await api.listWaitingRuns();
+    sendJson(ctx.res, 200, { waitingRuns, now: clock.now() });
   });
-  // AMENDMENTS.md A47: a thin proxy to the server's own `decideApprovalTask`
-  // (`packages/server/src/approvals.ts`) — the dashboard no longer decodes
-  // the gate or writes it locally (root AMENDMENTS.md A46's flagged bug:
-  // the former local `decideApprovalAction` decoded `t.runId` alone,
-  // dropping `t.stepId`, and hardcoded `gates.humanReview` regardless of
-  // which gate actually decoded — fixed at the source now that this is the
-  // ONE implementation).
-  router.post("/approvals/:id/decision", async (ctx, body) => {
+
+  router.get("/api/approvals", async (ctx) => {
+    const approvals = await api.listApprovals("pending");
+    sendJson(ctx.res, 200, approvals);
+  });
+
+  router.post("/api/approvals/:id/decision", async (ctx, body) => {
     const status = str(body, "status") as "approved" | "rejected" | "needs_changes";
     const trustMode = (str(body, "trustMode", "governed") as Parameters<ApiClient["decideApproval"]>[1]["trustMode"]) || "governed";
     await api.decideApproval(ctx.params["id"]!, { status, reviewer: str(body, "reviewer", "dashboard-operator"), trustMode });
-    redirect(ctx.res, "/approvals");
+    sendJson(ctx.res, 200, { success: true });
   });
 
-  router.get("/corrections/new", (ctx) => {
-    sendHtml(ctx.res, 200, renderRecordCorrectionFormPage(ctx.query.get("runId") ?? "", ctx.query.get("stepId") ?? ""));
-  });
-  router.post("/corrections", async (ctx, body) => {
+  router.post("/api/corrections", async (ctx, body) => {
     await api.recordCorrection({
       runId: str(body, "runId"),
       stepId: str(body, "stepId"),
@@ -228,60 +263,77 @@ export function buildDashboardRouter(store: AartStore, api: ApiClient, deps: Das
       reason: str(body, "reason"),
       reviewer: str(body, "reviewer"),
     });
-    redirect(ctx.res, "/corrections");
+    sendJson(ctx.res, 200, { success: true });
   });
-  router.get("/corrections", async (ctx) => {
-    sendHtml(ctx.res, 200, renderCorrectionQueuePage(await api.listCorrections()));
+  router.get("/api/corrections", async (ctx) => {
+    const corrections = await api.listCorrections();
+    sendJson(ctx.res, 200, corrections);
   });
-  router.post("/corrections/:key/update-run-output", async (ctx) => {
+  router.post("/api/corrections/:key/update-run-output", async (ctx) => {
     const run = await api.updateCorrectionRunOutput(ctx.params["key"]!);
     if (!run) {
-      sendHtml(ctx.res, 404, page("Not Found", "<p>No such correction.</p>"));
+      sendJson(ctx.res, 404, { error: "No such correction." });
       return;
     }
-    redirect(ctx.res, "/corrections");
+    sendJson(ctx.res, 200, run);
   });
-  router.post("/corrections/:key/create-eval-example", async (ctx, body) => {
+  router.post("/api/corrections/:key/create-eval-example", async (ctx, body) => {
     const example = await api.createEvalExampleFromCorrection(ctx.params["key"]!, str(body, "suiteId"));
     if (!example) {
-      sendHtml(ctx.res, 404, page("Not Found", "<p>No such correction.</p>"));
+      sendJson(ctx.res, 404, { error: "No such correction." });
       return;
     }
-    redirect(ctx.res, "/corrections");
+    sendJson(ctx.res, 200, example);
   });
-  router.post("/corrections/:key/create-issue", async (ctx) => {
+  router.post("/api/corrections/:key/create-issue", async (ctx) => {
     const brief = await api.createIssueForCorrection(ctx.params["key"]!);
     if (!brief) {
-      sendHtml(ctx.res, 404, page("Not Found", "<p>No such correction.</p>"));
+      sendJson(ctx.res, 404, { error: "No such correction." });
       return;
     }
     sendJson(ctx.res, 200, brief);
   });
 
-  router.get("/evals/new", (ctx) => sendHtml(ctx.res, 200, renderCreateEvalFormPage()));
-  router.post("/evals/suites", async (ctx, body) => {
-    await api.createEvalSuite({ name: str(body, "name"), description: str(body, "description") || undefined, scorer: { id: `scorer-${Date.now()}`, kind: str(body, "scorerKind", "exact_match") } });
-    redirect(ctx.res, "/evals");
+  router.post("/api/evals/suites", async (ctx, body) => {
+    await api.createEvalSuite({
+      name: str(body, "name"),
+      description: str(body, "description") || undefined,
+      scorer: { id: `scorer-${Date.now()}`, kind: str(body, "scorerKind", "exact_match") }
+    });
+    sendJson(ctx.res, 200, { success: true });
   });
-  router.post("/evals/runs", async (ctx, body) => {
+  router.post("/api/evals/runs", async (ctx, body) => {
     await api.runEvalSuite(str(body, "suiteId"), str(body, "workflowId"), str(body, "workflowVersion"));
-    redirect(ctx.res, "/evals");
+    sendJson(ctx.res, 200, { success: true });
   });
-  router.get("/evals", async (ctx) => {
+  router.get("/api/evals", async (ctx) => {
     const { suites, runs } = await api.listEvals();
-    sendHtml(ctx.res, 200, renderEvalDashboardPage(suites, runs));
+    sendJson(ctx.res, 200, { suites, runs });
   });
 
-  // -- v3 production additions (architecture §13.3) -----------------------
+  router.get("/api/environments", async (ctx) => sendJson(ctx.res, 200, await api.listEnvironments()));
+  router.get("/api/deployments", async (ctx) => sendJson(ctx.res, 200, await api.listDeployments()));
+  router.get("/api/trigger-configs", async (ctx) => sendJson(ctx.res, 200, await api.listDeployments()));
+  router.get("/api/secrets", async (ctx) => {
+    const envs = await api.listEnvironments();
+    const result = envs.map((e) => {
+      const redactedSecretSource: Record<string, unknown> = {};
+      if (e.secretSource) {
+        for (const name of Object.keys(e.secretSource)) {
+          redactedSecretSource[name] = { status: "bound" };
+        }
+      }
+      return {
+        ...e,
+        secretSource: redactedSecretSource
+      };
+    });
+    sendJson(ctx.res, 200, result);
+  });
 
-  router.get("/environments", async (ctx) => sendHtml(ctx.res, 200, renderEnvironmentsPage(await api.listEnvironments())));
-  router.get("/deployments", async (ctx) => sendHtml(ctx.res, 200, renderDeploymentsPage(await api.listDeployments())));
-  router.get("/trigger-configs", async (ctx) => sendHtml(ctx.res, 200, renderTriggerConfigsPage(await api.listDeployments())));
-  router.get("/secrets", async (ctx) => sendHtml(ctx.res, 200, renderSecretsStatusPage(await api.listEnvironments())));
-
-  router.get("/worker-health", async (ctx) => {
-    const workers: WorkerHealthEntry[] = await Promise.all(
-      workerUrls.map(async (url): Promise<WorkerHealthEntry> => {
+  router.get("/api/worker-health", async (ctx) => {
+    const workers = await Promise.all(
+      workerUrls.map(async (url) => {
         try {
           return { url, health: await api.workerHealth(url) };
         } catch (err) {
@@ -289,24 +341,20 @@ export function buildDashboardRouter(store: AartStore, api: ApiClient, deps: Das
         }
       }),
     );
-    sendHtml(ctx.res, 200, renderWorkerHealthPage(workers));
+    sendJson(ctx.res, 200, workers);
   });
 
-  // Flagged runs (v3, architecture §13.3 F3 fix) — dashboard/CLI only,
-  // deliberately no MCP surface (see views/flags.ts's header comment).
-  router.get("/flagged-runs", async (ctx) => {
-    sendHtml(ctx.res, 200, renderFlaggedRunsPage(await api.listFlaggedRunsViaApi()));
+  router.get("/api/flagged-runs", async (ctx) => {
+    sendJson(ctx.res, 200, await api.listFlaggedRunsViaApi());
   });
-  router.post("/flagged-runs/:runId/clear", async (ctx, body) => {
+  router.post("/api/flagged-runs/:runId/clear", async (ctx, body) => {
     const result = await api.clearRunFlag(ctx.params["runId"]!, str(body, "clearedBy", "dashboard-operator"));
     if (result.kind !== "cleared") {
-      sendHtml(ctx.res, 409, page("Could Not Clear", `<p>${escapeHtml(result.kind)}</p>`));
+      sendJson(ctx.res, 409, { error: result.kind });
       return;
     }
-    redirect(ctx.res, "/flagged-runs");
+    sendJson(ctx.res, 200, result);
   });
-
-  router.get("/health", (ctx) => sendJson(ctx.res, 200, { status: "ok" }));
 
   return router;
 }
@@ -317,24 +365,6 @@ export interface DashboardHandle {
   close(): Promise<void>;
 }
 
-/**
- * A never-persisted-to store, structurally satisfying the two remaining
- * `AartStore`-typed parameters this package's own router still takes
- * (Blocks/Packs' capability catalog, and `createStubDeps`'s own
- * construction requirement) when a caller omits `config.store`/`config.deps`
- * — AMENDMENTS.md A47's "the dashboard needs [a server URL] and NOTHING
- * else" end state. `os.tmpdir()` always exists on any real OS (so this
- * never trips the composition-time root check `@aart/cli`'s
- * `server`/`worker` commands now enforce for their OWN, load-bearing store
- * root — see `packages/cli/src/commands/process.ts`), and nothing in this
- * package's router ever calls a read/write method on it (confirmed:
- * capability-catalog.ts's functions only thread `store` through to
- * `@aart/llm`'s `createLlmPack`, which itself only reads it at BLOCK
- * EXECUTION time — never at manifest-listing time, the only thing this
- * package's Blocks/Packs pages ever do). `createFsStore` itself does zero
- * eager I/O (lazy on first read/write, `packages/store/src/adapters/fs`),
- * so constructing this is free even when nothing ever touches it.
- */
 function placeholderStore(): AartStore {
   return createFsStore(path.join(tmpdir(), "aart-dashboard-unused-store"));
 }
@@ -344,7 +374,79 @@ export async function startDashboard(config: DashboardConfig): Promise<Dashboard
   const store = config.store ?? placeholderStore();
   const deps = config.deps ?? createStubDeps(store, clock);
   const router = buildDashboardRouter(store, config.api, deps, clock, config.workerUrls ?? []);
-  const server = createServer((req, res) => void router.handle(req, res));
+  
+  const frontendDir = getFrontendDir();
+
+  const server = createServer(async (req, res) => {
+    const url = new URL(req.url ?? "/", "http://localhost");
+    const pathname = url.pathname;
+
+    // Route to API or health endpoint if matched
+    if (pathname.startsWith("/api/") || pathname === "/health") {
+      await router.handle(req, res);
+      return;
+    }
+
+    // Serve static files and fallback to index.html for SPA
+    if (frontendDir && req.method === "GET") {
+      try {
+        // Resolve-then-verify-prefix, not strip-then-join: URL pathnames are
+        // always "/"-delimited (WHATWG URL spec) regardless of host OS, so
+        // decode/normalize with path.posix first, never plain `path` (which
+        // is "\"-delimited on Windows and would treat a decoded literal
+        // "\.." as a plain filename character there, not a traversal
+        // segment, if normalized with the OS-specific module instead).
+        // Stripping a leading "../" prefix (the prior approach) only
+        // catches that one shape — it doesn't defend against whatever a
+        // resolve() ends up producing after normalization on every
+        // platform. Resolving to an absolute path and verifying it's still
+        // inside frontendDir is the robust pattern regardless of the exact
+        // encoding a traversal attempt uses; a request that fails the check
+        // is treated exactly like "file not found" below (SPA fallback to
+        // index.html), never a distinguishable error that would confirm to
+        // a caller whether the traversal "worked."
+        const resolvedRoot = path.resolve(frontendDir);
+        const decodedPath = path.posix.normalize(decodeURIComponent(pathname));
+        const resolvedPath = path.resolve(resolvedRoot, `.${decodedPath}`);
+        const withinRoot = resolvedPath === resolvedRoot || resolvedPath.startsWith(resolvedRoot + path.sep);
+
+        let filePath = withinRoot ? resolvedPath : path.join(resolvedRoot, "index.html");
+
+        let stat;
+        try {
+          stat = await fs.stat(filePath);
+        } catch {
+          // File does not exist, use SPA fallback (index.html)
+          filePath = path.join(resolvedRoot, "index.html");
+          stat = await fs.stat(filePath);
+        }
+
+        if (stat.isDirectory()) {
+          filePath = path.join(filePath, "index.html");
+          stat = await fs.stat(filePath);
+        }
+
+        const ext = path.extname(filePath).toLowerCase();
+        const contentType = MIME_TYPES[ext] || "application/octet-stream";
+
+        res.writeHead(200, { "content-type": contentType });
+        const content = await fs.readFile(filePath);
+        res.end(content);
+        return;
+      } catch (err) {
+        // Generic body — never echo err.message (e.g. an fs error can
+        // embed the absolute filesystem path) to the client.
+        console.error("[dashboard] static file serve failed:", err);
+        res.writeHead(500, { "content-type": "text/plain" });
+        res.end("Internal Server Error");
+        return;
+      }
+    }
+
+    // Fallback if frontend build does not exist
+    await router.handle(req, res);
+  });
+
   const port = config.port ?? DEFAULT_DASHBOARD_PORT;
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
@@ -359,7 +461,4 @@ export async function startDashboard(config: DashboardConfig): Promise<Dashboard
   };
 }
 
-// Re-exported for callers that just want the router (e.g. mounting inside
-// another process's own HTTP server at a path prefix) without this
-// package owning the listening socket.
 export { Router };

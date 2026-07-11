@@ -12,6 +12,11 @@ import { defineConfig } from "vitest/config";
 
 export default defineConfig({
   test: {
-    projects: ["packages/*/vitest.config.ts"],
+    // "packages/*/vitest.config.ts" only reaches direct children of
+    // packages/ — packages/dashboard/frontend's own vitest.config.ts is
+    // one level deeper (it's a nested workspace member, pnpm-workspace.yaml
+    // "packages/dashboard/frontend"), so it needs its own explicit entry
+    // or `pnpm run test` silently never runs the SPA's tests at all.
+    projects: ["packages/*/vitest.config.ts", "packages/dashboard/frontend/vitest.config.ts"],
   },
 });

@@ -14,7 +14,9 @@
   },
   "files": ["dist"],
   "scripts": {
-    "build": "tsc -b"
+    "build:frontend": "cd frontend && pnpm run build",
+    "build:backend": "tsc -b",
+    "build": "pnpm run build:frontend && pnpm run build:backend"
   },
   "dependencies": {
     "@aart/blocks-core": "workspace:*",
