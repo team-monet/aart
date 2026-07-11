@@ -222,7 +222,7 @@ aart_deploy_workflow, aart_trigger_workflow, aart_list_waiting_runs, aart_resume
 
 ## (e) Starting the dashboard + worker + server locally
 
-**The server** (control plane — webhooks, approvals, the `/health`/`/runs`/`/waiting-runs`/... read API):
+**The server** (control plane — webhooks, approvals, the `/health`/`/runs`/`/waiting-runs`/... read API, and now every dashboard write action too — see below):
 
 ```bash
 cd ~/aart-test-drive
@@ -230,32 +230,30 @@ aart server --port 8080
 ```
 Open **http://localhost:8080/health** → `{"status":"ok"}`. Try **http://localhost:8080/runs** and **http://localhost:8080/workflows** too — real data from your `.aart` store. `Ctrl-C` stops it cleanly (prints `"Server stopped."`).
 
+AMENDMENTS.md A47: if `~/aart-test-drive/.aart` doesn't exist yet (wrong directory, typo'd `--root`/`AART_ROOT`, or you haven't run `aart register`/`aart init` there yet), this now **refuses to start** with a clear, actionable error instead of silently binding to an empty store — the exact silent-failure class root AMENDMENTS.md A43 found. Fix the path, or hydrate a fresh one with `aart server --bundle <dir>` (part (f) below).
+
 **The worker** (claims and executes runs from `job_queue`), in a second terminal:
 
 ```bash
 cd ~/aart-test-drive
 aart worker
 ```
-Open **http://localhost:8787/health** → `{"status":"ok","claimedRuns":0,"uptime":...}` (a separate port from the server's own health, by design — ADR-16). `Ctrl-C` stops it cleanly too (`"Worker stopped."`).
+Open **http://localhost:8787/health** → `{"status":"ok","claimedRuns":0,"uptime":...}` (a separate port from the server's own health, by design — ADR-16). `Ctrl-C` stops it cleanly too (`"Worker stopped."`). Same missing-root refusal as `aart server` above applies here too.
 
 **The dashboard** is a private, workspace-only package (`@aart/dashboard`, never published — it's not part of the CLI's own bundle) — you run it from this repo, not from the installed tarball. It has no bin/dev script yet, so save this as e.g. `~/aart-test-drive/dashboard-dev.mjs` and run it with plain `node` (after `pnpm run build` in the repo, so `packages/dashboard/dist` exists):
 
 ```js
 // dashboard-dev.mjs — @aart/dashboard's own documented composition-root
 // usage (packages/dashboard/src/index.ts's header comment), run standalone.
-// Needs aart server already running on :8080 (started above) for its
-// /runs and /workflows pages — everything else (health, blocks) works
-// without it. Run this FROM ~/aart-test-drive (where you saved it) — the
-// relative "./.aart" path below resolves against whatever directory you
-// launch `node` from, same as `aart server`'s own default.
-import { createFsStore } from "/Users/johnlee/code/aart/packages/store/dist/index.js";
-import { startDashboard, createHttpApiClient, createStubDeps } from "/Users/johnlee/code/aart/packages/dashboard/dist/index.js";
+// AMENDMENTS.md A47: no store, no .aart path, nothing but a server URL —
+// every dashboard page (read AND write) now goes through `aart server`'s
+// HTTP API alone. Needs aart server already running on :8080 (started
+// above). Can be run from ANY directory — there is no relative path here
+// to get wrong anymore.
+import { startDashboard, createHttpApiClient } from "/Users/johnlee/code/aart/packages/dashboard/dist/index.js";
 
-const store = createFsStore("./.aart");
 const handle = await startDashboard({
-  store,
   api: createHttpApiClient("http://localhost:8080"),
-  deps: createStubDeps(store),
   workerUrls: ["http://localhost:8787"],
   port: 4000,
 });
@@ -266,11 +264,13 @@ console.log(`dashboard on http://localhost:${handle.port}`);
 node dashboard-dev.mjs
 ```
 
-Open **http://localhost:4000/runs** — your real registered runs. **http://localhost:4000/workflows**, **http://localhost:4000/blocks**, **http://localhost:4000/waiting-runs**, **http://localhost:4000/approvals** are all real too (verified: 200s, real data, with `aart server` running alongside). Click through into a workflow (**http://localhost:4000/workflows/smoke-data-pipeline**) or a block (**http://localhost:4000/blocks/data.stringify**) for its detail page — both now real (root AMENDMENTS.md A43; previously workflow detail 404'd and block detail didn't exist as a page at all).
+Open **http://localhost:4000/runs** — your real registered runs. **http://localhost:4000/workflows**, **http://localhost:4000/blocks**, **http://localhost:4000/waiting-runs**, **http://localhost:4000/approvals**, **http://localhost:4000/corrections**, **http://localhost:4000/evals** are all real too (verified: 200s, real data, with `aart server` running alongside — a live tarball-install test drive walked every one of these, plus every writable action below, with the dashboard started in a directory that has never contained a `.aart` anywhere). Click through into a workflow (**http://localhost:4000/workflows/smoke-data-pipeline**) or a block (**http://localhost:4000/blocks/data.stringify**) for its detail page — both real (root AMENDMENTS.md A43; previously workflow detail 404'd and block detail didn't exist as a page at all).
 
-**A previous version of this exact script had a footgun**: it hard-coded an absolute placeholder path (`/Users/YOU/aart-test-drive/.aart`) you had to manually edit to your own home directory. Miss that edit — easy to do on a copy-paste — and `createFsStore` silently points at a directory that doesn't exist; every dashboard page that read straight from that store handle (workflow detail chief among them) 404'd on data that demonstrably existed, while list pages kept working fine (they read through `aart server`'s own HTTP API instead, which was never affected). That's exactly the bug root AMENDMENTS.md A43 found and fixed from a real local test drive — the script above now uses a relative path so there's nothing to individually substitute, and workflow/block detail no longer depend on this script's own store handle being correctly configured at all (they read through the API/catalog like every other page now).
+**Every writable action is real too, as of AMENDMENTS.md A47** — trigger a run, approve/deprecate/promote/block-promotion/mark-needs-review a workflow, decide an approval task (**including a `riskReview` one — a previous version of this exact decision path misattributed a `riskReview` decision to `humanReview`; that's fixed, verified with a live two-gate walk through this exact dashboard**), record a correction and act on it, create/run an eval suite, and clear a flagged run's flag. None of these depend on this script's own store configuration at all (there isn't one) — they call the SAME real functions `aart approve`/`aart promote`/`aart request-approval`/etc. call, just reached over this dashboard's own `POST` routes instead of the CLI.
 
-Honest note on the dashboard specifically: its write actions (`DashboardDeps`) are still a documented partial-stub — real governance/promotion/risk-diff, but `redact`/`triggerRun`/`resumeApproval`/evidence-report-rendering are still local mirrors (`packages/dashboard/src/stub-deps.ts`'s own header comment). That's a pre-existing, separately-tracked gap this session didn't touch — the composition-root decision this session implemented was scoped to `packages/cli` specifically (architecture's three-client principle: three separate composition roots, not one shared one).
+**A previous version of this exact script had a footgun**: it hard-coded an absolute placeholder path (`/Users/YOU/aart-test-drive/.aart`) you had to manually edit to your own home directory. Miss that edit — easy to do on a copy-paste — and `createFsStore` silently pointed at a directory that doesn't exist; every dashboard page/action that read or wrote straight from that store handle 404'd or silently misbehaved on data that demonstrably existed, while pages already routed through `aart server`'s own HTTP API kept working fine. That's exactly the bug root AMENDMENTS.md A43 found and started fixing from a real local test drive, one route at a time; AMENDMENTS.md A47 finishes it — this script no longer constructs a store AT ALL, so this entire class of footgun (wrong path, forgotten substitution, a local store silently drifting out of sync with the server's) can no longer recur for ANY dashboard page or action, not just the ones fixed first.
+
+Honest note on the dashboard specifically: `resumeApproval` (the run-continuation half of resuming a genuine per-run `human.approval` wait — as opposed to a workflow-version-level gate decision, which is fully real) and report rendering (the Run detail page's HTML/Markdown/JSON transform) still use `DashboardDeps`'s own local implementations rather than `@aart/engine`'s/`@aart/evidence`'s composition-root-wired real ones (`packages/dashboard/src/stub-deps.ts`'s own header comment) — a pre-existing, narrower, separately-tracked gap this session didn't touch (neither of these ever depends on this package's own store configuration, so neither was part of the store-divergence bug class this session closed). `deps`/`store` remain accepted, optional `DashboardConfig` fields for exactly this reason, and for the local (`aart dev`, single-process) topology, where a real `AartStore` is genuinely load-bearing again.
 
 ---
 
@@ -411,9 +411,8 @@ Other real things worth poking at:
 Stated plainly, not glossed over:
 
 - **`llm.*` blocks** (`llm.extract`/`llm.classify`/`llm.judge`) are wired for real — the real Anthropic provider adapter, real schema validation, real retry logic — but **untested end-to-end in this session**: no Anthropic API key is available in the environment this was built in. Set `ANTHROPIC_API_KEY` and they should work; this wasn't verified here.
-- **The dashboard's write actions** are still a documented partial stub (see part (e)'s note) — read pages are real, some write actions (approve/promote/risk-diff) are real, others (trigger a run, resume an approval, render a report) are still local mirrors pending their own composition-root wiring pass. Not this session's scope.
+- **The dashboard's `resumeApproval` (per-run wait continuation) and report rendering** still use `DashboardDeps`'s own local implementations rather than `@aart/engine`'s/`@aart/evidence`'s real ones (see part (e)'s note) — narrower than it sounds: `AMENDMENTS.md` A47 closed the store-divergence class for every OTHER dashboard read/write (including trigger-a-run, which now uses the real `EngineBoundary.startRun`), and neither of these two remaining stubs was ever store-path-dependent, so neither was part of that bug class. Not yet wired to the real composition root.
 - **`aart server`'s real trigger wiring never resolved webhook/github/slack HMAC secrets, and `--environment`/`--store`/`--root` didn't exist** — true as of `AMENDMENTS.md` A44; closed A45. See part (f) above for the live webhook proof and the flags.
-- **A hand-crafted or dashboard-decided `riskReview` approval task can be misattributed to `humanReview`** — narrow, pre-existing edge case `AMENDMENTS.md` A46 flagged rather than fixed (out of that session's CLI-only scope): the dashboard's own approval-decision path (`packages/dashboard/src/views/approvals.ts`) predates the `--gate` parameter and always writes `gates.humanReview`, regardless of which gate an ApprovalTask's `stepId` actually decodes to. A `riskReview` task created via `aart request-approval --gate riskReview` and decided through the CLI (`aart approve`) is unaffected — only a dashboard-mediated decision on such a task would misfire.
 - **No `LICENSE` file** — deliberately deferred; `packages/cli/README.md`'s existing "no license chosen, treat as all-rights-reserved" flag is unchanged.
 - **Pack-delivered blocks** aren't in the real block catalog yet (documented gap, `real-context.ts`) — only the 56 core built-ins (`@aart/blocks-core` + `@aart/llm`) are dispatchable today, on a fresh store with no packs installed.
 - **`isolated-vm`'s `engines.node: ">=26.0.0"`** vs. this machine's v22.22.2 (part (a)'s install warning) — pre-existing, not new, not addressed here.
