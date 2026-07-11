@@ -29,8 +29,8 @@ export const USAGE = `AART CLI — usage:
   aart flag clear <runId> --by <name>
   aart flag list
   aart bundle <workflowId> [--version <v>] [--out <dir>] [--environment <name>]
-  aart worker
-  aart server [--port <n>]
+  aart worker [--bundle <dir>]
+  aart server [--port <n>] [--bundle <dir>]
   aart mcp
 `;
 

@@ -1,11 +1,13 @@
 // Full CLI surface tests (spec §33's command list, plus this session's
 // documented additions: bundle/flag/approve/mcp — see commands/*.ts module
 // doc comments for the evidence behind each addition).
-import { writeFile, readFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { compileWorkflowInput, requestApprovalHandler, runWorkflowHandler as mcpRunWorkflowHandler } from "@aart/mcp";
 import { afterEach, describe, expect, it } from "vitest";
 import { run } from "./cli.js";
+import { createCliContext, type CliContext } from "./cli-context.js";
 import { approvalWaitWorkflowYaml, createTestCli, sampleWorkflowYaml, type TestCli } from "./test-utils.js";
 
 let tc: TestCli;
@@ -299,6 +301,112 @@ describe("aart worker / aart server / aart mcp — non-blocking mode for tests",
     tc = await createTestCli();
     const outcome = await run(["mcp"], { cliContext: tc.cli, blocking: false });
     expect(outcome.ok).toBe(true);
+  });
+});
+
+// S12 "deploy story" — `--bundle <dir>` on worker/server. Needs the REAL
+// composition (createCliContext WITHOUT `real: false`, matching
+// cli-context.test.ts's own pattern) — createTestCli()'s stub ServerPort
+// (stubs/server.ts) produces a deliberately simplified, non-real bundle
+// shape (no bundleHash/schemaVersion/closure arrays; see that file's own
+// header comment) that this session's real loader correctly refuses to
+// load, so these tests would fail for the WRONG reason (a fake-bundle
+// shape mismatch, not real --bundle wiring) if they used createTestCli().
+//
+// Two independent CliContexts (two separate `.aart` stores under two
+// separate tmpdirs) — "laptop" produces + writes a bundle, "server"
+// hydrates it — the same shape as the real laptop -> transfer -> server
+// deploy story this flag exists for, not a same-store round-trip that would
+// hide a real seam bug.
+describe("aart worker / aart server --bundle <dir> (S12 deploy story)", () => {
+  let cleanupPaths: string[] = [];
+  afterEach(async () => {
+    await Promise.all(cleanupPaths.map((p) => rm(p, { recursive: true, force: true })));
+    cleanupPaths = [];
+  });
+
+  async function freshRealCli(): Promise<{ cli: CliContext; cwd: string }> {
+    const base = await mkdtemp(join(tmpdir(), "aart-cli-bundle-e2e-"));
+    cleanupPaths.push(base);
+    const cwd = join(base, "project");
+    await mkdir(cwd, { recursive: true });
+    const cli = createCliContext({ root: join(base, ".aart"), trustMode: "governed" }); // real: true (default) — see describe block header
+    return { cli, cwd };
+  }
+
+  it("aart server --bundle <dir> hydrates the bundle into the server's own store before starting, reported in the result", async () => {
+    const laptop = await freshRealCli();
+    const path = join(laptop.cwd, "wf.yaml");
+    await writeFile(path, sampleWorkflowYaml("wf-server-bundle"), "utf8");
+    await run(["register", path], { cliContext: laptop.cli });
+    const outDir = join(laptop.cwd, "bundle-out");
+    const bundleOutcome = await run(["bundle", "wf-server-bundle", "--out", outDir], { cliContext: laptop.cli });
+    expect(bundleOutcome.ok).toBe(true);
+
+    const serverSide = await freshRealCli();
+    expect(await serverSide.cli.aart.store.workflows.get("wf-server-bundle", "0.1.0")).toBeUndefined();
+
+    const outcome = await run(["server", "--port", "9998", "--bundle", outDir], { cliContext: serverSide.cli, blocking: false });
+    expect(outcome.ok).toBe(true);
+    expect((outcome.result as { bundle?: { kind: string } }).bundle?.kind).toBe("hydrated");
+    expect(await serverSide.cli.aart.store.workflows.get("wf-server-bundle", "0.1.0")).toBeDefined();
+  });
+
+  it("aart worker --bundle <dir> hydrates the bundle into the worker's own store before starting, reported in the result", async () => {
+    const laptop = await freshRealCli();
+    const path = join(laptop.cwd, "wf.yaml");
+    await writeFile(path, sampleWorkflowYaml("wf-worker-bundle"), "utf8");
+    await run(["register", path], { cliContext: laptop.cli });
+    const outDir = join(laptop.cwd, "bundle-out");
+    await run(["bundle", "wf-worker-bundle", "--out", outDir], { cliContext: laptop.cli });
+
+    const serverSide = await freshRealCli();
+    const outcome = await run(["worker", "--bundle", outDir], { cliContext: serverSide.cli, blocking: false });
+    expect(outcome.ok).toBe(true);
+    expect((outcome.result as { bundle?: { kind: string } }).bundle?.kind).toBe("hydrated");
+    expect(await serverSide.cli.aart.store.workflows.get("wf-worker-bundle", "0.1.0")).toBeDefined();
+  });
+
+  it("re-running aart worker --bundle <dir> against the same store is idempotent (already_hydrated), not an error", async () => {
+    const laptop = await freshRealCli();
+    const path = join(laptop.cwd, "wf.yaml");
+    await writeFile(path, sampleWorkflowYaml("wf-worker-bundle-idem"), "utf8");
+    await run(["register", path], { cliContext: laptop.cli });
+    const outDir = join(laptop.cwd, "bundle-out");
+    await run(["bundle", "wf-worker-bundle-idem", "--out", outDir], { cliContext: laptop.cli });
+
+    const serverSide = await freshRealCli();
+    const first = await run(["worker", "--bundle", outDir], { cliContext: serverSide.cli, blocking: false });
+    const second = await run(["worker", "--bundle", outDir], { cliContext: serverSide.cli, blocking: false });
+    expect(first.ok).toBe(true);
+    expect(second.ok).toBe(true);
+    expect((first.result as { bundle?: { kind: string } }).bundle?.kind).toBe("hydrated");
+    expect((second.result as { bundle?: { kind: string } }).bundle?.kind).toBe("already_hydrated");
+  });
+
+  it("a hash-mismatched bundle directory fails the command cleanly (ok:false), it does not start the server", async () => {
+    const laptop = await freshRealCli();
+    const path = join(laptop.cwd, "wf.yaml");
+    await writeFile(path, sampleWorkflowYaml("wf-server-bundle-bad"), "utf8");
+    await run(["register", path], { cliContext: laptop.cli });
+    const outDir = join(laptop.cwd, "bundle-out");
+    await run(["bundle", "wf-server-bundle-bad", "--out", outDir], { cliContext: laptop.cli });
+    const manifestPath = join(outDir, "manifest.json");
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as Record<string, unknown>;
+    await writeFile(manifestPath, JSON.stringify({ ...manifest, bundleHash: "0".repeat(64) }, null, 2), "utf8");
+
+    const serverSide = await freshRealCli();
+    const outcome = await run(["server", "--port", "9997", "--bundle", outDir], { cliContext: serverSide.cli, blocking: false });
+    expect(outcome.ok).toBe(false);
+    expect(outcome.exitCode).toBe(1);
+    expect(String((outcome.result as { error?: string }).error)).toMatch(/bundleHash mismatch/i);
+  });
+
+  it("aart worker / aart server without --bundle behave exactly as before (no bundle field in the result)", async () => {
+    const serverSide = await freshRealCli();
+    const outcome = await run(["worker"], { cliContext: serverSide.cli, blocking: false });
+    expect(outcome.ok).toBe(true);
+    expect((outcome.result as { bundle?: unknown }).bundle).toBeUndefined();
   });
 });
 
