@@ -415,17 +415,31 @@ Stated plainly, matching this repo's own "What doesn't work yet" convention
   network / VPN-only exposure) in front of anything beyond localhost —
   this deploy kit's compose/systemd examples above bind to all interfaces
   by default and assume you're adding that layer yourself.
-- **The dashboard's write actions are a documented partial stub upstream**
-  (`@aart/dashboard`, owned by a different session than this one — this
-  deploy kit packages what exists, doesn't change it). Read pages are
-  fully real. Some write actions (approve, promote, risk-diff) are real.
-  Others (triggering a run, resuming an approval, rendering a report
-  through the dashboard UI specifically) are still local mirrors, not yet
-  wired to the real engine/evidence packages — use the CLI or MCP surface
-  for those until that wiring lands. A hand-crafted or dashboard-decided
-  `riskReview` approval task can also be misattributed to `humanReview`
-  through the dashboard specifically (AMENDMENTS.md A46) — the CLI's `aart
-  approve` is unaffected.
+- **The dashboard is API-complete except two narrower gaps** (`@aart/dashboard`,
+  AMENDMENTS.md A47 — owned by a different session than this deploy kit,
+  which packages what exists rather than changing it). Every read AND
+  write route — trigger a run, approve/promote/block a workflow version,
+  decide an approval task, record/act on a correction, create/run an eval
+  suite, clear a run's flag — goes through the same real `@aart/server`
+  HTTP API and underlying functions the CLI/MCP surfaces call, not a
+  dashboard-local reimplementation (closing the store-divergence bug class
+  documented in AMENDMENTS.md A43, and the `riskReview`/`humanReview`
+  approval-task misattribution documented in A46 — both fixed at their
+  source, no longer dashboard-specific caveats). The two still-genuine
+  gaps: resuming a run's own wait step and rendering the HTML execution
+  report are still local mirrors, not yet wired to the real engine/evidence
+  packages — use the CLI or MCP surface for those until that wiring lands.
+  Separately: this deploy kit's own `dashboard` launcher
+  (`deploy/serve-dashboard.mjs`) constructs its `DashboardDeps` via
+  `createStubDeps(store)` with no override, so the `redact` field is
+  `identityRedact` — a documented no-op stand-in (`stub-deps.ts`), not
+  `@aart/governance`'s real `redactRecord`. The dashboard's redaction
+  chokepoint (every run-bearing API response routes through `deps.redact`
+  before serialization) is real and exercised, but in THIS launcher
+  specifically it currently has nothing wired in to actually scrub with —
+  flagged here, not fixed, since wiring in the real redactor is a
+  composition-root change to `deploy/serve-dashboard.mjs`, out of this
+  entry's own scope.
 - **Pack-delivered blocks aren't in the real catalog yet.** Only the 56
   core built-ins (`@aart/blocks-core` + `@aart/llm`) are dispatchable on a
   fresh store with no packs installed — documented gap, not this deploy

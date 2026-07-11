@@ -103,14 +103,18 @@ services:
       worker:
         condition: service_healthy
     restart: unless-stopped
-    # Ops limits (DEPLOY.md elaborates): @aart/dashboard's write actions
-    # are a documented PARTIAL stub upstream (approve/promote/risk-diff are
-    # real; triggering a run, resuming an approval, and rendering a report
-    # through the dashboard UI are still local mirrors, not yet wired to
-    # the real engine/evidence packages) — read pages are fully real. Treat
-    # this service as an operator READ/light-write console, not the
-    # primary way to run workflows in production; use the CLI/webhooks for
-    # that (server/worker above).
+    # Ops limits (DEPLOY.md elaborates): @aart/dashboard is API-complete
+    # (AMENDMENTS.md A47) — every read AND write route (trigger a run,
+    # approve/promote/block a workflow version, decide an approval task,
+    # record/act on a correction, create/run an eval suite, clear a run's
+    # flag) goes through the SAME real @aart/server HTTP API + underlying
+    # functions the CLI/MCP surfaces call, not a dashboard-local
+    # reimplementation. The two remaining gaps are narrower: resuming a
+    # run's own wait step and rendering the HTML execution report are
+    # still local mirrors, not yet wired to the real engine/evidence
+    # packages. The dashboard has no built-in auth (DEPLOY.md's own "No
+    # authentication" note) — scope its network exposure accordingly
+    # regardless of write-completeness.
 
 volumes:
   aart-store:

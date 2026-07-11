@@ -49,7 +49,26 @@ const MIME_TYPES: Record<string, string> = {
   ".ttf": "font/ttf",
 };
 
+/** `AART_DASHBOARD_FRONTEND_DIR`, checked before any `__dirname`-relative
+ * guess: every guess below assumes this package's OWN compiled `server.js`
+ * is still physically sitting in `packages/dashboard/dist` at runtime,
+ * which is only true when this package is loaded unbundled. The deploy
+ * kit's `dashboard` launcher (`deploy/serve-dashboard.mjs`) esbuild-bundles
+ * this package's code into `packages/cli/dist/serve-dashboard.mjs` (a
+ * SIBLING package's dist dir) for reasons unrelated to this file (pnpm's
+ * non-hoisted node_modules layout — see that script's own header comment);
+ * once bundled, `__dirname` here resolves to wherever the BUNDLE physically
+ * lives, not this source file's original location, so every guess below
+ * misses (confirmed directly: a real `docker run <image> dashboard` served
+ * a 404 for `GET /` despite `packages/dashboard/dist/frontend/index.html`
+ * genuinely existing in the image, exactly this failure). The Dockerfile's
+ * `runtime-base` stage sets this env var to the one absolute path that's
+ * actually correct for that specific bundled/containerized layout. */
 function getFrontendDir(): string | undefined {
+  const override = process.env["AART_DASHBOARD_FRONTEND_DIR"];
+  if (override && existsSync(path.join(override, "index.html"))) {
+    return override;
+  }
   const paths = [
     path.join(__dirname, "frontend"),
     path.join(__dirname, "../frontend/dist"),

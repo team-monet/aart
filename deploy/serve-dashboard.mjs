@@ -20,15 +20,25 @@
 // (packages/dashboard is another concurrent session's ownership).
 //
 // Uses createStubDeps — @aart/dashboard's own DI container, the SAME one
-// TEST-DRIVE.md's manual walkthrough uses. Some write actions (approve/
-// promote/risk-diff) are wired to real @aart/governance/@aart/server
-// exports; others (triggering a run, resuming an approval, rendering a
-// report) are still local mirrors pending @aart/dashboard's own
-// composition-root wiring pass (TEST-DRIVE.md's "What doesn't work yet",
-// AMENDMENTS.md A46's dashboard note) — this script does not attempt to
-// change that; it only packages what already exists. See DEPLOY.md's
-// "Ops limits" section for the honest read on what this means in
-// production.
+// TEST-DRIVE.md's manual walkthrough uses. As of AMENDMENTS.md A47, every
+// dashboard READ and WRITE route (trigger a run, approve/promote/block a
+// workflow version, decide an approval task, corrections, evals, flag-
+// clear) goes through the real @aart/server HTTP API this script points
+// `createHttpApiClient(apiUrl)` at, not a dashboard-local reimplementation
+// — `deps`/`createStubDeps` only still matters here for the two narrower
+// gaps documented in TEST-DRIVE.md's "What doesn't work yet" (resuming a
+// run's own wait step, and rendering the Run Detail page's HTML report)
+// plus the risk-diff computation (deps.semanticRiskDiff, already real —
+// see capability-catalog.ts). This script does not attempt to close either
+// remaining gap; it only packages what already exists. Also worth flagging
+// here (not this script's own gap to close, but real): `createStubDeps`'s
+// `redact` defaults to `identityRedact` (a documented no-op stand-in, see
+// stub-deps.ts) — this launcher never overrides it with @aart/governance's
+// real `redactRecord`, so server.ts's redaction chokepoint (AMENDMENTS.md
+// B1) routes through a function that doesn't actually scrub anything in
+// THIS specific launcher, unlike a composition root that wires the real
+// one in. See DEPLOY.md's "Ops limits" section for the fuller operational
+// read.
 // Plain bare specifiers — this SOURCE file is never run directly by node
 // inside the image; deploy/build-dashboard-launcher.mjs esbuild-bundles it
 // (same philosophy as packages/cli/scripts/build-publish.mjs: inline the

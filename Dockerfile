@@ -155,6 +155,17 @@ RUN chmod +x /app/deploy/entrypoint.sh \
 # "sharing a store volume." Override per-container with -e AART_ROOT=...
 # or `--root <dir>` if you need a different layout.
 ENV AART_ROOT=/data
+# @aart/dashboard's own `getFrontendDir()` guesses the SPA build's location
+# relative to wherever its OWN compiled code is physically running from —
+# correct when that package loads unbundled, wrong once esbuild bundles it
+# into packages/cli/dist/serve-dashboard.mjs (this stage's `dashboard`
+# role, deploy/build-dashboard-launcher.mjs), which is a different
+# directory. This is the one absolute path that's actually correct for
+# THIS image's fixed layout (COPY --from=pruned /workspace /app above
+# preserves the workspace's own packages/dashboard/dist/frontend
+# structure) — verified directly (a real `docker run <image> dashboard`
+# served the real SPA, not a 404, only once this was added).
+ENV AART_DASHBOARD_FRONTEND_DIR=/app/packages/dashboard/dist/frontend
 # Server control-plane (8080), worker health (8787), dashboard (4000) —
 # see DEPLOY.md for exactly what each serves. A worker/dashboard-only
 # container simply never binds the ports it doesn't use; EXPOSE is
