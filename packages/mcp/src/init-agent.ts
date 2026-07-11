@@ -48,6 +48,24 @@
 // broken its own existing unit tests' documented contract for no reason —
 // the CLI layer is the one place that actually knows how it was invoked, so
 // that's where the safe-by-default choice belongs.
+//
+// AMENDMENTS.md A55 — `generateInitAgentOutputs` is now the SOLE source of
+// truth for the instructions text, used by two callers that must never fork
+// into independently-maintained copies: (1) `@aart/cli`'s `initAgentCommand`
+// (packages/cli/src/commands/authoring.ts), which writes it into a
+// workspace's own `AGENTS.md` — unchanged, still the per-workspace
+// mechanical writer; and (2) `with-aart/bootstrap/install.md`'s global-
+// instructions phase, which installs the SAME text (never a hand-authored
+// second copy) into a host's user-level always-on instruction surface (e.g.
+// Claude Code's `~/.claude/CLAUDE.md`) — sourced by literally running `aart
+// init-agent` against a scratch directory and reading the `AGENTS.md` it
+// writes, then discarding the scratch dir. If this file's `instructions`
+// template ever needs to become trust-mode-agnostic (e.g. to bundle all
+// four `APPROVAL_SECTION_BY_MODE` variants for a mode-independent global
+// copy) or otherwise diverge from what a single `trustMode` call site can
+// produce, extend THIS function (or export a new one from THIS module) —
+// never hand-write a second instructions template anywhere else in this
+// repo, in with-aart, or in prose inside install.md itself.
 import type { TrustMode } from "@aart/types";
 
 export interface McpConfig {

@@ -1,0 +1,13 @@
+{
+  "name": "with-aart",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Agent-first onboarding for AART — wires a coding agent's per-workspace MCP config (via `aart init-agent`) and installs AART's working instructions globally, one host install covering every AART-enabled project. Colocated inside team-monet/aart rather than published separately: AART itself is still pre-1.0.0 (see ../AUTHORING.md part (b)), so `private: true` here reflects that stage, not a decision against ever publishing this harness on its own.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "bin": { "with-aart": "./bootstrap/cli.mjs" },
+  "files": ["bootstrap", "mcp", "README.md"],
+  "scripts": {
+    "bootstrap": "node bootstrap/cli.mjs"
+  }
+}

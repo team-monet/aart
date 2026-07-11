@@ -1,0 +1,10 @@
+{
+  "_comment": "MCP config template for the aart server — PER-WORKSPACE, not user/global scope. AART's store (.aart/, like a project's own .git/) is workspace-scoped by design, so this entry belongs in THIS PROJECT's own .mcp.json, never a global/user-level config (contrast a substrate MCP server backed by one shared store organized per project by circle, which registers once at user scope). Don't hand-write this: run `aart init-agent` in the workspace instead — it generates this exact shape with a self-consistent absolute path to whichever `aart` binary is actually running it (AMENDMENTS.md A54 closed the npx-registry trap a hand-written npx form walks into) and merges it into any existing .mcp.json without deleting sibling servers (AMENDMENTS.md A55). This file exists as a reference for what the generated entry looks like, not something to copy by hand into a real project.",
+  "mcpServers": {
+    "aart": {
+      "command": "node",
+      "args": ["<absolute path to your install's dist/bin.js — aart init-agent fills this in for you>", "mcp"]
+    }
+  },
+  "_npx_alternative_once_1_0_0_ships": { "command": "npx", "args": ["-y", "@team-monet/aart", "mcp"] }
+}

@@ -5,9 +5,10 @@
 // principle). list/init have no MCP-tool counterpart at all (pure catalog
 // listing / project scaffolding) so they're implemented directly here
 // against the real @aart/store.
+import { existsSync } from "node:fs";
 import { readFile, mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { generateInitAgentOutputs, registerWorkflowHandler, runWorkflowHandler, validateWorkflowHandler, wrapResult, type HandlerResult } from "@aart/mcp";
+import { generateInitAgentOutputs, registerWorkflowHandler, runWorkflowHandler, validateWorkflowHandler, wrapResult, type HandlerResult, type McpConfig } from "@aart/mcp";
 import type { Tokenized } from "../args.js";
 import { flagBoolean, flagString, requirePositional } from "../args.js";
 import type { CliContext } from "../cli-context.js";
@@ -95,6 +96,48 @@ function resolveBinPath(tokens: Tokenized): string | undefined {
   return flagString(tokens.flags, "bin-path") ?? process.argv[1];
 }
 
+/**
+ * `.mcp.json` is a shared, multi-tenant registry — a real project (this
+ * founder's own included, per with-aart/bootstrap/install.md) routinely has
+ * OTHER MCP servers already registered there (e.g. `monet`'s own per-repo
+ * entry) before `aart init-agent` ever runs. Before this function existed,
+ * `initAgentCommand` wrote `outputs.mcpConfigJson` straight over whatever
+ * was already on disk — silently deleting every sibling server entry, the
+ * exact "clobber" failure mode with-monet's own install.md explicitly
+ * guards against by hand for every host config it touches. Read-merge-write
+ * instead: parse what's already there, replace only the `aart` key (in
+ * place — re-running `init-agent` after an update is the documented
+ * refresh mechanism, AUTHORING.md part (f), so `aart`'s own entry is MEANT
+ * to be overwritten each run), keep every other top-level key and every
+ * sibling server entry untouched. No existing file -> behaves exactly as
+ * before (the common case; byte-identical output, since `generated` IS
+ * `outputs.mcpConfig`). A file that exists but fails to parse as JSON is
+ * left on disk untouched and reported as an error, rather than silently
+ * replaced — the same "fail loudly instead of silently doing the wrong
+ * thing" tradeoff `aart server`'s missing-store-root check (cli.ts,
+ * AMENDMENTS.md A47) and A54's own binPath fix already make elsewhere in
+ * this codebase.
+ */
+async function mergeMcpConfig(mcpConfigPath: string, generated: McpConfig): Promise<Record<string, unknown>> {
+  // A fresh object-literal spread, not the `generated` variable itself —
+  // `McpConfig` is a named interface with no index signature, so returning
+  // it directly doesn't structurally satisfy `Record<string, unknown>`
+  // (TS2322), even though the merge branch below's own fresh literal does.
+  if (!existsSync(mcpConfigPath)) return { ...generated };
+  const raw = await readFile(mcpConfigPath, "utf8");
+  let existing: Record<string, unknown>;
+  try {
+    existing = JSON.parse(raw) as Record<string, unknown>;
+  } catch (cause) {
+    throw new Error(
+      `${mcpConfigPath} already exists but is not valid JSON — fix or remove it by hand before re-running "aart init-agent", so its other MCP server entries (if any) aren't silently lost.`,
+      { cause },
+    );
+  }
+  const existingServers = (existing["mcpServers"] as Record<string, unknown> | undefined) ?? {};
+  return { ...existing, mcpServers: { ...existingServers, ...generated.mcpServers } };
+}
+
 export async function initAgentCommand(tokens: Tokenized, cli: CliContext): Promise<HandlerResult> {
   const outputs = generateInitAgentOutputs({
     trustMode: cli.aart.trustMode,
@@ -106,7 +149,8 @@ export async function initAgentCommand(tokens: Tokenized, cli: CliContext): Prom
   const instructionsPath = flagString(tokens.flags, "instructions-out") ?? join(cwd, "AGENTS.md");
   await mkdir(join(mcpConfigPath, ".."), { recursive: true });
   await mkdir(join(instructionsPath, ".."), { recursive: true });
-  await writeFile(mcpConfigPath, outputs.mcpConfigJson, "utf8");
+  const mergedMcpConfig = await mergeMcpConfig(mcpConfigPath, outputs.mcpConfig);
+  await writeFile(mcpConfigPath, JSON.stringify(mergedMcpConfig, null, 2), "utf8");
   await writeFile(instructionsPath, outputs.instructions, "utf8");
   return { ok: true, mcpConfigPath, instructionsPath };
 }

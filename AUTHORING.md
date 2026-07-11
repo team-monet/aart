@@ -148,9 +148,27 @@ this reached npm's registry — you're back in the trap.
 
 ## (c) Wiring the coding agent
 
-In a **separate** directory from the repo clone above — this is your actual
-authoring workspace, where workflows and their local `.aart` store will
-live, e.g.:
+**Recommended: let your coding agent do this for you.** Open the agent in
+your authoring workspace and paste:
+
+> **Set up AART for me: read https://raw.githubusercontent.com/team-monet/aart/main/with-aart/bootstrap/install.md and follow it, checking with me at each decision point.**
+
+That playbook — [`with-aart/bootstrap/install.md`](./with-aart/bootstrap/install.md),
+[`with-aart/README.md`](./with-aart/README.md) for the pitch — has the agent
+orient to its own host, wire this workspace's MCP config (`aart init-agent`,
+the same mechanism described below — the playbook doesn't reimplement it),
+*offer* to install AART's working instructions **globally** (once per host,
+e.g. Claude Code's user-level `CLAUDE.md`) so every AART-enabled workspace
+gets the verify reflex and the authoring loop without a fresh copy each
+time, and then verifies the wiring for real (lists the registered tools,
+calls `aart_find_blocks`) before declaring done. It's the `with-monet`-style
+agent-first install, adapted to AART's per-workspace-store model — see
+`with-aart/README.md` for exactly how the two differ.
+
+**What that playbook actually runs, and what to do by hand if you'd rather
+skip the agent-first flow:** in your authoring workspace (a **separate**
+directory from the repo clone above — this is where workflows and their
+local `.aart` store live), e.g.:
 
 ```bash
 mkdir -p ~/aart-workflows
@@ -158,13 +176,19 @@ cd ~/aart-workflows
 aart init-agent
 ```
 
-This writes two files here:
+`aart init-agent` is the mechanical writer underneath both paths — it stays
+a plain, host-agnostic command; all the "which host, which global file"
+reasoning above lives in `with-aart`'s playbook, not in this command itself.
+It writes two files here:
 
 - **`AGENTS.md`** — instructions for the coding agent: the verify reflex,
   the authoring loop (discover → draft → register → validate → run →
   report), `{{ }}` expression wiring, and how approval works for this
   project's trust mode. Claude Code (or any agent that reads `AGENTS.md`)
-  picks this up automatically.
+  picks this up automatically. This is the SAME text `with-aart`'s global
+  install offers to also install once per host (AMENDMENTS.md A55) — one
+  generator (`packages/mcp/src/init-agent.ts`), never two hand-maintained
+  copies.
 - **`.mcp.json`** — the real MCP server config. As of this session it reads:
   ```json
   { "mcpServers": { "aart": { "command": "node", "args": ["<absolute path to your install's bin.js>", "mcp"] } } }
@@ -173,12 +197,19 @@ This writes two files here:
   it on THIS machine — resolved automatically from the running `aart`
   process, so it's always correct for however you installed it, and it
   never touches the npm registry (closing the part (b) trap for the config
-  a coding agent actually spawns from). Before this session, `init-agent`
-  always generated `{"command": "npx", "args": ["-y", "@team-monet/aart",
-  "mcp"]}` instead — exactly the trap in part (b), just automated. If you
-  ever need the old registry-resolved form (correct once `1.0.0` is
-  genuinely published), pass `--npx` to `init-agent`; `--package <name>`
-  names a different registry package if you're pointing at a fork.
+  a coding agent actually spawns from). Before A54, `init-agent` always
+  generated `{"command": "npx", "args": ["-y", "@team-monet/aart", "mcp"]}`
+  instead — exactly the trap in part (b), just automated. If you ever need
+  the old registry-resolved form (correct once `1.0.0` is genuinely
+  published), pass `--npx` to `init-agent`; `--package <name>` names a
+  different registry package if you're pointing at a fork.
+
+  **Merge-safe as of AMENDMENTS.md A55:** if `.mcp.json` already has other
+  servers registered (e.g. a `monet` entry, if this workspace also runs
+  `with-monet`), `init-agent` reads the existing file, replaces only its own
+  `aart` key, and writes the rest back untouched — it no longer deletes
+  siblings. A `.mcp.json` that exists but isn't valid JSON is left alone and
+  reported as an error rather than silently replaced.
 
 Open (or restart) Claude Code with `~/aart-workflows` as its working
 directory / project root — it auto-detects `.mcp.json`. Once connected, you

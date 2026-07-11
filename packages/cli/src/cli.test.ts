@@ -200,6 +200,71 @@ describe("aart init / aart init-agent", () => {
       expect(config.mcpServers.aart.args).toEqual(["-y", "@custom/aart", "mcp"]);
     });
   });
+
+  describe("aart init-agent's .mcp.json write is merge-safe, not clobbering (this session's own fix — with-aart/bootstrap/install.md's Phase 3 depends on this)", () => {
+    it("preserves a sibling MCP server entry already in .mcp.json (e.g. a pre-existing `monet` registration) instead of deleting it", async () => {
+      tc = await createTestCli();
+      const mcpConfigOut = join(tc.cwd, ".mcp.json");
+      await writeFile(mcpConfigOut, JSON.stringify({ mcpServers: { monet: { command: "monet", args: ["start"] } } }, null, 2), "utf8");
+
+      const outcome = await run(["init-agent", "--mcp-config-out", mcpConfigOut, "--instructions-out", join(tc.cwd, "AGENTS.md")], {
+        cliContext: tc.cli,
+      });
+
+      expect(outcome.ok).toBe(true);
+      const config = JSON.parse(await readFile(mcpConfigOut, "utf8"));
+      expect(config.mcpServers.monet).toEqual({ command: "monet", args: ["start"] });
+      expect(config.mcpServers.aart.args).toContain("mcp");
+    });
+
+    it("re-running init-agent updates the aart entry in place (idempotent refresh, AUTHORING.md part (f)) without duplicating or dropping the sibling entry", async () => {
+      tc = await createTestCli();
+      const mcpConfigOut = join(tc.cwd, ".mcp.json");
+      await writeFile(mcpConfigOut, JSON.stringify({ mcpServers: { monet: { command: "monet", args: ["start"] } } }, null, 2), "utf8");
+
+      await run(["init-agent", "--bin-path", "/opt/aart-old/dist/bin.js", "--mcp-config-out", mcpConfigOut, "--instructions-out", join(tc.cwd, "AGENTS.md")], {
+        cliContext: tc.cli,
+      });
+      const second = await run(
+        ["init-agent", "--bin-path", "/opt/aart-new/dist/bin.js", "--mcp-config-out", mcpConfigOut, "--instructions-out", join(tc.cwd, "AGENTS.md")],
+        { cliContext: tc.cli },
+      );
+
+      expect(second.ok).toBe(true);
+      const config = JSON.parse(await readFile(mcpConfigOut, "utf8"));
+      expect(Object.keys(config.mcpServers).sort()).toEqual(["aart", "monet"]);
+      expect(config.mcpServers.aart).toEqual({ command: "node", args: ["/opt/aart-new/dist/bin.js", "mcp"] });
+      expect(config.mcpServers.monet).toEqual({ command: "monet", args: ["start"] });
+    });
+
+    it("preserves top-level keys outside mcpServers in the existing file", async () => {
+      tc = await createTestCli();
+      const mcpConfigOut = join(tc.cwd, ".mcp.json");
+      await writeFile(mcpConfigOut, JSON.stringify({ _comment: "hand-maintained", mcpServers: {} }, null, 2), "utf8");
+
+      const outcome = await run(["init-agent", "--mcp-config-out", mcpConfigOut, "--instructions-out", join(tc.cwd, "AGENTS.md")], {
+        cliContext: tc.cli,
+      });
+
+      expect(outcome.ok).toBe(true);
+      const config = JSON.parse(await readFile(mcpConfigOut, "utf8"));
+      expect(config._comment).toBe("hand-maintained");
+    });
+
+    it("an existing .mcp.json that isn't valid JSON fails loudly and is left on disk untouched, rather than being silently overwritten", async () => {
+      tc = await createTestCli();
+      const mcpConfigOut = join(tc.cwd, ".mcp.json");
+      await writeFile(mcpConfigOut, "{not valid json", "utf8");
+
+      const outcome = await run(["init-agent", "--mcp-config-out", mcpConfigOut, "--instructions-out", join(tc.cwd, "AGENTS.md")], {
+        cliContext: tc.cli,
+      });
+
+      expect(outcome.ok).toBe(false);
+      expect(String((outcome.result as { error?: string }).error)).toContain("not valid JSON");
+      expect(await readFile(mcpConfigOut, "utf8")).toBe("{not valid json"); // untouched
+    });
+  });
 });
 
 describe("aart diff", () => {
