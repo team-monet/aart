@@ -12,6 +12,20 @@ env:
 jobs:
   ci:
     runs-on: ubuntu-latest
+    # GitHub's own unset-default is 360 (6 HOURS) per job — with none set,
+    # a step that hangs instead of failing (exactly what happened on the
+    # first run on a fresh main, run 29148548882: the familiarity-evals CI
+    # gate step held the job open 30+ minutes past its own logical
+    # completion because a leaked Playwright browser subprocess kept
+    # Node's event loop non-empty, since fixed at the root — see
+    # packages/familiarity-evals/src/ci-gate.ts) burns the full 6 hours
+    # before anyone notices, instead of failing fast. 20 minutes is
+    # generous headroom over this job's actual shape (Playwright browser
+    # download + OS deps, a full workspace build/typecheck, the full test
+    # suite, redaction lint, the familiarity-evals gate) while still
+    # bounding a future regression of the same kind to a fast, visible
+    # failure rather than a silent multi-hour hang.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 

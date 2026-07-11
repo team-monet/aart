@@ -11,7 +11,7 @@
 // comment: each client/consumer calls the same UNDERLYING @aart/governance/
 // @aart/engine/@aart/blocks-core functions, it does not depend on a
 // sibling's own composition-root code).
-import { createBlockCatalog } from "@aart/blocks-core";
+import { closeBrowserSession, createBlockCatalog } from "@aart/blocks-core";
 import { alwaysAllowCapabilityCheck, createEngine, identityRedactFn, type BlockRegistry } from "@aart/engine";
 import { computeCapabilityClosure, validateWorkflow, type CapabilityClosureLookup, type CapabilityClosureNode } from "@aart/governance";
 import { createLlmPack } from "@aart/llm";
@@ -97,10 +97,32 @@ export function createRealValidateFn(store: AartStore): ValidateFn {
  * a webhook) is a CORRECT authoring outcome, not a failure to run; only
  * "failed"/"cancelled" (or a thrown dispatch error, e.g. an unresolvable
  * block reference) counts as a run-success failure.
+ *
+ * `onRunTerminal: (runId) => closeBrowserSession(runId)` — the identical
+ * hook packages/mcp/src/real-context.ts's own createRealEngine wires for
+ * the SAME reason (that file's own comment: "@aart/blocks-core's
+ * closeBrowserSession"), completing the composition-root pattern this
+ * file's header comment already says it mirrors. Two of this suite's own
+ * tasks (verify-page-renders, fill-web-form-and-screenshot) author
+ * browser.* steps, which lazily launch a real, shared headless Chromium
+ * (@aart/blocks-core's browser-session.ts) — that module's own doc comment
+ * names the SEAM explicitly: nothing in @aart/blocks-core itself ever
+ * closes a run's session; the engine composition root is expected to.
+ * Without this, each task's BrowserContext/Page would stay open for the
+ * rest of the process's life instead of being released as soon as that
+ * task's run goes terminal (the shared Chromium PROCESS itself is a
+ * separate, coarser resource — closed once, by ci-gate.ts's own final
+ * closeAllBrowserSessions(), not per-run here).
  */
 export function createRealRunSuccessFn(store: AartStore): RunSuccessFn {
   const blocks = buildCatalog(store);
-  const engine = createEngine({ store, redact: identityRedactFn, capabilityCheck: alwaysAllowCapabilityCheck, blocks });
+  const engine = createEngine({
+    store,
+    redact: identityRedactFn,
+    capabilityCheck: alwaysAllowCapabilityCheck,
+    blocks,
+    onRunTerminal: (runId) => closeBrowserSession(runId),
+  });
   void computeCapabilityClosure; // referenced for symmetry with createRealValidateFn's lookup construction - this function doesn't itself need a closure (capabilityCheck is unconditional here)
 
   return async (workflow: unknown) => {
