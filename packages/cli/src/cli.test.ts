@@ -467,6 +467,95 @@ describe("aart worker / aart server / aart mcp — non-blocking mode for tests",
   });
 });
 
+// AMENDMENTS.md A47 — composition-time loud failure for "aart server"/
+// "aart worker" against a missing store root (root AMENDMENTS.md A43's
+// actual bug class: the fs store adapter's ENOENT-as-empty read semantics
+// made a misconfigured root silently indistinguishable from a genuinely
+// empty one). Every case below goes through run()'s own real
+// resolveCliContext (no `cliContext` override — the ONE thing that would
+// bypass this check, per assertServerRootExists's own doc comment), so
+// each MUST pass an explicit --root pointing at a throwaway tmpdir, same
+// discipline the "--root <dir> / AART_ROOT" describe block above already
+// established.
+describe("aart server / aart worker — composition-time root check (AMENDMENTS.md A47)", () => {
+  let base: string;
+  afterEach(async () => {
+    await rm(base, { recursive: true, force: true });
+    delete process.env.AART_ROOT;
+  });
+
+  it("aart server refuses to start against a --root that doesn't exist, with an actionable error, before ever binding the port", async () => {
+    base = await mkdtemp(join(tmpdir(), "aart-server-root-check-"));
+    const missingRoot = join(base, "does-not-exist", ".aart");
+
+    const outcome = await run(["server", "--port", "0", "--root", missingRoot], { blocking: false });
+
+    expect(outcome.ok).toBe(false);
+    expect(String((outcome.result as { error?: string }).error)).toContain(missingRoot);
+    expect(String((outcome.result as { error?: string }).error)).toContain("does not exist");
+  });
+
+  it("aart worker refuses to start against a --root that doesn't exist", async () => {
+    base = await mkdtemp(join(tmpdir(), "aart-worker-root-check-"));
+    const missingRoot = join(base, "nope", ".aart");
+
+    const outcome = await run(["worker", "--root", missingRoot], { blocking: false });
+
+    expect(outcome.ok).toBe(false);
+    expect(String((outcome.result as { error?: string }).error)).toContain(missingRoot);
+  });
+
+  it("aart server starts normally when --root already exists (even genuinely empty — no false positive)", async () => {
+    base = await mkdtemp(join(tmpdir(), "aart-server-root-ok-"));
+    const root = join(base, ".aart");
+    await mkdir(root, { recursive: true });
+
+    const outcome = await run(["server", "--port", "0", "--root", root], { blocking: false });
+
+    expect(outcome.ok).toBe(true);
+  });
+
+  it("AART_ROOT env var is honored by the check the same way --root is", async () => {
+    base = await mkdtemp(join(tmpdir(), "aart-server-root-env-"));
+    const missingRoot = join(base, "env-missing", ".aart");
+    process.env.AART_ROOT = missingRoot;
+
+    const outcome = await run(["server", "--port", "0"], { blocking: false });
+
+    expect(outcome.ok).toBe(false);
+    expect(String((outcome.result as { error?: string }).error)).toContain(missingRoot);
+  });
+
+  // Hydrating a fresh root is the ENTIRE point of --bundle (AMENDMENTS.md
+  // A44/A45) — a missing root there is the expected starting state, not a
+  // misconfiguration, so the check must not fire. Uses a real bundle
+  // (produced via a separate, real registration + bundle step) so this
+  // proves the full "missing root -> hydrate -> serve" flow still works
+  // end to end, not just that the check is skipped.
+  it("aart server --bundle <dir> is NOT blocked by the root check, even against a --root that doesn't exist yet (hydration creates it)", async () => {
+    base = await mkdtemp(join(tmpdir(), "aart-server-bundle-root-"));
+    const sourceRoot = join(base, "source", ".aart");
+    const wfPath = join(base, "wf.yaml");
+    await writeFile(wfPath, sampleWorkflowYaml("wf-bundle-root-check"), "utf8");
+    await run(["register", wfPath, "--root", sourceRoot]);
+    const outDir = join(base, "bundle-out");
+    await run(["bundle", "wf-bundle-root-check", "--out", outDir, "--root", sourceRoot]);
+
+    const freshRoot = join(base, "fresh-does-not-exist-yet", ".aart");
+    const outcome = await run(["server", "--port", "0", "--root", freshRoot, "--bundle", outDir], { blocking: false });
+
+    expect(outcome.ok).toBe(true);
+    const list = await run(["list", "--root", freshRoot]);
+    expect((list.result as { workflows: { id: string }[] }).workflows.map((w) => w.id)).toContain("wf-bundle-root-check");
+  });
+
+  it("an explicit cliContext override bypasses the check entirely (this package's own fast unit tests, which never point at a real --root)", async () => {
+    tc = await createTestCli(); // tc.root is a real tmpdir but NEVER passed as --root here
+    const outcome = await run(["server", "--port", "0"], { cliContext: tc.cli, blocking: false });
+    expect(outcome.ok).toBe(true);
+  });
+});
+
 // S12 "deploy story" — `--bundle <dir>` on worker/server. Needs the REAL
 // composition (createCliContext WITHOUT `real: false`, matching
 // cli-context.test.ts's own pattern) — createTestCli()'s stub ServerPort

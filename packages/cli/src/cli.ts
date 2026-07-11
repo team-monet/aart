@@ -1,6 +1,7 @@
 // run(argv) — the full CLI command surface (spec §33), dispatching to the
 // SAME handler functions the MCP tool surface calls wherever an MCP tool
 // exists for that action (architecture's three-clients principle).
+import { existsSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import { createSqliteStore } from "@aart/store/sqlite";
@@ -107,11 +108,58 @@ async function resolveCliContext(tokens: Tokenized, aartOptions: CreateCliContex
   return createCliContext({ ...aartOptions, root });
 }
 
+/** Resolves `--root`/`AART_ROOT`/`aartOptions.root` with the exact same precedence `resolveCliContext` applies internally (flag > env > programmatic option > `./.aart` default) — shared so `assertServerRootExists` below and the context construction it gates never disagree about which path is "the" root. */
+function resolveRootOption(tokens: Tokenized, aartOptions: CreateCliContextOptions | undefined): string {
+  return flagString(tokens.flags, "root") ?? process.env.AART_ROOT ?? aartOptions?.root ?? path.join(process.cwd(), ".aart");
+}
+
+/**
+ * AMENDMENTS.md A47 — composition-time loud failure for `aart server`/`aart
+ * worker` specifically (the two long-running, serve-existing-data
+ * processes root AMENDMENTS.md A43's founder-visible bug was actually
+ * about): a store root that doesn't exist yet is, for these two commands,
+ * almost always a misconfiguration (a wrong or copy-pasted path), not a
+ * legitimate fresh start. `@aart/store`'s fs adapter treats a missing root
+ * as "zero records" on every read (`packages/store/src/adapters/fs/*.ts`'s
+ * own `isEnoent`-as-empty handling, deliberately UNCHANGED here — this
+ * repo's own conformance suite depends on that lazy-creation semantics,
+ * and a fresh-store `aart register`/`aart init` flow needs it too, so this
+ * check is scoped to the composition/launch layer, not the adapter) —
+ * which is exactly how A43's founder-visible bug went unnoticed until a
+ * real test drive: no error anywhere, just silent emptiness. This refuses
+ * to start rather than bind a port against a store that will silently
+ * look empty.
+ *
+ * Bypassed when `--bundle <dir>` is given (`maybeHydrateBundle`,
+ * `commands/process.ts`) — hydrating a fresh root is the ENTIRE point of
+ * that flag (AMENDMENTS.md A44/A45's own deploy-story proof: "a store that
+ * didn't exist a moment earlier hydrates then binds"), so a missing root
+ * there is the expected starting state, not a misconfiguration. Also
+ * skipped whenever the caller supplies its own `options.cliContext`
+ * (this package's own test suite, `cli.test.ts`'s "aart server"/"aart
+ * worker" describe blocks chief among them) — a caller that already built
+ * its own context has taken responsibility for its correctness; this
+ * check only guards the real `--root`/`AART_ROOT`/default resolution path
+ * `resolveCliContext` performs.
+ */
+function assertServerRootExists(tokens: Tokenized, aartOptions: CreateCliContextOptions | undefined): void {
+  if (flagString(tokens.flags, "bundle")) return;
+  const root = resolveRootOption(tokens, aartOptions);
+  if (!existsSync(root)) {
+    throw new Error(
+      `Store root "${root}" does not exist. Refusing to start against a missing root — a missing root used to fail SILENTLY (the fs store adapter treats it as an empty store on every read, root AMENDMENTS.md A43/A47). If this is a fresh deployment, hydrate it first with "aart server --bundle <dir>" (or "aart worker --bundle <dir>"); otherwise point --root/AART_ROOT at the directory your data already lives in, or create it first (e.g. "aart register <path>").`,
+    );
+  }
+}
+
 export async function run(argv: readonly string[], options: RunOptions = {}): Promise<CliOutcome> {
   const [command, ...rest] = argv;
   const tokens = tokenize(rest);
 
   try {
+    if (!options.cliContext && (command === "server" || command === "worker")) {
+      assertServerRootExists(tokens, options.aartOptions);
+    }
     const cli = options.cliContext ?? (await resolveCliContext(tokens, options.aartOptions));
     switch (command) {
       case "run":
