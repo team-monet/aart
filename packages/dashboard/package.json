@@ -18,6 +18,7 @@
   },
   "dependencies": {
     "@aart/blocks-core": "workspace:*",
+    "@aart/evidence": "workspace:*",
     "@aart/governance": "workspace:*",
     "@aart/llm": "workspace:*",
     "@aart/server": "workspace:*",

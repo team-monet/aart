@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { createTestFixture, makeRun, makeWorkflow } from "../test-support/fixtures.js";
-import { formatAge, listRunsFilterFromQuery, renderArtifactsPage, renderRunDetailPage, renderRunsListPage, renderWaitingRunsPage, triggerWorkflowAction } from "./runs.js";
+import { makeRun } from "../test-support/fixtures.js";
+import { formatAge, listRunsFilterFromQuery, renderArtifactsPage, renderRunDetailPage, renderRunsListPage, renderWaitingRunsPage } from "./runs.js";
 
 describe("renderRunsListPage", () => {
   it("lists runs with a link per run and surfaces an unresolved flag", () => {
@@ -57,29 +57,10 @@ describe("listRunsFilterFromQuery", () => {
   });
 });
 
-describe("triggerWorkflowAction", () => {
-  it("resolves the Workflow from the store and delegates to the injected triggerRun (S1's bound Engine.triggerRun shape)", async () => {
-    const { store, deps, cleanup } = await createTestFixture();
-    try {
-      const workflow = makeWorkflow({ id: "wf-trig", version: "1.0.0" });
-      await store.workflows.put(workflow);
-
-      const run = await triggerWorkflowAction(deps, store, { workflowId: "wf-trig", workflowVersion: "1.0.0", inputs: { x: 1 } });
-
-      expect(run.workflowId).toBe("wf-trig");
-      expect(run.status).toBe("pending");
-      expect(await store.runs.get(run.runId)).toEqual(run);
-    } finally {
-      await cleanup();
-    }
-  });
-
-  it("throws for an unknown workflow rather than silently triggering nothing", async () => {
-    const { store, deps, cleanup } = await createTestFixture();
-    try {
-      await expect(triggerWorkflowAction(deps, store, { workflowId: "nope", workflowVersion: "1.0.0", inputs: {} })).rejects.toThrow();
-    } finally {
-      await cleanup();
-    }
-  });
-});
+// AMENDMENTS.md A47: `triggerWorkflowAction` (formerly tested below) is
+// deleted from this module — `server.ts`'s `POST /runs/trigger` route now
+// calls `api.triggerRun` directly, a thin proxy to
+// `packages/server/src/http/server.ts`'s new `/runs/trigger` endpoint
+// (tested in `packages/server/src/http/server.test.ts`'s "trigger a
+// workflow run" describe block, and in `api-client.test.ts` for both the
+// HTTP and fake-store-backed `ApiClient` implementations).

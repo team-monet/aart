@@ -2,12 +2,17 @@
 // runs — no dedicated S2 HTTP route is documented, so this page aggregates
 // `RunRecord.artifacts` across `listRuns()`, which IS documented), Waiting
 // runs (v2 — architecture §13.2's "inspect waiting runs", surfacing wait
-// AGE per architecture §4.4.1's `[DECISION]`), and the "trigger workflow"
-// (v2) writable action.
-import type { AartStore } from "@aart/store";
+// AGE per architecture §4.4.1's `[DECISION]`).
+//
+// AMENDMENTS.md A47: the "trigger workflow" WRITE (`triggerWorkflowAction`,
+// formerly here) is deleted — `server.ts`'s `POST /runs/trigger` route now
+// calls `api.triggerRun` directly, a thin proxy to
+// `packages/server/src/http/server.ts`'s own new `/runs/trigger` endpoint,
+// which uses the REAL `EngineBoundary.startRun` (the same real
+// `Engine.triggerRun` a webhook/CLI trigger uses) rather than this
+// package's former hand-rolled RunRecord-construction stub.
 import type { RunRecord, RunStatus } from "@aart/types";
 import type { WaitingRunEntry } from "../api-client.js";
-import type { DashboardDeps, TriggerRunInput } from "../deps.js";
 import { escapeHtml, form, page, table, textField } from "../http/html.js";
 
 export function renderRunsListPage(runs: RunRecord[]): string {
@@ -65,32 +70,6 @@ ${textField("environment", "Environment (optional)")}`,
     "Trigger",
   )}`;
   return page("Trigger Workflow", body);
-}
-
-export interface TriggerWorkflowParams {
-  workflowId: string;
-  workflowVersion: string;
-  inputs: Record<string, unknown>;
-  environment?: string;
-}
-
-/**
- * The "trigger workflow" (§35.2) action: resolves the target Workflow
- * (already-authored, already `store.workflows.put` by whichever authoring
- * flow created it — this action never authors a Workflow itself), then
- * calls the injected `deps.triggerRun` — the SAME bound `Engine.triggerRun`
- * a CLI `aart run`/MCP `aart_trigger_workflow` call would use.
- */
-export async function triggerWorkflowAction(deps: DashboardDeps, store: AartStore, params: TriggerWorkflowParams): Promise<RunRecord> {
-  const workflow = await store.workflows.get(params.workflowId, params.workflowVersion);
-  if (!workflow) throw new Error(`workflow not found: ${params.workflowId}@${params.workflowVersion}`);
-  const input: TriggerRunInput = {
-    workflow,
-    trigger: { type: "manual", id: `dashboard-${Date.now()}`, source: "dashboard", payload: {}, receivedAt: new Date().toISOString() },
-    inputs: params.inputs,
-    environment: params.environment,
-  };
-  return deps.triggerRun(input);
 }
 
 export function listRunsFilterFromQuery(query: URLSearchParams): { status?: RunStatus; workflowId?: string } {

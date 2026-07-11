@@ -2,40 +2,51 @@
 // router. Mirrors @aart/server's own composition pattern (one server.ts
 // wiring many domain modules — flags.ts, promotion.ts, environments.ts —
 // together, observed in the S2 sibling worktree) rather than putting route
-// logic inline here; this file is thin glue: parse request -> call a
-// views/ function -> render or redirect.
+// logic inline here; this file is thin glue: parse request -> call `api`'s
+// (or, for pure rendering, `deps`'s) function -> render or redirect.
+//
+// AMENDMENTS.md A47: every route below — read OR write — now goes through
+// `api: ApiClient` alone. Before this session, only v1's read pages did;
+// every writable action (trigger a run, approve/promote/block/mark a
+// workflow, decide an approval task, record/act on a correction, create/run
+// an eval suite, clear a run's flag) called `deps.X(store, ...)` directly
+// against a SEPARATE, locally-constructed `AartStore` handle — exactly the
+// class of bug root AMENDMENTS.md A43 found and fixed for workflow/block
+// detail (a dashboard process whose own store handle points at a
+// different, possibly-misconfigured root than the server process's own
+// store silently shows wrong/empty data, or in a write's case, silently
+// writes to the WRONG place, or a `riskReview` decision gets misattributed
+// to `humanReview` because a second, divergent reimplementation drifted
+// from the real one — root AMENDMENTS.md A46's flagged finding). Every one
+// of those actions now has a real implementation server-side
+// (`packages/server/src/http/server.ts`) and this file calls it through
+// `api` — the dashboard's ONLY connection to data is the server it points
+// at, full stop. `store`/`deps` remain in `DashboardConfig` (both OPTIONAL
+// now, see config.ts) for the two things that are genuinely never
+// store-path-dependent: the Blocks/Packs pages' pure in-memory capability
+// catalog, and Run detail's pure report-rendering transform.
 import { createServer, type Server } from "node:http";
-import type { AartStore } from "@aart/store";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { createFsStore, type AartStore } from "@aart/store";
 import type { ApiClient } from "./api-client.js";
 import type { DashboardConfig } from "./config.js";
 import { DEFAULT_DASHBOARD_PORT } from "./config.js";
 import type { Clock } from "./clock.js";
 import { systemClock } from "./clock.js";
 import type { DashboardDeps } from "./deps.js";
+import { createStubDeps } from "./stub-deps.js";
 import { redirect, Router, sendHtml, sendJson } from "./http/router.js";
 import { escapeHtml, page } from "./http/html.js";
-import { decideApprovalAction, renderApprovalQueuePage } from "./views/approvals.js";
+import { renderApprovalQueuePage } from "./views/approvals.js";
 import { getBlockManifest, listBlockManifests } from "./capability-catalog.js";
 import { renderBlockDetailPage, renderBlocksPage, renderPacksPage } from "./views/blocks-packs.js";
-import {
-  blockPromotionAction,
-  clearNeedsReviewAction,
-  createEvalExampleFromCorrectionAction,
-  createIssueForAgentAction,
-  findCorrectionByKey,
-  markNeedsReviewAction,
-  recordCorrectionAction,
-  renderCorrectionQueuePage,
-  renderRecordCorrectionFormPage,
-  triggerImprovementProposalAction,
-  unblockPromotionAction,
-  updateRunOutputAction,
-} from "./views/corrections.js";
-import { createEvalAction, renderCreateEvalFormPage, renderEvalDashboardPage, runEvalAction } from "./views/evals.js";
-import { clearFlagAction, renderFlaggedRunsPage } from "./views/flags.js";
+import { renderCorrectionQueuePage, renderRecordCorrectionFormPage } from "./views/corrections.js";
+import { renderCreateEvalFormPage, renderEvalDashboardPage } from "./views/evals.js";
+import { renderFlaggedRunsPage } from "./views/flags.js";
 import { renderDeploymentsPage, renderEnvironmentsPage, renderSecretsStatusPage, renderTriggerConfigsPage, renderWorkerHealthPage, type WorkerHealthEntry } from "./views/production.js";
-import { listRunsFilterFromQuery, renderArtifactsPage, renderRunDetailPage, renderRunsListPage, renderTriggerFormPage, renderWaitingRunsPage, triggerWorkflowAction } from "./views/runs.js";
-import { approveOrDeprecateAction, promoteAction, renderRiskDiffPage, renderWorkflowDetailPage, renderWorkflowsListPage } from "./views/workflows.js";
+import { listRunsFilterFromQuery, renderArtifactsPage, renderRunDetailPage, renderRunsListPage, renderTriggerFormPage, renderWaitingRunsPage } from "./views/runs.js";
+import { renderRiskDiffPage, renderWorkflowDetailPage, renderWorkflowsListPage } from "./views/workflows.js";
 
 function str(body: Record<string, unknown>, key: string, fallback = ""): string {
   const v = body[key];
@@ -65,7 +76,7 @@ export function buildDashboardRouter(store: AartStore, api: ApiClient, deps: Das
   router.post("/runs/trigger", async (ctx, body) => {
     const inputs = parseJsonField(body, "inputs");
     const environment = str(body, "environment") || undefined;
-    const run = await triggerWorkflowAction(deps, store, { workflowId: str(body, "workflowId"), workflowVersion: str(body, "workflowVersion"), inputs, environment });
+    const run = await api.triggerRun({ workflowId: str(body, "workflowId"), workflowVersion: str(body, "workflowVersion") || undefined, inputs, environment });
     redirect(ctx.res, `/runs/${encodeURIComponent(run.runId)}`);
   });
 
@@ -108,14 +119,14 @@ export function buildDashboardRouter(store: AartStore, api: ApiClient, deps: Das
   router.post("/workflows/:id/approve", async (ctx, body) => {
     const id = ctx.params["id"]!;
     const action = str(body, "action") === "deprecate" ? "deprecate" : "approve";
-    const trustMode = (str(body, "trustMode", "governed") as Parameters<typeof approveOrDeprecateAction>[5]) ?? "governed";
-    await approveOrDeprecateAction(deps, store, id, str(body, "version"), action, trustMode);
+    const trustMode = (str(body, "trustMode", "governed") as Parameters<ApiClient["approveOrDeprecateWorkflow"]>[3]) || "governed";
+    await api.approveOrDeprecateWorkflow(id, str(body, "version"), action, trustMode);
     redirect(ctx.res, `/workflows/${encodeURIComponent(id)}`);
   });
 
   router.post("/workflows/:id/promote", async (ctx, body) => {
     const id = ctx.params["id"]!;
-    await promoteAction(deps, store, id, str(body, "version"), str(body, "environmentId"));
+    await api.promoteWorkflow(id, str(body, "version"), str(body, "environmentId"));
     redirect(ctx.res, `/workflows/${encodeURIComponent(id)}`);
   });
 
@@ -123,35 +134,43 @@ export function buildDashboardRouter(store: AartStore, api: ApiClient, deps: Das
     const id = ctx.params["id"]!;
     const fromVersion = str(body, "fromVersion");
     const toVersion = str(body, "toVersion");
-    const [a, b] = await Promise.all([store.workflows.get(id, fromVersion), store.workflows.get(id, toVersion)]);
-    if (!a || !b) {
+    const [from, to] = await Promise.all([api.getWorkflow(id, fromVersion), api.getWorkflow(id, toVersion)]);
+    if (!from || !to) {
       sendHtml(ctx.res, 404, page("Not Found", "<p>One or both workflow versions not found.</p>"));
       return;
     }
-    sendHtml(ctx.res, 200, renderRiskDiffPage(id, fromVersion, toVersion, deps.semanticRiskDiff(a, b)));
+    sendHtml(ctx.res, 200, renderRiskDiffPage(id, fromVersion, toVersion, deps.semanticRiskDiff(from.workflow, to.workflow)));
   });
 
   router.post("/workflows/:id/block-promotion", async (ctx, body) => {
-    await blockPromotionAction(deps, store, ctx.params["id"]!, str(body, "version"));
+    await api.blockPromotion(ctx.params["id"]!, str(body, "version"));
     redirect(ctx.res, `/workflows/${encodeURIComponent(ctx.params["id"]!)}`);
   });
   router.post("/workflows/:id/unblock-promotion", async (ctx, body) => {
-    await unblockPromotionAction(deps, store, ctx.params["id"]!, str(body, "version"));
+    await api.unblockPromotion(ctx.params["id"]!, str(body, "version"));
     redirect(ctx.res, `/workflows/${encodeURIComponent(ctx.params["id"]!)}`);
   });
   router.post("/workflows/:id/mark-needs-review", async (ctx, body) => {
-    await markNeedsReviewAction(deps, store, ctx.params["id"]!, str(body, "version"));
+    await api.markNeedsReview(ctx.params["id"]!, str(body, "version"));
     redirect(ctx.res, `/workflows/${encodeURIComponent(ctx.params["id"]!)}`);
   });
   router.post("/workflows/:id/clear-needs-review", async (ctx, body) => {
-    await clearNeedsReviewAction(deps, store, ctx.params["id"]!, str(body, "version"));
+    await api.clearNeedsReview(ctx.params["id"]!, str(body, "version"));
     redirect(ctx.res, `/workflows/${encodeURIComponent(ctx.params["id"]!)}`);
   });
   router.post("/workflows/:id/trigger-improvement", async (ctx, body) => {
-    await triggerImprovementProposalAction(deps, store, ctx.params["id"]!, str(body, "version"));
+    await api.triggerImprovementProposal(ctx.params["id"]!, str(body, "version"));
     redirect(ctx.res, `/workflows/${encodeURIComponent(ctx.params["id"]!)}`);
   });
 
+  // Blocks/Packs — the one pair of pages that legitimately still takes
+  // `store` (capability-catalog.ts's own doc comment: a pure, static,
+  // in-memory construction from @aart/blocks-core/@aart/llm manifests,
+  // never filesystem-path-dependent — confirmed by A43's own investigation
+  // and unchanged by this session). `store` here is whatever
+  // `startDashboard` resolved (the caller's real one, or the internal
+  // always-valid placeholder — see startDashboard's own doc comment) —
+  // either way this route never performs I/O through it.
   router.get("/blocks", (ctx) => sendHtml(ctx.res, 200, renderBlocksPage(listBlockManifests(store))));
   // Block detail — previously not a route at all (no view, no link from
   // the Blocks list above); a founder test drive confirmed there was no
@@ -180,12 +199,19 @@ export function buildDashboardRouter(store: AartStore, api: ApiClient, deps: Das
   });
 
   router.get("/approvals", async (ctx) => {
-    sendHtml(ctx.res, 200, renderApprovalQueuePage(await store.approvals.list({ status: "pending" })));
+    sendHtml(ctx.res, 200, renderApprovalQueuePage(await api.listApprovals("pending")));
   });
+  // AMENDMENTS.md A47: a thin proxy to the server's own `decideApprovalTask`
+  // (`packages/server/src/approvals.ts`) — the dashboard no longer decodes
+  // the gate or writes it locally (root AMENDMENTS.md A46's flagged bug:
+  // the former local `decideApprovalAction` decoded `t.runId` alone,
+  // dropping `t.stepId`, and hardcoded `gates.humanReview` regardless of
+  // which gate actually decoded — fixed at the source now that this is the
+  // ONE implementation).
   router.post("/approvals/:id/decision", async (ctx, body) => {
     const status = str(body, "status") as "approved" | "rejected" | "needs_changes";
-    const trustMode = (str(body, "trustMode", "governed") as Parameters<typeof decideApprovalAction>[6]) ?? "governed";
-    await decideApprovalAction(deps, store, ctx.params["id"]!, status, str(body, "reviewer", "dashboard-operator"), undefined, trustMode);
+    const trustMode = (str(body, "trustMode", "governed") as Parameters<ApiClient["decideApproval"]>[1]["trustMode"]) || "governed";
+    await api.decideApproval(ctx.params["id"]!, { status, reviewer: str(body, "reviewer", "dashboard-operator"), trustMode });
     redirect(ctx.res, "/approvals");
   });
 
@@ -193,7 +219,7 @@ export function buildDashboardRouter(store: AartStore, api: ApiClient, deps: Das
     sendHtml(ctx.res, 200, renderRecordCorrectionFormPage(ctx.query.get("runId") ?? "", ctx.query.get("stepId") ?? ""));
   });
   router.post("/corrections", async (ctx, body) => {
-    await recordCorrectionAction(deps, store, {
+    await api.recordCorrection({
       runId: str(body, "runId"),
       stepId: str(body, "stepId"),
       fieldPath: str(body, "fieldPath"),
@@ -205,47 +231,44 @@ export function buildDashboardRouter(store: AartStore, api: ApiClient, deps: Das
     redirect(ctx.res, "/corrections");
   });
   router.get("/corrections", async (ctx) => {
-    sendHtml(ctx.res, 200, renderCorrectionQueuePage(await store.corrections.list()));
+    sendHtml(ctx.res, 200, renderCorrectionQueuePage(await api.listCorrections()));
   });
   router.post("/corrections/:key/update-run-output", async (ctx) => {
-    const correction = await findCorrectionByKey(store, ctx.params["key"]!);
-    if (!correction) {
+    const run = await api.updateCorrectionRunOutput(ctx.params["key"]!);
+    if (!run) {
       sendHtml(ctx.res, 404, page("Not Found", "<p>No such correction.</p>"));
       return;
     }
-    await updateRunOutputAction(deps, store, correction);
     redirect(ctx.res, "/corrections");
   });
   router.post("/corrections/:key/create-eval-example", async (ctx, body) => {
-    const correction = await findCorrectionByKey(store, ctx.params["key"]!);
-    if (!correction) {
+    const example = await api.createEvalExampleFromCorrection(ctx.params["key"]!, str(body, "suiteId"));
+    if (!example) {
       sendHtml(ctx.res, 404, page("Not Found", "<p>No such correction.</p>"));
       return;
     }
-    await createEvalExampleFromCorrectionAction(deps, store, correction, str(body, "suiteId"));
     redirect(ctx.res, "/corrections");
   });
   router.post("/corrections/:key/create-issue", async (ctx) => {
-    const correction = await findCorrectionByKey(store, ctx.params["key"]!);
-    if (!correction) {
+    const brief = await api.createIssueForCorrection(ctx.params["key"]!);
+    if (!brief) {
       sendHtml(ctx.res, 404, page("Not Found", "<p>No such correction.</p>"));
       return;
     }
-    const brief = await createIssueForAgentAction(deps, store, correction);
     sendJson(ctx.res, 200, brief);
   });
 
   router.get("/evals/new", (ctx) => sendHtml(ctx.res, 200, renderCreateEvalFormPage()));
   router.post("/evals/suites", async (ctx, body) => {
-    await createEvalAction(deps, store, { name: str(body, "name"), description: str(body, "description") || undefined, scorer: { id: `scorer-${Date.now()}`, kind: str(body, "scorerKind", "exact_match") } });
+    await api.createEvalSuite({ name: str(body, "name"), description: str(body, "description") || undefined, scorer: { id: `scorer-${Date.now()}`, kind: str(body, "scorerKind", "exact_match") } });
     redirect(ctx.res, "/evals");
   });
   router.post("/evals/runs", async (ctx, body) => {
-    await runEvalAction(deps, store, str(body, "suiteId"), str(body, "workflowId"), str(body, "workflowVersion"));
+    await api.runEvalSuite(str(body, "suiteId"), str(body, "workflowId"), str(body, "workflowVersion"));
     redirect(ctx.res, "/evals");
   });
   router.get("/evals", async (ctx) => {
-    const [suites, runs] = await Promise.all([store.evals.listSuites(), store.evals.listRuns()]);
+    const { suites, runs } = await api.listEvals();
     sendHtml(ctx.res, 200, renderEvalDashboardPage(suites, runs));
   });
 
@@ -275,7 +298,7 @@ export function buildDashboardRouter(store: AartStore, api: ApiClient, deps: Das
     sendHtml(ctx.res, 200, renderFlaggedRunsPage(await api.listFlaggedRunsViaApi()));
   });
   router.post("/flagged-runs/:runId/clear", async (ctx, body) => {
-    const result = await clearFlagAction(deps, store, ctx.params["runId"]!, str(body, "clearedBy", "dashboard-operator"));
+    const result = await api.clearRunFlag(ctx.params["runId"]!, str(body, "clearedBy", "dashboard-operator"));
     if (result.kind !== "cleared") {
       sendHtml(ctx.res, 409, page("Could Not Clear", `<p>${escapeHtml(result.kind)}</p>`));
       return;
@@ -294,9 +317,33 @@ export interface DashboardHandle {
   close(): Promise<void>;
 }
 
+/**
+ * A never-persisted-to store, structurally satisfying the two remaining
+ * `AartStore`-typed parameters this package's own router still takes
+ * (Blocks/Packs' capability catalog, and `createStubDeps`'s own
+ * construction requirement) when a caller omits `config.store`/`config.deps`
+ * — AMENDMENTS.md A47's "the dashboard needs [a server URL] and NOTHING
+ * else" end state. `os.tmpdir()` always exists on any real OS (so this
+ * never trips the composition-time root check `@aart/cli`'s
+ * `server`/`worker` commands now enforce for their OWN, load-bearing store
+ * root — see `packages/cli/src/commands/process.ts`), and nothing in this
+ * package's router ever calls a read/write method on it (confirmed:
+ * capability-catalog.ts's functions only thread `store` through to
+ * `@aart/llm`'s `createLlmPack`, which itself only reads it at BLOCK
+ * EXECUTION time — never at manifest-listing time, the only thing this
+ * package's Blocks/Packs pages ever do). `createFsStore` itself does zero
+ * eager I/O (lazy on first read/write, `packages/store/src/adapters/fs`),
+ * so constructing this is free even when nothing ever touches it.
+ */
+function placeholderStore(): AartStore {
+  return createFsStore(path.join(tmpdir(), "aart-dashboard-unused-store"));
+}
+
 export async function startDashboard(config: DashboardConfig): Promise<DashboardHandle> {
   const clock = config.clock ?? systemClock;
-  const router = buildDashboardRouter(config.store, config.api, config.deps, clock, config.workerUrls ?? []);
+  const store = config.store ?? placeholderStore();
+  const deps = config.deps ?? createStubDeps(store, clock);
+  const router = buildDashboardRouter(store, config.api, deps, clock, config.workerUrls ?? []);
   const server = createServer((req, res) => void router.handle(req, res));
   const port = config.port ?? DEFAULT_DASHBOARD_PORT;
   await new Promise<void>((resolve, reject) => {

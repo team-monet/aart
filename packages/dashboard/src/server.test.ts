@@ -109,6 +109,80 @@ describe("dashboard HTTP server — route wiring", () => {
       }
     });
 
+    // AMENDMENTS.md A47: the SAME divergent-store proof above (root
+    // AMENDMENTS.md A43's exact scenario), extended to EVERY OTHER
+    // data-bearing route this session migrated off direct `store` access —
+    // reads (approvals/corrections/evals lists, previously store-direct)
+    // AND writes (trigger a run, decide an approval, record a correction —
+    // previously `deps.X(store, ...)` against this SAME divergent local
+    // store). `fixture.store` (this dashboard instance's own configured
+    // store) is asserted empty throughout; every effect must land in
+    // `real.store` (fronted only by `api`) instead — proving the dashboard
+    // genuinely has NO functional dependency left on its own local store
+    // for any of these, not just workflow/block detail.
+    it("every remaining v1/v2/v3 read AND write goes through `api`, never the dashboard's own divergent local `store` (root AMENDMENTS.md A43, extended A47)", async () => {
+      const real = await createTestFixture();
+      try {
+        await real.store.workflows.put(makeWorkflow({ id: "wf-div2", version: "1.0.0", gates: { validate: "passed", readiness: "pending", evals: "pending", riskReview: "pending", humanReview: "passed" } }));
+        await real.store.approvals.put({ id: "at-div", runId: "run-div", stepId: "step1", title: "Ship?", description: "d", status: "pending", createdAt: "2026-07-10T00:00:00.000Z" });
+        await real.store.runs.put(makeRun({ runId: "run-div", status: "waiting", waits: [{ type: "approval", taskId: "at-div", schemaVersion: 1 }] }));
+        await real.store.waits.put("run-div", "step1", { type: "approval", taskId: "at-div", schemaVersion: 1 }, "2026-07-10T00:00:00.000Z");
+        await real.store.corrections.put({ runId: "run-div", stepId: "step1", fieldPath: "outputs.x", observed: 1, corrected: 2, reason: "r", reviewer: "alice", createdAt: "2026-07-10T00:00:00.000Z" });
+        await real.store.evals.putSuite({ id: "suite-div", name: "S", examples: [], scorer: { id: "s1", kind: "exact_match" }, tags: [] });
+
+        await handle.close();
+        handle = await startDashboard({ store: fixture.store, api: createFakeApiClient(real.store), deps: fixture.deps, clock: fixture.clock, port: 0 });
+        baseUrl = `http://127.0.0.1:${handle.port}`;
+
+        // Reads: fixture.store (this dashboard instance's OWN store) is
+        // empty of all of the above — every response below can ONLY have
+        // come from `real.store`, via `api`.
+        expect(await fixture.store.workflows.getLatest("wf-div2")).toBeUndefined();
+        expect(await fixture.store.approvals.list()).toEqual([]);
+        expect(await fixture.store.corrections.list()).toEqual([]);
+        expect(await fixture.store.evals.listSuites()).toEqual([]);
+
+        expect(await (await fetch(`${baseUrl}/approvals`)).text()).toContain("Ship?");
+        expect(await (await fetch(`${baseUrl}/corrections`)).text()).toContain("run-div");
+        expect(await (await fetch(`${baseUrl}/evals`)).text()).toContain("S</td>");
+
+        // Writes: trigger a run, decide an approval, record a correction —
+        // every effect must land in real.store, and fixture.store must stay
+        // untouched throughout.
+        const triggerRes = await fetch(`${baseUrl}/runs/trigger`, {
+          method: "POST",
+          headers: { "content-type": "application/x-www-form-urlencoded" },
+          body: "workflowId=wf-div2&workflowVersion=1.0.0&inputs=%7B%7D",
+          redirect: "manual",
+        });
+        expect(triggerRes.status).toBe(303);
+        expect(await real.store.runs.list({ workflowId: "wf-div2" })).toHaveLength(1);
+        expect(await fixture.store.runs.list({ workflowId: "wf-div2" })).toHaveLength(0);
+
+        const decideRes = await fetch(`${baseUrl}/approvals/at-div/decision`, {
+          method: "POST",
+          headers: { "content-type": "application/x-www-form-urlencoded" },
+          body: "status=approved&reviewer=alice",
+          redirect: "manual",
+        });
+        expect(decideRes.status).toBe(303);
+        expect((await real.store.approvals.get("at-div"))?.status).toBe("approved");
+        expect(await fixture.store.approvals.get("at-div")).toBeUndefined();
+
+        const correctRes = await fetch(`${baseUrl}/corrections`, {
+          method: "POST",
+          headers: { "content-type": "application/x-www-form-urlencoded" },
+          body: "runId=run-div&stepId=step1&fieldPath=outputs.y&observed=1&corrected=2&reason=r&reviewer=alice",
+          redirect: "manual",
+        });
+        expect(correctRes.status).toBe(303);
+        expect(await real.store.corrections.list({ runId: "run-div", stepId: "step1" })).toHaveLength(2); // the fixture-seeded one + this new one
+        expect(await fixture.store.corrections.list()).toEqual([]);
+      } finally {
+        await real.cleanup();
+      }
+    });
+
     it("GET /blocks renders the real block catalog; GET /blocks/:id renders one block's manifest (root AMENDMENTS.md A43 — no route existed at all before); GET /packs stays an honest pending-integration page (reconciliation ledger item 13)", async () => {
       const blocksHtml = await (await fetch(`${baseUrl}/blocks`)).text();
       expect(blocksHtml).toContain("http.request");
@@ -247,14 +321,28 @@ describe("dashboard HTTP server — route wiring", () => {
     });
 
     it("correction outcomes: update-run-output / create-eval-example / create-issue all reachable by URL-encoded correctionKey", async () => {
-      await fixture.store.runs.put(makeRun({ runId: "run-out", workflowId: "wf-out", workflowVersion: "1.0.0", outputs: { total: 1 } }));
+      // AMENDMENTS.md A47: update-run-output now routes through
+      // @aart/evidence's real `updateRunOutput` (server-side,
+      // `packages/server/src/http/server.ts`'s new
+      // `/corrections/:key/update-run-output` endpoint) instead of this
+      // package's former local mirror — the real one patches the target
+      // STEP's own trace.outputs (spec §23.3's `(runId, stepId, fieldPath)`
+      // scoping, `fieldPath` a dot-path INTO that step's trace), not
+      // `RunRecord.outputs` directly the way the old mirror's "outputs."
+      // special case did; a correction therefore needs a matching trace
+      // entry for `stepId` to exist, same as any other real caller.
+      await fixture.store.runs.put(
+        makeRun({ runId: "run-out", workflowId: "wf-out", workflowVersion: "1.0.0", trace: [{ seq: 0, stepId: "step1", block: "http.get", status: "completed", inputs: {}, outputs: { total: 1 }, startedAt: "t" }] }),
+      );
       const correction = makeCorrection({ runId: "run-out", stepId: "step1", fieldPath: "outputs.total", corrected: 42 });
       await fixture.store.corrections.put(correction);
       const key = encodeURIComponent("run-out:step1:outputs.total");
 
       const updateRes = await fetch(`${baseUrl}/corrections/${key}/update-run-output`, { method: "POST", redirect: "manual" });
       expect(updateRes.status).toBe(303);
-      expect((await fixture.store.runs.get("run-out"))?.outputs).toEqual({ total: 42 });
+      const updatedRun = await fixture.store.runs.get("run-out");
+      expect(updatedRun?.trace[0]?.outputs).toEqual({ total: 42 });
+      expect(updatedRun?.trace[0]?.postHocCorrected).toBe(true);
 
       const evalRes = await fetch(`${baseUrl}/corrections/${key}/create-eval-example`, {
         method: "POST",
@@ -272,6 +360,14 @@ describe("dashboard HTTP server — route wiring", () => {
     });
 
     it("create eval / run eval: POST creates a suite then runs it", async () => {
+      // AMENDMENTS.md A47: run-eval now routes through
+      // `packages/server/src/evals.ts`'s `runEvalSuiteForWorkflow`, which
+      // verifies the target workflow version actually exists (matching
+      // `packages/mcp/src/handlers/evals.ts`'s real `runEvalHandler`) — the
+      // pre-A47 dashboard-local mirror never checked, silently persisting
+      // an EvalRun against an unvalidated workflowId/Version.
+      await fixture.store.workflows.put(makeWorkflow({ id: "wf-1", version: "1.0.0" }));
+
       const createRes = await fetch(`${baseUrl}/evals/suites`, {
         method: "POST",
         headers: { "content-type": "application/x-www-form-urlencoded" },

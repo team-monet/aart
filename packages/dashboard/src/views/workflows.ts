@@ -1,5 +1,5 @@
-// Workflows (v1 — list), approve/deprecate + promote + view risk diff (v2
-// writable/read actions — architecture §13.2).
+// Workflows (v1 — list), workflow detail + view risk diff (v1/v2 read
+// pages — architecture §13.2).
 //
 // S2's `GET /workflows` returns bare `{ workflowIds: string[] }` — the list
 // page (v1, "reads via S2's API") uses that for its primary enumeration.
@@ -18,10 +18,15 @@
 // `ApiClient` like every other v1 page — the dashboard no longer needs a
 // second, independently-configured store handle to render this page at
 // all, closing off that whole failure mode rather than patching around it.
+//
+// AMENDMENTS.md A47: the approve/deprecate + promote WRITES
+// (`approveOrDeprecateAction`/`promoteAction`, formerly here) are deleted —
+// `server.ts`'s `POST /workflows/:id/approve`/`/promote` routes now call
+// `api.approveOrDeprecateWorkflow`/`api.promoteWorkflow` directly, thin
+// proxies to `packages/server/src/workflow-actions.ts`/`promotion.ts`'s
+// real implementations.
 import type { SemanticRiskDiff } from "@aart/governance";
-import type { AartStore } from "@aart/store";
-import type { RunRecord, TrustMode, Workflow } from "@aart/types";
-import type { DashboardDeps, GateName, PromoteResult } from "../deps.js";
+import type { RunRecord, Workflow } from "@aart/types";
 import { escapeHtml, form, hiddenField, page, table, textField } from "../http/html.js";
 
 /** Recent-runs section is capped, not paginated (no "runs page 2" feature requested) — matches this page's existing "small, honest, not over-built" scope. */
@@ -123,13 +128,3 @@ export function renderRiskDiffPage(workflowId: string, fromVersion: string, toVe
   return page("Risk Diff", body);
 }
 
-/** Thin delegate to the injected `computeApprovalState`/`approveOrDeprecateWorkflow` — see deps.ts. */
-export async function approveOrDeprecateAction(deps: DashboardDeps, store: AartStore, workflowId: string, version: string, action: "approve" | "deprecate", trustMode: TrustMode): Promise<Workflow> {
-  const requiredGates: readonly GateName[] = deps.requiredGatesByTrustMode[trustMode];
-  return deps.approveOrDeprecateWorkflow(store, workflowId, version, action, requiredGates);
-}
-
-/** Thin delegate to the injected `promoteWorkflowVersionToEnvironment` (internally calls S4's real `evaluatePromotionForEnvironment`) — see deps.ts. */
-export async function promoteAction(deps: DashboardDeps, store: AartStore, workflowId: string, version: string, environmentId: string, triggerConfig?: Record<string, unknown>): Promise<PromoteResult> {
-  return deps.promoteWorkflowVersionToEnvironment(store, { workflowId, workflowVersion: version, environmentId, triggerConfig });
-}

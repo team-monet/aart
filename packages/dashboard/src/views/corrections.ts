@@ -1,48 +1,35 @@
 // Correction queue (v3) + record correction + the 6 correction outcomes +
 // 2 complements (v2/v3 writable actions — S6 seam E4, architecture §13.2).
-// Every action here is a one-line delegate to its injected `deps` function
-// — see deps.ts's E4 citation block for the exact SEAMS.md-sourced
-// signatures each one matches.
-import type { AartStore } from "@aart/store";
-import type { Correction, EvalExample, ImprovementBrief, RunRecord, Workflow } from "@aart/types";
-import type { DashboardDeps, RecordCorrectionInput } from "../deps.js";
+//
+// AMENDMENTS.md A47: every action that used to live here as a one-line
+// `deps.X(store, ...)` delegate (`findCorrectionByKey`,
+// `recordCorrectionAction`, `updateRunOutputAction`,
+// `createEvalExampleFromCorrectionAction`, `createIssueForAgentAction`,
+// `triggerImprovementProposalAction`, `blockPromotionAction`,
+// `unblockPromotionAction`, `markNeedsReviewAction`,
+// `clearNeedsReviewAction`) is deleted — `server.ts`'s routes now call the
+// corresponding `ApiClient` method directly (matching how every v1 READ
+// route already called `api.X()` with no view-file indirection), closing
+// the store-divergence bug class (root AMENDMENTS.md A43) for these writes
+// the same way it was already closed for reads. This file keeps only pure
+// rendering + the `correctionKey` encoding both this file's own outcome
+// buttons and `server.ts`'s `/corrections/:key/...` routes rely on.
+import type { Correction } from "@aart/types";
 import { escapeHtml, form, page, table, textField } from "../http/html.js";
 
 /**
  * The stable identity of a Correction. Spec §23.3's `Correction` has no
  * `id` field of its own — architecture §5.3's `corrections` table
  * primary-keys on `(run_id, step_id, field_path)` instead (no
- * `created_at` component). This MATCHES S6's own published convention
- * exactly, read directly from `@aart/evidence`'s
- * `packages/evidence/src/corrections/correction.ts` (`correctionKey`,
- * same `${runId}:${stepId}:${fieldPath}` format, no timestamp) — this
- * package doesn't depend on `@aart/evidence` (see deps.ts's header
- * comment on why no Wave-1 sibling package is a dependency yet), so this
- * is a same-shaped local mirror, not an import, kept identical
- * deliberately so the two packages' notion of "which correction is this"
- * never drifts. `EvalExample.createdFromCorrection` (architecture §9.7)
- * is the other consumer of this exact format.
+ * `created_at` component). This MATCHES `@aart/evidence`'s own published
+ * convention exactly (`packages/evidence/src/corrections/correction.ts`'s
+ * `correctionKey`, same `${runId}:${stepId}:${fieldPath}` format, no
+ * timestamp) — kept as an identical local mirror (rather than importing
+ * evidence's copy) since this is purely a URL-encoding concern for this
+ * page's own links, not a store-touching operation.
  */
 export function correctionKey(correction: Pick<Correction, "runId" | "stepId" | "fieldPath">): string {
   return `${correction.runId}:${correction.stepId}:${correction.fieldPath}`;
-}
-
-/**
- * Looks a Correction back up from a `correctionKey` via
- * `store.corrections.list({runId, stepId})` (the only query CorrectionStore
- * supports) + an exact fieldPath match. `key` arrives already
- * `decodeURIComponent`-ed once by the router's own `:param` matching
- * (http/router.ts) — this does NOT decode again, since the key contains
- * no further percent-escapes of its own past that one router-level
- * decode. Splits on the first two colons only, so a fieldPath that itself
- * contains a colon still round-trips correctly.
- */
-export async function findCorrectionByKey(store: AartStore, key: string): Promise<Correction | undefined> {
-  const [runId, stepId, ...fieldPathParts] = key.split(":");
-  const fieldPath = fieldPathParts.join(":");
-  if (!runId || !stepId || !fieldPath) return undefined;
-  const candidates = await store.corrections.list({ runId, stepId });
-  return candidates.find((c) => c.fieldPath === fieldPath);
 }
 
 export function renderCorrectionQueuePage(corrections: Correction[]): string {
@@ -80,40 +67,4 @@ ${textField("reviewer", "Reviewer")}`,
     "Record correction",
   );
   return page("Record Correction", body);
-}
-
-export async function recordCorrectionAction(deps: DashboardDeps, store: AartStore, input: RecordCorrectionInput): Promise<Correction> {
-  return deps.recordCorrection(store, input);
-}
-
-export async function updateRunOutputAction(deps: DashboardDeps, store: AartStore, correction: Correction): Promise<RunRecord> {
-  return deps.updateRunOutput(store, correction);
-}
-
-export async function createEvalExampleFromCorrectionAction(deps: DashboardDeps, store: AartStore, correction: Correction, suiteId: string): Promise<EvalExample> {
-  return deps.createEvalExampleFromCorrection(store, correction, suiteId);
-}
-
-export async function createIssueForAgentAction(deps: DashboardDeps, store: AartStore, correction: Correction): Promise<ImprovementBrief> {
-  return deps.createIssueForAgent(store, correction);
-}
-
-export async function triggerImprovementProposalAction(deps: DashboardDeps, store: AartStore, workflowId: string, workflowVersion: string): Promise<ImprovementBrief> {
-  return deps.triggerImprovementProposal(store, workflowId, workflowVersion);
-}
-
-export async function blockPromotionAction(deps: DashboardDeps, store: AartStore, workflowId: string, workflowVersion: string): Promise<Workflow> {
-  return deps.blockPromotion(store, workflowId, workflowVersion);
-}
-
-export async function unblockPromotionAction(deps: DashboardDeps, store: AartStore, workflowId: string, workflowVersion: string): Promise<Workflow> {
-  return deps.unblockPromotion(store, workflowId, workflowVersion);
-}
-
-export async function markNeedsReviewAction(deps: DashboardDeps, store: AartStore, workflowId: string, workflowVersion: string): Promise<Workflow> {
-  return deps.markNeedsReview(store, workflowId, workflowVersion);
-}
-
-export async function clearNeedsReviewAction(deps: DashboardDeps, store: AartStore, workflowId: string, workflowVersion: string): Promise<Workflow> {
-  return deps.clearNeedsReview(store, workflowId, workflowVersion);
 }
