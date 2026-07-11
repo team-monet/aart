@@ -7,21 +7,29 @@
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { join } from "node:path";
+import { z } from "zod";
 import type { AartStore } from "@aart/store";
 import type { Deployment, PackManifest, PromptRegistryEntry, SchemaRegistryEntry, Workflow } from "@aart/types";
 import { computeClosure, resolveClosureRegistryEntries } from "./closure.js";
 
-export interface BundleManifest {
-  schemaVersion: 1;
-  workflowId: string;
-  workflowVersion: string;
-  createdAt: string;
-  bundleHash: string;
-  workflows: Array<{ workflowId: string; version: string }>;
-  packs: Array<{ name: string; version: string; contentHash: string }>;
-  prompts: Array<{ name: string; version: string; contentHash: string }>;
-  schemas: Array<{ name: string; version: string; contentHash: string }>;
-}
+// Zod schema, not just a TS interface, for one reason beyond this file's own
+// use: load.ts (the consuming half, see that module's header) reads
+// manifest.json off disk — untrusted input from whoever produced the bundle
+// directory, possibly on a different machine/build — and needs a real
+// runtime validator for it, the same way it needs WorkflowSchema/
+// PackManifestSchema/etc. for the rest of the bundle's contents.
+export const BundleManifestSchema = z.object({
+  schemaVersion: z.literal(1),
+  workflowId: z.string(),
+  workflowVersion: z.string(),
+  createdAt: z.string(),
+  bundleHash: z.string(),
+  workflows: z.array(z.object({ workflowId: z.string(), version: z.string() })),
+  packs: z.array(z.object({ name: z.string(), version: z.string(), contentHash: z.string() })),
+  prompts: z.array(z.object({ name: z.string(), version: z.string(), contentHash: z.string() })),
+  schemas: z.array(z.object({ name: z.string(), version: z.string(), contentHash: z.string() })),
+});
+export type BundleManifest = z.infer<typeof BundleManifestSchema>;
 
 export interface Bundle {
   manifest: BundleManifest;
@@ -53,6 +61,33 @@ function sortKeysDeep(value: unknown): unknown {
     return sorted;
   }
   return value;
+}
+
+/**
+ * The one place `bundleHash` is actually computed — shared by `produceBundle`
+ * below (over freshly-resolved store content) and `load.ts`'s
+ * `verifyBundleHash` (over content re-read from a bundle directory on disk),
+ * so the two sides can never independently drift on canonicalization and
+ * silently produce/accept mismatched hashes for what's logically the same
+ * content. `manifest` is deliberately typed as `Omit<BundleManifest,
+ * "bundleHash" | "createdAt">` at both call sites — see this file's own
+ * `produceBundle` doc comment on why `createdAt` is excluded, and
+ * `bundleHash` obviously can't hash itself. `definitions`/`packs`/
+ * `registry.*` are typed as plain `Record<string, unknown>` (not `Workflow`/
+ * `PackManifest`/etc.) so this function works identically whether the caller
+ * has already-Zod-validated, typed records (produceBundle) or freshly
+ * `JSON.parse`d, not-yet-validated ones (load.ts hashes BEFORE schema
+ * validation — see that module's own doc comment for why content-addressing
+ * is checked first).
+ */
+export function computeBundleHash(input: {
+  manifest: Omit<BundleManifest, "bundleHash" | "createdAt">;
+  definitions: Record<string, unknown>;
+  packs: Record<string, unknown>;
+  registry: { prompts: Record<string, unknown>; schemas: Record<string, unknown> };
+  triggers: unknown;
+}): string {
+  return createHash("sha256").update(canonicalJson(input)).digest("hex");
 }
 
 export interface ProduceBundleParams {
@@ -116,9 +151,7 @@ export async function produceBundle(store: AartStore, params: ProduceBundleParam
   // schemas/triggers, and the manifest's own structural workflow/version
   // list) IS included.
   const { createdAt: _createdAt, ...hashableManifest } = manifestWithoutHash;
-  const bundleHash = createHash("sha256")
-    .update(canonicalJson({ manifest: hashableManifest, definitions, packs, registry: { prompts, schemas }, triggers }))
-    .digest("hex");
+  const bundleHash = computeBundleHash({ manifest: hashableManifest, definitions, packs, registry: { prompts, schemas }, triggers });
 
   return {
     manifest: { ...manifestWithoutHash, bundleHash },
@@ -129,7 +162,7 @@ export async function produceBundle(store: AartStore, params: ProduceBundleParam
   };
 }
 
-/** Writes a produced `Bundle` to disk in architecture §0.3's documented layout (`manifest.json`, `definitions/`, `packs/`, `registry/`, `triggers.json`) — what `docker run teammonet/aart-worker --bundle=...` / a K8s Job mounting a bundle / `aart worker --bundle=...` actually consume. */
+/** Writes a produced `Bundle` to disk in architecture §0.3's documented layout (`manifest.json`, `definitions/`, `packs/`, `registry/`, `triggers.json`) — what `aart server --bundle=<dir>` / `aart worker --bundle=<dir>` (S12, `load.ts` in this same directory) actually consume, and what a `docker run teammonet/aart-worker --bundle=...` / a K8s Job mounting a bundle would too, on top of the same CLI flag. */
 export async function writeBundleToDisk(bundle: Bundle, outDir: string): Promise<void> {
   await fs.mkdir(outDir, { recursive: true });
   await fs.writeFile(join(outDir, "manifest.json"), JSON.stringify(bundle.manifest, null, 2));
@@ -158,6 +191,7 @@ export async function writeBundleToDisk(bundle: Bundle, outDir: string): Promise
   }
 }
 
-function sanitizeFilename(key: string): string {
+/** Exported so `load.ts` can compute the exact on-disk filename a given `${id}@${version}` key was written under (architecture §0.3's layout) without re-deriving keys from directory-listing filenames, which — for a key containing a sanitized character — would not be losslessly reversible. Same function on both sides of the write/read seam, not two independently-maintained copies. */
+export function sanitizeFilename(key: string): string {
   return key.replace(/[/\\:*?"<>|]/g, "_");
 }

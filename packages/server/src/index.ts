@@ -6,7 +6,14 @@
 // --- composition-root entry points (the CLI-command seams) ---
 export { startServer, type ServerHandle } from "./http/server.js";
 export { startWorker, type StartWorkerOptions, type WorkerHandle } from "./worker/worker.js";
-export { produceBundle, writeBundleToDisk, type Bundle, type BundleManifest, type ProduceBundleParams } from "./bundle/bundle.js";
+export { produceBundle, writeBundleToDisk, BundleManifestSchema, computeBundleHash, sanitizeFilename, type Bundle, type BundleManifest, type ProduceBundleParams } from "./bundle/bundle.js";
+// --- bundle LOADING (S12 "deploy story" — the consuming half of the line
+// above): `aart server --bundle <dir>` / `aart worker --bundle <dir>`
+// (@aart/cli's commands/process.ts) call `hydrateBundleFromDisk` directly;
+// `readBundleFromDisk`/`hydrateBundle`/`verifyBundleHash` are exposed
+// separately for callers that want the read/hydrate steps independently
+// (tests, or a future caller that already has a `Bundle` in memory). ---
+export { readBundleFromDisk, hydrateBundle, hydrateBundleFromDisk, verifyBundleHash, type HydrateBundleResult } from "./bundle/load.js";
 
 // --- config ---
 export * from "./config.js";
