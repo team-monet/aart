@@ -1,0 +1,36 @@
+# Mirrors .gitignore's own list (node_modules/dist are host-platform build
+# output — copying them into the build context would ship macOS/host
+# binaries into a Linux image, exactly the isolated-vm/native-addon
+# mismatch this deploy kit exists to get right; the image rebuilds
+# everything for real inside the container instead, see Dockerfile).
+node_modules
+**/node_modules
+dist
+**/dist
+*.tsbuildinfo
+**/*.tsbuildinfo
+*.tgz
+**/*.tgz
+.aart
+**/.aart
+coverage
+**/coverage
+.DS_Store
+**/.DS_Store
+*.log
+**/*.log
+.env
+**/.env
+.env.*
+**/.env.*
+!.env.example
+!**/.env.example
+
+# Local git metadata and editor/agent state — never needed inside the image.
+.git
+.github
+
+# This deploy kit's own local scratch (docker build output, downloaded
+# browser caches if anyone runs playwright install outside a container) —
+# not part of the source the image needs to build from.
+deploy/.local
