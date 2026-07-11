@@ -19,9 +19,17 @@ import type { TriggerBinding } from "./types.js";
  * skipped, not an error — those four adapter types don't require a
  * `TriggerBinding` to exist ahead of time; a caller invoking them supplies
  * `workflowId` directly.
+ *
+ * `filter.environmentId` (AMENDMENTS.md A45) restricts the underlying
+ * `Deployment` read to one `Environment` — `DeploymentStore.list` already
+ * accepts this filter natively (both adapters), so this is a pass-through,
+ * not new filtering logic. Omitted (the default, unchanged from before this
+ * filter existed): every deployment across every environment, matching
+ * `aart server`'s documented dev-convenience default when no `--environment`
+ * is given.
  */
-export async function loadTriggerBindingsFromDeployments(store: AartStore): Promise<TriggerBinding[]> {
-  const deployments = await store.deployments.list();
+export async function loadTriggerBindingsFromDeployments(store: AartStore, filter?: { environmentId?: string }): Promise<TriggerBinding[]> {
+  const deployments = await store.deployments.list({ environmentId: filter?.environmentId });
   const bindings: TriggerBinding[] = [];
   for (const deployment of deployments) {
     const binding = deploymentToBinding(deployment);

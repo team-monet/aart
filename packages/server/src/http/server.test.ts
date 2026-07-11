@@ -101,6 +101,65 @@ describe("webhook ingress (architecture §6.1/§15)", () => {
   });
 });
 
+describe("--environment scoping (AMENDMENTS.md A45) — config.environmentId restricts which deployments' trigger bindings activate", () => {
+  it("two envs, two deployments, scoped server activates exactly one", async () => {
+    fx = await createTestFixture();
+    await fx.store.deployments.put({
+      id: "binding_env_a",
+      workflowId: "wf_scoped",
+      workflowVersion: "1",
+      environmentId: "env_a",
+      triggerConfig: { type: "webhook", webhookPath: "/webhooks/binding_env_a" },
+      createdAt: fx.clock.nowIso(),
+    });
+    await fx.store.deployments.put({
+      id: "binding_env_b",
+      workflowId: "wf_scoped",
+      workflowVersion: "1",
+      environmentId: "env_b",
+      triggerConfig: { type: "webhook", webhookPath: "/webhooks/binding_env_b" },
+      createdAt: fx.clock.nowIso(),
+    });
+    // No secretResolver — these bindings have no webhookHmacSecretRef, so
+    // HMAC verification is skipped (secret ?? "" against no signature
+    // header both resolve falsy the same way the unscoped tests above do);
+    // this test isolates environment scoping specifically, not HMAC.
+    handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false, environmentId: "env_a" });
+
+    const resA = await fetch(`http://localhost:${handle.port}/webhooks/binding_env_a`, { method: "POST", body: "{}" });
+    expect(resA.status, "env_a's own binding is active").not.toBe(404);
+
+    const resB = await fetch(`http://localhost:${handle.port}/webhooks/binding_env_b`, { method: "POST", body: "{}" });
+    expect(resB.status, "env_b's binding is invisible to a server scoped to env_a").toBe(404);
+  });
+
+  it("unset environmentId activates every deployment across every environment (documented dev-convenience default)", async () => {
+    fx = await createTestFixture();
+    await fx.store.deployments.put({
+      id: "binding_all_a",
+      workflowId: "wf_scoped",
+      workflowVersion: "1",
+      environmentId: "env_a",
+      triggerConfig: { type: "webhook", webhookPath: "/webhooks/binding_all_a" },
+      createdAt: fx.clock.nowIso(),
+    });
+    await fx.store.deployments.put({
+      id: "binding_all_b",
+      workflowId: "wf_scoped",
+      workflowVersion: "1",
+      environmentId: "env_b",
+      triggerConfig: { type: "webhook", webhookPath: "/webhooks/binding_all_b" },
+      createdAt: fx.clock.nowIso(),
+    });
+    handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false });
+
+    for (const bindingId of ["binding_all_a", "binding_all_b"]) {
+      const res = await fetch(`http://localhost:${handle.port}/webhooks/${bindingId}`, { method: "POST", body: "{}" });
+      expect(res.status, `${bindingId} active with no --environment scoping`).not.toBe(404);
+    }
+  });
+});
+
 describe("github webhook ingress + PR-merge-as-approval (architecture §7.2/§6.1)", () => {
   it("a non-merge github event runs through normal trigger intake", async () => {
     fx = await createTestFixture();

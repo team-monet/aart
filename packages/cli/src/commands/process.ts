@@ -61,7 +61,13 @@ export async function workerCommand(tokens: Tokenized, cli: CliContext, options:
 export async function serverCommand(tokens: Tokenized, cli: CliContext, options: ProcessCommandOptions = {}): Promise<HandlerResult> {
   const bundle = await maybeHydrateBundle(tokens, cli);
   const portFlag = flagString(tokens.flags, "port");
-  const handle = await cli.serverPort.startServer({ port: portFlag ? Number(portFlag) : undefined });
+  // --environment / AART_ENVIRONMENT (AMENDMENTS.md A45): flag wins over
+  // env var, matching --root's own documented flag > env > default
+  // precedence elsewhere in this file. Omitted entirely (both flag and env
+  // unset) -> `environment: undefined`, ServerPort's own documented "every
+  // deployment across every environment" default.
+  const environment = flagString(tokens.flags, "environment") ?? process.env.AART_ENVIRONMENT;
+  const handle = await cli.serverPort.startServer({ port: portFlag ? Number(portFlag) : undefined, environment });
   if (options.blocking ?? true) {
     await waitForShutdownSignal();
   }

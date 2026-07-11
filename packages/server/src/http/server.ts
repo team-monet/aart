@@ -52,7 +52,7 @@ function outcomeStatus(outcome: IntakeOutcome | { kind: "pr_merge_approval"; app
 }
 
 async function findBinding(config: ServerConfig, bindingId: string): Promise<TriggerBinding | undefined> {
-  const bindings = await loadTriggerBindingsFromDeployments(config.store);
+  const bindings = await loadTriggerBindingsFromDeployments(config.store, { environmentId: config.environmentId });
   return bindings.find((b) => b.id === bindingId);
 }
 
@@ -220,7 +220,7 @@ export async function startServer(config: ServerConfig): Promise<ServerHandle> {
   if (config.runTicker !== false) {
     ticker = createTicker(
       { store: config.store, engine: config.engine, clock, logger: logger.child({ component: "ticker" }) },
-      { tickIntervalMs: config.tickIntervalMs, backpressure: config, poisonGuard: config },
+      { tickIntervalMs: config.tickIntervalMs, backpressure: config, poisonGuard: config, environmentId: config.environmentId },
     );
     ticker.start();
   }

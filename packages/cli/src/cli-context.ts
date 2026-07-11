@@ -19,6 +19,7 @@
 // on createAartContext explains why: real browser/LLM dispatch has no place
 // in a fast unit test). Pass `real: false` to get it — see test-utils.ts's
 // createTestCli, the one call site that does.
+import path from "node:path";
 import {
   createAartContext,
   createRealAartContextWithEngine,
@@ -61,6 +62,20 @@ export function createCliContext(options: CreateCliContextOptions = {}): CliCont
       "createCliContext: the real ServerPort needs a real Engine instance; do not override both options.engine and options.evidence together, or pass { real: false } for the stub composition instead.",
     );
   }
-  const serverPort = createRealServerPort(context.store, engine);
+  // AMENDMENTS.md A45: createRealServerPort's secretResolver (secrets.ts)
+  // needs the resolved `.aart` store root for its secrets.json fallback —
+  // recomputed here with the exact same default `createAartContext`/
+  // `createRealAartContextWithEngine` themselves use (context.ts:
+  // `options.root ?? path.join(process.cwd(), ".aart")`) rather than having
+  // either function hand it back out, since `options.store` (a caller-
+  // supplied store override, e.g. `--store sqlite`'s pre-built store — see
+  // cli.ts's `run()`) means `options.root` is sometimes not even what the
+  // ACTIVE store is rooted at; this recomputation stays correct either way
+  // because callers that override `options.store` for a non-default root
+  // (sqlite at a custom path) still pass the matching `options.root`
+  // alongside it (cli.ts's `resolveAartOptions`), so this line and that
+  // store construction always agree on the same root.
+  const resolvedRoot = options.root ?? path.join(process.cwd(), ".aart");
+  const serverPort = createRealServerPort(context.store, engine, resolvedRoot);
   return { aart: context, serverPort };
 }

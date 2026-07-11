@@ -69,6 +69,12 @@ describe("createCliContext", () => {
     ).rejects.toThrow(/environment "does-not-exist" not found/);
   });
 
+  it("real ServerPort.startServer rejects an --environment name that doesn't exist (AMENDMENTS.md A45 — same name -> Deployment bridge as produceBundle above)", async () => {
+    const root = await freshRoot();
+    const cli = createCliContext({ root, trustMode: "governed" });
+    await expect(cli.serverPort.startServer({ port: 0, environment: "does-not-exist" })).rejects.toThrow(/environment "does-not-exist" not found/);
+  });
+
   it("real ServerPort.produceBundle succeeds with no --environment (bare closure bundle) and writes the real bundle layout", async () => {
     const root = await freshRoot();
     const cli = createCliContext({ root, trustMode: "governed" });

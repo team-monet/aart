@@ -8,7 +8,11 @@
 //     Engine instance cli-context.ts's createRealAartContextWithEngine call
 //     already built for this same process's AartContext — one Engine, one
 //     store, shared by every port/command in one CLI invocation, never two
-//     divergent ones.
+//     divergent ones. AMENDMENTS.md A45: startServer now also wires a real
+//     secretResolver (secrets.ts — the piece A44 found missing, so webhook/
+//     github/slack HMAC verification can actually succeed) and resolves
+//     `config.environment`'s human-readable name into the `environmentId`
+//     ServerConfig scopes trigger-binding activation by.
 //   - produceBundle <- @aart/server's real produceBundle (the actual
 //     transitive-closure bundle production, packages/server/src/bundle/
 //     bundle.ts), bridged: ServerPort.produceBundle's `environment?: string`
@@ -46,6 +50,7 @@ import {
   type Bundle,
 } from "@aart/server";
 import { writeBundleFilesToDisk } from "./bundle-files.js";
+import { createRealSecretResolver } from "./secrets.js";
 
 function sanitizeFilename(key: string): string {
   return key.replace(/[/\\:*?"<>|]/g, "_");
@@ -83,12 +88,34 @@ async function resolveDeployment(store: AartStore, workflowId: string, workflowV
   return deployments.find((d) => d.workflowVersion === workflowVersion);
 }
 
-export function createRealServerPort(store: AartStore, engine: Engine): ServerPort {
+/** `aart server --environment <name>`'s bridge (AMENDMENTS.md A45): a human names an Environment, `ServerConfig.environmentId` (config.ts) wants its id. Same "throw only when the NAME itself doesn't exist" discipline as `resolveDeployment` above, for the same reason — an operator typo in `--environment` should fail loudly at startup, not silently fall back to "every environment" (this function's caller, `startServer` below, only calls this when `config.environment` is actually given; omitting the flag entirely is the documented "all environments" default and never reaches here). */
+async function resolveEnvironmentId(store: AartStore, environmentName: string): Promise<string> {
+  const environment = await store.environments.getByName(environmentName);
+  if (!environment) {
+    throw new Error(`aart server: environment "${environmentName}" not found. Register it first, e.g. "aart deploy <workflowId> --target ${environmentName}".`);
+  }
+  return environment.id;
+}
+
+/**
+ * `store`/`engine` mirror `createRealEngineBoundary`'s own inputs (this
+ * process's shared Engine — see this file's module doc comment). `root`
+ * (AMENDMENTS.md A45) is the resolved `.aart` store root
+ * (`CreateAartContextOptions.root`, already resolved once by
+ * `cli-context.ts` before this function is called) — needed here so the
+ * real `secretResolver`'s store-adjacent `secrets.json` fallback
+ * (secrets.ts) reads from the SAME root this CLI invocation's store is
+ * actually rooted at, not an independently-recomputed (and potentially
+ * divergent, e.g. under `--root`) default.
+ */
+export function createRealServerPort(store: AartStore, engine: Engine, root: string): ServerPort {
   const boundary = createRealEngineBoundary(store, engine);
+  const secretResolver = createRealSecretResolver(root);
 
   return {
     async startServer(config): Promise<ServerHandleLike> {
-      return startRealServer({ store, engine: boundary, port: config.port });
+      const environmentId = config.environment ? await resolveEnvironmentId(store, config.environment) : undefined;
+      return startRealServer({ store, engine: boundary, port: config.port, secretResolver, environmentId });
     },
 
     async startWorker(options): Promise<WorkerHandleLike> {

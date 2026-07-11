@@ -76,6 +76,8 @@ export interface ServerConfig extends SharedRuntimeConfig, TickerConfig, PoisonG
   runTicker?: boolean;
   /** architecture §7.2's PR-merge-as-approval ingestion — see triggers/adapters.ts's `ingestGithubPrMergeApproval` doc comment for why this mapping is a documented integration point rather than a guessed convention. Omit to leave PR-merge ingestion a no-op. */
   resolveGithubApprovalTarget?: (payload: unknown) => { runId: string; stepId: string } | undefined;
+  /** AMENDMENTS.md A45 — restricts which `Deployment`-sourced trigger bindings (webhook/github/slack/poll ingress, both the HTTP layer and the ticker's poll loop) this server instance activates, by `Environment` id. Threaded straight into `loadTriggerBindingsFromDeployments`'s own `filter.environmentId` (triggers/registry.ts) everywhere this config loads bindings. Unset (the default) activates every deployment's trigger across every environment — a documented dev convenience, not a production isolation guarantee. `@aart/cli`'s `--environment <name>` (real-server-port.ts) resolves the human-readable name to this id before constructing this config. */
+  environmentId?: string;
 }
 
 export const DEFAULT_TICK_INTERVAL_MS = 5000;

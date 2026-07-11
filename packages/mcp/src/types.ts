@@ -251,7 +251,8 @@ export interface BundleLike {
 export type ClearRunFlagResult = { kind: "cleared"; run: RunRecord } | { kind: "not_found" } | { kind: "no_flag" };
 
 export interface ServerPort {
-  startServer(config: { port?: number }): Promise<ServerHandleLike>;
+  /** `environment` (AMENDMENTS.md A45): an `Environment` NAME (mirroring `produceBundle`'s own `environment?: string` convention below) — scopes which `Deployment`-sourced trigger bindings this server instance activates. Omitted (the default) activates every deployment across every environment, a documented dev convenience. The real port (`@aart/cli`'s `createRealServerPort`) resolves the name to an id and throws if it doesn't exist; the stub port ignores it (matching its existing `produceBundle`'s own documented "never looks at `environment`" behavior — see `cli-context.test.ts`). */
+  startServer(config: { port?: number; environment?: string }): Promise<ServerHandleLike>;
   startWorker(options: { workerId?: string }): Promise<WorkerHandleLike>;
   produceBundle(params: { workflowId: string; workflowVersion: string; environment?: string }): Promise<BundleLike>;
   writeBundleToDisk(bundle: BundleLike, outDir: string): Promise<void>;

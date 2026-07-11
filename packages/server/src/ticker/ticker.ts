@@ -34,6 +34,8 @@ export interface TickerOptions {
   missedRunLookbackMs?: number;
   /** Injectable fetch for poll triggers — defaults to the global `fetch`. */
   fetchImpl?: (url: string) => Promise<{ status: number; json: () => Promise<unknown> }>;
+  /** AMENDMENTS.md A45 — same `Environment`-id scoping as `ServerConfig.environmentId` (config.ts), applied to poll-trigger bindings this ticker loads (`checkPollTriggers` below). `startServer` passes its own `config.environmentId` straight through so `--environment` scopes poll triggers consistently with webhook/github/slack ingress, not just the HTTP layer. Schedule (cron) firing is deliberately NOT scoped by this field — `Schedule` records (architecture §5.3) have no `environmentId` of their own to filter by; only `Deployment`-sourced bindings (the 12 non-schedule trigger types) are environment-scopable in this data model. */
+  environmentId?: string;
 }
 
 export interface TickResult {
@@ -141,7 +143,7 @@ export function createTicker(deps: TickerDeps, options: TickerOptions = {}): Tic
   }
 
   async function checkPollTriggers(now: Date): Promise<number> {
-    const bindings = (await loadTriggerBindingsFromDeployments(deps.store)).filter((b) => b.type === "poll" && b.pollUrl);
+    const bindings = (await loadTriggerBindingsFromDeployments(deps.store, { environmentId: options.environmentId })).filter((b) => b.type === "poll" && b.pollUrl);
     let count = 0;
     for (const binding of bindings) {
       const interval = binding.pollIntervalMs ?? 60_000;
