@@ -57,18 +57,27 @@ async function main() {
     external: EXTERNAL,
     sourcemap: true,
     logLevel: "info",
-    // deploy/serve-dashboard.mjs's bare "@aart/store"/"@aart/dashboard"
-    // imports don't resolve from THIS file's own location (deploy/ has no
-    // node_modules of its own) the way they would from inside e.g.
-    // packages/dashboard/ (a real dependent). Pointing esbuild's resolver
-    // straight at each package's already-built dist entry point sidesteps
-    // needing deploy/ to be "a real pnpm workspace member" just to build
-    // this one script — their OWN internal imports still resolve normally
-    // from THEIR real location once esbuild follows the alias.
+    // deploy/serve-dashboard.mjs's bare "@aart/store"/"@aart/dashboard"/
+    // "@aart/governance" imports don't resolve from THIS file's own location
+    // (deploy/ has no node_modules of its own) the way they would from
+    // inside e.g. packages/dashboard/ (a real dependent). Pointing esbuild's
+    // resolver straight at each package's already-built dist entry point
+    // sidesteps needing deploy/ to be "a real pnpm workspace member" just to
+    // build this one script — their OWN internal imports still resolve
+    // normally from THEIR real location once esbuild follows the alias.
+    // Only packages serve-dashboard.mjs imports BARE (directly, as a
+    // top-level `import` in that file) need an entry here — @aart/governance
+    // was already reachable, unaliased, as one of @aart/dashboard's own
+    // internal dependencies (packages/dashboard/node_modules/@aart/
+    // governance, real pnpm workspace linking) before A51 (AMENDMENTS.md); it
+    // needs its OWN alias entry now for the identical reason @aart/store/
+    // @aart/dashboard already did, only once serve-dashboard.mjs itself, not
+    // just one of its dependencies, started referencing it by bare specifier.
     alias: {
       "@aart/store": path.join(repoRoot, "packages/store/dist/index.js"),
       "@aart/store/sqlite": path.join(repoRoot, "packages/store/dist/adapters/sqlite/index.js"),
       "@aart/dashboard": path.join(repoRoot, "packages/dashboard/dist/index.js"),
+      "@aart/governance": path.join(repoRoot, "packages/governance/dist/index.js"),
     },
   });
   chmodSync(OUT_FILE, 0o755);

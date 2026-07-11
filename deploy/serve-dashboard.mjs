@@ -20,25 +20,48 @@
 // (packages/dashboard is another concurrent session's ownership).
 //
 // Uses createStubDeps — @aart/dashboard's own DI container, the SAME one
-// TEST-DRIVE.md's manual walkthrough uses. As of AMENDMENTS.md A47, every
-// dashboard READ and WRITE route (trigger a run, approve/promote/block a
-// workflow version, decide an approval task, corrections, evals, flag-
-// clear) goes through the real @aart/server HTTP API this script points
-// `createHttpApiClient(apiUrl)` at, not a dashboard-local reimplementation
-// — `deps`/`createStubDeps` only still matters here for the two narrower
-// gaps documented in TEST-DRIVE.md's "What doesn't work yet" (resuming a
-// run's own wait step, and rendering the Run Detail page's HTML report)
-// plus the risk-diff computation (deps.semanticRiskDiff, already real —
-// see capability-catalog.ts). This script does not attempt to close either
-// remaining gap; it only packages what already exists. Also worth flagging
-// here (not this script's own gap to close, but real): `createStubDeps`'s
-// `redact` defaults to `identityRedact` (a documented no-op stand-in, see
-// stub-deps.ts) — this launcher never overrides it with @aart/governance's
-// real `redactRecord`, so server.ts's redaction chokepoint (AMENDMENTS.md
-// B1) routes through a function that doesn't actually scrub anything in
-// THIS specific launcher, unlike a composition root that wires the real
-// one in. See DEPLOY.md's "Ops limits" section for the fuller operational
-// read.
+// TEST-DRIVE.md's manual walkthrough uses, with ONE field overridden below:
+// `redact` is rebound from createStubDeps's own `identityRedact` default (a
+// no-op stand-in stub-deps.ts itself calls "never-invoked-in-production")
+// to @aart/governance's real `redactRecord` (AMENDMENTS.md A51, closing the
+// gap A50 flagged here) — the same bare reference every other real
+// composition root in this codebase binds with zero adapter
+// (packages/mcp/src/real-context.ts's createRealEngine/
+// createRealGovernancePort both do `redact: redactRecord` directly, since
+// redactRecord already matches DashboardDeps.redact's RedactFn signature
+// exactly). server.ts's redaction chokepoint (`/api/runs`, `/api/runs/:id`,
+// `/api/artifacts`) now has the real algorithm wired into THIS launcher too,
+// not a stand-in that never scrubs anything.
+//
+// Worth being precise about what this fix does and doesn't change:
+// server.ts's own chokepoint (`redactRun`) always calls `deps.redact(run,
+// new Set())` — an EMPTY resolved-secrets set, by that file's own explicit
+// design (defense-in-depth over a RunRecord the engine already redacted at
+// write time, not the primary scrub — see server.ts's `redactRun` doc
+// comment). `redactRecord` only ever replaces values it's TOLD to look for
+// via that second argument; fed an empty set, same as every existing call
+// site in this package feeds it, it returns the record unchanged — same
+// observable output as `identityRedact` for those specific calls, verified
+// directly (AMENDMENTS.md A51), not assumed. Wiring in the real function
+// here is still the right fix regardless (a production composition root
+// carrying a stub documented as "never-invoked-in-production" is a real gap
+// independent of what any ONE call site happens to pass today, and closes
+// it for any future caller that DOES thread a real resolved-secrets set
+// through) — just don't expect a value planted only in a run's trace to
+// visibly disappear from these routes as a result of this specific change;
+// see DEPLOY.md's "Ops limits" section for the fuller operational read.
+//
+// As of AMENDMENTS.md A47, every dashboard READ and WRITE route (trigger a
+// run, approve/promote/block a workflow version, decide an approval task,
+// corrections, evals, flag-clear) goes through the real @aart/server HTTP
+// API this script points `createHttpApiClient(apiUrl)` at, not a
+// dashboard-local reimplementation — `deps`/`createStubDeps` only still
+// matters here for the two narrower gaps documented in TEST-DRIVE.md's
+// "What doesn't work yet" (resuming a run's own wait step, and rendering
+// the Run Detail page's HTML report) plus the risk-diff computation
+// (deps.semanticRiskDiff, already real — see capability-catalog.ts). This
+// script does not attempt to close either remaining gap; it only packages
+// what already exists.
 // Plain bare specifiers — this SOURCE file is never run directly by node
 // inside the image; deploy/build-dashboard-launcher.mjs esbuild-bundles it
 // (same philosophy as packages/cli/scripts/build-publish.mjs: inline the
@@ -52,7 +75,12 @@
 //      dependencies are linked under THAT package's own node_modules —
 //      e.g. /app/packages/dashboard/node_modules/@aart/* — never hoisted
 //      to the workspace root) — a bare-specifier import from an unbundled
-//      copy of this file fails to resolve (ERR_MODULE_NOT_FOUND).
+//      copy of this file fails to resolve (ERR_MODULE_NOT_FOUND). This is
+//      why build-dashboard-launcher.mjs's own `alias` map has to name every
+//      package THIS file imports directly (@aart/store, @aart/dashboard,
+//      and — as of A51 — @aart/governance) rather than relying on plain
+//      node resolution the way a file with a real node_modules beside it
+//      could; see that script's own header comment.
 //   2. @aart/store's dist/index.js barrel re-exports its conformance-suite
 //      helper (conformance.js), which imports `vitest` — a devDependency,
 //      correctly absent from this image's production-only node_modules.
@@ -65,6 +93,7 @@
 import { createFsStore } from "@aart/store";
 import { createSqliteStore } from "@aart/store/sqlite";
 import { startDashboard, createHttpApiClient, createStubDeps } from "@aart/dashboard";
+import { redactRecord } from "@aart/governance";
 
 const root = process.env.AART_ROOT ?? "/data";
 const storeKind = process.env.AART_STORE ?? "fs";
@@ -89,7 +118,10 @@ const store = storeKind === "sqlite" ? await createSqliteStore(`${root}/aart.db`
 const handle = await startDashboard({
   store,
   api: createHttpApiClient(apiUrl),
-  deps: createStubDeps(store),
+  // createStubDeps(store)'s own default `redact` (identityRedact) overridden
+  // with @aart/governance's real redactRecord — see this file's own header
+  // comment (AMENDMENTS.md A51) for why, and what it does/doesn't change.
+  deps: { ...createStubDeps(store), redact: redactRecord },
   workerUrls,
   ...(port !== undefined ? { port } : {}),
 });

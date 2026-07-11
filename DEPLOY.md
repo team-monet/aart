@@ -430,16 +430,29 @@ Stated plainly, matching this repo's own "What doesn't work yet" convention
   report are still local mirrors, not yet wired to the real engine/evidence
   packages — use the CLI or MCP surface for those until that wiring lands.
   Separately: this deploy kit's own `dashboard` launcher
-  (`deploy/serve-dashboard.mjs`) constructs its `DashboardDeps` via
-  `createStubDeps(store)` with no override, so the `redact` field is
-  `identityRedact` — a documented no-op stand-in (`stub-deps.ts`), not
-  `@aart/governance`'s real `redactRecord`. The dashboard's redaction
-  chokepoint (every run-bearing API response routes through `deps.redact`
-  before serialization) is real and exercised, but in THIS launcher
-  specifically it currently has nothing wired in to actually scrub with —
-  flagged here, not fixed, since wiring in the real redactor is a
-  composition-root change to `deploy/serve-dashboard.mjs`, out of this
-  entry's own scope.
+  (`deploy/serve-dashboard.mjs`) now overrides `createStubDeps(store)`'s
+  `redact` field with `@aart/governance`'s real `redactRecord` (AMENDMENTS.md
+  A51 closes the gap this note used to flag) — the same bare reference
+  every other real composition root in this codebase binds, with zero
+  adapter needed. The dashboard's redaction chokepoint (every run-bearing
+  API response routes through `deps.redact` before serialization) now has
+  the real algorithm wired into THIS launcher too, not a stand-in
+  documented as never-invoked-in-production.
+  One nuance worth being explicit about, verified directly rather than
+  assumed: `server.ts`'s own chokepoint always calls `deps.redact(run, new
+  Set())` — an EMPTY resolved-secrets set, by that file's own explicit
+  design (defense-in-depth over a `RunRecord` the engine already redacted
+  at write time, not the primary scrub). `redactRecord` only replaces
+  values it's told to look for via that second argument, so fed an empty
+  set — every existing call site's own choice, unrelated to this fix — it
+  returns the record unchanged, same observable output `identityRedact`
+  always gave. Wiring in the real function was still the right fix (a
+  production composition root has no business carrying a stub whose own
+  doc comment calls it "never-invoked-in-production," and this closes the
+  gap for any future caller that DOES thread a real resolved-secrets set
+  through), but don't expect a value planted only in a run's trace to
+  visibly disappear from `/api/runs`, `/api/runs/:id`, or `/api/artifacts`
+  as a direct result of this specific change.
 - **Pack-delivered blocks aren't in the real catalog yet.** Only the 56
   core built-ins (`@aart/blocks-core` + `@aart/llm`) are dispatchable on a
   fresh store with no packs installed — documented gap, not this deploy
