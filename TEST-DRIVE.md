@@ -270,7 +270,49 @@ Honest note on the dashboard specifically: its write actions (`DashboardDeps`) a
 
 ---
 
-## (f) What to try next
+## (f) Deploying a workflow to a real server — the bundle-based path
+
+Parts (b)–(e) all ran on ONE machine. This part is the actual deploy story: author/test on your laptop, ship just the finished artifact to wherever `aart server`/`aart worker` actually run. As of this session (`AMENDMENTS.md` A44), that artifact is a real, content-addressed **bundle** — `aart bundle` already produced one (part (f)/(g) below); this session built the other half: something that actually reads one back in.
+
+**On your laptop** (or wherever you're authoring/testing):
+
+```bash
+cd ~/aart-test-drive
+aart bundle smoke-data-pipeline --out ./prod-bundle
+```
+
+(`--environment <name>` also works here if you've deployed to a real `Environment` first — part (g)'s note below — and pins the bundle's `triggers.json` to that deployment's real trigger config. Omitted, as above, it's a bare workflow-closure bundle: every definition, no live trigger — still exactly what a fresh server needs to start executing runs you kick off with `aart run`/`aart_run_workflow`.)
+
+Copy **just the bundle directory** to wherever the server will run — it's small, self-contained, and every byte inside it is covered by its own `manifest.json`'s `bundleHash`:
+
+```bash
+scp -r ./prod-bundle you@your-server:/path/to/prod-bundle
+# or: rsync -a ./prod-bundle/ you@your-server:/path/to/prod-bundle/
+# or: zip/tar it and copy however you'd copy any small directory
+```
+
+**On the server:**
+
+```bash
+aart server --port 8080 --bundle /path/to/prod-bundle
+aart worker --bundle /path/to/prod-bundle   # second process, same store
+```
+
+Both hydrate the bundle's workflow/pack/prompt/schema definitions — plus its `triggers.json`, sourced as the deployment's real trigger config — into their own `.aart` store **before** starting. Verified this session against two independent, isolated-`npm`-installed copies of the CLI (`AMENDMENTS.md` A44's own methodology, not simulated): a fresh server sees exactly what the bundle carries and nothing else (`GET /workflows`, `GET /deployments`); re-running `--bundle` against an already-hydrated store is a safe no-op (`"bundle": {"kind": "already_hydrated", ...}` in the command's own result); a *different* bundle produced for the same workflow@version is refused outright (`ok:false`, before the port ever binds) rather than silently overwriting whatever's already there; `aart run <id>` against the hydrated store genuinely dispatches and completes, visible on `GET /runs` from either process; both stop cleanly on `Ctrl-C`/`SIGTERM`, same as running locally.
+
+**What doesn't move with a bundle:** run history, waits, signals, the job queue, artifacts — a bundle seeds a store's *definitions*, it doesn't replace a store (`packages/server/src/bundle/load.ts`'s own header comment). If you need to move a server's **entire** state to a new host — every past run, every artifact, a real migration rather than a fresh deploy — `rsync` the whole `.aart` directory instead:
+
+```bash
+rsync -a ~/aart-test-drive/.aart/ you@your-server:/path/to/.aart/
+```
+
+That's the everything-including-history alternative — slower, bigger, and it carries your local dev runs along with it, which a bundle deliberately does not.
+
+**Not yet built** (`AMENDMENTS.md` A44 has the full story, including why): `aart server --environment <name>` to scope which deployment's triggers actually activate at runtime (today, every deployment's trigger fires, same as running locally — documented dev-convenience behavior, not yet an opt-in production one); a `--store sqlite` flag for safe concurrent multi-process access (today's fs store is fine for one lightly-used process at a time — the sqlite adapter itself is done and its own conformance suite is green, it's just not reachable from the CLI yet); a `--root <dir>` flag so the store doesn't have to live under wherever you happen to run the command from. All three are scoped, unblocked, and ready to build on top of what's here — this session shipped the bundle half only, per an explicit founder scope decision recorded in `AMENDMENTS.md`.
+
+---
+
+## (g) What to try next
 
 The real payoff of the MCP wiring in part (d) is having your coding agent **author** a workflow, not just run one you hand-wrote. With `aart mcp` connected in Claude Code:
 
@@ -280,7 +322,7 @@ That's the exact loop `AGENTS.md` (part (d)) describes: `aart_find_blocks` → d
 
 Other real things worth poking at:
 - **`aart_verify`** — the single-call "prove this URL/page actually works" tool (loads it, checks it, screenshots it if it's a browser target). No registration needed first.
-- **`aart bundle <id> --environment staging`** — produces a real, content-addressed deployment bundle (`manifest.json` + `definitions/` + `packs/` + `registry/` + `triggers.json`) once you've deployed to an environment (part (d)'s `aart deploy` step). An unknown `--environment` name fails with a clear error rather than silently producing a broken bundle.
+- **`aart bundle <id> --environment staging`** — produces a real, content-addressed deployment bundle (`manifest.json` + `definitions/` + `packs/` + `registry/` + `triggers.json`) once you've deployed to an environment (part (d)'s `aart deploy` step) — see part (f) above for what to do with it once you have it.
 - **`aart flag list`** / **`aart flag clear <runId> --by <name>`** — the one CLI/dashboard-only action deliberately not exposed over MCP (architecture §13.3: un-flagging a poison/reclaim-exhausted run stays a human judgment call).
 
 ---
@@ -291,6 +333,9 @@ Stated plainly, not glossed over:
 
 - **`llm.*` blocks** (`llm.extract`/`llm.classify`/`llm.judge`) are wired for real — the real Anthropic provider adapter, real schema validation, real retry logic — but **untested end-to-end in this session**: no Anthropic API key is available in the environment this was built in. Set `ANTHROPIC_API_KEY` and they should work; this wasn't verified here.
 - **The dashboard's write actions** are still a documented partial stub (see part (e)'s note) — read pages are real, some write actions (approve/promote/risk-diff) are real, others (trigger a run, resume an approval, render a report) are still local mirrors pending their own composition-root wiring pass. Not this session's scope.
+- **`aart server`'s real trigger wiring never resolves webhook/github/slack HMAC secrets** (`AMENDMENTS.md` A44) — those three trigger types are unconditionally signature-checked (by design, architecture §6.1/§15) but the CLI never wires a `secretResolver`, so none of them can currently fire successfully through a real running `aart server`, independent of the bundle work in part (f). Found while building part (f)'s own proof; worked around there by using `aart run` directly.
+- **The CLI alone can't get a workflow to a deployable (`approved`) state** (`AMENDMENTS.md` A44) — `aart approve` exists, but nothing in the CLI's own command surface creates the approval task it decides on (that's MCP-only today, `aart_request_approval`), so `aart deploy` cannot currently be made to succeed from the CLI alone in any trust mode. Part (f)'s own bundle-deploy proof works around this by bundling a bare (undeployed) workflow closure.
+- **`aart server --environment <name>` / SQLite export + `--store` / `--root`** — scoped, unblocked, not yet built; see part (f) above and `AMENDMENTS.md` A44.
 - **No `LICENSE` file** — deliberately deferred; `packages/cli/README.md`'s existing "no license chosen, treat as all-rights-reserved" flag is unchanged.
 - **Pack-delivered blocks** aren't in the real block catalog yet (documented gap, `real-context.ts`) — only the 56 core built-ins (`@aart/blocks-core` + `@aart/llm`) are dispatchable today, on a fresh store with no packs installed.
 - **`isolated-vm`'s `engines.node: ">=26.0.0"`** vs. this machine's v22.22.2 (part (a)'s install warning) — pre-existing, not new, not addressed here.
