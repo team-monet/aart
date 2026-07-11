@@ -103,6 +103,33 @@ export async function driveClockUntil(clock: ReturnType<typeof createFakeClock>,
   }
 }
 
+/**
+ * Polls `condition()` on a short REAL interval until it's true, or throws
+ * once `timeoutMs` of real wall-clock time has elapsed. AMENDMENTS.md A45:
+ * `flushAsync(ms=20)`'s single fixed sleep, used as a proxy for "has the
+ * fake engine's fire-and-forget async work (a store write triggered from
+ * inside a fake-clock-fired callback) landed yet", was observed to fail
+ * `worker.test.ts`'s poison-flag test ~1/5 full-suite runs under CPU
+ * contention — 20ms is sometimes not enough real time for that write to
+ * land, and a LONGER fixed sleep is still just a probabilistically-safer
+ * guess, not a fix (architecture the task explicitly called for: "poll-
+ * until-condition with timeout, not a longer sleep"). This is that: the
+ * real condition is checked directly, on a tight interval, so the test
+ * proceeds the instant it's actually true and only ever fails when the
+ * condition genuinely never becomes true within a generous timeout — not
+ * when it becomes true one tick later than a fixed sleep guessed.
+ */
+export async function waitFor(condition: () => boolean | Promise<boolean>, options: { timeoutMs?: number; intervalMs?: number } = {}): Promise<void> {
+  const timeoutMs = options.timeoutMs ?? 2000;
+  const intervalMs = options.intervalMs ?? 5;
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (await condition()) return;
+    if (Date.now() >= deadline) throw new Error(`waitFor: condition not met within ${timeoutMs}ms`);
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+}
+
 export async function createTestFixture(clock?: Clock): Promise<TestFixture> {
   const root = await fs.mkdtemp(join(tmpdir(), "aart-server-test-"));
   const store = createFsStore(root);

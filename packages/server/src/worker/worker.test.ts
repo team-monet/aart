@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { tryClaimNextRun } from "./claim.js";
 import { runReclaimSweep } from "./reclaim.js";
 import { startWorker, type WorkerHandle } from "./worker.js";
-import { createFakeClock, createTestFixture, driveClockUntil, flushAsync, type TestFixture } from "../test-helpers.js";
+import { createFakeClock, createTestFixture, driveClockUntil, flushAsync, waitFor, type TestFixture } from "../test-helpers.js";
 
 let fx: TestFixture | undefined;
 let workers: WorkerHandle[] = [];
@@ -133,7 +133,10 @@ describe("poison-run guard write path (architecture §6.2) — worker.ts is wher
 
     const worker = await startWorker({ store: fx.store, engine: failingEngine, clock, maxConsecutiveFailures: 3, installSignalHandler: false, healthPort: 0 });
     workers.push(worker);
-    await flushAsync();
+    // AMENDMENTS.md A45 (known pre-existing flake): a fixed flushAsync()
+    // sleep here raced the worker's own fire-and-forget claim-execute-flag
+    // pipeline under CPU contention. Poll the real condition instead.
+    await waitFor(async () => (await fx!.store.runs.get("run_third_failure"))?.flag?.kind === "poison");
 
     const finalRun = await fx.store.runs.get("run_third_failure");
     expect(finalRun?.status).toBe("failed");
