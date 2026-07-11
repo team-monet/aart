@@ -84,7 +84,22 @@ const EXTERNAL = [
   "zod",
 ];
 
-const builtins = new Set([...builtinModules, ...builtinModules.map((m) => `node:${m}`)]);
+// AMENDMENTS.md A45: `node:sqlite` (packages/store/src/adapters/sqlite/db.ts
+// — chosen specifically to avoid a native-addon dependency, see that file's
+// own header comment) is a genuine Node builtin, but it's still
+// EXPERIMENTAL on this workspace's Node floor (verified directly: `node
+// -e "require('node:module').builtinModules.includes('sqlite')"` -> false
+// on Node v22.22.2) — `node:module`'s own `builtinModules` list doesn't yet
+// carry it, so it isn't caught by the general `node:${m}` derivation below.
+// Without this, the cross-check three lines down would demand "sqlite" be
+// added to package.json "dependencies" — which would be actively WRONG
+// (there is no installable npm package by that name; a real `npm install`
+// of the published tarball would 404 trying to fetch it, reproducing
+// exactly the class of bug this whole script exists to prevent, A33).
+// Listed explicitly so a genuinely-missing real dependency still fails this
+// build the way it should, while this one correctly doesn't.
+const EXPERIMENTAL_BUILTINS_NOT_YET_IN_MODULE_BUILTINS = ["node:sqlite"];
+const builtins = new Set([...builtinModules, ...builtinModules.map((m) => `node:${m}`), ...EXPERIMENTAL_BUILTINS_NOT_YET_IN_MODULE_BUILTINS]);
 
 async function main() {
   const result = await esbuild.build({

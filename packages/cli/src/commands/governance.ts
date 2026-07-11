@@ -1,4 +1,5 @@
-// aart diff / aart correction add|list / aart promote / aart approve.
+// aart diff / aart correction add|list / aart promote / aart approve /
+// aart request-approval.
 //
 // `aart approve` (spec §33 does not literally list this command) is this
 // session's own deliberate, documented addition: spec §17.5's authority
@@ -9,11 +10,22 @@
 // anything this session builds. Calls the exact same `approveHandler`
 // aart_approve (MCP) calls — see packages/mcp/src/handlers/governance.ts's
 // own module doc comment for the full resolved-ambiguity note this shares.
+//
+// `aart request-approval` (AMENDMENTS.md A45): the CLI-side gap A44 found
+// and explicitly left open — `aart approve` could DECIDE on an existing
+// ApprovalTask but nothing in the CLI's own surface could CREATE one
+// (`aart_request_approval` was MCP-only), so `aart deploy` could never be
+// made to succeed from the CLI alone. Calls the exact same
+// `requestApprovalHandler` `aart_request_approval` (MCP) calls, same
+// three-clients-principle pattern as `approveCommand` above — matches its
+// `workflowId [--version]` shape to `promoteCommand`/`deployCommand`'s own
+// (defaults to that workflow's latest registered version when omitted).
 import {
   approveHandler,
   diffWorkflowHandler,
   promoteWorkflowHandler,
   recordCorrectionHandler,
+  requestApprovalHandler,
   wrapResult,
   type HandlerResult,
 } from "@aart/mcp";
@@ -54,6 +66,14 @@ export async function correctionCommand(tokens: Tokenized, cli: CliContext): Pro
     return { ok: true, corrections };
   }
   return { ok: false, error: 'Usage: aart correction add <runId> | aart correction list' };
+}
+
+export async function requestApprovalCommand(tokens: Tokenized, cli: CliContext): Promise<HandlerResult & { next: string }> {
+  const workflowId = requirePositional(tokens.positionals, 0, "workflowId");
+  const workflowVersion = flagString(tokens.flags, "version") ?? (await cli.aart.store.workflows.getLatest(workflowId))?.version;
+  if (!workflowVersion) return { ok: false, error: `No versions found for workflow "${workflowId}".`, next: "Call aart register first." };
+  const result = await requestApprovalHandler(cli.aart, { workflowId, workflowVersion });
+  return wrapResult("aart_request_approval", result);
 }
 
 export async function promoteCommand(tokens: Tokenized, cli: CliContext): Promise<HandlerResult & { next: string }> {

@@ -18,6 +18,7 @@ export {
   promoteWorkflowHandler,
   recordCorrectionHandler,
   registerWorkflowHandler,
+  requestApprovalHandler,
   runEvalHandler,
   runWorkflowHandler,
   validateWorkflowHandler,

@@ -1,7 +1,7 @@
 // Full CLI surface tests (spec §33's command list, plus this session's
 // documented additions: bundle/flag/approve/mcp — see commands/*.ts module
 // doc comments for the evidence behind each addition).
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { compileWorkflowInput, requestApprovalHandler, runWorkflowHandler as mcpRunWorkflowHandler } from "@aart/mcp";
@@ -14,6 +14,20 @@ let tc: TestCli;
 afterEach(async () => {
   await tc?.cleanup();
 });
+
+/** A trivial, fast, no-browser/no-LLM workflow (`data.stringify` only) — for `--root`/`--store` plumbing tests below that exercise `run()`'s real composition root directly (no `cliContext` override, so they go through the REAL engine) and only care about store/root wiring, not block-dispatch semantics. */
+function trivialWorkflowYaml(id: string): string {
+  return `id: ${id}
+name: Trivial Probe Workflow
+version: 0.1.0
+steps:
+  - id: greet
+    uses: data.stringify
+    with:
+      value: "hi"
+      format: "json"
+`;
+}
 
 describe("aart run", () => {
   it("runs a registered workflow", async () => {
@@ -233,6 +247,75 @@ describe("aart approve — the CLI's own strict/production-mode-safe approval su
   });
 });
 
+describe("aart request-approval — the CLI-side gap A44 found and A45 closes (AMENDMENTS.md)", () => {
+  it("creates a real, pending workflow-version ApprovalTask via the SAME requestApprovalHandler aart_request_approval (MCP) calls, defaulting --version to the latest registered version", async () => {
+    tc = await createTestCli();
+    const path = join(tc.cwd, "wf.yaml");
+    await writeFile(path, sampleWorkflowYaml("wf-cli-request-approval"), "utf8");
+    await run(["register", path], { cliContext: tc.cli });
+
+    const outcome = await run(["request-approval", "wf-cli-request-approval"], { cliContext: tc.cli });
+    expect(outcome.ok).toBe(true);
+    const taskId = (outcome.result as { taskId: string }).taskId;
+    expect(taskId).toBeTruthy();
+
+    const task = await tc.cli.aart.store.approvals.get(taskId);
+    expect(task?.status).toBe("pending");
+  });
+
+  it("--version targets a specific registered version rather than defaulting to latest", async () => {
+    tc = await createTestCli();
+    const pathV1 = join(tc.cwd, "wf-v1.yaml");
+    await writeFile(pathV1, sampleWorkflowYaml("wf-cli-request-approval-v", "0.1.0"), "utf8");
+    await run(["register", pathV1], { cliContext: tc.cli });
+    const pathV2 = join(tc.cwd, "wf-v2.yaml");
+    await writeFile(pathV2, sampleWorkflowYaml("wf-cli-request-approval-v", "0.2.0"), "utf8");
+    await run(["register", pathV2], { cliContext: tc.cli });
+
+    const outcome = await run(["request-approval", "wf-cli-request-approval-v", "--version", "0.1.0"], { cliContext: tc.cli });
+    expect(outcome.ok).toBe(true);
+    expect((outcome.result as { workflowId: string; stepId: string }).stepId).toBeTruthy();
+  });
+
+  it("errors clearly when the workflow has no registered versions", async () => {
+    tc = await createTestCli();
+    const outcome = await run(["request-approval", "no-such-workflow"], { cliContext: tc.cli });
+    expect(outcome.ok).toBe(false);
+    expect((outcome.result as { error: string }).error).toMatch(/No versions found/);
+  });
+
+  it("the full CLI-only lifecycle: register -> request-approval -> approve genuinely records a decision through the installed command surface, no MCP client involved", async () => {
+    tc = await createTestCli();
+    const path = join(tc.cwd, "wf.yaml");
+    await writeFile(path, sampleWorkflowYaml("wf-cli-only-lifecycle"), "utf8");
+    await run(["register", path], { cliContext: tc.cli });
+
+    const requestOutcome = await run(["request-approval", "wf-cli-only-lifecycle"], { cliContext: tc.cli });
+    expect(requestOutcome.ok).toBe(true);
+    const taskId = (requestOutcome.result as { taskId: string }).taskId;
+
+    const approveOutcome = await run(["approve", taskId, "--decision", "approved", "--reviewer", "alice"], { cliContext: tc.cli });
+    expect(approveOutcome.ok).toBe(true);
+    expect((approveOutcome.result as { gates: { humanReview: string } }).gates.humanReview).toBe("passed");
+
+    // AMENDMENTS.md A45 (real finding, distinct from and beyond this
+    // command's own scope): `aart promote` still refuses here — a SEPARATE,
+    // pre-existing gap this session found while proving this lifecycle,
+    // not something aart_request_approval's absence caused or this
+    // command's own addition fixes. Only `humanReview` has ANY real write
+    // path anywhere in the CLI/MCP surface (this approve step, just above);
+    // `validate`/`readiness`/`evals`/`riskReview` have none — every
+    // existing test that gets a workflow into a PROMOTABLE state
+    // (cli.test.ts's own "aart promote / aart deploy" block above) does so
+    // by writing `gates` directly into the store, which is exactly what a
+    // real CLI-only operator cannot do. See this session's final report /
+    // AMENDMENTS.md A45 for the full finding and recommendation.
+    const promoteOutcome = await run(["promote", "wf-cli-only-lifecycle"], { cliContext: tc.cli });
+    expect(promoteOutcome.ok).toBe(false);
+    expect((promoteOutcome.result as { unmetGates: string[] }).unmetGates).toEqual(["validate"]);
+  });
+});
+
 describe("aart flag clear / aart flag list — CLI-only, no MCP tool (architecture §13.3's stated exception)", () => {
   it("lists flagged runs (empty by default)", async () => {
     tc = await createTestCli();
@@ -407,6 +490,108 @@ describe("aart worker / aart server --bundle <dir> (S12 deploy story)", () => {
     const outcome = await run(["worker"], { cliContext: serverSide.cli, blocking: false });
     expect(outcome.ok).toBe(true);
     expect((outcome.result as { bundle?: unknown }).bundle).toBeUndefined();
+  });
+});
+
+describe("--root <dir> / AART_ROOT (AMENDMENTS.md A45) — every call below goes through run()'s own real resolveCliContext, no cliContext override, so each MUST pass an explicit --root pointing at a throwaway tmpdir (never the real process.cwd()'s ./.aart default)", () => {
+  let base: string;
+  afterEach(async () => {
+    await rm(base, { recursive: true, force: true });
+    delete process.env.AART_ROOT;
+  });
+
+  it("--root <dir> isolates the store from a different --root <dir>", async () => {
+    base = await mkdtemp(join(tmpdir(), "aart-root-flag-test-"));
+    const rootA = join(base, "root-a", ".aart");
+    const rootB = join(base, "root-b", ".aart");
+    const wfPath = join(base, "wf.yaml");
+    await writeFile(wfPath, trivialWorkflowYaml("wf-root-flag"), "utf8");
+
+    const registerOutcome = await run(["register", wfPath, "--root", rootA]);
+    expect(registerOutcome.ok).toBe(true);
+
+    const listA = await run(["list", "--root", rootA]);
+    expect((listA.result as { workflows: { id: string }[] }).workflows.map((w) => w.id)).toContain("wf-root-flag");
+
+    const listB = await run(["list", "--root", rootB]);
+    expect((listB.result as { workflows: unknown[] }).workflows).toEqual([]);
+  });
+
+  it("AART_ROOT env var is honored when --root is not given", async () => {
+    base = await mkdtemp(join(tmpdir(), "aart-root-env-test-"));
+    const root = join(base, "env-root", ".aart");
+    process.env.AART_ROOT = root;
+    const wfPath = join(base, "wf.yaml");
+    await writeFile(wfPath, trivialWorkflowYaml("wf-root-env"), "utf8");
+
+    await run(["register", wfPath]);
+    const listOutcome = await run(["list", "--root", root]); // read back via explicit --root, same value AART_ROOT held
+    expect((listOutcome.result as { workflows: { id: string }[] }).workflows.map((w) => w.id)).toContain("wf-root-env");
+  });
+
+  it("--root flag takes precedence over AART_ROOT when both are given", async () => {
+    base = await mkdtemp(join(tmpdir(), "aart-root-precedence-test-"));
+    const envRoot = join(base, "env-root", ".aart");
+    const flagRoot = join(base, "flag-root", ".aart");
+    process.env.AART_ROOT = envRoot;
+    const wfPath = join(base, "wf.yaml");
+    await writeFile(wfPath, trivialWorkflowYaml("wf-root-precedence"), "utf8");
+
+    await run(["register", wfPath, "--root", flagRoot]);
+
+    const listFlagRoot = await run(["list", "--root", flagRoot]);
+    expect((listFlagRoot.result as { workflows: { id: string }[] }).workflows.map((w) => w.id)).toContain("wf-root-precedence");
+
+    const listEnvRoot = await run(["list", "--root", envRoot]);
+    expect((listEnvRoot.result as { workflows: unknown[] }).workflows).toEqual([]);
+  });
+});
+
+describe("--store fs|sqlite (AMENDMENTS.md A45)", () => {
+  let base: string;
+  afterEach(async () => {
+    await rm(base, { recursive: true, force: true });
+  });
+
+  it("--store sqlite backs the store with a real SQLite db file at <root>/aart.db, readable back through the same flag", async () => {
+    base = await mkdtemp(join(tmpdir(), "aart-store-flag-test-"));
+    const root = join(base, ".aart");
+    const wfPath = join(base, "wf.yaml");
+    await writeFile(wfPath, trivialWorkflowYaml("wf-store-sqlite"), "utf8");
+
+    const registerOutcome = await run(["register", wfPath, "--root", root, "--store", "sqlite"]);
+    expect(registerOutcome.ok).toBe(true);
+
+    await expect(stat(join(root, "aart.db"))).resolves.toBeDefined();
+
+    const listSqlite = await run(["list", "--root", root, "--store", "sqlite"]);
+    expect((listSqlite.result as { workflows: { id: string }[] }).workflows.map((w) => w.id)).toContain("wf-store-sqlite");
+
+    // Cross-check: the SAME root read with the DEFAULT (fs) adapter sees
+    // nothing — proving this is genuinely a different backend, not merely
+    // a different directory the fs adapter would have found anyway.
+    const listFs = await run(["list", "--root", root]);
+    expect((listFs.result as { workflows: unknown[] }).workflows).toEqual([]);
+  });
+
+  it("defaults to fs when --store is omitted", async () => {
+    base = await mkdtemp(join(tmpdir(), "aart-store-default-test-"));
+    const root = join(base, ".aart");
+    const wfPath = join(base, "wf.yaml");
+    await writeFile(wfPath, trivialWorkflowYaml("wf-store-default"), "utf8");
+
+    await run(["register", wfPath, "--root", root]);
+    await expect(stat(join(root, "aart.db"))).rejects.toThrow(); // no sqlite db file was ever created
+    const listOutcome = await run(["list", "--root", root]);
+    expect((listOutcome.result as { workflows: { id: string }[] }).workflows.map((w) => w.id)).toContain("wf-store-default");
+  });
+
+  it("rejects an unrecognized --store value with a clear error, not a crash", async () => {
+    base = await mkdtemp(join(tmpdir(), "aart-store-invalid-test-"));
+    const root = join(base, ".aart");
+    const outcome = await run(["list", "--root", root, "--store", "postgres"]);
+    expect(outcome.ok).toBe(false);
+    expect((outcome.result as { error: string }).error).toMatch(/--store must be "fs" or "sqlite"/);
   });
 });
 
