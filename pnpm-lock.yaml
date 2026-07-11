@@ -109,6 +109,9 @@ importers:
       '@aart/blocks-core':
         specifier: workspace:*
         version: link:../blocks-core
+      '@aart/evidence':
+        specifier: workspace:*
+        version: link:../evidence
       '@aart/governance':
         specifier: workspace:*
         version: link:../governance
@@ -330,6 +333,9 @@ importers:
       '@aart/engine':
         specifier: workspace:*
         version: link:../engine
+      '@aart/evidence':
+        specifier: workspace:*
+        version: link:../evidence
       '@aart/expr':
         specifier: workspace:*
         version: link:../expr

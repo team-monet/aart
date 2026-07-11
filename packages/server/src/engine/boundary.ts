@@ -31,6 +31,8 @@ export interface StartRunParams {
   mappedInputs: Record<string, unknown>;
   /** Set by trigger intake when the delivery is a `dryRun`-style test (unused by the fake; real engine wires this to `RunRecord.params.dryRun`, architecture §9.5). */
   dryRun?: boolean;
+  /** AMENDMENTS.md A47: threaded straight through to `Engine.triggerRun`'s own `environment` (`@aart/engine`'s `TriggerRunInput.environment` — capability grants are resolved per-environment on every step dispatch, ADR-06). Optional, unset by every pre-A47 caller (trigger intake never set this) — added for the dashboard's "trigger workflow" action (§35.2), whose form has always had an optional Environment field. */
+  environment?: string;
 }
 
 export type StartRunResult =
@@ -203,6 +205,7 @@ export function createRealEngineBoundary(store: AartStore, engine: Engine): Engi
           trigger: params.trigger,
           inputs: params.mappedInputs,
           ...(params.dryRun ? { params: { dryRun: true } } : {}),
+          ...(params.environment ? { environment: params.environment } : {}),
         });
         // run-lifecycle.ts's triggerRun stashes waitingOnConcurrency in the
         // free-form params bag (its own `[DECISION]` comment) rather than a

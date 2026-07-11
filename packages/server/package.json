@@ -18,6 +18,7 @@
   },
   "dependencies": {
     "@aart/engine": "workspace:*",
+    "@aart/evidence": "workspace:*",
     "@aart/expr": "workspace:*",
     "@aart/governance": "workspace:*",
     "@aart/store": "workspace:*",

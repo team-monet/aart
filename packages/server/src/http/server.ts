@@ -3,18 +3,25 @@
 // dashboard-hosting mount point... plus... the scheduler ticker." This
 // session's DoD note: "dashboard content itself is S8's scope — S2 just
 // needs to expose the mount point/API surface S8 will consume."
-import { createServer, type Server } from "node:http";
-import type { ApprovalTask, Signal } from "@aart/types";
+import { createServer, type Server, type ServerResponse } from "node:http";
+import type { AartStore } from "@aart/store";
+import type { ApprovalTask, Scorer, Signal, Trigger, TrustMode, Workflow } from "@aart/types";
+import { blockPromotion, clearNeedsReview, createEvalExampleFromCorrection, createIssueForAgent, markNeedsReview, recordCorrection, triggerImprovementProposal, unblockPromotion, updateRunOutput, type RecordCorrectionInput } from "@aart/evidence";
+import { decideApprovalTask } from "../approvals.js";
 import { systemClock, type Clock } from "../clock.js";
 import { DEFAULT_HTTP_PORT, type ServerConfig } from "../config.js";
+import { findCorrectionByKey } from "../corrections.js";
+import { createEvalSuite, runEvalSuiteForWorkflow } from "../evals.js";
 import { clearRunFlag, listFlaggedRuns } from "../flags.js";
 import { generateId } from "../ids.js";
 import { createServerLogger, type Logger } from "../logger.js";
+import { promoteWorkflowVersionToEnvironment } from "../promotion.js";
 import { createTicker, type TickerHandle } from "../ticker/ticker.js";
 import { adaptGithubTrigger, adaptSlackTrigger, adaptWebhookTrigger, ingestGithubPrMergeApproval, isGithubPrMergeEvent, type AdapterResult } from "../triggers/adapters.js";
 import { processTriggerIntake, recordRejectedTrigger } from "../triggers/intake.js";
 import { loadTriggerBindingsFromDeployments } from "../triggers/registry.js";
 import type { InboundDelivery, IntakeOutcome, TriggerBinding } from "../triggers/types.js";
+import { approveOrDeprecateWorkflow } from "../workflow-actions.js";
 import { sendJson, Router } from "./router.js";
 
 export interface ServerHandle {
@@ -54,6 +61,30 @@ function outcomeStatus(outcome: IntakeOutcome | { kind: "pr_merge_approval"; app
 async function findBinding(config: ServerConfig, bindingId: string): Promise<TriggerBinding | undefined> {
   const bindings = await loadTriggerBindingsFromDeployments(config.store, { environmentId: config.environmentId });
   return bindings.find((b) => b.id === bindingId);
+}
+
+/**
+ * Shared response glue for the four "workflow flag" write actions
+ * (block/unblock-promotion, mark/clear-needs-review — `@aart/evidence`'s
+ * `corrections/outcomes.ts`) — every one throws a plain `Error` on an
+ * unknown workflow version (evidence's own convention, matching this
+ * codebase's other store-glue outcome functions), converted here to this
+ * file's own established 404-with-`{error}` shape rather than falling
+ * through to the router's generic 500 handler.
+ */
+async function respondWorkflowFlagAction(
+  res: ServerResponse,
+  fn: (store: AartStore, workflowId: string, workflowVersion: string) => Promise<Workflow>,
+  store: AartStore,
+  workflowId: string,
+  workflowVersion: string,
+): Promise<void> {
+  try {
+    const workflow = await fn(store, workflowId, workflowVersion);
+    sendJson(res, 200, { workflow });
+  } catch (err) {
+    sendJson(res, 404, { error: err instanceof Error ? err.message : "not found" });
+  }
 }
 
 export async function startServer(config: ServerConfig): Promise<ServerHandle> {
@@ -114,18 +145,31 @@ export async function startServer(config: ServerConfig): Promise<ServerHandle> {
   // MCP `aart_approve` tool, mode-gated per §17.5, is a separate S5
   // concern that should route through this same write path, not a second
   // implementation).
+  //
+  // AMENDMENTS.md A47: now handles BOTH ApprovalTask shapes
+  // (`../approvals.js`'s `decideApprovalTask` — a genuine per-run wait via
+  // `engine.resumeDirect`, or a workflow-version-level gate decision,
+  // decoding the ACTUAL gate a task's `stepId` encodes rather than
+  // assuming `humanReview` — root AMENDMENTS.md A46's flagged dashboard
+  // bug, fixed at its source here since this is now the ONE real
+  // implementation the dashboard itself calls instead of reimplementing).
   router.post("/approvals/:id/decision", async (ctx, body) => {
-    const task = await config.store.approvals.get(ctx.params["id"]!);
-    if (!task) return sendJson(ctx.res, 404, { error: "approval task not found" });
-    const decision = body as { status: ApprovalTask["status"]; reviewer: string; decision?: unknown };
-    if (!decision.reviewer) return sendJson(ctx.res, 400, { error: "reviewer is required" });
-    const updated: ApprovalTask = { ...task, status: decision.status, reviewer: decision.reviewer, decision: decision.decision, decidedAt: clock.nowIso() };
-    await config.store.approvals.put(updated);
-    if (decision.status === "approved" || decision.status === "rejected" || decision.status === "needs_changes") {
-      const result = await config.engine.resumeDirect(task.runId, task.stepId, { approval: updated });
-      return sendJson(ctx.res, 200, { task: updated, resume: result });
+    const decision = body as { status: ApprovalTask["status"]; reviewer: string; decision?: unknown; trustMode?: TrustMode };
+    const result = await decideApprovalTask(config.store, config.engine, ctx.params["id"]!, decision, clock);
+    switch (result.kind) {
+      case "not_found":
+        return sendJson(ctx.res, 404, { error: "approval task not found" });
+      case "missing_reviewer":
+        return sendJson(ctx.res, 400, { error: "reviewer is required" });
+      case "invalid_gate":
+        return sendJson(ctx.res, 400, { error: `A human decision cannot set gate "${result.gate}" — only humanReview, riskReview are decided via approval tasks.` });
+      case "workflow_not_found":
+        return sendJson(ctx.res, 404, { error: `Workflow ${result.workflowId}@${result.workflowVersion} not found.` });
+      case "workflow_version":
+        return sendJson(ctx.res, 200, { kind: result.kind, task: result.task, workflowId: result.workflowId, workflowVersion: result.workflowVersion, gates: result.gates, approval: result.approval });
+      case "run_step":
+        return sendJson(ctx.res, 200, result.resume ? { kind: result.kind, task: result.task, resume: result.resume } : { kind: result.kind, task: result.task });
     }
-    return sendJson(ctx.res, 200, { task: updated });
   });
 
   router.post("/runs/:runId/resume", async (ctx, body) => {
@@ -153,6 +197,120 @@ export async function startServer(config: ServerConfig): Promise<ServerHandle> {
     const result = await clearRunFlag(config.store, ctx.params["runId"]!, clearedBy, clock);
     const status = result.kind === "cleared" ? 200 : result.kind === "not_found" ? 404 : 409;
     return sendJson(ctx.res, status, result);
+  });
+
+  // AMENDMENTS.md A47 — every dashboard write action below now has a real
+  // server-side implementation, closing the store-divergence bug class
+  // (root AMENDMENTS.md A43) for writes the same way A43/this session
+  // closed it for reads: the dashboard's ONLY connection to data is this
+  // HTTP API, so a misconfigured/absent local store can no longer produce
+  // silently-wrong behavior for ANY dashboard action, not just page reads.
+
+  // "Trigger workflow" (§35.2) — via the REAL EngineBoundary.startRun
+  // (`engine/boundary.ts`), the SAME real `Engine.triggerRun` a webhook/CLI
+  // trigger uses; not a dashboard-local RunRecord-construction stub.
+  router.post("/runs/trigger", async (ctx, body) => {
+    const { workflowId, workflowVersion, inputs, environment } = body as { workflowId?: string; workflowVersion?: string; inputs?: Record<string, unknown>; environment?: string };
+    if (!workflowId) return sendJson(ctx.res, 400, { error: "workflowId is required" });
+    const trigger: Trigger = { type: "manual", id: generateId("trig"), source: "dashboard", payload: {}, receivedAt: clock.nowIso() };
+    const result = await config.engine.startRun({ workflowId, workflowVersion, trigger, mappedInputs: inputs ?? {}, environment });
+    if (result.kind === "rejected") return sendJson(ctx.res, 409, { error: result.reason });
+    const run = await config.store.runs.get(result.runId);
+    return sendJson(ctx.res, 200, { kind: result.kind, run });
+  });
+
+  router.post("/workflows/:id/approve", async (ctx, body) => {
+    const { version, action, trustMode } = body as { version?: string; action?: "approve" | "deprecate"; trustMode?: TrustMode };
+    if (!version) return sendJson(ctx.res, 400, { error: "version is required" });
+    const result = await approveOrDeprecateWorkflow(config.store, ctx.params["id"]!, version, action === "deprecate" ? "deprecate" : "approve", trustMode ?? "governed");
+    if (result.kind === "not_found") return sendJson(ctx.res, 404, { error: "not found" });
+    return sendJson(ctx.res, 200, { workflow: result.workflow });
+  });
+
+  router.post("/workflows/:id/promote", async (ctx, body) => {
+    const { version, environmentId, triggerConfig } = body as { version?: string; environmentId?: string; triggerConfig?: Record<string, unknown> };
+    if (!version || !environmentId) return sendJson(ctx.res, 400, { error: "version and environmentId are required" });
+    const result = await promoteWorkflowVersionToEnvironment(config.store, { workflowId: ctx.params["id"]!, workflowVersion: version, environmentId, triggerConfig }, clock);
+    return sendJson(ctx.res, 200, result);
+  });
+
+  router.post("/workflows/:id/block-promotion", async (ctx, body) => {
+    const { version } = body as { version?: string };
+    if (!version) return sendJson(ctx.res, 400, { error: "version is required" });
+    await respondWorkflowFlagAction(ctx.res, blockPromotion, config.store, ctx.params["id"]!, version);
+  });
+  router.post("/workflows/:id/unblock-promotion", async (ctx, body) => {
+    const { version } = body as { version?: string };
+    if (!version) return sendJson(ctx.res, 400, { error: "version is required" });
+    await respondWorkflowFlagAction(ctx.res, unblockPromotion, config.store, ctx.params["id"]!, version);
+  });
+  router.post("/workflows/:id/mark-needs-review", async (ctx, body) => {
+    const { version } = body as { version?: string };
+    if (!version) return sendJson(ctx.res, 400, { error: "version is required" });
+    await respondWorkflowFlagAction(ctx.res, markNeedsReview, config.store, ctx.params["id"]!, version);
+  });
+  router.post("/workflows/:id/clear-needs-review", async (ctx, body) => {
+    const { version } = body as { version?: string };
+    if (!version) return sendJson(ctx.res, 400, { error: "version is required" });
+    await respondWorkflowFlagAction(ctx.res, clearNeedsReview, config.store, ctx.params["id"]!, version);
+  });
+  router.post("/workflows/:id/trigger-improvement", async (ctx, body) => {
+    const { version } = body as { version?: string };
+    if (!version) return sendJson(ctx.res, 400, { error: "version is required" });
+    const brief = await triggerImprovementProposal(config.store, ctx.params["id"]!, version);
+    return sendJson(ctx.res, 200, brief);
+  });
+
+  router.post("/corrections", async (ctx, body) => {
+    const input = body as Partial<RecordCorrectionInput>;
+    if (!input.runId || !input.stepId || !input.fieldPath || !input.reason || !input.reviewer) {
+      return sendJson(ctx.res, 400, { error: "runId, stepId, fieldPath, reason, and reviewer are required" });
+    }
+    const correction = await recordCorrection(config.store, input as RecordCorrectionInput);
+    return sendJson(ctx.res, 200, { correction });
+  });
+  router.post("/corrections/:key/update-run-output", async (ctx) => {
+    const correction = await findCorrectionByKey(config.store, ctx.params["key"]!);
+    if (!correction) return sendJson(ctx.res, 404, { error: "not found" });
+    try {
+      const run = await updateRunOutput(config.store, correction);
+      return sendJson(ctx.res, 200, { run });
+    } catch (err) {
+      return sendJson(ctx.res, 404, { error: err instanceof Error ? err.message : "not found" });
+    }
+  });
+  router.post("/corrections/:key/create-eval-example", async (ctx, body) => {
+    const correction = await findCorrectionByKey(config.store, ctx.params["key"]!);
+    if (!correction) return sendJson(ctx.res, 404, { error: "not found" });
+    const { suiteId } = body as { suiteId?: string };
+    if (!suiteId) return sendJson(ctx.res, 400, { error: "suiteId is required" });
+    const example = await createEvalExampleFromCorrection(config.store, correction, suiteId);
+    return sendJson(ctx.res, 200, { example });
+  });
+  router.post("/corrections/:key/create-issue", async (ctx) => {
+    const correction = await findCorrectionByKey(config.store, ctx.params["key"]!);
+    if (!correction) return sendJson(ctx.res, 404, { error: "not found" });
+    try {
+      const brief = await createIssueForAgent(config.store, correction);
+      return sendJson(ctx.res, 200, brief);
+    } catch (err) {
+      return sendJson(ctx.res, 404, { error: err instanceof Error ? err.message : "not found" });
+    }
+  });
+
+  router.post("/evals/suites", async (ctx, body) => {
+    const { name, description, scorer } = body as { name?: string; description?: string; scorer?: Scorer };
+    if (!name || !scorer) return sendJson(ctx.res, 400, { error: "name and scorer are required" });
+    const suite = await createEvalSuite(config.store, { name, description, scorer });
+    return sendJson(ctx.res, 200, { suite });
+  });
+  router.post("/evals/runs", async (ctx, body) => {
+    const { suiteId, workflowId, workflowVersion } = body as { suiteId?: string; workflowId?: string; workflowVersion?: string };
+    if (!suiteId || !workflowId) return sendJson(ctx.res, 400, { error: "suiteId and workflowId are required" });
+    const result = await runEvalSuiteForWorkflow(config.store, suiteId, workflowId, workflowVersion);
+    if (result.kind === "suite_not_found") return sendJson(ctx.res, 404, { error: `eval suite not found: ${suiteId}` });
+    if (result.kind === "workflow_not_found") return sendJson(ctx.res, 404, { error: `workflow not found: ${workflowId}${workflowVersion ? `@${workflowVersion}` : ""}` });
+    return sendJson(ctx.res, 200, { evalRun: result.evalRun, results: result.results });
   });
 
   // Read surface — the "API surface S8 will consume" (this session's DoD note).
@@ -198,6 +356,27 @@ export async function startServer(config: ServerConfig): Promise<ServerHandle> {
   router.get("/environments", async (ctx) => sendJson(ctx.res, 200, { environments: await config.store.environments.list() }));
   router.get("/deployments", async (ctx) => sendJson(ctx.res, 200, { deployments: await config.store.deployments.list() }));
   router.get("/rejected-triggers", async (ctx) => sendJson(ctx.res, 200, { rejected: await config.store.rejectedTriggers.list() }));
+
+  // AMENDMENTS.md A47 — the three remaining dashboard list pages that used
+  // to read `store.approvals`/`store.corrections`/`store.evals` directly
+  // (the same store-divergence bug class root AMENDMENTS.md A43 fixed for
+  // workflow/block detail — SEAMS.md never published a route for these
+  // three, "flagged" rather than built, until now).
+  router.get("/approvals", async (ctx) => {
+    const status = ctx.query.get("status");
+    const tasks = await config.store.approvals.list(status ? { status: status as never } : undefined);
+    sendJson(ctx.res, 200, { tasks });
+  });
+  router.get("/corrections", async (ctx) => {
+    const runId = ctx.query.get("runId") ?? undefined;
+    const stepId = ctx.query.get("stepId") ?? undefined;
+    const corrections = await config.store.corrections.list(runId !== undefined || stepId !== undefined ? { runId, stepId } : undefined);
+    sendJson(ctx.res, 200, { corrections });
+  });
+  router.get("/evals", async (ctx) => {
+    const [suites, runs] = await Promise.all([config.store.evals.listSuites(), config.store.evals.listRuns()]);
+    sendJson(ctx.res, 200, { suites, runs });
+  });
 
   // Dashboard-hosting mount point (architecture §13, this session's DoD:
   // "S2 just needs to expose the mount point... dashboard content itself is

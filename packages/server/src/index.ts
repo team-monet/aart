@@ -32,6 +32,14 @@ export { createFakeEngine, createRealEngineBoundary, type EngineBoundary, type R
 // --- the flagged-run clear write path (dashboard/CLI only, deliberately NOT MCP-exposed — architecture §13.3) ---
 export { clearRunFlag, listFlaggedRuns, type ClearRunFlagResult } from "./flags.js";
 
+// --- AMENDMENTS.md A47: dashboard write actions this package's own HTTP
+// API now serves for real, closing the store-divergence bug class (root
+// AMENDMENTS.md A43) for every dashboard write path, not only reads ---
+export { decideApprovalTask, type DecideApprovalTaskInput, type DecideApprovalTaskResult } from "./approvals.js";
+export { approveOrDeprecateWorkflow, type ApproveOrDeprecateAction, type ApproveOrDeprecateResult } from "./workflow-actions.js";
+export { findCorrectionByKey } from "./corrections.js";
+export { createEvalSuite, runEvalSuiteForWorkflow, type CreateEvalSuiteInput, type RunEvalSuiteForWorkflowResult } from "./evals.js";
+
 // --- environments / deployments / promotion (architecture ADR-06/ADR-07) ---
 // S9 integration (reconciliation ledger item 2): computeApprovalState/
 // computePromotionState/evaluatePromotionForEnvironment/PromotionRecord/

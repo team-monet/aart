@@ -265,6 +265,236 @@ describe("approval decision endpoint (spec §17.5's CLI/dashboard authority surf
     const res = await fetch(`http://localhost:${handle.port}/approvals/at_2/decision`, { method: "POST", body: JSON.stringify({ status: "approved" }) });
     expect(res.status).toBe(400);
   });
+
+  // AMENDMENTS.md A46/A47: this endpoint now ALSO handles workflow-version-
+  // level decisions (aart request-approval's sentinel), decoding the
+  // ACTUAL gate a task's stepId encodes rather than assuming humanReview —
+  // the exact bug a former dashboard-local reimplementation of this logic
+  // had (root AMENDMENTS.md A46's flagged finding). Exercised through the
+  // real HTTP endpoint, both gates, not just the underlying function.
+  it("a workflow-version riskReview decision writes gates.riskReview, not gates.humanReview, over HTTP", async () => {
+    fx = await createTestFixture();
+    await fx.store.workflows.put(fixtureWorkflow("1.0.0", { id: "wf_risk" }));
+    const subject = { runId: "workflow-version:wf_risk@1.0.0", stepId: "__gate:riskReview__" };
+    await fx.store.approvals.put({ id: "at_risk", ...subject, title: "Risk review", description: "d", status: "pending", createdAt: fx.clock.nowIso() });
+    handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false });
+
+    const res = await fetch(`http://localhost:${handle.port}/approvals/at_risk/decision`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ status: "approved", reviewer: "jane@example.com" }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { kind: string; gates: { riskReview: string; humanReview: string } };
+    expect(body.kind).toBe("workflow_version");
+    expect(body.gates.riskReview).toBe("passed");
+    expect(body.gates.humanReview).toBe("pending");
+
+    const persisted = await fx.store.workflows.get("wf_risk", "1.0.0");
+    expect(persisted?.gates.riskReview).toBe("passed");
+    expect(persisted?.gates.humanReview).toBe("pending");
+  });
+
+  it("a hand-crafted task targeting gate 'validate' is refused with 400, not silently written", async () => {
+    fx = await createTestFixture();
+    await fx.store.workflows.put(fixtureWorkflow("1.0.0", { id: "wf_bad_gate" }));
+    await fx.store.approvals.put({ id: "at_bad", runId: "workflow-version:wf_bad_gate@1.0.0", stepId: "__gate:validate__", title: "t", description: "d", status: "pending", createdAt: fx.clock.nowIso() });
+    handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false });
+
+    const res = await fetch(`http://localhost:${handle.port}/approvals/at_bad/decision`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ status: "approved", reviewer: "jane@example.com" }),
+    });
+    expect(res.status).toBe(400);
+    const persisted = await fx.store.workflows.get("wf_bad_gate", "1.0.0");
+    expect(persisted?.gates.validate).toBe("passed"); // untouched, not overwritten
+  });
+
+  it("404s for an unknown taskId", async () => {
+    fx = await createTestFixture();
+    handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false });
+    const res = await fetch(`http://localhost:${handle.port}/approvals/no-such-task/decision`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ status: "approved", reviewer: "jane" }),
+    });
+    expect(res.status).toBe(404);
+  });
+});
+
+describe("dashboard write actions (AMENDMENTS.md A47) — every dashboard write now has a real server-side implementation", () => {
+  it("POST /runs/trigger starts a real run via EngineBoundary.startRun and returns it", async () => {
+    fx = await createTestFixture();
+    await fx.store.workflows.put(fixtureWorkflow("1.0.0", { id: "wf_trigger" }));
+    handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false });
+
+    const res = await fetch(`http://localhost:${handle.port}/runs/trigger`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ workflowId: "wf_trigger", inputs: { x: 1 } }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { kind: string; run: { runId: string; status: string; workflowId: string } };
+    expect(body.kind).toBe("started");
+    expect(body.run.workflowId).toBe("wf_trigger");
+    expect(body.run.status).toBe("pending");
+    await expect(fx.store.runs.get(body.run.runId)).resolves.toMatchObject({ status: "pending" });
+    await expect(fx.store.jobQueue.get(body.run.runId)).resolves.toBeDefined(); // enqueued for real, not just persisted
+  });
+
+  it("POST /runs/trigger 400s without a workflowId", async () => {
+    fx = await createTestFixture();
+    handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false });
+    const res = await fetch(`http://localhost:${handle.port}/runs/trigger`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ inputs: {} }) });
+    expect(res.status).toBe(400);
+  });
+
+  it("POST /workflows/:id/approve recomputes approval from the real computeApprovalState", async () => {
+    fx = await createTestFixture();
+    await fx.store.workflows.put(fixtureWorkflow("1.0.0", { id: "wf_approve", gates: { validate: "passed", readiness: "pending", evals: "pending", riskReview: "pending", humanReview: "passed" } }));
+    handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false });
+
+    const res = await fetch(`http://localhost:${handle.port}/workflows/wf_approve/approve`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ version: "1.0.0", action: "approve", trustMode: "governed" }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { workflow: { approval: string } };
+    expect(body.workflow.approval).toBe("approved");
+  });
+
+  it("POST /workflows/:id/promote uses the real promoteWorkflowVersionToEnvironment (creates a Deployment)", async () => {
+    fx = await createTestFixture();
+    await fx.store.workflows.put(fixtureWorkflow("1.0.0", { id: "wf_promote", approval: "approved" }));
+    await fx.store.environments.put({ id: "env_promote", name: "staging", config: { trustMode: "dev" } });
+    handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false });
+
+    const res = await fetch(`http://localhost:${handle.port}/workflows/wf_promote/promote`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ version: "1.0.0", environmentId: "env_promote" }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { kind: string };
+    expect(body.kind).toBe("promoted");
+    await expect(fx.store.deployments.list({ workflowId: "wf_promote" })).resolves.toHaveLength(1);
+  });
+
+  it("POST /workflows/:id/block-promotion, /unblock-promotion, /mark-needs-review, /clear-needs-review round-trip the corresponding boolean flag", async () => {
+    fx = await createTestFixture();
+    await fx.store.workflows.put(fixtureWorkflow("1.0.0", { id: "wf_flags" }));
+    handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false });
+    const base = `http://localhost:${handle.port}/workflows/wf_flags`;
+    const post = (path: string) => fetch(`${base}${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ version: "1.0.0" }) });
+
+    await post("/block-promotion");
+    await expect(fx.store.workflows.get("wf_flags", "1.0.0")).resolves.toMatchObject({ promotionBlocked: true });
+    await post("/unblock-promotion");
+    await expect(fx.store.workflows.get("wf_flags", "1.0.0")).resolves.toMatchObject({ promotionBlocked: false });
+    await post("/mark-needs-review");
+    await expect(fx.store.workflows.get("wf_flags", "1.0.0")).resolves.toMatchObject({ needsReview: true });
+    await post("/clear-needs-review");
+    await expect(fx.store.workflows.get("wf_flags", "1.0.0")).resolves.toMatchObject({ needsReview: false });
+
+    const missing = await fetch(`${base}/block-promotion`.replace("wf_flags", "no-such-wf"), { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ version: "1.0.0" }) });
+    expect(missing.status).toBe(404);
+  });
+
+  it("POST /workflows/:id/trigger-improvement returns a real ImprovementBrief (@aart/evidence's generateImprovementBrief)", async () => {
+    fx = await createTestFixture();
+    await fx.store.workflows.put(fixtureWorkflow("1.0.0", { id: "wf_improve" }));
+    handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false });
+    const res = await fetch(`http://localhost:${handle.port}/workflows/wf_improve/trigger-improvement`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ version: "1.0.0" }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { workflowId: string; workflowVersion: string };
+    expect(body.workflowId).toBe("wf_improve");
+    expect(body.workflowVersion).toBe("1.0.0");
+  });
+
+  it("POST /corrections records a Correction; the 3 outcome routes act on it via URL-encoded correctionKey", async () => {
+    fx = await createTestFixture();
+    await fx.store.runs.put({
+      runId: "run_corr",
+      workflowId: "wf_corr",
+      workflowVersion: "1.0.0",
+      status: "completed",
+      approved: true,
+      approvalMode: "dev",
+      trigger: { type: "manual", id: "t1", source: "cli", payload: null, receivedAt: fx.clock.nowIso() },
+      inputs: {},
+      trace: [{ seq: 0, stepId: "step1", block: "http.get", status: "completed", inputs: {}, outputs: { total: 1 }, startedAt: fx.clock.nowIso() }],
+      waits: [],
+      artifacts: [],
+      snapshot: { definitions: {}, resolvedVersions: {}, packHashes: {}, capturedAt: fx.clock.nowIso() },
+      startedAt: fx.clock.nowIso(),
+      updatedAt: fx.clock.nowIso(),
+      schemaVersion: 1,
+    });
+    handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false });
+    const base = `http://localhost:${handle.port}`;
+
+    const recordRes = await fetch(`${base}/corrections`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ runId: "run_corr", stepId: "step1", fieldPath: "outputs.total", observed: 1, corrected: 42, reason: "off by one", reviewer: "alice" }),
+    });
+    expect(recordRes.status).toBe(200);
+    const key = encodeURIComponent("run_corr:step1:outputs.total");
+
+    const updateRes = await fetch(`${base}/corrections/${key}/update-run-output`, { method: "POST" });
+    expect(updateRes.status).toBe(200);
+    const updateBody = (await updateRes.json()) as { run: { trace: Array<{ outputs?: Record<string, unknown> }> } };
+    expect(updateBody.run.trace[0]?.outputs).toEqual({ total: 42 });
+
+    const exampleRes = await fetch(`${base}/corrections/${key}/create-eval-example`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ suiteId: "suite_1" }) });
+    expect(exampleRes.status).toBe(200);
+    await expect(fx.store.evals.listExamples("suite_1")).resolves.toHaveLength(1);
+
+    const issueRes = await fetch(`${base}/corrections/${key}/create-issue`, { method: "POST" });
+    expect(issueRes.status).toBe(200);
+    const issueBody = (await issueRes.json()) as { workflowId: string };
+    expect(issueBody.workflowId).toBe("wf_corr");
+
+    const missingKey = encodeURIComponent("no-such-run:step1:outputs.total");
+    const missingRes = await fetch(`${base}/corrections/${missingKey}/update-run-output`, { method: "POST" });
+    expect(missingRes.status).toBe(404);
+  });
+
+  it("POST /evals/suites creates a suite; POST /evals/runs scores it with @aart/evidence's real scorer registry and persists the EvalRun", async () => {
+    fx = await createTestFixture();
+    await fx.store.workflows.put(fixtureWorkflow("1.0.0", { id: "wf_eval" }));
+    handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false });
+    const base = `http://localhost:${handle.port}`;
+
+    const createRes = await fetch(`${base}/evals/suites`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "My Suite", scorer: { id: "s1", kind: "exact_match" } }),
+    });
+    expect(createRes.status).toBe(200);
+    const { suite } = (await createRes.json()) as { suite: { id: string } };
+    await fx.store.evals.putExample({ id: "ex1", suiteId: suite.id, input: 5, expected: 5 });
+
+    const runRes = await fetch(`${base}/evals/runs`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ suiteId: suite.id, workflowId: "wf_eval", workflowVersion: "1.0.0" }),
+    });
+    expect(runRes.status).toBe(200);
+    const runBody = (await runRes.json()) as { evalRun: { passed: number; total: number } };
+    expect(runBody.evalRun.passed).toBe(1);
+    expect(runBody.evalRun.total).toBe(1);
+    await expect(fx.store.evals.listRuns({ suiteId: suite.id })).resolves.toHaveLength(1);
+
+    const missingSuiteRes = await fetch(`${base}/evals/runs`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ suiteId: "no-such-suite", workflowId: "wf_eval" }) });
+    expect(missingSuiteRes.status).toBe(404);
+  });
 });
 
 describe("flagged-run clear endpoint (architecture §13.3 — dashboard/CLI only, not MCP)", () => {
@@ -399,6 +629,48 @@ describe("read API surface (S8's dashboard consumes this)", () => {
     expect(res.status).toBe(200);
     const body = (await json(res)) as { mount: string };
     expect(body.mount).toBe("dashboard");
+  });
+
+  // AMENDMENTS.md A47: the three dashboard list pages that used to read
+  // `store.approvals`/`store.corrections`/`store.evals` directly (the same
+  // store-divergence bug class root AMENDMENTS.md A43 fixed for workflow/
+  // block detail) — SEAMS.md never published a route for these three,
+  // "flagged" rather than built, until now.
+  it("GET /approvals (optionally ?status=) lists ApprovalTasks", async () => {
+    fx = await createTestFixture();
+    await fx.store.approvals.put({ id: "at_r1", runId: "run_1", stepId: "s", title: "t", description: "d", status: "pending", createdAt: fx.clock.nowIso() });
+    await fx.store.approvals.put({ id: "at_r2", runId: "run_2", stepId: "s", title: "t", description: "d", status: "approved", reviewer: "alice", decidedAt: fx.clock.nowIso(), createdAt: fx.clock.nowIso() });
+    handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false });
+
+    const all = (await json(await fetch(`http://localhost:${handle.port}/approvals`))) as { tasks: unknown[] };
+    expect(all.tasks).toHaveLength(2);
+
+    const pendingOnly = (await json(await fetch(`http://localhost:${handle.port}/approvals?status=pending`))) as { tasks: Array<{ id: string }> };
+    expect(pendingOnly.tasks.map((t) => t.id)).toEqual(["at_r1"]);
+  });
+
+  it("GET /corrections (optionally ?runId=&stepId=) lists Corrections", async () => {
+    fx = await createTestFixture();
+    await fx.store.corrections.put({ runId: "run_a", stepId: "s1", fieldPath: "outputs.x", observed: 1, corrected: 2, reason: "r", reviewer: "alice", createdAt: fx.clock.nowIso() });
+    await fx.store.corrections.put({ runId: "run_b", stepId: "s1", fieldPath: "outputs.y", observed: 1, corrected: 2, reason: "r", reviewer: "bob", createdAt: fx.clock.nowIso() });
+    handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false });
+
+    const all = (await json(await fetch(`http://localhost:${handle.port}/corrections`))) as { corrections: unknown[] };
+    expect(all.corrections).toHaveLength(2);
+
+    const filtered = (await json(await fetch(`http://localhost:${handle.port}/corrections?runId=run_a&stepId=s1`))) as { corrections: Array<{ runId: string }> };
+    expect(filtered.corrections.map((c) => c.runId)).toEqual(["run_a"]);
+  });
+
+  it("GET /evals lists both suites and runs", async () => {
+    fx = await createTestFixture();
+    await fx.store.evals.putSuite({ id: "suite_1", name: "S", examples: [], scorer: { id: "s1", kind: "exact_match" }, tags: [] });
+    await fx.store.evals.putRun({ id: "evalrun_1", suiteId: "suite_1", workflowId: "wf", workflowVersion: "1.0.0", status: "completed", total: 1, passed: 1, failed: 0, score: 1, regressions: [], improvements: [], reportArtifact: "a" });
+    handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false });
+
+    const body = (await json(await fetch(`http://localhost:${handle.port}/evals`))) as { suites: unknown[]; runs: unknown[] };
+    expect(body.suites).toHaveLength(1);
+    expect(body.runs).toHaveLength(1);
   });
 });
 
