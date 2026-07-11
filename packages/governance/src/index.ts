@@ -60,6 +60,7 @@ export {
   computeCapabilityClosure,
   getGrantedCapabilities,
   maxRiskTier,
+  normalizeEnvironmentTrustMode,
   riskForCapability,
   type CapabilityClosureLookup,
   type CapabilityClosureNode,

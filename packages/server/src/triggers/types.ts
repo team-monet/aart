@@ -31,6 +31,26 @@ export interface TriggerBinding {
   workflowId: string;
   workflowVersion?: string;
   deploymentId?: string;
+  /**
+   * The `Environment` (by id) this binding's `Deployment` targets — carried
+   * forward from `Deployment.environmentId` (`deploymentToBinding`,
+   * registry.ts) so `processTriggerIntake` can thread it into
+   * `EngineBoundary.startRun`/`Engine.triggerRun`'s `environment` param
+   * (architecture §4.6's capability-dispatch chokepoint reads it there on
+   * every step). AMENDMENTS.md (S15, settling the S11/A42
+   * governance-permissiveness finding): before this field existed, NO
+   * trigger-fired (webhook/github/slack/poll/etc.) run ever carried an
+   * `environment` at all, so real capability enforcement silently fell back
+   * to this session's OTHER fix's same "no environment -> unconditional
+   * grant" hole — an unattended, deployed run got the SAME accidental
+   * dev-mode bypass a direct `aart run` did. Undefined for bindings with no
+   * backing `Deployment` (manual/cli/sdk/mcp — see registry.ts's own doc
+   * comment) and for `schedule` bindings (sourced from the separate
+   * `Schedule` store member, which has no environment concept in its
+   * frozen §5.3 shape — a documented, NOT-closed-this-session gap; see
+   * AMENDMENTS.md).
+   */
+  environmentId?: string;
   /** spec §21.3 `triggerMapping`: `{{ }}` expressions (resolved against `{ trigger }`, architecture §6.2) producing the run's mapped inputs. Absent means "pass the whole delivery payload through as inputs" (a reasonable default for adapters like `manual`/`cli`/`sdk` that are usually invoked with already-shaped input). */
   triggerMapping?: Record<string, string>;
   /** architecture §6.3: "is this a new-run trigger or a resume-signal — made by trigger TYPE, not by inspecting payload shape." `"start"` unless noted otherwise per adapter. */

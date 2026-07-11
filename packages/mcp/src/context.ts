@@ -132,7 +132,13 @@ export function createRealAartContextWithEngine(options: CreateAartContextOption
   // only happens when at least one port isn't explicitly overridden.
   const needsRealCatalog = !options.engine || !options.governance || !options.evidence || !options.registry;
   const catalog = needsRealCatalog ? buildRealCatalog(store, options.llm) : undefined;
-  const realEngine = !options.engine || !options.evidence ? createRealEngine(store, catalog!.blocks) : undefined;
+  // trustMode threaded through explicitly (AMENDMENTS.md, S15) — this is
+  // what makes the real capability-dispatch chokepoint (architecture §4.6,
+  // via createGetGrantedCapabilities) agree with the SAME trustMode this
+  // context records onto RunRecord.approvalMode below, instead of the two
+  // silently diverging whenever a run carries no `environment` (the S11/A42
+  // finding this session settles).
+  const realEngine = !options.engine || !options.evidence ? createRealEngine(store, catalog!.blocks, trustMode) : undefined;
 
   const governance = options.governance ?? createRealGovernancePort(catalog!.blocks, trustMode);
   const engine = options.engine ?? createRealEnginePort(realEngine!);

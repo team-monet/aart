@@ -177,3 +177,30 @@ export function getGrantedCapabilities(input: GrantedCapabilitiesInput): string[
   );
   return match ? [...input.capabilityClosure] : [];
 }
+
+/**
+ * Normalizes an `Environment`'s raw, loosely-typed `config["trustMode"]`
+ * value (`config: z.record(z.string(), z.unknown())` — architecture gives
+ * `Environment.config` no frozen sub-shape) into a real `TrustMode`.
+ * Unrecognized/absent falls back to `"governed"` — spec §17.2's own stated
+ * default ("Local development default: governed"), and the same fallback
+ * this function's callers used inline before this was factored out.
+ *
+ * AMENDMENTS.md (S15, settling the S11/A42 governance-permissiveness
+ * finding): this is now the ONE place "what trust mode does this
+ * environment/run operate under" is resolved from a raw config value,
+ * shared by every real call site that used to re-derive its own copy of
+ * this ternary — `@aart/mcp`'s `getGrantedCapabilities` adapter (the
+ * ACTUAL capability-dispatch enforcement, architecture §4.6) and
+ * `@aart/server`'s trigger-fired `RunRecord.approvalMode` capture
+ * (architecture §19.1's "captured once at trigger time" audit field) both
+ * now call this instead of hand-rolling the same "unrecognized -> governed"
+ * fallback twice, which is exactly the kind of silent, ungoverned default
+ * that produced the A42 finding this session closes (there, the divergent
+ * copy was "unrecognized/absent -> dev", not "-> governed" — see
+ * capability.ts's own `getGrantedCapabilities` doc comment history / this
+ * session's AMENDMENTS entry for the full story).
+ */
+export function normalizeEnvironmentTrustMode(raw: unknown): TrustMode {
+  return raw === "dev" || raw === "governed" || raw === "strict" || raw === "production" ? raw : "governed";
+}

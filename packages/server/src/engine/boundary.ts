@@ -15,10 +15,11 @@
 // S9, doing the merge) can converge it with the real engine's actual export
 // shape — see this task's final report for the explicit list of what S9
 // must reconcile.
-import type { RunRecord, Signal, Trigger, WaitCondition } from "@aart/types";
+import type { RunRecord, Signal, Trigger, TrustMode, WaitCondition } from "@aart/types";
 import { ConcurrencyRejectedError, CorrelationError } from "@aart/types";
 import type { AartStore } from "@aart/store";
 import type { Engine } from "@aart/engine";
+import { normalizeEnvironmentTrustMode } from "@aart/governance";
 import type { Clock } from "../clock.js";
 import { generateId } from "../ids.js";
 
@@ -31,7 +32,25 @@ export interface StartRunParams {
   mappedInputs: Record<string, unknown>;
   /** Set by trigger intake when the delivery is a `dryRun`-style test (unused by the fake; real engine wires this to `RunRecord.params.dryRun`, architecture §9.5). */
   dryRun?: boolean;
-  /** AMENDMENTS.md A47: threaded straight through to `Engine.triggerRun`'s own `environment` (`@aart/engine`'s `TriggerRunInput.environment` — capability grants are resolved per-environment on every step dispatch, ADR-06). Optional, unset by every pre-A47 caller (trigger intake never set this) — added for the dashboard's "trigger workflow" action (§35.2), whose form has always had an optional Environment field. */
+  /**
+   * AMENDMENTS.md A47: originally added for the dashboard's "trigger
+   * workflow" action (§35.2, whose form has always had an optional
+   * Environment field) — threaded straight through to `Engine.triggerRun`'s
+   * own `environment` (`@aart/engine`'s `TriggerRunInput.environment`).
+   *
+   * AMENDMENTS.md A48 (S15): for a trigger-fired run this is
+   * `binding.environmentId` (`TriggerBinding`, triggers/types.ts), sourced
+   * from `Deployment.environmentId` when the trigger was loaded from a
+   * deployment (registry.ts's `deploymentToBinding`) — threading it through
+   * is what makes architecture §4.6's capability-dispatch chokepoint gate
+   * an unattended, trigger-fired run by its REAL deployed environment's
+   * trust mode, instead of the unconditional-grant default a missing
+   * environment previously produced (the S11/A42 finding A48 settles — see
+   * real-context.ts's `createGetGrantedCapabilities` for the sibling fix
+   * on the direct-run side). Undefined for bindings with no backing
+   * `Deployment` and for `schedule` bindings (documented residual gap,
+   * AMENDMENTS.md).
+   */
   environment?: string;
 }
 
@@ -86,7 +105,14 @@ export function createFakeEngine(store: AartStore, clock: Clock): EngineBoundary
         approvalMode: "dev",
         trigger: params.trigger,
         inputs: params.mappedInputs,
-        params: params.dryRun ? { dryRun: true } : undefined,
+        // AMENDMENTS.md (S15): the fake models environment/dryRun as DATA
+        // (matching this function's own "real RunRecord/job_queue writes"
+        // doc comment above) so trigger-intake tests can observe the real
+        // plumbing threading environmentId through — it still does NOT
+        // model capability dispatch (approved/approvalMode stay the fixed
+        // {true, "dev"} below regardless), consistent with this fake's
+        // documented scope.
+        params: params.dryRun || params.environment !== undefined ? { ...(params.dryRun ? { dryRun: true } : {}), ...(params.environment !== undefined ? { environment: params.environment } : {}) } : undefined,
         trace: [],
         waits: [],
         artifacts: [],
@@ -199,13 +225,32 @@ export function createRealEngineBoundary(store: AartStore, engine: Engine): Engi
       if (!workflow) {
         return { kind: "rejected", reason: `Workflow "${params.workflowId}"${params.workflowVersion ? `@${params.workflowVersion}` : ""} not found.` };
       }
+      // AMENDMENTS.md (S15): approvalMode captured HONESTLY for a
+      // deployed (environment-attached) trigger-fired run, matching
+      // RunWorkflowInput's own "captured once at trigger time" contract
+      // (spec §19.1) — mirrors runWorkflowHandler's `approvalMode:
+      // ctx.trustMode` on the direct-run side, just resolved from the
+      // TARGET ENVIRONMENT's config here instead of an ambient CLI/MCP
+      // context (this process has no equivalent single "ambient trust
+      // mode" - a worker/server serves many environments at once). Only
+      // resolvable when params.environment is set (the common,
+      // deployment-backed case this session's fix targets); a
+      // deployment-less binding (manual/cli/sdk, or the documented
+      // schedule gap) falls back to the engine's own pre-existing
+      // `{approved: true, approvalMode: "dev"}` default, UNCHANGED from
+      // before this session — real capability enforcement for that case
+      // still runs under whichever `defaultTrustMode` this process's
+      // Engine was constructed with (real-context.ts's createRealEngine),
+      // never an unconditional grant.
+      const approvalMode: TrustMode | undefined = params.environment ? normalizeEnvironmentTrustMode((await store.environments.get(params.environment))?.config["trustMode"]) : undefined;
       try {
         const run = await engine.triggerRun({
           workflow,
           trigger: params.trigger,
           inputs: params.mappedInputs,
           ...(params.dryRun ? { params: { dryRun: true } } : {}),
-          ...(params.environment ? { environment: params.environment } : {}),
+          environment: params.environment,
+          ...(approvalMode ? { approved: workflow.approval === "approved", approvalMode } : {}),
         });
         // run-lifecycle.ts's triggerRun stashes waitingOnConcurrency in the
         // free-form params bag (its own `[DECISION]` comment) rather than a

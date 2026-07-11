@@ -20,12 +20,14 @@
     "smoke:browser": "node scripts/smoke/browser.mjs",
     "smoke:isolated-vm": "node scripts/smoke/isolated-vm.mjs",
     "smoke": "pnpm run smoke:browser && pnpm run smoke:isolated-vm",
+    "build:dashboard-launcher": "node deploy/build-dashboard-launcher.mjs",
     "lint:redaction": "node packages/governance/dist/redaction-lint-cli.js",
     "eval:familiarity": "pnpm --filter @aart/familiarity-evals run eval:ci-gate"
   },
   "devDependencies": {
     "@changesets/cli": "2.31.0",
     "@types/node": "26.1.1",
+    "esbuild": "0.27.7",
     "isolated-vm": "7.0.0",
     "playwright": "1.61.1",
     "typescript": "5.9.3",

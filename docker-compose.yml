@@ -1,0 +1,116 @@
+# AART production deploy example (AMENDMENTS.md A49) — server + worker +
+# dashboard sharing one store volume, environment-scoped, secrets via .env.
+# This is a SHAPE to adapt, not a drop-in prod config — see DEPLOY.md for
+# what to change per real deployment (TLS termination, real secret backend,
+# resource limits, restart policy tuning) and its "Ops limits" section for
+# what this stack is honest about NOT providing on its own (no built-in
+# auth in front of the dashboard/control-plane HTTP APIs, single-instance
+# scheduler ticker, etc.).
+#
+# Quick start:
+#   cp .env.example .env              # fill in AART_SECRET_* values
+#   docker compose build              # builds the lean (no-browser) image;
+#                                      # see DEPLOY.md for --with-browser
+#   docker compose up -d
+#   curl http://localhost:8080/health
+#   curl http://localhost:8787/health
+#   open http://localhost:4000        # dashboard
+#
+# Store: sqlite (the multi-process-safe choice — see DEPLOY.md's store
+# guidance; fs is single-process-only and would race under server+worker
+# writing concurrently to the same store). One named volume, mounted
+# read-write into all three services, is what makes this "sharing a store
+# volume" — the same store, the same runs/workflows/deployments, seen from
+# three different processes.
+#
+# Environment scoping: AART_ENVIRONMENT (server-only; worker/dashboard have
+# no environment-scoping flag of their own — see DEPLOY.md) restricts which
+# deployments' triggers this server activates (`--environment`/
+# AART_ENVIRONMENT, AMENDMENTS.md A45). Set it once you've run `aart deploy
+# <workflowId> --target production` and know that environment's real name.
+
+services:
+  server:
+    build:
+      context: .
+      # dockerfile: Dockerfile (default — implicit)
+      target: runtime # swap to runtime-browser if any deployed workflow uses browser.* steps
+    image: aart:latest
+    command: ["server", "--port", "8080", "--store", "sqlite"]
+    ports:
+      - "8080:8080"
+    volumes:
+      - aart-store:/data
+    environment:
+      AART_ROOT: /data
+      # AART_ENVIRONMENT: production   # uncomment once you have a real named Environment to scope to
+      AART_TRUST_MODE: governed # spec §17.2's own local/CI default — explicit here rather than implicit
+    env_file:
+      - .env # AART_SECRET_* values (webhook HMAC secrets, etc.) — see DEPLOY.md
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: .
+      target: runtime # MUST match server's target — a worker without Chromium can't dispatch browser.* steps a browser-enabled server accepted
+    image: aart:latest
+    command: ["worker", "--store", "sqlite"]
+    volumes:
+      - aart-store:/data
+    environment:
+      AART_ROOT: /data
+      AART_TRUST_MODE: governed
+    env_file:
+      - .env
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8787/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+    # No published port by default — the worker's :8787 health endpoint is
+    # only needed by the dashboard's worker-health page (AART_WORKER_URLS
+    # below) and by an operator directly `docker compose exec`-ing in.
+    # Uncomment to reach it from the host too:
+    # ports:
+    #   - "8787:8787"
+
+  dashboard:
+    build:
+      context: .
+      target: runtime
+    image: aart:latest
+    command: ["dashboard"]
+    ports:
+      - "4000:4000"
+    volumes:
+      - aart-store:/data
+    environment:
+      AART_ROOT: /data
+      AART_STORE: sqlite
+      AART_SERVER_URL: http://server:8080
+      AART_WORKER_URLS: http://worker:8787
+    depends_on:
+      server:
+        condition: service_healthy
+      worker:
+        condition: service_healthy
+    restart: unless-stopped
+    # Ops limits (DEPLOY.md elaborates): @aart/dashboard's write actions
+    # are a documented PARTIAL stub upstream (approve/promote/risk-diff are
+    # real; triggering a run, resuming an approval, and rendering a report
+    # through the dashboard UI are still local mirrors, not yet wired to
+    # the real engine/evidence packages) — read pages are fully real. Treat
+    # this service as an operator READ/light-write console, not the
+    # primary way to run workflows in production; use the CLI/webhooks for
+    # that (server/worker above).
+
+volumes:
+  aart-store:
