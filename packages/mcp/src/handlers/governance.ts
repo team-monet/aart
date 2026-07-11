@@ -47,16 +47,61 @@
 // finding from this same reconciliation pass (architecture §7.9's diagram
 // names "approval decision" as a named redactRecord input path; a task's
 // free-form `decision` field can echo back arbitrary data).
-import type { Gates, Workflow } from "@aart/types";
+import type { Gates, GateStatus, Workflow } from "@aart/types";
 import type { AartContext } from "../context.js";
 import type { HandlerResult } from "../response.js";
+import type { GateName } from "../types.js";
 import { newId } from "../stubs/engine.js";
+
+/**
+ * S14 "gate write paths" — the shared gate-update path every gate writer in
+ * this codebase goes through: read the workflow, merge ONE gate's new
+ * status into `gates`, recompute `approval` via governance's own
+ * `computeApprovalState` (architecture §7.1's sole writer of that field —
+ * unchanged by this session), persist both together, return the updated
+ * snapshot. This is `applyVersionReviewDecision`'s (below) former
+ * humanReview-only body, generalized so `authoring.ts` (validate),
+ * `execution.ts` (readiness), and `evals.ts` (evals) reuse the identical
+ * path rather than each hand-rolling their own read/merge/recompute/persist.
+ */
+export async function applyGateResult(
+  ctx: AartContext,
+  workflowId: string,
+  workflowVersion: string,
+  gate: GateName,
+  status: GateStatus,
+): Promise<HandlerResult> {
+  const workflow = await ctx.store.workflows.get(workflowId, workflowVersion);
+  if (!workflow) return { ok: false, error: `Workflow ${workflowId}@${workflowVersion} not found.` };
+  const gates: Gates = { ...workflow.gates, [gate]: status };
+  const requiredGates = ctx.governance.requiredGatesByMode[ctx.trustMode];
+  const approval = ctx.governance.computeApprovalState(gates, requiredGates);
+  const updated: Workflow = { ...workflow, gates, approval };
+  await ctx.store.workflows.put(updated);
+  return { ok: true, kind: "workflow_version", workflowId, workflowVersion, gates, approval };
+}
+
+/**
+ * Which gates a human DECISION (aart_approve, via a workflow-version-level
+ * ApprovalTask) may advance — spec §17.1's "each gate is advanced ONLY by
+ * its own mechanism": `validate`/`readiness`/`evals` each get their own
+ * dedicated, evidence-based writer (authoring.ts/execution.ts/evals.ts) and
+ * must never be settled by a bare human click. Enforced at TWO points:
+ * requestApprovalHandler below (a friendly, request-time rejection) and
+ * applyVersionReviewDecision (the load-bearing check — a defensive re-check
+ * against whatever gate a task's OWN stored `stepId` actually decodes to,
+ * closing the bypass a hand-crafted runId+stepId request could otherwise
+ * open around the first check).
+ */
+const APPROVAL_TASK_GATES: readonly GateName[] = ["humanReview", "riskReview"];
 
 export interface RequestApprovalInput {
   runId?: string;
   stepId?: string;
   workflowId?: string;
   workflowVersion?: string;
+  /** S14: which gate this workflow-version-level request targets — `"humanReview"` (default, this parameter's pre-S14 sole behavior) or `"riskReview"`. Ignored for the runId+stepId (per-run wait) shape, which isn't a workflow-version gate at all. */
+  gate?: GateName;
   title?: string;
   description?: string;
 }
@@ -65,7 +110,11 @@ export async function requestApprovalHandler(ctx: AartContext, input: RequestApp
   let runId: string;
   let stepId: string;
   if (input.workflowId && input.workflowVersion) {
-    ({ runId, stepId } = ctx.governance.workflowVersionApprovalSubject(input.workflowId, input.workflowVersion));
+    const gate = input.gate ?? "humanReview";
+    if (!APPROVAL_TASK_GATES.includes(gate)) {
+      return { ok: false, error: `--gate must be one of: ${APPROVAL_TASK_GATES.join(", ")} (got "${gate}").` };
+    }
+    ({ runId, stepId } = ctx.governance.workflowVersionApprovalSubject(input.workflowId, input.workflowVersion, gate));
   } else if (input.runId && input.stepId) {
     runId = input.runId;
     stepId = input.stepId;
@@ -95,17 +144,14 @@ async function applyVersionReviewDecision(
   ctx: AartContext,
   workflowId: string,
   workflowVersion: string,
+  gate: GateName,
   decision: ApproveInput["decision"],
 ): Promise<HandlerResult> {
-  const workflow = await ctx.store.workflows.get(workflowId, workflowVersion);
-  if (!workflow) return { ok: false, error: `Workflow ${workflowId}@${workflowVersion} not found.` };
-  const gateResult = decision === "approved" ? "passed" : decision === "rejected" ? "failed" : "pending";
-  const gates: Gates = { ...workflow.gates, humanReview: gateResult };
-  const requiredGates = ctx.governance.requiredGatesByMode[ctx.trustMode];
-  const approval = ctx.governance.computeApprovalState(gates, requiredGates);
-  const updated: Workflow = { ...workflow, gates, approval };
-  await ctx.store.workflows.put(updated);
-  return { ok: true, kind: "workflow_version", workflowId, workflowVersion, gates, approval };
+  if (!APPROVAL_TASK_GATES.includes(gate)) {
+    return { ok: false, error: `A human decision cannot set gate "${gate}" — only ${APPROVAL_TASK_GATES.join(", ")} are decided via approval tasks.` };
+  }
+  const gateResult: GateStatus = decision === "approved" ? "passed" : decision === "rejected" ? "failed" : "pending";
+  return applyGateResult(ctx, workflowId, workflowVersion, gate, gateResult);
 }
 
 export async function approveHandler(ctx: AartContext, input: ApproveInput): Promise<HandlerResult> {
@@ -120,9 +166,9 @@ export async function approveHandler(ctx: AartContext, input: ApproveInput): Pro
     decidedAt: ctx.now().toISOString(),
   });
 
-  const versionReview = ctx.governance.decodeWorkflowVersionApprovalSubject(task.runId);
+  const versionReview = ctx.governance.decodeWorkflowVersionApprovalSubject(task.runId, task.stepId);
   if (versionReview) {
-    return applyVersionReviewDecision(ctx, versionReview.workflowId, versionReview.workflowVersion, input.decision);
+    return applyVersionReviewDecision(ctx, versionReview.workflowId, versionReview.workflowVersion, versionReview.gate, input.decision);
   }
 
   const outcome = await ctx.engine.resumeApproval(task.runId, task.stepId, {
@@ -180,5 +226,9 @@ export async function promoteWorkflowHandler(ctx: AartContext, input: PromoteWor
     await ctx.store.workflows.put({ ...workflow, approval });
   }
   const unmetGates = requiredGates.filter((g) => workflow.gates[g] !== "passed" && workflow.gates[g] !== "waived");
-  return { ok: approval === "approved", workflowId: input.workflowId, workflowVersion: input.workflowVersion, approval, requiredGates, unmetGates };
+  // gates (S14): the full current gate snapshot, already in scope — a
+  // read-side addition (promoteWorkflowHandler writes no gate itself, only
+  // reconciles `approval`), included so a caller can see every gate's
+  // status alongside unmetGates rather than just the required subset.
+  return { ok: approval === "approved", workflowId: input.workflowId, workflowVersion: input.workflowVersion, approval, gates: workflow.gates, requiredGates, unmetGates };
 }

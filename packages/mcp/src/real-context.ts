@@ -64,7 +64,7 @@ import {
   type CapabilityClosureLookup,
   type CapabilityClosureNode,
 } from "@aart/governance";
-import { createReportRenderers, recordCorrection as evidenceRecordCorrection, createEvalExampleFromCorrection as evidenceCreateEvalExampleFromCorrection, createScorerRegistry, runEvalSuite } from "@aart/evidence";
+import { computeEvalsGateStatus, createReportRenderers, recordCorrection as evidenceRecordCorrection, createEvalExampleFromCorrection as evidenceCreateEvalExampleFromCorrection, createScorerRegistry, runEvalSuite } from "@aart/evidence";
 import { computePackContentHash, findBlocks, type BlockCatalogEntry } from "@aart/registry";
 import { createLlmPack, type CreateLlmPackOptions } from "@aart/llm";
 import type { AartStore } from "@aart/store";
@@ -368,6 +368,8 @@ export function createRealEvidencePort(store: AartStore, engine: Engine): Eviden
       });
       return result.evalRun;
     },
+
+    computeEvalsGateStatus,
   };
 }
 

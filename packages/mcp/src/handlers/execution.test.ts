@@ -92,6 +92,55 @@ describe("getReportHandler (aart_get_report)", () => {
   });
 });
 
+describe("runWorkflowHandler — the readiness GATE writer (S14 'gate write paths')", () => {
+  it("a completed real run of a registered version writes gates.readiness = 'passed'", async () => {
+    tc = await createTestContext();
+    await registerWorkflowHandler(tc.ctx, { workflow: sampleWorkflowYaml("wf-readiness-1") });
+    const result = await runWorkflowHandler(tc.ctx, { workflowId: "wf-readiness-1", input: { url: "https://example.com" } });
+    expect(result.ok).toBe(true);
+    expect((result.gates as { readiness: string }).readiness).toBe("passed");
+    const stored = await tc.ctx.store.workflows.get("wf-readiness-1", "0.1.0");
+    expect(stored?.gates.readiness).toBe("passed");
+  });
+
+  it("a dry run does NOT write gates.readiness, even though it also reports status 'completed' — a dry run fakes dispatch and proves nothing real", async () => {
+    tc = await createTestContext();
+    await registerWorkflowHandler(tc.ctx, { workflow: sampleWorkflowYaml("wf-readiness-dry") });
+    const result = await runWorkflowHandler(tc.ctx, { workflowId: "wf-readiness-dry", input: { url: "https://example.com" }, dryRun: true });
+    expect(result.status).toBe("completed");
+    const stored = await tc.ctx.store.workflows.get("wf-readiness-dry", "0.1.0");
+    expect(stored?.gates.readiness).toBe("pending");
+  });
+
+  it("a failed run does not write gates.readiness — only a genuinely completed run counts", async () => {
+    tc = await createTestContext();
+    await registerWorkflowHandler(tc.ctx, { workflow: failingWorkflowYaml("wf-readiness-fail") });
+    await runWorkflowHandler(tc.ctx, { workflowId: "wf-readiness-fail" });
+    const stored = await tc.ctx.store.workflows.get("wf-readiness-fail", "0.1.0");
+    expect(stored?.gates.readiness).toBe("pending");
+  });
+
+  it("running a specific PINNED (non-latest) version writes readiness onto THAT exact version, leaving a sibling version's gate untouched — negative test: an unrun version lacks readiness", async () => {
+    tc = await createTestContext();
+    await registerWorkflowHandler(tc.ctx, { workflow: sampleWorkflowYaml("wf-readiness-pinned", "0.1.0") });
+    await registerWorkflowHandler(tc.ctx, { workflow: sampleWorkflowYaml("wf-readiness-pinned", "0.2.0") });
+    await runWorkflowHandler(tc.ctx, { workflowId: "wf-readiness-pinned", workflowVersion: "0.1.0", input: { url: "https://example.com" } });
+
+    const v1 = await tc.ctx.store.workflows.get("wf-readiness-pinned", "0.1.0");
+    const v2 = await tc.ctx.store.workflows.get("wf-readiness-pinned", "0.2.0");
+    expect(v1?.gates.readiness).toBe("passed");
+    expect(v2?.gates.readiness).toBe("pending"); // never run -- still lacks readiness
+  });
+
+  it("aart_verify's synthetic workflow (gates pre-'waived') runs cleanly through this SAME readiness-writing path — no special-casing of a prior 'waived' state (matches the pre-existing humanReview writer's own precedent; 'waived' and 'passed' are behaviorally identical for computeApprovalState)", async () => {
+    tc = await createTestContext();
+    const result = await verifyHandler(tc.ctx, { url: "https://example.com" });
+    expect(result.ok).toBe(true);
+    const stored = await tc.ctx.store.workflows.get("__aart_verify__", "0.1.0-no-expect");
+    expect(["waived", "passed"]).toContain(stored?.gates.readiness);
+  });
+});
+
 describe("verifyHandler (aart_verify) — the agent's easiest success path (spec §32.6)", () => {
   it("one call, url only: returns a passed report", async () => {
     tc = await createTestContext();

@@ -88,6 +88,63 @@ describe("approveHandler (aart_approve) — mode-agnostic at the handler level (
   });
 });
 
+describe("requestApprovalHandler / approveHandler — the riskReview GATE writer via --gate (S14 'gate write paths'), no new mechanism", () => {
+  it("--gate riskReview creates a task with a riskReview-shaped stepId, distinct from the humanReview default", async () => {
+    tc = await createTestContext();
+    const result = await requestApprovalHandler(tc.ctx, { workflowId: "wf-riskreview-1", workflowVersion: "0.1.0", gate: "riskReview" });
+    expect(result.ok).toBe(true);
+    expect(result.stepId).toBe("__gate:riskReview__");
+  });
+
+  it("omitting --gate still defaults to humanReview (regression: pre-S14 behavior unchanged)", async () => {
+    tc = await createTestContext();
+    const result = await requestApprovalHandler(tc.ctx, { workflowId: "wf-riskreview-default", workflowVersion: "1.0.0" });
+    expect(result.stepId).toBe("__gate:humanReview__");
+  });
+
+  it("rejects an invalid --gate value at request time", async () => {
+    tc = await createTestContext();
+    const result = await requestApprovalHandler(tc.ctx, { workflowId: "wf-riskreview-bad", workflowVersion: "1.0.0", gate: "validate" });
+    expect(result.ok).toBe(false);
+  });
+
+  it("approving a riskReview task writes gates.riskReview (not gates.humanReview) and recomputes approval", async () => {
+    tc = await createTestContext({ trustMode: "production" });
+    await registerWorkflowHandler(tc.ctx, { workflow: sampleWorkflowYaml("wf-riskreview-2") });
+    // production requires all 5 gates -- satisfy the other 4 directly so
+    // this ONE decision is what flips approval, proving the write actually
+    // lands on riskReview specifically (not a coincidental side effect).
+    const wf = await tc.ctx.store.workflows.get("wf-riskreview-2", "0.1.0");
+    await tc.ctx.store.workflows.put({ ...wf!, gates: { validate: "passed", readiness: "passed", evals: "passed", riskReview: "pending", humanReview: "passed" } });
+
+    const request = await requestApprovalHandler(tc.ctx, { workflowId: "wf-riskreview-2", workflowVersion: "0.1.0", gate: "riskReview" });
+    const result = await approveHandler(tc.ctx, { taskId: request.taskId as string, decision: "approved", reviewer: "alice" });
+    expect(result.ok).toBe(true);
+    expect(result.approval).toBe("approved");
+
+    const updated = await tc.ctx.store.workflows.get("wf-riskreview-2", "0.1.0");
+    expect(updated?.gates.riskReview).toBe("passed");
+    expect(updated?.gates.humanReview).toBe("passed"); // untouched, was already passed before this decision
+  });
+
+  it("a hand-crafted approval task targeting a non-approval-task gate (e.g. 'validate') is refused at approve time — spec §17.1's 'each gate is advanced only by its own mechanism' holds even against a bypass of the request-time check", async () => {
+    tc = await createTestContext({ trustMode: "governed" });
+    await registerWorkflowHandler(tc.ctx, { workflow: sampleWorkflowYaml("wf-bypass-1") });
+    // The RAW runId+stepId shape (genuine per-run-wait input) has no way at
+    // request time to recognize it's spoofing the workflow-version sentinel
+    // convention with a disallowed gate -- exactly the gap
+    // applyVersionReviewDecision's own defensive re-check exists to close.
+    const request = await requestApprovalHandler(tc.ctx, { runId: "workflow-version:wf-bypass-1@0.1.0", stepId: "__gate:validate__" });
+    expect(request.ok).toBe(true);
+
+    const result = await approveHandler(tc.ctx, { taskId: request.taskId as string, decision: "approved", reviewer: "alice" });
+    expect(result.ok).toBe(false);
+
+    const stored = await tc.ctx.store.workflows.get("wf-bypass-1", "0.1.0");
+    expect(stored?.gates.validate).toBe("pending"); // untouched -- the bypass attempt did not work
+  });
+});
+
 describe("recordCorrectionHandler (aart_record_correction)", () => {
   it("persists a correction with the required reviewer field", async () => {
     tc = await createTestContext();

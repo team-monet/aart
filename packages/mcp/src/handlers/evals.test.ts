@@ -101,3 +101,39 @@ describe("runEvalHandler (aart_run_eval)", () => {
     expect(evalRun.regressions).toEqual(["ex1"]);
   });
 });
+
+describe("runEvalHandler — the evals GATE writer (S14 'gate write paths'), reusing @aart/evidence's own promotion-gate threshold comparison", () => {
+  it("a suite run meeting minScore writes gates.evals = 'passed'", async () => {
+    tc = await createTestContext();
+    await registerWorkflowHandler(tc.ctx, { workflow: sampleWorkflowYaml("wf-evals-gate-pass") });
+    await tc.ctx.store.evals.putSuite(emptySuite); // 0 examples -> score 1 (runEval's own "total>0?passed/total:1")
+    const result = await runEvalHandler(tc.ctx, { suiteId: "suite-1", workflowId: "wf-evals-gate-pass", minScore: 0.9 });
+    expect(result.ok).toBe(true);
+    expect((result.gates as { evals: string }).evals).toBe("passed");
+    const stored = await tc.ctx.store.workflows.get("wf-evals-gate-pass", "0.1.0");
+    expect(stored?.gates.evals).toBe("passed");
+  });
+
+  it("a suite run below minScore writes gates.evals = 'failed'", async () => {
+    tc = await createTestContext();
+    await registerWorkflowHandler(tc.ctx, { workflow: sampleWorkflowYaml("wf-evals-gate-fail") });
+    await tc.ctx.store.evals.putSuite(emptySuite);
+    await tc.ctx.store.evals.putExample({ id: "ex1", suiteId: "suite-1", input: { url: "https://example.com" }, expected: { impossible: true } });
+    const result = await runEvalHandler(tc.ctx, { suiteId: "suite-1", workflowId: "wf-evals-gate-fail", minScore: 0.5 });
+    expect(result.ok).toBe(false); // score 0 (1 example, regressed)
+    expect((result.gates as { evals: string }).evals).toBe("failed");
+    const stored = await tc.ctx.store.workflows.get("wf-evals-gate-fail", "0.1.0");
+    expect(stored?.gates.evals).toBe("failed");
+  });
+
+  it("omitting minScore never touches gates.evals — unchanged pre-S14 behavior for every existing caller", async () => {
+    tc = await createTestContext();
+    await registerWorkflowHandler(tc.ctx, { workflow: sampleWorkflowYaml("wf-evals-gate-untouched") });
+    await tc.ctx.store.evals.putSuite(emptySuite);
+    const result = await runEvalHandler(tc.ctx, { suiteId: "suite-1", workflowId: "wf-evals-gate-untouched" });
+    expect(result.ok).toBe(true);
+    expect(result.gates).toBeUndefined();
+    const stored = await tc.ctx.store.workflows.get("wf-evals-gate-untouched", "0.1.0");
+    expect(stored?.gates.evals).toBe("pending");
+  });
+});

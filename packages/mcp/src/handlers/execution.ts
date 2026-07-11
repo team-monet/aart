@@ -11,6 +11,7 @@ import type { AartContext } from "../context.js";
 import type { HandlerResult } from "../response.js";
 import { newId } from "../stubs/engine.js";
 import { compileWorkflowInput, YamlCompileError } from "../yaml-compiler.js";
+import { applyGateResult } from "./governance.js";
 
 async function resolveWorkflow(ctx: AartContext, workflowId: string, workflowVersion?: string): Promise<Workflow | undefined> {
   return workflowVersion ? ctx.store.workflows.get(workflowId, workflowVersion) : ctx.store.workflows.getLatest(workflowId);
@@ -48,6 +49,36 @@ export async function runWorkflowHandler(ctx: AartContext, input: RunWorkflowInp
   });
   const finished = await ctx.engine.executeRun(created.runId);
 
+  // Readiness gate (S14 "gate write paths"): a genuinely-completed, non-dry
+  // real run of THIS EXACT registered version satisfies spec §17.1's
+  // readiness gate — "this version has actually been run for real."
+  // `workflow` above is always resolved from the store (resolveWorkflow),
+  // never an ad-hoc/unregistered source — there is no "run a local file
+  // directly" path anywhere in this handler (or `aart run`, which only ever
+  // takes a workflowId) — so "a local file-based run doesn't count" holds
+  // by construction, not by an extra check here. A dry run
+  // (params.dryRun) fakes every capability-gated block's dispatch (S1's
+  // documented semantics, engine/step-executor.ts's isDryRun branch) and so
+  // proves nothing real; excluded explicitly, since "completed" alone
+  // doesn't distinguish a dry run from a genuine one. Every caller of this
+  // shared handler goes through this same check — aart run / aart_run_workflow
+  // directly, and aart_verify indirectly (verifyHandler below calls this
+  // function) — matching the brief's "via aart run ... or aart_verify
+  // against it." No waived-guard: kept consistent with the pre-existing
+  // humanReview writer (applyVersionReviewDecision), which has never
+  // special-cased a prior "waived" state either, and "waived"/"passed" are
+  // behaviorally identical for computeApprovalState/promotion purposes —
+  // only the descriptive label differs.
+  let gates = workflow.gates;
+  let approval = workflow.approval;
+  if (finished.status === "completed" && !input.dryRun) {
+    const gateWrite = await applyGateResult(ctx, workflow.id, workflow.version, "readiness", "passed");
+    if (gateWrite.ok) {
+      gates = gateWrite.gates as typeof gates;
+      approval = gateWrite.approval as typeof approval;
+    }
+  }
+
   return {
     ok: finished.status === "completed" || finished.status === "waiting",
     runId: finished.runId,
@@ -55,6 +86,8 @@ export async function runWorkflowHandler(ctx: AartContext, input: RunWorkflowInp
     outputs: finished.outputs,
     error: finished.error,
     trace: summarizeTrace(finished),
+    gates,
+    approval,
   };
 }
 

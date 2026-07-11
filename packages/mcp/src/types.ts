@@ -27,6 +27,7 @@ import type {
   EvalRun,
   EvalSuite,
   Gates,
+  GateStatus,
   ModelFacingReport,
   RunRecord,
   TrustMode,
@@ -150,9 +151,10 @@ export interface GovernancePort {
    * since governance owns the underlying ApprovalTask-writing business
    * logic this sentinel decorates).
    */
-  workflowVersionApprovalSubject(workflowId: string, workflowVersion: string): { runId: string; stepId: string };
-  /** The decode side of `workflowVersionApprovalSubject` above — `undefined` for any `runId` that isn't this sentinel shape (including a genuine per-run `RunRecord.runId`). */
-  decodeWorkflowVersionApprovalSubject(runId: string): { workflowId: string; workflowVersion: string } | undefined;
+  /** S14 "gate write paths": `gate` defaults to `"humanReview"` (this sentinel's sole use before S14) — pass `"riskReview"` for a risk-review workflow-version decision. No new mechanism; same ApprovalTask machinery, a different gate key encoded into `stepId`. */
+  workflowVersionApprovalSubject(workflowId: string, workflowVersion: string, gate?: GateName): { runId: string; stepId: string };
+  /** The decode side of `workflowVersionApprovalSubject` above — `undefined` for any `runId` that isn't this sentinel shape (including a genuine per-run `RunRecord.runId`). S14: `stepId` is optional — omitted (every pre-S14 call site) decodes `gate: "humanReview"`, matching what those call sites already assumed. */
+  decodeWorkflowVersionApprovalSubject(runId: string, stepId?: string): { workflowId: string; workflowVersion: string; gate: GateName } | undefined;
   /**
    * S9 integration (reconciliation ledger item 1's redaction-bypass finding):
    * the one path every `ApprovalTask` write goes through, routing through
@@ -201,6 +203,18 @@ export interface EvidencePort {
   createEvalExampleFromCorrection(correction: Correction, suiteId: string): Promise<EvalExample>;
   /** Runs every example in a suite against a workflow's latest run outputs — a simplified stand-in for S6's full scorer registry (12 kinds, architecture §9.5); this port only exercises `exact_match`/`jsonpath_contains`-shaped comparisons, clearly short of S6's real registry. */
   runEval(suite: EvalSuite, workflowId: string, workflowVersion: string): Promise<EvalRun>;
+  /**
+   * S14 "gate write paths": @aart/evidence's own promotion-gate threshold
+   * comparison (architecture §9.6 — "writes 'passed' only if the
+   * EvalRun.score meets the minScore threshold... this is the one gate
+   * whose pass/fail isn't binary-by-nature"), exposed here so the `evals`
+   * gate writer (aart_run_eval / `aart eval run --min-score`) reuses this
+   * EXACT comparison rather than re-deriving it. Pure/synchronous — a
+   * trivial, fully-specified algorithm mirrored verbatim on both the real
+   * and stub side (same "not actually simulated" treatment this port's
+   * sibling GovernancePort already gives computeApprovalState).
+   */
+  computeEvalsGateStatus(evalRun: EvalRun, minScore: number): GateStatus;
 }
 
 // ---------------------------------------------------------------------------

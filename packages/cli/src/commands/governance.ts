@@ -68,11 +68,20 @@ export async function correctionCommand(tokens: Tokenized, cli: CliContext): Pro
   return { ok: false, error: 'Usage: aart correction add <runId> | aart correction list' };
 }
 
+/** `--gate humanReview|riskReview` (S14 "gate write paths", default `humanReview` — this command's pre-S14 sole behavior): extends the SAME ApprovalTask task/decision flow to a `riskReview` workflow-version decision, no new mechanism. Validated here too (not only inside `requestApprovalHandler`) for a friendly early error, matching `approveCommand`'s own `--decision` enum check just below. */
 export async function requestApprovalCommand(tokens: Tokenized, cli: CliContext): Promise<HandlerResult & { next: string }> {
   const workflowId = requirePositional(tokens.positionals, 0, "workflowId");
+  // Flag-shape validation (--gate) happens BEFORE any store lookup — same
+  // fail-fast-on-malformed-input discipline approveCommand's own --decision
+  // check uses, so a bad --gate value is reported immediately rather than
+  // masked by an unrelated "No versions found" error when both are wrong.
+  const gate = flagString(tokens.flags, "gate");
+  if (gate !== undefined && gate !== "humanReview" && gate !== "riskReview") {
+    return { ok: false, error: "--gate must be one of: humanReview, riskReview", next: "Retry with a valid --gate." };
+  }
   const workflowVersion = flagString(tokens.flags, "version") ?? (await cli.aart.store.workflows.getLatest(workflowId))?.version;
   if (!workflowVersion) return { ok: false, error: `No versions found for workflow "${workflowId}".`, next: "Call aart register first." };
-  const result = await requestApprovalHandler(cli.aart, { workflowId, workflowVersion });
+  const result = await requestApprovalHandler(cli.aart, { workflowId, workflowVersion, gate });
   return wrapResult("aart_request_approval", result);
 }
 

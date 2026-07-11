@@ -16,9 +16,20 @@
 // against the stub engine's (necessarily fake) run outputs, a small fraction
 // of S6's real 12-kind scorer registry (architecture §9.5).
 import type { AartStore } from "@aart/store";
-import type { Correction, EvalExample, EvalRun, EvalSuite, ModelFacingReport, RunRecord, Trigger, Workflow } from "@aart/types";
+import type { Correction, EvalExample, EvalRun, EvalSuite, GateStatus, ModelFacingReport, RunRecord, Trigger, Workflow } from "@aart/types";
 import type { EnginePort, EvidencePort } from "../types.js";
 import { newId } from "./engine.js";
+
+/**
+ * Mirrors @aart/evidence/src/evals/promotion-gate.ts's computeEvalsGateStatus
+ * EXACTLY (S14 "gate write paths") — a trivial, fully-specified threshold
+ * comparison (architecture §9.6), not a faked/simplified simulation like
+ * this module's runEval above, so there is nothing to diverge from the real
+ * implementation: both sides are the same one-line algorithm.
+ */
+export function computeEvalsGateStatus(evalRun: EvalRun, minScore: number): GateStatus {
+  return evalRun.score >= minScore ? "passed" : "failed";
+}
 
 const HEADLINE_BY_STATUS: Record<RunRecord["status"], ModelFacingReport["headline"]> = {
   completed: "passed",
@@ -167,5 +178,7 @@ export function createStubEvidence(store: AartStore, engine: EnginePort): Eviden
       await store.evals.putRun(evalRun);
       return evalRun;
     },
+
+    computeEvalsGateStatus,
   };
 }

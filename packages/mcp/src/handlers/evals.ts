@@ -12,6 +12,7 @@
 import type { EvalExample, EvalSuite } from "@aart/types";
 import type { AartContext } from "../context.js";
 import type { HandlerResult } from "../response.js";
+import { applyGateResult } from "./governance.js";
 
 export interface CreateEvalFromCorrectionInput {
   runId: string;
@@ -40,6 +41,18 @@ export interface RunEvalInput {
   suiteId: string;
   workflowId: string;
   workflowVersion?: string;
+  /**
+   * S14 "gate write paths": the `promotion.requires[].evals.minScore`
+   * threshold (spec §24.5) this run is evaluated against. OMITTED (the
+   * pre-S14 default): this run is purely informational and never touches
+   * `gates.evals` — unchanged behavior for every existing caller. SUPPLIED:
+   * `@aart/evidence`'s own promotion-gate threshold comparison
+   * (`computeEvalsGateStatus`, architecture §9.6 — "the one gate whose
+   * pass/fail isn't binary-by-nature") decides passed/failed from
+   * `evalRun.score`, and that exact evidence-owned decision (not a
+   * reimplementation of it) is what gets written.
+   */
+  minScore?: number;
 }
 
 export async function runEvalHandler(ctx: AartContext, input: RunEvalInput): Promise<HandlerResult> {
@@ -55,5 +68,14 @@ export async function runEvalHandler(ctx: AartContext, input: RunEvalInput): Pro
   const effectiveSuite: EvalSuite = { ...suite, examples: storedExamples.length > 0 ? storedExamples : suite.examples };
 
   const evalRun = await ctx.evidence.runEval(effectiveSuite, workflow.id, workflow.version);
+
+  if (input.minScore !== undefined) {
+    const gateStatus = ctx.evidence.computeEvalsGateStatus(evalRun, input.minScore);
+    const gateWrite = await applyGateResult(ctx, workflow.id, workflow.version, "evals", gateStatus);
+    if (gateWrite.ok) {
+      return { ok: evalRun.failed === 0, evalRun, gates: gateWrite.gates, approval: gateWrite.approval };
+    }
+  }
+
   return { ok: evalRun.failed === 0, evalRun };
 }

@@ -15,6 +15,7 @@ import { bundleCommand, flagCommand, mcpCommand, serverCommand, workerCommand } 
 export const USAGE = `AART CLI — usage:
   aart run <workflowId> --input <json> [--version <v>]
   aart validate <path>
+  aart validate <workflowId> --registered [--version <v>]
   aart list
   aart register <path>
   aart init
@@ -24,8 +25,8 @@ export const USAGE = `AART CLI — usage:
   aart correction list [--run <runId>] [--step <id>]
   aart eval create <suite> [--scorer <kind>]
   aart eval add <suite> --from-run <runId>
-  aart eval run <suite> --workflow <workflowId> [--version <v>]
-  aart request-approval <workflowId> [--version <v>]
+  aart eval run <suite> --workflow <workflowId> [--version <v>] [--min-score <n>]
+  aart request-approval <workflowId> [--version <v>] [--gate humanReview|riskReview]
   aart promote <workflowId> [--version <v>]
   aart deploy <workflowId> --target <target> [--version <v>]
   aart trigger add <workflowId> --type <type>

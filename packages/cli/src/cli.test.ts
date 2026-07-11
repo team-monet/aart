@@ -70,6 +70,48 @@ describe("aart validate", () => {
     const outcome = await run(["validate", join(tc.cwd, "nope.yaml")], { cliContext: tc.cli });
     expect(outcome.ok).toBe(false);
   });
+
+  it("a plain file-path validation (no --registered) never writes gates, even though it's pre-registration", async () => {
+    tc = await createTestCli();
+    const path = join(tc.cwd, "wf.yaml");
+    await writeFile(path, sampleWorkflowYaml("wf-cli-validate-nogate"), "utf8");
+    await run(["register", path], { cliContext: tc.cli }); // register separately so there IS a stored version to check
+    await run(["validate", path], { cliContext: tc.cli }); // validates the FILE again, not --registered
+    const stored = await tc.cli.aart.store.workflows.get("wf-cli-validate-nogate", "0.1.0");
+    expect(stored?.gates.validate).toBe("pending");
+  });
+
+  describe("--registered (S14 'gate write paths') — validates an already-registered VERSION by reference, and writes gates.validate", () => {
+    it("a clean registered-version validation returns ok:true and gates.validate: 'passed'", async () => {
+      tc = await createTestCli();
+      const path = join(tc.cwd, "wf.yaml");
+      await writeFile(path, sampleWorkflowYaml("wf-cli-validate-registered"), "utf8");
+      await run(["register", path], { cliContext: tc.cli });
+
+      const outcome = await run(["validate", "wf-cli-validate-registered", "--registered"], { cliContext: tc.cli });
+      expect(outcome.ok).toBe(true);
+      expect((outcome.result as { gates: { validate: string } }).gates.validate).toBe("passed");
+
+      const stored = await tc.cli.aart.store.workflows.get("wf-cli-validate-registered", "0.1.0");
+      expect(stored?.gates.validate).toBe("passed");
+    });
+
+    it("--version targets a specific registered version rather than defaulting to latest", async () => {
+      tc = await createTestCli();
+      const pathV1 = join(tc.cwd, "wf-v1.yaml");
+      await writeFile(pathV1, sampleWorkflowYaml("wf-cli-validate-reg-v", "0.1.0"), "utf8");
+      await run(["register", pathV1], { cliContext: tc.cli });
+      const pathV2 = join(tc.cwd, "wf-v2.yaml");
+      await writeFile(pathV2, sampleWorkflowYaml("wf-cli-validate-reg-v", "0.2.0"), "utf8");
+      await run(["register", pathV2], { cliContext: tc.cli });
+
+      await run(["validate", "wf-cli-validate-reg-v", "--registered", "--version", "0.1.0"], { cliContext: tc.cli });
+      const v1 = await tc.cli.aart.store.workflows.get("wf-cli-validate-reg-v", "0.1.0");
+      const v2 = await tc.cli.aart.store.workflows.get("wf-cli-validate-reg-v", "0.2.0");
+      expect(v1?.gates.validate).toBe("passed");
+      expect(v2?.gates.validate).toBe("pending"); // untouched -- gates are per-version
+    });
+  });
 });
 
 describe("aart register / aart list", () => {
@@ -284,11 +326,17 @@ describe("aart request-approval — the CLI-side gap A44 found and A45 closes (A
     expect((outcome.result as { error: string }).error).toMatch(/No versions found/);
   });
 
-  it("the full CLI-only lifecycle: register -> request-approval -> approve genuinely records a decision through the installed command surface, no MCP client involved", async () => {
+  it("the full CLI-only lifecycle: register -> validate --registered -> request-approval -> approve -> promote genuinely completes through the installed command surface, no MCP client involved, no direct store access (AMENDMENTS.md A46 — closes the gap A45 found and deliberately left open)", async () => {
     tc = await createTestCli();
     const path = join(tc.cwd, "wf.yaml");
     await writeFile(path, sampleWorkflowYaml("wf-cli-only-lifecycle"), "utf8");
     await run(["register", path], { cliContext: tc.cli });
+
+    // A45's own finding: `validateWorkflowHandler`'s workflowId+workflowVersion
+    // branch never persisted anything. S14 wires it — this IS that write path.
+    const validateOutcome = await run(["validate", "wf-cli-only-lifecycle", "--registered"], { cliContext: tc.cli });
+    expect(validateOutcome.ok).toBe(true);
+    expect((validateOutcome.result as { gates: { validate: string } }).gates.validate).toBe("passed");
 
     const requestOutcome = await run(["request-approval", "wf-cli-only-lifecycle"], { cliContext: tc.cli });
     expect(requestOutcome.ok).toBe(true);
@@ -298,21 +346,53 @@ describe("aart request-approval — the CLI-side gap A44 found and A45 closes (A
     expect(approveOutcome.ok).toBe(true);
     expect((approveOutcome.result as { gates: { humanReview: string } }).gates.humanReview).toBe("passed");
 
-    // AMENDMENTS.md A45 (real finding, distinct from and beyond this
-    // command's own scope): `aart promote` still refuses here — a SEPARATE,
-    // pre-existing gap this session found while proving this lifecycle,
-    // not something aart_request_approval's absence caused or this
-    // command's own addition fixes. Only `humanReview` has ANY real write
-    // path anywhere in the CLI/MCP surface (this approve step, just above);
-    // `validate`/`readiness`/`evals`/`riskReview` have none — every
-    // existing test that gets a workflow into a PROMOTABLE state
-    // (cli.test.ts's own "aart promote / aart deploy" block above) does so
-    // by writing `gates` directly into the store, which is exactly what a
-    // real CLI-only operator cannot do. See this session's final report /
-    // AMENDMENTS.md A45 for the full finding and recommendation.
+    // governed mode requires exactly validate+humanReview (gates.ts's
+    // REQUIRED_GATES_BY_MODE) — both real now, so promote genuinely
+    // succeeds, no direct store write standing in for a real command.
     const promoteOutcome = await run(["promote", "wf-cli-only-lifecycle"], { cliContext: tc.cli });
-    expect(promoteOutcome.ok).toBe(false);
-    expect((promoteOutcome.result as { unmetGates: string[] }).unmetGates).toEqual(["validate"]);
+    expect(promoteOutcome.ok).toBe(true);
+    expect((promoteOutcome.result as { approval: string }).approval).toBe("approved");
+    expect((promoteOutcome.result as { unmetGates: string[] }).unmetGates).toEqual([]);
+  });
+});
+
+describe("aart request-approval --gate riskReview / aart eval run --min-score (S14 'gate write paths')", () => {
+  it("--gate riskReview creates a task distinct from the humanReview default, and approving it writes gates.riskReview specifically", async () => {
+    tc = await createTestCli();
+    const path = join(tc.cwd, "wf.yaml");
+    await writeFile(path, sampleWorkflowYaml("wf-cli-riskreview"), "utf8");
+    await run(["register", path], { cliContext: tc.cli });
+
+    const requestOutcome = await run(["request-approval", "wf-cli-riskreview", "--gate", "riskReview"], { cliContext: tc.cli });
+    expect(requestOutcome.ok).toBe(true);
+    expect((requestOutcome.result as { stepId: string }).stepId).toBe("__gate:riskReview__");
+    const taskId = (requestOutcome.result as { taskId: string }).taskId;
+
+    const approveOutcome = await run(["approve", taskId, "--decision", "approved", "--reviewer", "alice"], { cliContext: tc.cli });
+    expect(approveOutcome.ok).toBe(true);
+    expect((approveOutcome.result as { gates: { riskReview: string; humanReview: string } }).gates.riskReview).toBe("passed");
+    expect((approveOutcome.result as { gates: { riskReview: string; humanReview: string } }).gates.humanReview).toBe("pending"); // untouched -- a different gate
+  });
+
+  it("an invalid --gate value fails cleanly with a friendly error, not a silent fall-through", async () => {
+    tc = await createTestCli();
+    const outcome = await run(["request-approval", "wf-cli-riskreview-bad", "--gate", "bogus"], { cliContext: tc.cli });
+    expect(outcome.ok).toBe(false);
+    expect((outcome.result as { error: string }).error).toMatch(/--gate must be one of/);
+  });
+
+  it("--min-score wires @aart/evidence's threshold comparison into gates.evals", async () => {
+    tc = await createTestCli();
+    const path = join(tc.cwd, "wf.yaml");
+    await writeFile(path, sampleWorkflowYaml("wf-cli-min-score"), "utf8");
+    await run(["register", path], { cliContext: tc.cli });
+    await run(["eval", "create", "cli-min-score-suite"], { cliContext: tc.cli });
+
+    const belowThreshold = await run(["eval", "run", "cli-min-score-suite", "--workflow", "wf-cli-min-score", "--min-score", "1.1"], { cliContext: tc.cli });
+    expect((belowThreshold.result as { gates: { evals: string } }).gates.evals).toBe("failed");
+
+    const atThreshold = await run(["eval", "run", "cli-min-score-suite", "--workflow", "wf-cli-min-score", "--min-score", "1"], { cliContext: tc.cli });
+    expect((atThreshold.result as { gates: { evals: string } }).gates.evals).toBe("passed");
   });
 });
 

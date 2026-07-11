@@ -9,7 +9,7 @@ import { readFile, mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { generateInitAgentOutputs, registerWorkflowHandler, runWorkflowHandler, validateWorkflowHandler, wrapResult, type HandlerResult } from "@aart/mcp";
 import type { Tokenized } from "../args.js";
-import { flagString, requirePositional } from "../args.js";
+import { flagBoolean, flagString, requirePositional } from "../args.js";
 import type { CliContext } from "../cli-context.js";
 
 export async function runCommand(tokens: Tokenized, cli: CliContext): Promise<HandlerResult & { next: string }> {
@@ -20,7 +20,27 @@ export async function runCommand(tokens: Tokenized, cli: CliContext): Promise<Ha
   return wrapResult("aart_run_workflow", result);
 }
 
+/**
+ * `--registered` (S14 "gate write paths"): validates an already-registered
+ * VERSION by reference instead of a file path — the dead branch A45 found
+ * (`validateWorkflowHandler`'s own `workflowId`+`workflowVersion` shape),
+ * now genuinely reachable from the CLI. Matches `promoteCommand`/
+ * `deployCommand`/`requestApprovalCommand`'s own `workflowId [--version]`
+ * shape (defaults to that workflow's latest registered version). Default
+ * (no `--registered`) is BYTE-FOR-BYTE the pre-S14 behavior: the positional
+ * is a file path, read from disk, validated as a draft — never touches
+ * gates (validating a file is pre-registration, spec §17.1's `validate`
+ * gate is a fact about a stored VERSION).
+ */
 export async function validateCommand(tokens: Tokenized, cli: CliContext): Promise<HandlerResult & { next: string }> {
+  if (flagBoolean(tokens.flags, "registered")) {
+    const workflowId = requirePositional(tokens.positionals, 0, "workflowId");
+    const workflowVersion = flagString(tokens.flags, "version") ?? (await cli.aart.store.workflows.getLatest(workflowId))?.version;
+    if (!workflowVersion) return wrapResult("aart_validate", { ok: false, error: `No versions found for workflow "${workflowId}".` });
+    const result = await validateWorkflowHandler(cli.aart, { workflowId, workflowVersion });
+    return wrapResult("aart_validate", result);
+  }
+
   const path = requirePositional(tokens.positionals, 0, "path");
   const source = await readFile(path, "utf8");
   const result = await validateWorkflowHandler(cli.aart, { workflow: source });

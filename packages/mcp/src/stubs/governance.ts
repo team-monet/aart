@@ -49,6 +49,11 @@ import type {
   ValidationResultShape,
 } from "../types.js";
 
+// Mirrors @aart/governance/src/gates.ts's GATE_NAMES exactly (spec §17.1's
+// five independent, parallel gates) — used below by decodeGateFromStepId's
+// membership check (S14 "gate write paths").
+const GATE_NAMES: readonly GateName[] = ["validate", "readiness", "evals", "riskReview", "humanReview"];
+
 // Mirrors @aart/governance/src/gates.ts's REQUIRED_GATES_BY_MODE exactly
 // (architecture §7.3's table).
 export const REQUIRED_GATES_BY_MODE: Readonly<Record<TrustMode, readonly GateName[]>> = {
@@ -210,20 +215,41 @@ export function redact(record: unknown, resolvedSecretRefs: ReadonlySet<string>)
 // decodeWorkflowVersionApprovalSubject exactly (S9 integration, reconciliation
 // ledger item 1 — this is the sentinel convention that WON over this
 // package's own former `version-review:`/`humanReview` encoding; see root
-// AMENDMENTS.md A23's "S9 resolution").
+// AMENDMENTS.md A23's "S9 resolution"). S14 "gate write paths": gate-
+// parameterized (`__gate:<gateName>__`, was the fixed `__gate:humanReview__`
+// constant) so riskReview can share this same machinery — mirrored here
+// exactly too, `gate`/`stepId` both optional and defaulting to `humanReview`
+// so every pre-S14 call site is unaffected.
 const WORKFLOW_VERSION_SUBJECT_PREFIX = "workflow-version:";
-const WORKFLOW_VERSION_SUBJECT_STEP_ID = "__gate:humanReview__";
+const WORKFLOW_VERSION_SUBJECT_STEP_PREFIX = "__gate:";
+const WORKFLOW_VERSION_SUBJECT_STEP_SUFFIX = "__";
+const DEFAULT_WORKFLOW_VERSION_GATE: GateName = "humanReview";
 
-export function workflowVersionApprovalSubject(workflowId: string, workflowVersion: string): { runId: string; stepId: string } {
-  return { runId: `${WORKFLOW_VERSION_SUBJECT_PREFIX}${workflowId}@${workflowVersion}`, stepId: WORKFLOW_VERSION_SUBJECT_STEP_ID };
+export function workflowVersionApprovalSubject(
+  workflowId: string,
+  workflowVersion: string,
+  gate: GateName = DEFAULT_WORKFLOW_VERSION_GATE,
+): { runId: string; stepId: string } {
+  return {
+    runId: `${WORKFLOW_VERSION_SUBJECT_PREFIX}${workflowId}@${workflowVersion}`,
+    stepId: `${WORKFLOW_VERSION_SUBJECT_STEP_PREFIX}${gate}${WORKFLOW_VERSION_SUBJECT_STEP_SUFFIX}`,
+  };
 }
 
-export function decodeWorkflowVersionApprovalSubject(runId: string): { workflowId: string; workflowVersion: string } | undefined {
+function decodeGateFromStepId(stepId: string | undefined): GateName {
+  if (stepId !== undefined && stepId.startsWith(WORKFLOW_VERSION_SUBJECT_STEP_PREFIX) && stepId.endsWith(WORKFLOW_VERSION_SUBJECT_STEP_SUFFIX)) {
+    const candidate = stepId.slice(WORKFLOW_VERSION_SUBJECT_STEP_PREFIX.length, stepId.length - WORKFLOW_VERSION_SUBJECT_STEP_SUFFIX.length);
+    if ((GATE_NAMES as readonly string[]).includes(candidate)) return candidate as GateName;
+  }
+  return DEFAULT_WORKFLOW_VERSION_GATE;
+}
+
+export function decodeWorkflowVersionApprovalSubject(runId: string, stepId?: string): { workflowId: string; workflowVersion: string; gate: GateName } | undefined {
   if (!runId.startsWith(WORKFLOW_VERSION_SUBJECT_PREFIX)) return undefined;
   const rest = runId.slice(WORKFLOW_VERSION_SUBJECT_PREFIX.length);
   const at = rest.lastIndexOf("@");
   if (at === -1) return undefined;
-  return { workflowId: rest.slice(0, at), workflowVersion: rest.slice(at + 1) };
+  return { workflowId: rest.slice(0, at), workflowVersion: rest.slice(at + 1), gate: decodeGateFromStepId(stepId) };
 }
 
 // Mirrors @aart/governance/src/approval-tasks.ts's writeApprovalDecision —

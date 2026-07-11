@@ -7,7 +7,7 @@ import { promises as fs } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { recordPrMergeApproval, recordStandingApprovalDecision, workflowVersionApprovalSubject, writeApprovalDecision } from "./approval-tasks.js";
+import { decodeWorkflowVersionApprovalSubject, recordPrMergeApproval, recordStandingApprovalDecision, workflowVersionApprovalSubject, writeApprovalDecision } from "./approval-tasks.js";
 
 let root: string;
 let store: ReturnType<typeof createFsStore>;
@@ -150,6 +150,39 @@ describe("recordPrMergeApproval — PR-merge-as-decision write path (architectur
     });
     const all = await store.approvals.list();
     expect(all.map((t) => t.id).sort()).toEqual([manual.id, merge.id].sort());
+  });
+});
+
+describe("workflowVersionApprovalSubject / decodeWorkflowVersionApprovalSubject — gate-parameterized sentinel (S14 'gate write paths')", () => {
+  it("defaults to the humanReview gate when none is given — this sentinel's pre-S14 sole behavior, unchanged", () => {
+    const subject = workflowVersionApprovalSubject("wf-a", "1.0.0");
+    expect(subject.stepId).toBe("__gate:humanReview__");
+    expect(subject.runId).toBe("workflow-version:wf-a@1.0.0");
+  });
+
+  it("encodes an explicit riskReview gate into stepId — no new mechanism, the same sentinel shape with a different gate key", () => {
+    const subject = workflowVersionApprovalSubject("wf-a", "1.0.0", "riskReview");
+    expect(subject.stepId).toBe("__gate:riskReview__");
+    expect(subject.runId).toBe("workflow-version:wf-a@1.0.0");
+  });
+
+  it("decodes a riskReview-shaped stepId back to gate: 'riskReview'", () => {
+    const subject = workflowVersionApprovalSubject("wf-b", "2.0.0", "riskReview");
+    expect(decodeWorkflowVersionApprovalSubject(subject.runId, subject.stepId)).toEqual({ workflowId: "wf-b", workflowVersion: "2.0.0", gate: "riskReview" });
+  });
+
+  it("decodes with stepId omitted (every pre-S14 call site, e.g. the dashboard's single-arg decode call) as gate: 'humanReview'", () => {
+    const subject = workflowVersionApprovalSubject("wf-c", "3.0.0");
+    expect(decodeWorkflowVersionApprovalSubject(subject.runId)).toEqual({ workflowId: "wf-c", workflowVersion: "3.0.0", gate: "humanReview" });
+  });
+
+  it("decodes an unrecognized/malformed stepId as gate: 'humanReview' rather than throwing (safe fallback, not a crash)", () => {
+    const subject = workflowVersionApprovalSubject("wf-d", "4.0.0");
+    expect(decodeWorkflowVersionApprovalSubject(subject.runId, "not-a-gate-shaped-step")).toEqual({ workflowId: "wf-d", workflowVersion: "4.0.0", gate: "humanReview" });
+  });
+
+  it("still returns undefined for a non-sentinel (genuine per-run) runId regardless of stepId — never a false positive", () => {
+    expect(decodeWorkflowVersionApprovalSubject("run-genuine-1", "__gate:riskReview__")).toBeUndefined();
   });
 });
 

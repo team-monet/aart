@@ -14,6 +14,7 @@ import { WorkflowSchema } from "@aart/types";
 import type { AartContext } from "../context.js";
 import type { HandlerResult } from "../response.js";
 import { compileWorkflowInput, YamlCompileError } from "../yaml-compiler.js";
+import { applyGateResult } from "./governance.js";
 
 const DRAFT_GATES = {
   validate: "pending",
@@ -62,6 +63,28 @@ export async function validateWorkflowHandler(ctx: AartContext, input: ValidateW
   }
 
   const result = ctx.governance.validateWorkflow(workflow);
+
+  // Gate write (S14 "gate write paths", the dead branch A45 found wired for
+  // real): ONLY the workflowId+workflowVersion (already-registered) shape
+  // writes gates.validate — a draft/in-memory `workflow` validation has no
+  // persisted version to attribute a gate to, spec §17.1's "validate" gate
+  // being a fact about a specific VERSION, not about arbitrary source text.
+  // `result.valid` already means exactly "zero error-class findings"
+  // (isValid, validation/types.ts: `findings.every(f => f.severity !==
+  // "error")`) — a clean run per this session's own brief, warnings
+  // included, don't block. A run WITH errors writes "failed" (chosen over
+  // reverting to "pending": "failed" is strictly more informative — it
+  // shows up in `unmetGates`/gate introspection identically either way, but
+  // unlike "pending" it also records that a check genuinely ran and did not
+  // pass, not merely "never checked" — symmetric with how this session's
+  // evals writer treats a below-threshold score).
+  if (input.workflowId && input.workflowVersion) {
+    const gateWrite = await applyGateResult(ctx, input.workflowId, input.workflowVersion, "validate", result.valid ? "passed" : "failed");
+    if (gateWrite.ok) {
+      return { ok: result.valid, valid: result.valid, findings: result.findings, gates: gateWrite.gates, approval: gateWrite.approval };
+    }
+  }
+
   return { ok: result.valid, valid: result.valid, findings: result.findings };
 }
 

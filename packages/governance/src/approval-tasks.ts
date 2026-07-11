@@ -20,6 +20,7 @@
 // `redactRecord` is a documented no-op (redact.test.ts).
 import type { AartStore, Logger } from "@aart/store";
 import type { ApprovalTask, StandingApproval } from "@aart/types";
+import { GATE_NAMES, type GateName } from "./gates.js";
 import { redactRecord } from "./redact.js";
 
 export interface WriteApprovalDecisionInput {
@@ -64,10 +65,38 @@ export async function writeApprovalDecision(
  * never goes through this helper.
  */
 const WORKFLOW_VERSION_SUBJECT_PREFIX = "workflow-version:";
-const WORKFLOW_VERSION_SUBJECT_STEP_ID = "__gate:humanReview__";
+const WORKFLOW_VERSION_SUBJECT_STEP_PREFIX = "__gate:";
+const WORKFLOW_VERSION_SUBJECT_STEP_SUFFIX = "__";
+/** This sentinel's sole gate before S14 "gate write paths" — kept as the default so every pre-existing caller (recordPrMergeApproval, recordStandingApprovalDecision, the dashboard's single-arg decode call, every prior test) is byte-for-byte unaffected by the gate-parameterization below. */
+const DEFAULT_WORKFLOW_VERSION_GATE: GateName = "humanReview";
 
-export function workflowVersionApprovalSubject(workflowId: string, workflowVersion: string): { runId: string; stepId: string } {
-  return { runId: `${WORKFLOW_VERSION_SUBJECT_PREFIX}${workflowId}@${workflowVersion}`, stepId: WORKFLOW_VERSION_SUBJECT_STEP_ID };
+/**
+ * S14 "gate write paths": `stepId` is now gate-parameterized
+ * (`__gate:<gateName>__`, was the fixed constant `__gate:humanReview__`) so
+ * this SAME ApprovalTask machinery can also carry a `riskReview` decision —
+ * spec §17.1's "each gate is advanced ONLY by its own mechanism" means
+ * `riskReview`'s mechanism IS a human decision, exactly like `humanReview`'s,
+ * just a different gate key; no new mechanism is introduced. `gate` defaults
+ * to `humanReview`, so every 2-arg call site is unaffected.
+ */
+export function workflowVersionApprovalSubject(
+  workflowId: string,
+  workflowVersion: string,
+  gate: GateName = DEFAULT_WORKFLOW_VERSION_GATE,
+): { runId: string; stepId: string } {
+  return {
+    runId: `${WORKFLOW_VERSION_SUBJECT_PREFIX}${workflowId}@${workflowVersion}`,
+    stepId: `${WORKFLOW_VERSION_SUBJECT_STEP_PREFIX}${gate}${WORKFLOW_VERSION_SUBJECT_STEP_SUFFIX}`,
+  };
+}
+
+/** Decodes a `stepId` produced by `workflowVersionApprovalSubject` back to the `GateName` it encodes. Falls back to the documented default (never throws) for `undefined`, malformed, or unrecognized-gate input — including every pre-S14 sentinel, which was always the literal `"__gate:humanReview__"` and decodes correctly here too. */
+function decodeGateFromStepId(stepId: string | undefined): GateName {
+  if (stepId !== undefined && stepId.startsWith(WORKFLOW_VERSION_SUBJECT_STEP_PREFIX) && stepId.endsWith(WORKFLOW_VERSION_SUBJECT_STEP_SUFFIX)) {
+    const candidate = stepId.slice(WORKFLOW_VERSION_SUBJECT_STEP_PREFIX.length, stepId.length - WORKFLOW_VERSION_SUBJECT_STEP_SUFFIX.length);
+    if ((GATE_NAMES as readonly string[]).includes(candidate)) return candidate as GateName;
+  }
+  return DEFAULT_WORKFLOW_VERSION_GATE;
 }
 
 /**
@@ -83,13 +112,20 @@ export function workflowVersionApprovalSubject(workflowId: string, workflowVersi
  * the same reason: defensive against a workflowId that itself happens to
  * contain `@`, even though `workflowVersion` (typically semver) practically
  * never does.
+ *
+ * S14: `stepId` is a new, OPTIONAL 2nd parameter — every existing 1-arg call
+ * site (the dashboard's `decodeWorkflowVersionApprovalSubject(t.runId)`
+ * chief among them) keeps working unchanged, decoding `gate: "humanReview"`
+ * by default (`decodeGateFromStepId`'s documented fallback), which is
+ * exactly what those call sites already assumed implicitly before this
+ * field existed.
  */
-export function decodeWorkflowVersionApprovalSubject(runId: string): { workflowId: string; workflowVersion: string } | undefined {
+export function decodeWorkflowVersionApprovalSubject(runId: string, stepId?: string): { workflowId: string; workflowVersion: string; gate: GateName } | undefined {
   if (!runId.startsWith(WORKFLOW_VERSION_SUBJECT_PREFIX)) return undefined;
   const rest = runId.slice(WORKFLOW_VERSION_SUBJECT_PREFIX.length);
   const at = rest.lastIndexOf("@");
   if (at === -1) return undefined;
-  return { workflowId: rest.slice(0, at), workflowVersion: rest.slice(at + 1) };
+  return { workflowId: rest.slice(0, at), workflowVersion: rest.slice(at + 1), gate: decodeGateFromStepId(stepId) };
 }
 
 export interface GithubMergeEventPayload {

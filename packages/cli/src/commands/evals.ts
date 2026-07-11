@@ -45,7 +45,13 @@ export async function evalCommand(tokens: Tokenized, cli: CliContext): Promise<H
   if (subcommand === "run") {
     const suiteId = requirePositional(rest, 0, "suite");
     const workflowId = requireFlagString(tokens.flags, "workflow");
-    const result = await runEvalHandler(cli.aart, { suiteId, workflowId, workflowVersion: flagString(tokens.flags, "version") });
+    // --min-score (S14 "gate write paths"): the promotion.requires[].evals.minScore
+    // threshold (spec §24.5). Omitted (default): purely informational, same
+    // as every pre-S14 `aart eval run` call — see runEvalHandler's own doc
+    // comment on RunEvalInput.minScore.
+    const minScoreFlag = flagString(tokens.flags, "min-score");
+    const minScore = minScoreFlag !== undefined ? Number(minScoreFlag) : undefined;
+    const result = await runEvalHandler(cli.aart, { suiteId, workflowId, workflowVersion: flagString(tokens.flags, "version"), minScore });
     return wrapResult("aart_run_eval", result);
   }
 
