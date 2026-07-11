@@ -58,21 +58,72 @@ describe("dashboard HTTP server — route wiring", () => {
       expect(missing.status).toBe(404);
     });
 
-    it("GET /workflows lists ids; GET /workflows/:id renders the detail page", async () => {
+    it("GET /workflows lists ids; GET /workflows/:id renders the detail page, including version history and recent runs (root AMENDMENTS.md A43)", async () => {
       await fixture.store.workflows.put(makeWorkflow({ id: "wf-1", version: "1.0.0" }));
+      await fixture.store.workflows.put(makeWorkflow({ id: "wf-1", version: "2.0.0" }));
+      await fixture.store.runs.put(makeRun({ runId: "run-for-wf-1", workflowId: "wf-1", workflowVersion: "1.0.0" }));
 
       const list = await fetch(`${baseUrl}/workflows`);
       expect(await list.text()).toContain("wf-1");
 
       const detail = await fetch(`${baseUrl}/workflows/wf-1`);
       expect(detail.status).toBe(200);
-      expect(await detail.text()).toContain("1.0.0");
+      const detailHtml = await detail.text();
+      expect(detailHtml).toContain("2.0.0"); // latest by default
+      expect(detailHtml).toContain('<a href="/workflows/wf-1?version=1.0.0">1.0.0</a>'); // version history, drill-down link
+      expect(detailHtml).toContain('<a href="/runs/run-for-wf-1">run-for-wf-1</a>'); // recent runs
+
+      const specificVersion = await fetch(`${baseUrl}/workflows/wf-1?version=1.0.0`);
+      expect(await specificVersion.text()).toContain("<strong>1.0.0</strong> (viewing)");
+
+      const missing = await fetch(`${baseUrl}/workflows/no-such-workflow`);
+      expect(missing.status).toBe(404);
     });
 
-    it("GET /blocks renders the real block catalog; GET /packs stays an honest pending-integration page (reconciliation ledger item 13)", async () => {
+    // The exact bug a founder's real local test drive hit (root
+    // AMENDMENTS.md A43): TEST-DRIVE.md's example launch script builds the
+    // dashboard's OWN `store` handle from a hand-typed `.aart` path
+    // independent of the one the real `aart server` process (fronted here
+    // by `api`) actually uses — get that path wrong (as the founder's own
+    // copy-pasted script did) and the OLD store-direct read 404'd on a
+    // workflow that demonstrably existed. Proves the fix: `store` below is
+    // deliberately EMPTY (no "wf-divergent" anywhere in it) while `api`
+    // fronts a SEPARATE store that has the real data — workflow detail must
+    // still render, because it no longer reads `store` at all.
+    it("workflow detail reads through `api`, not the dashboard's own local `store` — a misconfigured/empty local store no longer breaks the page as long as the real data is reachable via the API boundary", async () => {
+      const real = await createTestFixture();
+      try {
+        await real.store.workflows.put(makeWorkflow({ id: "wf-divergent", version: "1.0.0" }));
+
+        await handle.close();
+        handle = await startDashboard({ store: fixture.store, api: createFakeApiClient(real.store), deps: fixture.deps, clock: fixture.clock, port: 0 });
+        baseUrl = `http://127.0.0.1:${handle.port}`;
+
+        expect(await fixture.store.workflows.getLatest("wf-divergent")).toBeUndefined(); // this test's own dashboard-local store genuinely has no such workflow
+
+        const res = await fetch(`${baseUrl}/workflows/wf-divergent`);
+        expect(res.status).toBe(200);
+        expect(await res.text()).toContain("1.0.0");
+      } finally {
+        await real.cleanup();
+      }
+    });
+
+    it("GET /blocks renders the real block catalog; GET /blocks/:id renders one block's manifest (root AMENDMENTS.md A43 — no route existed at all before); GET /packs stays an honest pending-integration page (reconciliation ledger item 13)", async () => {
       const blocksHtml = await (await fetch(`${baseUrl}/blocks`)).text();
       expect(blocksHtml).toContain("http.request");
       expect(blocksHtml).toContain("block(s)");
+      expect(blocksHtml).toContain('<a href="/blocks/http.request">http.request</a>');
+
+      const detail = await fetch(`${baseUrl}/blocks/http.request`);
+      expect(detail.status).toBe(200);
+      const detailHtml = await detail.text();
+      expect(detailHtml).toContain("http.request");
+      expect(detailHtml).toContain("Input Schema");
+
+      const missing = await fetch(`${baseUrl}/blocks/no.such.block`);
+      expect(missing.status).toBe(404);
+
       expect((await (await fetch(`${baseUrl}/packs`)).text())).toContain("Pending");
     });
 

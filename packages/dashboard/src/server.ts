@@ -15,8 +15,8 @@ import type { DashboardDeps } from "./deps.js";
 import { redirect, Router, sendHtml, sendJson } from "./http/router.js";
 import { escapeHtml, page } from "./http/html.js";
 import { decideApprovalAction, renderApprovalQueuePage } from "./views/approvals.js";
-import { listBlockManifests } from "./capability-catalog.js";
-import { renderBlocksPage, renderPacksPage } from "./views/blocks-packs.js";
+import { getBlockManifest, listBlockManifests } from "./capability-catalog.js";
+import { renderBlockDetailPage, renderBlocksPage, renderPacksPage } from "./views/blocks-packs.js";
 import {
   blockPromotionAction,
   clearNeedsReviewAction,
@@ -88,16 +88,21 @@ export function buildDashboardRouter(store: AartStore, api: ApiClient, deps: Das
     sendHtml(ctx.res, 200, renderWorkflowsListPage(await api.listWorkflowIds()));
   });
 
-  // Full Workflow detail isn't in S2's documented HTTP shape yet (GET
-  // /workflows only returns bare ids) — read directly from the store. See
-  // this package's SEAMS.md.
+  // Reads through `api` (S2's now-enriched GET /workflows/:id), not a
+  // second directly-constructed store handle — see views/workflows.ts's
+  // header comment for why that used to be a real, reproduced bug (root
+  // AMENDMENTS.md A43), not just a hypothetical one. `?version=` lets the
+  // Versions section (rendered below) drill into any past version, not
+  // just latest.
   router.get("/workflows/:id", async (ctx) => {
-    const workflow = await store.workflows.getLatest(ctx.params["id"]!);
-    if (!workflow) {
+    const id = ctx.params["id"]!;
+    const detail = await api.getWorkflow(id, ctx.query.get("version") ?? undefined);
+    if (!detail) {
       sendHtml(ctx.res, 404, page("Not Found", "<p>No such workflow.</p>"));
       return;
     }
-    sendHtml(ctx.res, 200, renderWorkflowDetailPage(workflow));
+    const recentRuns = await api.listRuns({ workflowId: id });
+    sendHtml(ctx.res, 200, renderWorkflowDetailPage(detail.workflow, detail.versions, recentRuns));
   });
 
   router.post("/workflows/:id/approve", async (ctx, body) => {
@@ -148,6 +153,20 @@ export function buildDashboardRouter(store: AartStore, api: ApiClient, deps: Das
   });
 
   router.get("/blocks", (ctx) => sendHtml(ctx.res, 200, renderBlocksPage(listBlockManifests(store))));
+  // Block detail — previously not a route at all (no view, no link from
+  // the Blocks list above); a founder test drive confirmed there was no
+  // way to reach it (root AMENDMENTS.md A43). Reads the same real, local,
+  // in-memory catalog `/blocks` already does (@aart/blocks-core + @aart/llm
+  // manifests) — never store-path-dependent the way workflow detail used
+  // to be, so this one was purely a missing feature, not a wiring bug.
+  router.get("/blocks/:id", (ctx) => {
+    const manifest = getBlockManifest(store, ctx.params["id"]!);
+    if (!manifest) {
+      sendHtml(ctx.res, 404, page("Not Found", "<p>No such block.</p>"));
+      return;
+    }
+    sendHtml(ctx.res, 200, renderBlockDetailPage(manifest));
+  });
   router.get("/packs", (ctx) => sendHtml(ctx.res, 200, renderPacksPage()));
 
   router.get("/artifacts", async (ctx) => {

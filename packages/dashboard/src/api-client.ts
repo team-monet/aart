@@ -19,13 +19,19 @@
 // surfaces the ADR-16 health endpoint... per registered worker," i.e. N
 // workers, N independent health listeners.
 import type { AartStore } from "@aart/store";
-import type { Deployment, Environment, RejectedTrigger, RunRecord, RunStatus, WaitCondition } from "@aart/types";
+import type { Deployment, Environment, RejectedTrigger, RunRecord, RunStatus, WaitCondition, Workflow } from "@aart/types";
 
 export interface WaitingRunEntry {
   runId: string;
   stepId: string;
   wait: WaitCondition;
   createdAt: string;
+}
+
+/** `GET /workflows/:id`'s real shape (`packages/server/src/http/server.ts`) — the full record for one version (latest by default, or a specific one via `getWorkflow`'s own `version` param) plus every known version, so the Workflow detail page (views/workflows.ts) never needs a second round trip to render version history. */
+export interface WorkflowDetail {
+  workflow: Workflow;
+  versions: string[];
 }
 
 export interface HealthPayload {
@@ -41,6 +47,8 @@ export interface ApiClient {
   listWaitingRuns(): Promise<WaitingRunEntry[]>;
   listFlaggedRunsViaApi(): Promise<RunRecord[]>;
   listWorkflowIds(): Promise<string[]>;
+  /** The full record for one workflow (latest version, or `version` if given) plus its version history — `undefined` if the workflow (or that specific version) doesn't exist. Backs the Workflow detail page (views/workflows.ts). */
+  getWorkflow(id: string, version?: string): Promise<WorkflowDetail | undefined>;
   listEnvironments(): Promise<Environment[]>;
   listDeployments(): Promise<Deployment[]>;
   listRejectedTriggers(): Promise<RejectedTrigger[]>;
@@ -89,6 +97,13 @@ export function createHttpApiClient(baseUrl: string): ApiClient {
       const { workflowIds } = await getJson<{ workflowIds: string[] }>(`${base}/workflows`);
       return workflowIds;
     },
+    async getWorkflow(id, version) {
+      const qs = version ? `?version=${encodeURIComponent(version)}` : "";
+      const res = await fetch(`${base}/workflows/${encodeURIComponent(id)}${qs}`);
+      if (res.status === 404) return undefined;
+      if (!res.ok) throw new Error(`GET /workflows/${id} -> ${res.status}`);
+      return (await res.json()) as WorkflowDetail;
+    },
     async listEnvironments() {
       const { environments } = await getJson<{ environments: Environment[] }>(`${base}/environments`);
       return environments;
@@ -131,6 +146,12 @@ export function createFakeApiClient(store: AartStore, options: { workerHealth?: 
     },
     async listWorkflowIds() {
       return store.workflows.listWorkflowIds();
+    },
+    async getWorkflow(id, version) {
+      const workflow = version ? await store.workflows.get(id, version) : await store.workflows.getLatest(id);
+      if (!workflow) return undefined;
+      const versions = await store.workflows.listVersions(id);
+      return { workflow, versions };
     },
     async listEnvironments() {
       return store.environments.list();

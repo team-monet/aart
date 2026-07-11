@@ -245,11 +245,13 @@ Open **http://localhost:8787/health** → `{"status":"ok","claimedRuns":0,"uptim
 // usage (packages/dashboard/src/index.ts's header comment), run standalone.
 // Needs aart server already running on :8080 (started above) for its
 // /runs and /workflows pages — everything else (health, blocks) works
-// without it.
+// without it. Run this FROM ~/aart-test-drive (where you saved it) — the
+// relative "./.aart" path below resolves against whatever directory you
+// launch `node` from, same as `aart server`'s own default.
 import { createFsStore } from "/Users/johnlee/code/aart/packages/store/dist/index.js";
 import { startDashboard, createHttpApiClient, createStubDeps } from "/Users/johnlee/code/aart/packages/dashboard/dist/index.js";
 
-const store = createFsStore("/Users/YOU/aart-test-drive/.aart"); // <-- your actual .aart path
+const store = createFsStore("./.aart");
 const handle = await startDashboard({
   store,
   api: createHttpApiClient("http://localhost:8080"),
@@ -264,7 +266,9 @@ console.log(`dashboard on http://localhost:${handle.port}`);
 node dashboard-dev.mjs
 ```
 
-Open **http://localhost:4000/runs** — your real registered runs. **http://localhost:4000/workflows**, **http://localhost:4000/blocks**, **http://localhost:4000/waiting-runs**, **http://localhost:4000/approvals** are all real too (verified: 200s, real data, with `aart server` running alongside).
+Open **http://localhost:4000/runs** — your real registered runs. **http://localhost:4000/workflows**, **http://localhost:4000/blocks**, **http://localhost:4000/waiting-runs**, **http://localhost:4000/approvals** are all real too (verified: 200s, real data, with `aart server` running alongside). Click through into a workflow (**http://localhost:4000/workflows/smoke-data-pipeline**) or a block (**http://localhost:4000/blocks/data.stringify**) for its detail page — both now real (root AMENDMENTS.md A43; previously workflow detail 404'd and block detail didn't exist as a page at all).
+
+**A previous version of this exact script had a footgun**: it hard-coded an absolute placeholder path (`/Users/YOU/aart-test-drive/.aart`) you had to manually edit to your own home directory. Miss that edit — easy to do on a copy-paste — and `createFsStore` silently points at a directory that doesn't exist; every dashboard page that read straight from that store handle (workflow detail chief among them) 404'd on data that demonstrably existed, while list pages kept working fine (they read through `aart server`'s own HTTP API instead, which was never affected). That's exactly the bug root AMENDMENTS.md A43 found and fixed from a real local test drive — the script above now uses a relative path so there's nothing to individually substitute, and workflow/block detail no longer depend on this script's own store handle being correctly configured at all (they read through the API/catalog like every other page now).
 
 Honest note on the dashboard specifically: its write actions (`DashboardDeps`) are still a documented partial-stub — real governance/promotion/risk-diff, but `redact`/`triggerRun`/`resumeApproval`/evidence-report-rendering are still local mirrors (`packages/dashboard/src/stub-deps.ts`'s own header comment). That's a pre-existing, separately-tracked gap this session didn't touch — the composition-root decision this session implemented was scoped to `packages/cli` specifically (architecture's three-client principle: three separate composition roots, not one shared one).
 

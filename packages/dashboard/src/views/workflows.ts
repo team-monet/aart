@@ -1,28 +1,69 @@
 // Workflows (v1 — list), approve/deprecate + promote + view risk diff (v2
 // writable/read actions — architecture §13.2).
 //
-// S2's documented `GET /workflows` returns bare `{ workflowIds: string[] }`
-// (SEAMS.md) — no per-workflow name/version/approval/gates. The list page
-// (v1, "reads via S2's API") uses that for its primary enumeration; the
-// detail page reads the full Workflow record directly via
-// `store.workflows.getLatest` since S2 hasn't published a richer HTTP shape
-// for it yet — flagged in this package's SEAMS.md as a possible future
-// enrichment for S2's own route, not silently worked around.
+// S2's `GET /workflows` returns bare `{ workflowIds: string[] }` — the list
+// page (v1, "reads via S2's API") uses that for its primary enumeration.
+// The detail page USED TO read the full Workflow record directly via
+// `store.workflows.getLatest`, bypassing the API boundary entirely — SEAMS.md
+// flagged this as a possible future enrichment, then a later pass
+// re-verified it as "not a gap needing S9 to close." A real founder test
+// drive proved that call wrong: the dashboard process's own directly-
+// constructed `AartStore` handle silently pointed at the wrong `.aart`
+// directory (a copy-pasted, never-substituted placeholder path in
+// TEST-DRIVE.md's example launch script) while the list page, reading
+// through the real running `aart server`'s HTTP API, showed correct data —
+// workflow detail 404'd on a workflow that demonstrably existed (root
+// AMENDMENTS.md A43). S2's route is now enriched (`GET /workflows/:id`,
+// `packages/server/src/http/server.ts`) and this page reads through
+// `ApiClient` like every other v1 page — the dashboard no longer needs a
+// second, independently-configured store handle to render this page at
+// all, closing off that whole failure mode rather than patching around it.
 import type { SemanticRiskDiff } from "@aart/governance";
 import type { AartStore } from "@aart/store";
-import type { TrustMode, Workflow } from "@aart/types";
+import type { RunRecord, TrustMode, Workflow } from "@aart/types";
 import type { DashboardDeps, GateName, PromoteResult } from "../deps.js";
 import { escapeHtml, form, hiddenField, page, table, textField } from "../http/html.js";
+
+/** Recent-runs section is capped, not paginated (no "runs page 2" feature requested) — matches this page's existing "small, honest, not over-built" scope. */
+const RECENT_RUNS_LIMIT = 20;
 
 export function renderWorkflowsListPage(workflowIds: string[]): string {
   const rows = workflowIds.map((id) => [`<a href="/workflows/${escapeHtml(id)}">${escapeHtml(id)}</a>`]);
   return page("Workflows", table(["Workflow Id"], rows));
 }
 
-export function renderWorkflowDetailPage(workflow: Workflow): string {
+/**
+ * `versions` is whatever `store.workflows.listVersions`/`GET /workflows/:id`
+ * returns — ascending, real-semver-aware order (`compareVersions`, both
+ * store adapters) — reversed here for "most recent first" display; each
+ * links back to this same page with `?version=` so every version is
+ * viewable, not just latest. `recentRuns` is unfiltered by version
+ * (the workflow's full run history, across every version) and is sorted/
+ * capped here rather than by the caller, matching `renderBlocksPage`'s own
+ * "the view does its own presentation sort" precedent.
+ */
+export function renderWorkflowDetailPage(workflow: Workflow, versions: readonly string[], recentRuns: readonly RunRecord[]): string {
   const gateRows = Object.entries(workflow.gates).map(([k, v]) => [escapeHtml(k), escapeHtml(v)]);
+
+  const versionRows = [...versions].reverse().map((v) => [
+    v === workflow.version
+      ? `<strong>${escapeHtml(v)}</strong> (viewing)`
+      : `<a href="/workflows/${escapeHtml(workflow.id)}?version=${escapeHtml(v)}">${escapeHtml(v)}</a>`,
+  ]);
+
+  const recentRunRows = [...recentRuns]
+    .sort((a, b) => (a.startedAt < b.startedAt ? 1 : a.startedAt > b.startedAt ? -1 : 0))
+    .slice(0, RECENT_RUNS_LIMIT)
+    .map((r) => [`<a href="/runs/${escapeHtml(r.runId)}">${escapeHtml(r.runId)}</a>`, escapeHtml(r.workflowVersion), escapeHtml(r.status), escapeHtml(r.startedAt)]);
+
   const body = `<p>Version: ${escapeHtml(workflow.version)} — Approval: <strong>${escapeHtml(workflow.approval)}</strong>${workflow.promotionBlocked ? " (promotion blocked)" : ""}${workflow.needsReview ? " (needs review)" : ""}</p>
 ${table(["Gate", "Status"], gateRows)}
+
+<h2>Versions</h2>
+${table(["Version"], versionRows)}
+
+<h2>Recent Runs</h2>
+${recentRunRows.length > 0 ? table(["Run", "Version", "Status", "Started"], recentRunRows) : "<p>No runs yet.</p>"}
 
 <h2>Approve / Deprecate</h2>
 ${form(

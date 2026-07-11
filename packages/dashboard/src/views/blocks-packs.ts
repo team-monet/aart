@@ -32,12 +32,25 @@ import { escapeHtml, page, table } from "../http/html.js";
 export function renderBlocksPage(manifests: readonly BlockManifest[]): string {
   const sorted = [...manifests].sort((a, b) => a.id.localeCompare(b.id));
   const rows = sorted.map((m) => [
-    `<code>${escapeHtml(m.id)}</code>`,
+    `<code><a href="/blocks/${escapeHtml(m.id)}">${escapeHtml(m.id)}</a></code>`,
     escapeHtml(m.category ?? ""),
     escapeHtml(m.capabilities.join(", ")),
     escapeHtml(m.description),
   ]);
   return page("Blocks", `<p>${sorted.length} block(s) — @aart/blocks-core + @aart/llm core built-ins. Pack-delivered blocks are not yet listable here (see Packs page).</p>${table(["Id", "Category", "Capabilities", "Description"], rows)}`);
+}
+
+/** Block detail (previously a genuine gap — no route, no view, no link existed anywhere; a founder test drive confirmed there was no way to reach a single block's own manifest, root AMENDMENTS.md A43). Renders every `BlockManifest` field (architecture §2.5's frozen shape, `packages/types/src/block.ts`) the Blocks list doesn't already show in its table: version, and the full input/output JSON Schemas derived from the block's own Zod shape (`json-schema.ts`) — the same schemas the engine validates `with:`/step outputs against at dispatch, so this is the authoring-time equivalent of that runtime check. */
+export function renderBlockDetailPage(manifest: BlockManifest): string {
+  const body = `<p>Version: ${escapeHtml(manifest.version)}${manifest.category ? ` — Category: ${escapeHtml(manifest.category)}` : ""}</p>
+<p>${escapeHtml(manifest.description)}</p>
+<h2>Capabilities</h2>
+${manifest.capabilities.length > 0 ? `<ul>${manifest.capabilities.map((c) => `<li><code>${escapeHtml(c)}</code></li>`).join("")}</ul>` : "<p>(none)</p>"}
+<h2>Input Schema</h2>
+<pre>${escapeHtml(JSON.stringify(manifest.inputSchema, null, 2))}</pre>
+<h2>Output Schema</h2>
+<pre>${escapeHtml(JSON.stringify(manifest.outputSchema, null, 2))}</pre>`;
+  return page(`Block ${manifest.id}`, body);
 }
 
 export function renderPacksPage(): string {

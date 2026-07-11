@@ -46,6 +46,11 @@ export function listBlockManifests(store: AartStore): BlockManifest[] {
   return realBlockImplementations(store).map((impl) => impl.manifest);
 }
 
+/** A single block's real manifest by id, for the Block detail page (views/blocks-packs.ts) — `undefined` if `id` isn't in the real catalog (same core-builtins-only scope as `listBlockManifests`, no pack-delivered blocks). */
+export function getBlockManifest(store: AartStore, id: string): BlockManifest | undefined {
+  return realBlockImplementations(store).find((impl) => impl.manifest.id === id)?.manifest;
+}
+
 export function buildCapabilityClosureLookup(store: AartStore): CapabilityClosureLookup {
   const capabilitiesById = new Map<string, readonly string[]>();
   for (const impl of realBlockImplementations(store)) {

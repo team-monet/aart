@@ -174,6 +174,27 @@ export async function startServer(config: ServerConfig): Promise<ServerHandle> {
   router.get("/waiting-runs", async (ctx) => sendJson(ctx.res, 200, { waits: await config.store.waits.list() }));
   router.get("/flagged-runs", async (ctx) => sendJson(ctx.res, 200, { runs: await listFlaggedRuns(config.store) }));
   router.get("/workflows", async (ctx) => sendJson(ctx.res, 200, { workflowIds: await config.store.workflows.listWorkflowIds() }));
+  // Enriches the bare-ids list above with a per-workflow read (SEAMS.md
+  // "@aart/server's HTTP API surface" — previously flagged, then
+  // re-verified at S9 integration, as "not a gap needing S9 to close"
+  // since no consumer forced the question. A real founder test drive did:
+  // @aart/dashboard's workflow-detail page fell back to reading its own
+  // directly-constructed `AartStore` handle instead of this API precisely
+  // because this route didn't exist, and that second store handle silently
+  // drifted out of sync with the one this process itself uses (root
+  // AMENDMENTS.md A43). Closes the gap for real: latest version by
+  // default, or a specific one via `?version=`, plus every known version
+  // so a caller can render version history without a second round trip.
+  router.get("/workflows/:id", async (ctx) => {
+    const id = ctx.params["id"]!;
+    const requestedVersion = ctx.query.get("version") ?? undefined;
+    const [workflow, versions] = await Promise.all([
+      requestedVersion ? config.store.workflows.get(id, requestedVersion) : config.store.workflows.getLatest(id),
+      config.store.workflows.listVersions(id),
+    ]);
+    if (!workflow) return sendJson(ctx.res, 404, { error: "not found" });
+    sendJson(ctx.res, 200, { workflow, versions });
+  });
   router.get("/environments", async (ctx) => sendJson(ctx.res, 200, { environments: await config.store.environments.list() }));
   router.get("/deployments", async (ctx) => sendJson(ctx.res, 200, { deployments: await config.store.deployments.list() }));
   router.get("/rejected-triggers", async (ctx) => sendJson(ctx.res, 200, { rejected: await config.store.rejectedTriggers.list() }));

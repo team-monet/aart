@@ -1,8 +1,8 @@
 import { createServer, type Server } from "node:http";
 import { afterEach, describe, expect, it } from "vitest";
-import type { RunRecord } from "@aart/types";
+import type { RunRecord, Workflow } from "@aart/types";
 import { createFakeApiClient, createHttpApiClient } from "./api-client.js";
-import { createTestFixture, makeRun } from "./test-support/fixtures.js";
+import { createTestFixture, makeRun, makeWorkflow } from "./test-support/fixtures.js";
 
 describe("createFakeApiClient (store-backed, local/embedded topology)", () => {
   it("reads runs, waiting runs, flagged runs, workflow ids, environments, deployments, and rejected triggers straight from the store", async () => {
@@ -40,12 +40,34 @@ describe("createFakeApiClient (store-backed, local/embedded topology)", () => {
       await cleanup();
     }
   });
+
+  it("getWorkflow reads the latest (or a specific) version plus version history straight from the store, undefined when missing (root AMENDMENTS.md A43)", async () => {
+    const { store, cleanup } = await createTestFixture();
+    try {
+      await store.workflows.put(makeWorkflow({ id: "wf-detail", version: "1.0.0" }));
+      await store.workflows.put(makeWorkflow({ id: "wf-detail", version: "2.0.0", approval: "approved" }));
+      const client = createFakeApiClient(store);
+
+      const latest = await client.getWorkflow("wf-detail");
+      expect(latest?.workflow.version).toBe("2.0.0");
+      expect(latest?.workflow.approval).toBe("approved");
+      expect(latest?.versions).toEqual(["1.0.0", "2.0.0"]);
+
+      const specific = await client.getWorkflow("wf-detail", "1.0.0");
+      expect(specific?.workflow.version).toBe("1.0.0");
+
+      expect(await client.getWorkflow("no-such-workflow")).toBeUndefined();
+    } finally {
+      await cleanup();
+    }
+  });
 });
 
 describe("createHttpApiClient (real fetch, against S2's documented route shapes)", () => {
   let server: Server;
   let baseUrl: string;
   const run: RunRecord = makeRun({ runId: "http-run-1" });
+  const workflow: Workflow = makeWorkflow({ id: "wf-detail", version: "2.0.0" });
 
   function start(): Promise<void> {
     return new Promise((resolve) => {
@@ -76,6 +98,16 @@ describe("createHttpApiClient (real fetch, against S2's documented route shapes)
         }
         if (url.pathname === "/workflows") {
           res.end(JSON.stringify({ workflowIds: ["wf-1", "wf-2"] }));
+          return;
+        }
+        if (url.pathname === "/workflows/wf-detail") {
+          const version = url.searchParams.get("version");
+          res.end(JSON.stringify({ workflow: version ? { ...workflow, version } : workflow, versions: ["1.0.0", "2.0.0"] }));
+          return;
+        }
+        if (url.pathname === "/workflows/missing") {
+          res.writeHead(404);
+          res.end(JSON.stringify({ error: "not found" }));
           return;
         }
         if (url.pathname === "/environments") {
@@ -122,6 +154,21 @@ describe("createHttpApiClient (real fetch, against S2's documented route shapes)
     const client = createHttpApiClient(baseUrl);
     expect(await client.getRun("http-run-1")).toEqual(run);
     expect(await client.getRun("missing")).toBeUndefined();
+  });
+
+  it("issues GET /workflows/:id (optionally ?version=) and parses {workflow, versions}, returning undefined on 404 (root AMENDMENTS.md A43)", async () => {
+    await start();
+    const client = createHttpApiClient(baseUrl);
+
+    const latest = await client.getWorkflow("wf-detail");
+    expect(latest?.workflow.id).toBe("wf-detail");
+    expect(latest?.workflow.version).toBe("2.0.0");
+    expect(latest?.versions).toEqual(["1.0.0", "2.0.0"]);
+
+    const specific = await client.getWorkflow("wf-detail", "1.0.0");
+    expect(specific?.workflow.version).toBe("1.0.0");
+
+    expect(await client.getWorkflow("missing")).toBeUndefined();
   });
 
   it("issues GET /waiting-runs, /flagged-runs, /workflows, /environments, /deployments, /rejected-triggers, /health", async () => {

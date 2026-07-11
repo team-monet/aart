@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ApproveOrDeprecateWorkflowFn, PromoteResult, PromoteWorkflowVersionToEnvironmentFn } from "../deps.js";
-import { createTestFixture, makeEnvironment, makeWorkflow } from "../test-support/fixtures.js";
+import { createTestFixture, makeEnvironment, makeRun, makeWorkflow } from "../test-support/fixtures.js";
 import { approveOrDeprecateAction, promoteAction, renderRiskDiffPage, renderWorkflowDetailPage, renderWorkflowsListPage } from "./workflows.js";
 
 describe("renderWorkflowsListPage / renderWorkflowDetailPage", () => {
@@ -9,11 +9,34 @@ describe("renderWorkflowsListPage / renderWorkflowDetailPage", () => {
   });
 
   it("renders gates, approval state, and action forms", () => {
-    const html = renderWorkflowDetailPage(makeWorkflow({ id: "wf-1", approval: "draft" }));
+    const html = renderWorkflowDetailPage(makeWorkflow({ id: "wf-1", approval: "draft" }), ["1.0.0"], []);
     expect(html).toContain("draft");
     expect(html).toContain('action="/workflows/wf-1/approve"');
     expect(html).toContain('action="/workflows/wf-1/promote"');
     expect(html).toContain('action="/workflows/wf-1/risk-diff"');
+  });
+
+  // root AMENDMENTS.md A43: the detail page previously showed neither
+  // version history nor run history at all.
+  it("renders version history newest-first, links every OTHER version back to this page with ?version=, and marks (not links) the one currently being viewed", () => {
+    const html = renderWorkflowDetailPage(makeWorkflow({ id: "wf-1", version: "2.0.0" }), ["1.0.0", "2.0.0", "3.0.0"], []);
+    expect(html.indexOf("version=3.0.0")).toBeLessThan(html.indexOf("(viewing)"));
+    expect(html.indexOf("(viewing)")).toBeLessThan(html.indexOf("version=1.0.0"));
+    expect(html).toContain('<a href="/workflows/wf-1?version=1.0.0">1.0.0</a>');
+    expect(html).toContain('<a href="/workflows/wf-1?version=3.0.0">3.0.0</a>');
+    expect(html).toContain("<strong>2.0.0</strong> (viewing)");
+    expect(html).not.toContain('href="/workflows/wf-1?version=2.0.0"'); // the currently-viewed version isn't a link to itself
+  });
+
+  it("renders recent runs newest-first, each linking to its run detail page; an honest empty state when there are none", () => {
+    const empty = renderWorkflowDetailPage(makeWorkflow({ id: "wf-1" }), ["1.0.0"], []);
+    expect(empty).toContain("No runs yet.");
+
+    const older = makeRun({ runId: "run-older", workflowId: "wf-1", startedAt: "2026-07-01T00:00:00.000Z" });
+    const newer = makeRun({ runId: "run-newer", workflowId: "wf-1", startedAt: "2026-07-09T00:00:00.000Z" });
+    const html = renderWorkflowDetailPage(makeWorkflow({ id: "wf-1" }), ["1.0.0"], [older, newer]);
+    expect(html.indexOf("run-newer")).toBeLessThan(html.indexOf("run-older"));
+    expect(html).toContain('<a href="/runs/run-newer">run-newer</a>');
   });
 });
 

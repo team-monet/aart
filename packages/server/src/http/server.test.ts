@@ -3,9 +3,24 @@
 // path, resume/signal endpoints, github PR-merge ingestion, and the read
 // API surface for S8's dashboard.
 import { afterEach, describe, expect, it } from "vitest";
+import type { Workflow } from "@aart/types";
 import { computeHmacSignature } from "../triggers/hmac.js";
 import { createTestFixture, type TestFixture } from "../test-helpers.js";
 import { startServer, type ServerHandle } from "./server.js";
+
+function fixtureWorkflow(version: string, overrides: Partial<Workflow> = {}): Workflow {
+  return {
+    id: "wf_detail",
+    name: "n",
+    version,
+    inputs: [],
+    outputs: [],
+    execution: { type: "workflow", steps: [] },
+    approval: "draft",
+    gates: { validate: "passed", readiness: "pending", evals: "pending", riskReview: "pending", humanReview: "pending" },
+    ...overrides,
+  };
+}
 
 let fx: TestFixture | undefined;
 let handle: ServerHandle | undefined;
@@ -292,6 +307,30 @@ describe("read API surface (S8's dashboard consumes this)", () => {
       const res = await fetch(`http://localhost:${handle.port}${path}`);
       expect(res.status, `GET ${path}`).toBe(200);
     }
+  });
+
+  it("GET /workflows/:id -> {workflow, versions}: latest by default, a specific version via ?version=, 404 with {error} when unknown (root AMENDMENTS.md A43 — closes the SEAMS.md-flagged 'enrich GET /workflows' gap)", async () => {
+    fx = await createTestFixture();
+    await fx.store.workflows.put(fixtureWorkflow("0.1.0"));
+    await fx.store.workflows.put(fixtureWorkflow("0.2.0", { approval: "approved" }));
+    handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false });
+
+    const latestRes = await fetch(`http://localhost:${handle.port}/workflows/wf_detail`);
+    expect(latestRes.status).toBe(200);
+    const latestBody = (await json(latestRes)) as { workflow: Workflow; versions: string[] };
+    expect(latestBody.workflow.version).toBe("0.2.0");
+    expect(latestBody.workflow.approval).toBe("approved");
+    expect(latestBody.versions).toEqual(["0.1.0", "0.2.0"]);
+
+    const specificRes = await fetch(`http://localhost:${handle.port}/workflows/wf_detail?version=0.1.0`);
+    expect(specificRes.status).toBe(200);
+    const specificBody = (await json(specificRes)) as { workflow: Workflow; versions: string[] };
+    expect(specificBody.workflow.version).toBe("0.1.0");
+    expect(specificBody.versions).toEqual(["0.1.0", "0.2.0"]); // version history is the same regardless of which version was requested
+
+    const missingRes = await fetch(`http://localhost:${handle.port}/workflows/no-such-workflow`);
+    expect(missingRes.status).toBe(404);
+    expect(await json(missingRes)).toEqual({ error: "not found" });
   });
 
   it("GET /dashboard/* reserves the mount point (architecture §13, S8's content)", async () => {
