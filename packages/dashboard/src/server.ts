@@ -66,8 +66,22 @@ const MIME_TYPES: Record<string, string> = {
  * actually correct for that specific bundled/containerized layout. */
 function getFrontendDir(): string | undefined {
   const override = process.env["AART_DASHBOARD_FRONTEND_DIR"];
-  if (override && existsSync(path.join(override, "index.html"))) {
-    return override;
+  if (override) {
+    if (existsSync(path.join(override, "index.html"))) {
+      return override;
+    }
+    // AMENDMENTS.md A52: override SET but invalid (no index.html found
+    // there) — warn loudly rather than silently falling through to the
+    // __dirname-relative guesses below. An operator who set this env var
+    // clearly intended it to be authoritative (the Dockerfile's
+    // runtime-base stage is the one real caller today, per this
+    // function's own header comment above), so a typo'd/stale path should
+    // be visible, not a silent fallback that happens to still resolve
+    // correctly in an unbundled dev checkout but would mask a real
+    // misconfiguration in a bundled/containerized deploy. Unset stays
+    // silent, exactly as before — that's the common, expected case, not a
+    // misconfiguration.
+    console.warn(`[dashboard] AART_DASHBOARD_FRONTEND_DIR is set to "${override}" but no index.html was found there. Falling back to guessing the frontend directory.`);
   }
   const paths = [
     path.join(__dirname, "frontend"),

@@ -10,7 +10,7 @@
 // route, using the real stub deps + a real fs-backed store
 // (createFakeApiClient reading the same store, standing in for a live S2
 // process this worktree doesn't have).
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createFakeApiClient } from "./api-client.js";
 import { startDashboard, type DashboardHandle } from "./server.js";
 import { createTestFixture, makeCorrection, makeEnvironment, makeRun, makeWorkflow, type TestFixture } from "./test-support/fixtures.js";
@@ -164,6 +164,65 @@ describe("dashboard HTTP server — JSON REST API & SPA fallback routing", () =>
       const res = await rawGet(handle.port, "/assets/%5c..%5csecret");
       expect(res.status).toBe(200);
       expect(res.body).toContain("Dummy App");
+    });
+  });
+
+  // AMENDMENTS.md A52: getFrontendDir()'s AART_DASHBOARD_FRONTEND_DIR
+  // override now warns when SET but invalid (no index.html there), instead
+  // of silently falling through to the __dirname-relative guesses. Both
+  // cases go through startDashboard() for real (not a direct unit call —
+  // getFrontendDir itself is a module-private function, never exported)
+  // exactly like every other test in this file drives server.ts's behavior.
+  describe("AART_DASHBOARD_FRONTEND_DIR override — warns only when set-but-invalid", () => {
+    const ENV_KEY = "AART_DASHBOARD_FRONTEND_DIR";
+
+    it("set to a directory with no index.html: warns once, and still falls back to path-guessing (same SPA shell as when unset)", async () => {
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const bogusDir = path.join(tmpdir(), "aart-dashboard-bogus-frontend-dir-does-not-exist");
+      const original = process.env[ENV_KEY];
+      process.env[ENV_KEY] = bogusDir;
+      try {
+        await handle.close();
+        handle = await startDashboard({ store: fixture.store, api: createFakeApiClient(fixture.store), deps: fixture.deps, clock: fixture.clock, port: 0 });
+        baseUrl = `http://127.0.0.1:${handle.port}`;
+
+        expect(warnSpy).toHaveBeenCalledTimes(1);
+        const [message] = warnSpy.mock.calls[0]!;
+        expect(String(message)).toContain(ENV_KEY);
+        expect(String(message)).toContain(bogusDir);
+
+        // Fallback behavior unchanged: the same guessed candidate
+        // (tempFrontendDir, seeded in beforeAll) still serves the SPA
+        // shell exactly as it does when the override is unset entirely.
+        const res = await fetch(`${baseUrl}/`);
+        expect(res.status).toBe(200);
+        expect(await res.text()).toContain("Dummy App");
+      } finally {
+        if (original === undefined) delete process.env[ENV_KEY];
+        else process.env[ENV_KEY] = original;
+        warnSpy.mockRestore();
+      }
+    });
+
+    it("set to a valid frontend directory: no warning, and that directory is served directly", async () => {
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const original = process.env[ENV_KEY];
+      process.env[ENV_KEY] = tempFrontendDir; // the real dir this suite's own beforeAll seeded with a real index.html
+      try {
+        await handle.close();
+        handle = await startDashboard({ store: fixture.store, api: createFakeApiClient(fixture.store), deps: fixture.deps, clock: fixture.clock, port: 0 });
+        baseUrl = `http://127.0.0.1:${handle.port}`;
+
+        expect(warnSpy).not.toHaveBeenCalled();
+
+        const res = await fetch(`${baseUrl}/`);
+        expect(res.status).toBe(200);
+        expect(await res.text()).toContain("Dummy App");
+      } finally {
+        if (original === undefined) delete process.env[ENV_KEY];
+        else process.env[ENV_KEY] = original;
+        warnSpy.mockRestore();
+      }
     });
   });
 

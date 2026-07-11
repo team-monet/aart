@@ -66,8 +66,8 @@
 // inside the image; deploy/build-dashboard-launcher.mjs esbuild-bundles it
 // (same philosophy as packages/cli/scripts/build-publish.mjs: inline the
 // @aart/* workspace closure, leave genuine third-party packages external)
-// into a single self-contained deploy/dist/serve-dashboard.mjs, which is
-// what entrypoint.sh actually invokes. Two real, verified-by-building
+// into a single self-contained packages/cli/dist/serve-dashboard.mjs, which
+// is what entrypoint.sh actually invokes. Two real, verified-by-building
 // reasons this needs bundling rather than a plain `node deploy/serve-
 // dashboard.mjs`:
 //   1. This file lives at /app/deploy/, which has no node_modules of its
