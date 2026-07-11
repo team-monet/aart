@@ -7,6 +7,7 @@ import {
   computeCapabilityClosure,
   getGrantedCapabilities,
   maxRiskTier,
+  normalizeEnvironmentTrustMode,
   riskForCapability,
 } from "./capability.js";
 
@@ -227,5 +228,22 @@ describe("getGrantedCapabilities — the granted-set policy query architecture �
     });
     expect(checkCapability(["http"], granted)).toBe(true);
     expect(checkCapability(["command"], granted)).toBe(false);
+  });
+});
+
+describe("normalizeEnvironmentTrustMode (AMENDMENTS.md S15 — settling the S11/A42 governance-permissiveness finding)", () => {
+  it("passes through each of the four real trust-mode values unchanged", () => {
+    expect(normalizeEnvironmentTrustMode("dev")).toBe("dev");
+    expect(normalizeEnvironmentTrustMode("governed")).toBe("governed");
+    expect(normalizeEnvironmentTrustMode("strict")).toBe("strict");
+    expect(normalizeEnvironmentTrustMode("production")).toBe("production");
+  });
+
+  it("falls back to 'governed' (spec §17.2's own stated local-development default) for an absent or unrecognized value — never 'dev'", () => {
+    expect(normalizeEnvironmentTrustMode(undefined)).toBe("governed");
+    expect(normalizeEnvironmentTrustMode(null)).toBe("governed");
+    expect(normalizeEnvironmentTrustMode("")).toBe("governed");
+    expect(normalizeEnvironmentTrustMode("not-a-real-mode")).toBe("governed");
+    expect(normalizeEnvironmentTrustMode(42)).toBe("governed");
   });
 });

@@ -49,6 +49,29 @@ describe("processTriggerIntake — start path", () => {
     }
   });
 
+  it("threads binding.environmentId through to engine.startRun's environment param (AMENDMENTS.md S15 — settling the S11/A42 governance-permissiveness finding: a deployment-sourced trigger's real target environment must reach the capability-dispatch chokepoint, architecture §4.6)", async () => {
+    fx = await createTestFixture();
+    const adapted: AdaptedTrigger = { trigger: manualTrigger() };
+    const b = binding({ deploymentId: "dep_1", environmentId: "env_production" });
+    const outcome = await processTriggerIntake({ store: fx.store, engine: fx.engine, clock: fx.clock, logger: fx.logger }, b, adapted);
+    expect(outcome.kind).toBe("started");
+    if (outcome.kind === "started") {
+      const run = await fx.store.runs.get(outcome.runId);
+      expect(run?.params?.["environment"]).toBe("env_production");
+    }
+  });
+
+  it("a binding with no environmentId (manual/cli/sdk, or no backing Deployment) starts a run with no environment param — unchanged, pre-existing behavior", async () => {
+    fx = await createTestFixture();
+    const adapted: AdaptedTrigger = { trigger: manualTrigger() };
+    const outcome = await processTriggerIntake({ store: fx.store, engine: fx.engine, clock: fx.clock, logger: fx.logger }, binding(), adapted);
+    expect(outcome.kind).toBe("started");
+    if (outcome.kind === "started") {
+      const run = await fx.store.runs.get(outcome.runId);
+      expect(run?.params?.["environment"]).toBeUndefined();
+    }
+  });
+
   it("resolves triggerMapping into the run's inputs", async () => {
     fx = await createTestFixture();
     const adapted: AdaptedTrigger = { trigger: manualTrigger({ payload: { x: 5 } }) };

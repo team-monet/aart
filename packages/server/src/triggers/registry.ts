@@ -48,6 +48,12 @@ function deploymentToBinding(deployment: Deployment): TriggerBinding | undefined
     workflowId: deployment.workflowId,
     workflowVersion: deployment.workflowVersion,
     deploymentId: deployment.id,
+    // AMENDMENTS.md (S15): carried forward so processTriggerIntake can
+    // thread this deployment's REAL target environment into
+    // engine.startRun/triggerRun — see TriggerBinding.environmentId's own
+    // doc comment (types.ts) for why this was the missing link that made
+    // trigger-fired capability enforcement a no-op before this session.
+    environmentId: deployment.environmentId,
     mode: cfg.mode ?? "start",
   };
 }

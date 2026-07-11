@@ -152,6 +152,13 @@ export async function processTriggerIntake(deps: IntakeDeps, binding: TriggerBin
     workflowVersion: binding.workflowVersion,
     trigger,
     mappedInputs,
+    // AMENDMENTS.md (S15): threads this binding's target environment
+    // (deploymentToBinding, registry.ts) into the engine boundary, which is
+    // what lets the real capability-dispatch chokepoint (architecture §4.6)
+    // gate this trigger-fired run by its actual deployed environment's
+    // trust mode — see StartRunParams.environment's own doc comment
+    // (engine/boundary.ts) for the full story on the gap this closes.
+    environment: binding.environmentId,
   });
   if (result.kind === "started") return { kind: "started", runId: result.runId };
   if (result.kind === "queued") return { kind: "queued", runId: result.runId };

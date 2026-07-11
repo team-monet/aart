@@ -123,7 +123,7 @@ A stub can't produce that — it genuinely evaluated the assertion against the r
 
 **The report** — there's no `aart report` CLI command (checked: it's not in `aart`'s command surface). The equivalent is the `aart_get_report` MCP tool — see part (d) for wiring `aart mcp` in, then ask your agent to call it with the `runId` from above, or drive it directly per part (d)'s "one real tool call" example. It returns the full per-step trace (inputs/outputs/timings) plus a markdown rendering.
 
-**A second real governance moment, worth trying**: validate a version of the workflow that also writes a file (`artifact.write`, capability `file.write`) —
+**A second real governance moment, worth trying**: register a NEW version of the same workflow (`smoke-data-pipeline`, now `0.2.0`) that also writes a file (`artifact.write`, capability `file.write`) —
 
 ```yaml
   - id: save
@@ -131,7 +131,27 @@ A stub can't produce that — it genuinely evaluated the assertion against the r
     with: { name: "greeting.json", kind: "json_output", mime: "application/json", content: "{{ steps.greet.outputs.output }}" }
 ```
 
+```bash
+aart register smoke-data-pipeline-v2.yaml   # same id, version: 0.2.0, the "save" step appended
+aart validate smoke-data-pipeline --registered --version 0.2.0
+```
+
 `aart validate` genuinely reports a real `capability`-class finding ("Capability \"file.write\" is required... not yet approved") — real 5-class validation (schema/reference/capability/input-safety/deployment), not a rubber stamp.
+
+**Governance semantics note (AMENDMENTS.md A48) — what actually happens if you `aart run` this draft.** An earlier session (A42) observed this exact scenario — an unapproved draft, a Medium-risk `file.write` capability — running to completion anyway under `aart run` in `governed` mode, which read as a contradiction of the validate finding above ("not yet approved" sounds like it should block, and it didn't). That was a real bug in the DI wiring between the CLI/MCP run path and the capability-dispatch chokepoint (architecture §4.6) — settled and fixed in A48. As of this session, `aart run smoke-data-pipeline --version 0.2.0 --input '{"who":"John"}'` (still draft, unapproved, no `--environment` — `aart run` has no such flag) genuinely refuses:
+
+```json
+{
+  "ok": false, "status": "failed",
+  "error": "Step \"save\" (block \"artifact.write\") declares capabilities [file.write] which are not a subset of this run's granted capabilities [] (architecture §4.6, ADR-09)."
+}
+```
+
+This is the default (`governed` trust mode, spec §17.2's own stated local-development default) working as designed, not a new restriction to work around. Two real ways to actually run it:
+- **Approve it first** — `aart request-approval smoke-data-pipeline --version 0.2.0` then `aart approve <taskId> --decision approved --reviewer you` (part (c) below walks a live-run approval; this is the workflow-VERSION-level variant, same `aart approve` command). Once that version's `approval` is `"approved"`, the SAME `aart run` completes for real.
+- **Opt into `dev` mode for throwaway iteration** — `AART_TRUST_MODE=dev aart run smoke-data-pipeline --version 0.2.0 --input '{"who":"John"}'` — spec §17.2's documented "Experimental override: dev," which "runs with warning" and skips capability gating entirely, by design, for exactly this kind of local draft-iteration loop. This is opt-in, not the default — the bug this session fixed was `aart run` silently behaving as if `dev` mode were always on, with no way to turn it off.
+
+A capability-FREE draft (no `artifact.write`, no `browser`/`http`/`command`/... step — like `smoke-data-pipeline@0.1.0` itself, part (b)'s very first example) was never affected either way: an empty declared-capabilities set is always a subset of whatever's granted, approved or not, so the ordinary develop-test-iterate loop for pure data/logic/assertion workflows was never blocked and still isn't.
 
 ---
 
@@ -417,3 +437,4 @@ Stated plainly, not glossed over:
 - **No `LICENSE` file** — deliberately deferred; `packages/cli/README.md`'s existing "no license chosen, treat as all-rights-reserved" flag is unchanged.
 - **Pack-delivered blocks** aren't in the real block catalog yet (documented gap, `real-context.ts`) — only the 56 core built-ins (`@aart/blocks-core` + `@aart/llm`) are dispatchable today, on a fresh store with no packs installed.
 - **`isolated-vm`'s `engines.node: ">=26.0.0"`** vs. this machine's v22.22.2 (part (a)'s install warning) — pre-existing, not new, not addressed here.
+- **A `schedule`-fired trigger has no environment concept to gate by** — `AMENDMENTS.md` A48's fix threads a deployment's real target environment into every webhook/github/slack/poll/queue/database/email/file/sdk trigger's capability-dispatch gating (architecture §4.6), but `Schedule` store records (architecture §5.3's frozen shape) carry no `environmentId` field at all, unlike `Deployment`. A schedule-fired run today is gated by the hosting worker/server process's own ambient trust mode (`"governed"` in a correctly-configured deployment — not the old A48 bug's unconditional `"dev"` bypass), not the specific environment a human might expect. Closing this fully needs a `Schedule`-schema migration, out of A48's scope — flagged for whichever session next touches scheduling.

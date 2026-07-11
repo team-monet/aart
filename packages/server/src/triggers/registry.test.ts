@@ -86,3 +86,21 @@ describe("loadTriggerBindingsFromDeployments — environmentId filter (AMENDMENT
     expect(scoped).toEqual([]);
   });
 });
+
+describe("deploymentToBinding — environmentId carried onto the binding (AMENDMENTS.md S15 — settling the S11/A42 governance-permissiveness finding)", () => {
+  it("a deployment's environmentId is threaded onto its TriggerBinding, not just used to filter which deployments load", async () => {
+    const store = await freshStore();
+    await store.deployments.put({
+      id: "dep_a",
+      workflowId: "wf",
+      workflowVersion: "1",
+      environmentId: "env_production",
+      triggerConfig: { type: "webhook", webhookPath: "/a" },
+      createdAt: new Date().toISOString(),
+    });
+
+    const bindings = await loadTriggerBindingsFromDeployments(store);
+    expect(bindings).toHaveLength(1);
+    expect(bindings[0]?.environmentId).toBe("env_production");
+  });
+});

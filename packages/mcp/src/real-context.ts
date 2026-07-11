@@ -55,6 +55,7 @@ import {
   evaluatePromotionForEnvironment,
   getGrantedCapabilities,
   isAartApproveRegisteredForMode,
+  normalizeEnvironmentTrustMode,
   REQUIRED_GATES_BY_MODE,
   redactRecord,
   semanticRiskDiff,
@@ -131,13 +132,38 @@ export function buildRealCatalog(store: AartStore, llmOptions?: RealCatalogLlmOp
 //   - trustMode: resolved from the target Environment's own config.trustMode
 //     (matching promotion.ts's requiredGatesForEnvironment - the SAME
 //     established convention for "where does an environment's trust mode
-//     live"), defaulting to "dev" when no environment is given (an
-//     environment-less run has nothing to resolve, matching RunRecord.
-//     approvalMode's own "dev" default elsewhere) and "governed" if the
-//     environment exists but its config.trustMode is absent/invalid.
+//     live") via normalizeEnvironmentTrustMode when an environment IS
+//     given; otherwise falls back to `defaultTrustMode`, the CALLER-SUPPLIED
+//     ambient trust mode this run/process is actually operating under.
 //   - standingApprovals: the full store list (StandingApprovalStore.list()
 //     takes no filter args) - governance's own findMatchingStandingApproval
 //     does the actual per-approval matching internally.
+//
+// AMENDMENTS.md (S15, settling the S11/A42 governance-permissiveness
+// finding): `defaultTrustMode` was previously hardcoded to the literal
+// string `"dev"` here, unconditionally, for EVERY run that doesn't carry an
+// `environment` — which is every `aart run`/`aart_run_workflow` call (the
+// shared handler never threads one; RunWorkflowInput has no environment
+// field at all) and, until this same session's server-side fix
+// (triggers/registry.ts's `deploymentToBinding`, engine/boundary.ts's
+// `startRun`), every trigger-fired (webhook/schedule/etc.) run too. Because
+// `getGrantedCapabilities` grants the FULL capability closure unconditionally
+// whenever `trustMode === "dev"` (this package's own documented dev-mode
+// semantics, spec §17.2: "draft workflows can run with warning"), that
+// hardcoded fallback made the real architecture §4.6 capability-dispatch
+// chokepoint a no-op for direct CLI/MCP runs regardless of the ambient,
+// correctly-resolved `ctx.trustMode` (which defaults to spec §17.2's own
+// "Local development default: governed" and WAS already being recorded
+// correctly onto `RunRecord.approvalMode` for audit purposes — just never
+// consulted by the actual enforcement path). An unapproved, Medium-risk
+// workflow could run to completion under the default `governed` mode simply
+// because `aart run` has no `--environment` flag to attach. The fix: this
+// factory now REQUIRES its caller to supply the real ambient trust mode as
+// `defaultTrustMode` (no more silent, un-overridable literal) — the
+// authoring-loop freedom spec §17.2 documents ("Experimental override: dev")
+// remains fully available, but only when a caller actually asked for `dev`
+// (an explicit `AART_TRUST_MODE=dev` / `trustMode: "dev"` option), never as
+// an accidental side effect of omitting `--environment`.
 //
 // Documented simplification: capability-closure resolution only recognizes
 // BLOCK ids present in the real registry - a step referencing another
@@ -161,17 +187,26 @@ function buildCapabilityClosureLookup(blocks: BlockRegistry): CapabilityClosureL
   };
 }
 
-export function createGetGrantedCapabilities(store: AartStore, blocks: BlockRegistry): GetGrantedCapabilities {
+/**
+ * @param defaultTrustMode The trust mode to use for capability-grant
+ * resolution when a run carries no `environment` (every direct
+ * `aart run`/`aart_run_workflow`/`aart eval run` call, today's only such
+ * callers — see this function's own doc comment above). REQUIRED, not
+ * defaulted: callers must state which trust mode they're actually
+ * constructing this engine under (the real composition root passes the
+ * genuinely-resolved `ctx.trustMode`; a test/fixture that deliberately wants
+ * unconditional dev-mode grants passes `"dev"` explicitly, never by omission).
+ */
+export function createGetGrantedCapabilities(store: AartStore, blocks: BlockRegistry, defaultTrustMode: TrustMode): GetGrantedCapabilities {
   const lookup = buildCapabilityClosureLookup(blocks);
 
   return async (workflow: Workflow, environment: string | undefined): Promise<string[]> => {
     const closure = computeCapabilityClosure(workflow.execution.steps, lookup);
 
-    let trustMode: TrustMode = "dev";
+    let trustMode: TrustMode = defaultTrustMode;
     if (environment) {
       const env = await store.environments.get(environment);
-      const raw = env?.config["trustMode"];
-      trustMode = raw === "dev" || raw === "governed" || raw === "strict" || raw === "production" ? raw : "governed";
+      trustMode = normalizeEnvironmentTrustMode(env?.config["trustMode"]);
     }
 
     const standingApprovals = await store.standingApprovals.list();
@@ -212,12 +247,13 @@ export function createComputePackHashes() {
 // The real Engine instance + its EnginePort adapter for @aart/mcp/@aart/cli.
 // ---------------------------------------------------------------------------
 
-export function createRealEngine(store: AartStore, blocks: BlockRegistry): Engine {
+/** @param trustMode Threaded straight into `createGetGrantedCapabilities` — see that function's doc comment for why this is a required, explicit parameter rather than a silently-defaulted one (AMENDMENTS.md, S15). */
+export function createRealEngine(store: AartStore, blocks: BlockRegistry, trustMode: TrustMode): Engine {
   return createEngine({
     store,
     redact: redactRecord,
     capabilityCheck: checkCapability,
-    getGrantedCapabilities: createGetGrantedCapabilities(store, blocks),
+    getGrantedCapabilities: createGetGrantedCapabilities(store, blocks, trustMode),
     blocks,
     computePackHashes: createComputePackHashes(),
     onRunTerminal: (runId) => closeBrowserSession(runId),
