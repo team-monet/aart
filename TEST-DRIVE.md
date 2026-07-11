@@ -312,7 +312,73 @@ rsync -a ~/aart-test-drive/.aart/ you@your-server:/path/to/.aart/
 
 That's the everything-including-history alternative — slower, bigger, and it carries your local dev runs along with it, which a bundle deliberately does not.
 
-**Not yet built** (`AMENDMENTS.md` A44 has the full story, including why): `aart server --environment <name>` to scope which deployment's triggers actually activate at runtime (today, every deployment's trigger fires, same as running locally — documented dev-convenience behavior, not yet an opt-in production one); a `--store sqlite` flag for safe concurrent multi-process access (today's fs store is fine for one lightly-used process at a time — the sqlite adapter itself is done and its own conformance suite is green, it's just not reachable from the CLI yet); a `--root <dir>` flag so the store doesn't have to live under wherever you happen to run the command from. All three are scoped, unblocked, and ready to build on top of what's here — this session shipped the bundle half only, per an explicit founder scope decision recorded in `AMENDMENTS.md`.
+**`--environment <name>` (+ `AART_ENVIRONMENT`) — scoping which deployment's triggers actually activate** (`AMENDMENTS.md` A45): unset, `aart server`/`aart worker` activate every deployment's trigger across every environment in the store — a documented dev convenience, fine for one laptop with one environment in play. Once a store holds deployments for more than one environment (a real "staging vs. production" setup), name the one this process should serve:
+
+```bash
+aart server --port 8080 --environment production
+```
+
+A webhook/github/slack/poll binding that belongs to a DIFFERENT environment's deployment 404s against this server (`unknown trigger binding`) even though the record exists in the same store — verified directly this session: two environments, two deployments of the same workflow, a server started with `--environment production` served `production`'s binding and 404'd on `staging`'s. An unregistered environment name fails loudly at startup (`environment "X" not found`) rather than silently falling back to "everything."
+
+**`--store fs|sqlite` — which `@aart/store` adapter backs this invocation** (`AMENDMENTS.md` A45): `fs` (the default, unchanged) is one JSON file per record — simple, human-inspectable, fine for one process at a time. `sqlite` is a real `node:sqlite`-backed adapter (WAL mode, so `aart server` and `aart worker` can safely share ONE db file as two concurrent processes/connections — architecture §5.1's stated reason to reach for it) — its own conformance suite (the same shared test suite the `fs` adapter is held to) passes clean. The db file lives at `<root>/aart.db`:
+
+```bash
+aart server --port 8080 --store sqlite --environment production
+aart worker --store sqlite   # a SECOND process, same store — this is exactly the case sqlite (not fs) is for
+```
+
+Choose `sqlite` when `aart server` and `aart worker` (or more than one of either) run as separate processes against the same store; `fs` remains fine for the common single-process local/dev case this whole guide otherwise uses.
+
+**`--root <dir>` (+ `AART_ROOT`; precedence: flag > env var > `./.aart`)** (`AMENDMENTS.md` A45): every command in this guide has been implicitly using `./.aart`, relative to wherever you ran `aart` from. `--root`/`AART_ROOT` point it anywhere:
+
+```bash
+aart server --port 8080 --root /var/lib/aart-prod
+AART_ROOT=/var/lib/aart-prod aart worker
+```
+
+Honored by every command, not only `server`/`worker`/`run`/`mcp`/`init-agent` — those five are just where it matters most in practice (the store the founder's own copy-pasted script hard-codes vs. a real deploy target's own path).
+
+**Receive a real webhook — the actual live proof, not a description of one.** Continuing with `smoke-data-pipeline` from part (b) (or any registered workflow):
+
+```bash
+# 1. Get it to a deployable state and deploy it (part (b)/(c) cover
+#    register/validate; getting workflow.approval to "approved" needs
+#    request-approval + approve — see the CLI-only-lifecycle note below).
+aart request-approval smoke-data-pipeline
+aart approve <taskId> --decision approved --reviewer "your-name"
+aart promote smoke-data-pipeline
+aart deploy smoke-data-pipeline --target production
+# {"ok":true,"deployment":{"id":"deploy_XXXX", ...}, "environment":{"name":"production", ...}}
+
+# 2. Wire a webhook trigger onto that deployment.
+aart trigger add smoke-data-pipeline --type webhook --webhook-hmac-secret-ref secrets.DEMO_SECRET
+
+# 3. Start the server with the secret available — AART_SECRET_<NAME> is the
+#    quick path (a store-adjacent <root>/secrets.json file also works, see
+#    below).
+AART_SECRET_DEMO_SECRET="a-real-secret-value" aart server --port 8080 --environment production
+```
+
+```bash
+# 4. In another terminal — sign the payload with the SAME secret and POST it.
+BODY='{"who":"webhook-caller"}'
+SECRET="a-real-secret-value"
+SIG=$(node -e "const {createHmac}=require('node:crypto'); process.stdout.write('sha256='+createHmac('sha256','$SECRET').update('$BODY').digest('hex'))")
+curl -i -X POST "http://localhost:8080/webhooks/deploy_XXXX" -H "x-aart-signature: $SIG" -d "$BODY"
+# HTTP/1.1 200 OK
+# {"kind":"started","runId":"<uuid>"}
+
+# 5. A bad signature is rejected, not silently ignored — and the rejection is durable.
+curl -i -X POST "http://localhost:8080/webhooks/deploy_XXXX" -H "x-aart-signature: sha256=00...00" -d "$BODY"
+# HTTP/1.1 401 Unauthorized
+# {"error":"bad_hmac"}
+curl http://localhost:8080/rejected-triggers
+# {"rejected":[{"id":"rej_...","triggerType":"webhook","reason":"bad_hmac", ...}]}
+```
+
+Both verified live this session, against the installed tarball, exactly as above (`AMENDMENTS.md` A45's own transcript). `AART_SECRET_<NAME>` (env var, checked first) or `<root>/secrets.json` (`{"<NAME>": "value"}`, checked if the env var is unset) is the real secret-resolution mechanism now wired all the way through — `secrets.<NAME>` and a bare `<NAME>` both work as the `--webhook-hmac-secret-ref` value. `github`/`slack` bindings resolve their secret the same way (`x-hub-signature-256`/`x-slack-signature` respectively) — this walkthrough uses the generic `webhook` type only because it needs no provider-specific payload shape to demonstrate.
+
+**The CLI-only-lifecycle gap this walkthrough's own step 1 works around, honestly:** `aart request-approval` (new this session) and `aart approve` genuinely work end to end — `approve` really does record the decision and really does set the `humanReview` gate. But `aart promote`/`aart deploy` still refuse a workflow that's never had its `validate` gate satisfied, and **nothing in the CLI or MCP surface has a real write path for the `validate` (or `readiness`/`evals`/`riskReview`) gate** — `aart validate` genuinely checks the workflow and reports real findings, it just never persists that outcome onto the stored version's gates. Verified directly, live, from the installed binary: register → validate → request-approval → approve all genuinely succeed, then `aart promote` is refused with `unmetGates: ["validate"]` even though `humanReview` just passed for real. This is a separate, pre-existing gap this session found while proving the lifecycle — not something `aart request-approval`'s addition causes or fixes — see `AMENDMENTS.md` A45 for the full transcript and recommendation. This guide's own step 1 above skips past it as most real deployments will need to for now: something (today, not a CLI/MCP command) marks `gates.validate` `"passed"` before `request-approval`/`approve`/`promote`/`deploy` can carry a workflow the rest of the way.
 
 ---
 
@@ -337,9 +403,8 @@ Stated plainly, not glossed over:
 
 - **`llm.*` blocks** (`llm.extract`/`llm.classify`/`llm.judge`) are wired for real — the real Anthropic provider adapter, real schema validation, real retry logic — but **untested end-to-end in this session**: no Anthropic API key is available in the environment this was built in. Set `ANTHROPIC_API_KEY` and they should work; this wasn't verified here.
 - **The dashboard's write actions** are still a documented partial stub (see part (e)'s note) — read pages are real, some write actions (approve/promote/risk-diff) are real, others (trigger a run, resume an approval, render a report) are still local mirrors pending their own composition-root wiring pass. Not this session's scope.
-- **`aart server`'s real trigger wiring never resolves webhook/github/slack HMAC secrets** (`AMENDMENTS.md` A44) — those three trigger types are unconditionally signature-checked (by design, architecture §6.1/§15) but the CLI never wires a `secretResolver`, so none of them can currently fire successfully through a real running `aart server`, independent of the bundle work in part (f). Found while building part (f)'s own proof; worked around there by using `aart run` directly.
-- **The CLI alone can't get a workflow to a deployable (`approved`) state** (`AMENDMENTS.md` A44) — `aart approve` exists, but nothing in the CLI's own command surface creates the approval task it decides on (that's MCP-only today, `aart_request_approval`), so `aart deploy` cannot currently be made to succeed from the CLI alone in any trust mode. Part (f)'s own bundle-deploy proof works around this by bundling a bare (undeployed) workflow closure.
-- **`aart server --environment <name>` / SQLite export + `--store` / `--root`** — scoped, unblocked, not yet built; see part (f) above and `AMENDMENTS.md` A44.
+- **No CLI/MCP command ever satisfies the `validate`/`readiness`/`evals`/`riskReview` gates** (`AMENDMENTS.md` A45, found this session) — `aart request-approval` + `aart approve` (both new this session) genuinely work and genuinely set the `humanReview` gate, but `aart promote`/`aart deploy` additionally require `validate` under every non-`dev` trust mode (`dev` mode has its own separate, deliberate "never auto-approves" rule — see `packages/governance/src/approval.ts` — so it doesn't help either), and nothing anywhere writes that gate for a real registered workflow: `aart validate` checks a workflow and reports real findings but never persists the outcome onto the stored version. Verified live, from the installed binary: register → validate → request-approval → approve all succeed for real; `aart promote` then refuses with `unmetGates: ["validate"]`. Part (f)'s webhook walkthrough works around this (documented there) the same way this session's own test suite already did for its `aart promote`/`aart deploy` coverage — directly setting the gate, not via any CLI/MCP command, because none exists.
+- **`aart server`'s real trigger wiring never resolved webhook/github/slack HMAC secrets, and `--environment`/`--store`/`--root` didn't exist** — true as of `AMENDMENTS.md` A44; closed this session (A45). See part (f) above for the live webhook proof and the new flags.
 - **No `LICENSE` file** — deliberately deferred; `packages/cli/README.md`'s existing "no license chosen, treat as all-rights-reserved" flag is unchanged.
 - **Pack-delivered blocks** aren't in the real block catalog yet (documented gap, `real-context.ts`) — only the 56 core built-ins (`@aart/blocks-core` + `@aart/llm`) are dispatchable today, on a fresh store with no packs installed.
 - **`isolated-vm`'s `engines.node: ">=26.0.0"`** vs. this machine's v22.22.2 (part (a)'s install warning) — pre-existing, not new, not addressed here.
