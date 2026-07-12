@@ -64,6 +64,32 @@ describe("GET /health", () => {
   });
 });
 
+// D2a security hardening, breaking-change bind default (AMENDMENTS.md A59)
+// — a fast, direct unit-level proof (no CLI/store-root overhead) that
+// startServer itself honors config.host and defaults to loopback-only when
+// omitted. `ServerHandle`'s own PUBLIC type only exposes {server, port,
+// ticker?, getRoutes, close} -- `.server` is the real `node:http` `Server`
+// instance underneath (ServerHandle.server, this file's own interface), so
+// `.address()` is reachable directly without any cast; used here (not just
+// a fetch-succeeds check) because a fetch to `localhost` would succeed
+// whether bound to 127.0.0.1 OR 0.0.0.0 -- only inspecting the actual bound
+// address distinguishes them.
+describe("HTTP bind address (D2a security hardening, AMENDMENTS.md A59)", () => {
+  it("defaults to loopback-only (127.0.0.1) when config.host is omitted", async () => {
+    fx = await createTestFixture();
+    handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false });
+    const address = handle.server.address();
+    expect(address).toMatchObject({ address: "127.0.0.1" });
+  });
+
+  it("an explicit config.host is honored", async () => {
+    fx = await createTestFixture();
+    handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false, host: "0.0.0.0" });
+    const address = handle.server.address();
+    expect(address).toMatchObject({ address: "0.0.0.0" });
+  });
+});
+
 describe("webhook ingress (architecture §6.1/§15)", () => {
   it("valid HMAC: 200, starts a run", async () => {
     fx = await createTestFixture();
@@ -117,6 +143,60 @@ describe("webhook ingress (architecture §6.1/§15)", () => {
     handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false });
     const res = await fetch(`http://localhost:${handle.port}/webhooks/no-such-binding`, { method: "POST", body: "{}" });
     expect(res.status).toBe(404);
+  });
+
+  // D2a fix pass (AMENDMENTS.md A60, FIX 1) — before this fix, these three
+  // routes passed no maxBodyBytes of their own, so they silently inherited
+  // D2a's GLOBAL DEFAULT_MAX_BODY_BYTES (1MB, AMENDMENTS.md A59) the moment
+  // that default started applying to every uncapped route — a real
+  // regression for webhook deliveries specifically (external,
+  // operator-uncontrolled payloads; GitHub's own ceiling is 25MB, and
+  // GitHub does not retry a delivery it can't make). This proves the fix:
+  // a body clearly over the OLD 1MB default, but under the new
+  // MAX_WEBHOOK_INGEST_BYTES cap, now succeeds all the way through HMAC
+  // verification and trigger intake instead of 413ing before either ever run.
+  it("size cap: a body between 1MB and MAX_WEBHOOK_INGEST_BYTES succeeds through to HMAC verification and intake (previously 413'd under the global 1MB default)", async () => {
+    fx = await createTestFixture();
+    await fx.store.deployments.put({
+      id: "binding_large",
+      workflowId: "wf_webhook",
+      workflowVersion: "1",
+      environmentId: "env_1",
+      triggerConfig: { type: "webhook", webhookPath: "/webhooks/binding_large", webhookHmacSecretRef: "secrets.WEBHOOK_SECRET" },
+      createdAt: fx.clock.nowIso(),
+    });
+    handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false, secretResolver: async () => "real-secret" });
+
+    // ~2MB — comfortably over the pre-fix 1MB global default, comfortably
+    // under the new 25 MiB webhook cap.
+    const payload = { file_url: "https://x/bill.pdf", padding: "a".repeat(2 * 1024 * 1024) };
+    const rawBody = JSON.stringify(payload);
+    expect(rawBody.length).toBeGreaterThan(1_048_576);
+    const sig = computeHmacSignature(new TextEncoder().encode(rawBody), "real-secret");
+    const res = await fetch(`http://localhost:${handle.port}/webhooks/binding_large`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-aart-signature": sig },
+      body: rawBody,
+    });
+    expect(res.status).toBe(200);
+    const body = (await json(res)) as { kind: string };
+    expect(body.kind).toBe("started");
+  });
+
+  it("size cap: a body over MAX_WEBHOOK_INGEST_BYTES is rejected 413", async () => {
+    fx = await createTestFixture();
+    handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false });
+    // A plain oversized body — 413 fires from the router's Content-Length
+    // pre-check before this handler (or HMAC verification) ever runs, so
+    // the content doesn't need to be a real signed payload or a real
+    // binding id (mirrors /bundles/ingest's own size-cap test below).
+    const oversized = "x".repeat(27 * 1024 * 1024); // 27MB > the 25 MiB (26,214,400-byte) cap
+    const res = await fetch(`http://localhost:${handle.port}/webhooks/no-such-binding`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: oversized,
+    });
+    expect(res.status).toBe(413);
   });
 });
 
@@ -894,6 +974,193 @@ describe("POST /workflows/:id/promote — conditional deploy-token gating (AMEND
   });
 });
 
+// D2a fix pass (AMENDMENTS.md A60, FIX 2) — requireDeployToken (the
+// fail-closed tier: /bundles/ingest, /bundles/plan, /environments) called
+// checkAnyDeployToken([config.deployToken, config.deployTokenNext], provided)
+// with NO guard that config.deployToken was actually set, unlike its
+// conditional sibling requireDeployTokenIfConfigured (which already guards
+// `if (!config.deployToken) return true`). A server configured with ONLY
+// AART_DEPLOY_TOKEN_NEXT (no primary) would therefore ACCEPT a caller who
+// supplied exactly that NEXT token on a fail-closed route — contradicting
+// both the 401 remedy (which claims "no AART_DEPLOY_TOKEN configured") and
+// this file's/config.ts's own doc comments on deployTokenNext ("cannot
+// substitute for the primary token being configured at all"). Closed with
+// an explicit `if (!config.deployToken)` guard in requireDeployToken,
+// mirroring requireDeployTokenIfConfigured's own.
+describe("deploy token rotation — deployTokenNext without a primary (D2a fix pass, AMENDMENTS.md A60, FIX 2)", () => {
+  it("fail-closed tier (/bundles/ingest): a request bearing exactly the configured deployTokenNext value is STILL refused when deployToken (the primary) is unset — the NEXT token must not unlock a fail-closed route on its own", async () => {
+    fx = await createTestFixture();
+    await fx.store.workflows.put(deployableWorkflow("wf_next_only_fail_closed"));
+    const bundle = await produceBundle(fx.store, { workflowId: "wf_next_only_fail_closed", workflowVersion: "1" });
+    handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false, deployTokenNext: "next-token-only" }); // deployToken deliberately unset
+    const res = await fetch(`http://localhost:${handle.port}/bundles/ingest`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: "Bearer next-token-only" },
+      body: JSON.stringify({ files: bundleToFiles(bundle) }),
+    });
+    expect(res.status).toBe(401);
+    const body = (await json(res)) as { error: string };
+    // The SAME "not configured" remedy as if no token existed at all —
+    // proves this is treated exactly like the fully-unconfigured case, not
+    // a differentiated "wrong token" 401 (which would mean deployTokenNext
+    // was still being consulted as a candidate).
+    expect(body.error).toMatch(/AART_DEPLOY_TOKEN/);
+    await expect(fx.store.deployments.list({ workflowId: "wf_next_only_fail_closed" })).resolves.toHaveLength(0);
+  });
+
+  it("conditionally-gated tier (/runs/trigger): behaves byte-identically to the fully-unconfigured baseline when only deployTokenNext is set — deployToken unset already short-circuits requireDeployTokenIfConfigured before deployTokenNext is ever consulted, so this is a non-regression check, not a hole", async () => {
+    fx = await createTestFixture();
+    handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false }); // fully unconfigured baseline
+    const baseline = await fetch(`http://localhost:${handle.port}/runs/trigger`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({}) });
+    const baselineStatus = baseline.status;
+    const baselineBody: unknown = await baseline.json();
+    expect(baselineStatus, "this test's own premise is broken if the fully-unconfigured baseline is already 401").not.toBe(401);
+
+    await handle.close();
+    handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false, deployTokenNext: "next-token-only" }); // deployToken deliberately unset
+    const res = await fetch(`http://localhost:${handle.port}/runs/trigger`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({}) });
+    expect(res.status, "deployTokenNext alone must not change this route's behavior at all").toBe(baselineStatus);
+    await expect(res.json()).resolves.toEqual(baselineBody);
+  });
+});
+
+// D2a security hardening (AMENDMENTS.md A59) — the completeness test: the
+// single most important test in this sub-phase (per this session's own
+// brief). Converts "a future route silently ships open" (this repo's named
+// recurring bug class — A48/A53/A57 FIX1/A58 FIX B all being the SAME
+// shape: a real mechanism built but never wired into a real caller) into a
+// loud CI failure for THIS specific gap, by enumerating every ACTUALLY
+// registered route (Router.getRoutes(), via ServerHandle.getRoutes()) and
+// asserting each POST route either carries an explicit `auth` value or is
+// named in a small, hardcoded, deliberately-reviewed open-allowlist (the
+// three /webhooks/* routes — separate per-binding HMAC verification,
+// untouched). A route added to this file in the future that forgets to
+// pass `auth` (or add itself to the allowlist, if it's a genuinely-
+// intentional new open route) fails THIS test, not a security review.
+describe("auth-gate completeness (D2a security hardening, AMENDMENTS.md A59)", () => {
+  // The only routes this server intentionally leaves open with no `auth`
+  // option at all — a separate, per-binding HMAC mechanism gates these
+  // instead (adaptWebhookTrigger/adaptGithubTrigger/adaptSlackTrigger,
+  // config.secretResolver), completely unrelated to the deploy token.
+  const OPEN_ALLOWLIST = new Set(["POST /webhooks/:bindingId", "POST /webhooks/github/:bindingId", "POST /webhooks/slack/:bindingId"]);
+
+  it("every registered POST route either carries an explicit auth stance or is in the hardcoded open-allowlist (the 3 webhooks)", async () => {
+    fx = await createTestFixture();
+    handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false });
+    const postRoutes = handle.getRoutes().filter((r) => r.method === "POST");
+    // Sanity: this test only proves something if there ARE POST routes to
+    // check — guards against a future refactor silently emptying the
+    // router (and this test passing vacuously as a result).
+    expect(postRoutes.length).toBeGreaterThan(15);
+
+    for (const route of postRoutes) {
+      const key = `${route.method} ${route.path}`;
+      if (OPEN_ALLOWLIST.has(key)) {
+        expect(route.auth, `${key} is on the open-allowlist but unexpectedly carries an auth option -- either it's no longer meant to be open (remove it from OPEN_ALLOWLIST) or the auth option was added by mistake`).toBeUndefined();
+      } else {
+        expect(route.auth, `${key} is NOT on the open-allowlist and has no explicit auth option -- every mutation route must either be gated (pass { auth: ... } at registration) or be a deliberate, reviewed addition to OPEN_ALLOWLIST above (D2a, AMENDMENTS.md A59) -- a route silently shipping open is exactly the recurring bug class this test exists to catch`).toBeDefined();
+      }
+    }
+  });
+
+  // Allowlist entries that DON'T correspond to a real registered route would
+  // make the test above vacuously pass for that entry (nothing to check) —
+  // this closes that gap the other direction.
+  it("every OPEN_ALLOWLIST entry corresponds to a route that actually exists", async () => {
+    fx = await createTestFixture();
+    handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false });
+    const registered = new Set(handle.getRoutes().map((r) => `${r.method} ${r.path}`));
+    for (const allowlisted of OPEN_ALLOWLIST) {
+      expect(registered.has(allowlisted), `OPEN_ALLOWLIST names "${allowlisted}" but no such route is actually registered`).toBe(true);
+    }
+  });
+});
+
+// D2a security hardening (AMENDMENTS.md A59) — the SAME 4-case pattern the
+// promote-gating suite above already established (configured+correct token
+// -> unaffected; configured+wrong -> 401; configured+missing header -> 401;
+// unconfigured -> unaffected), run once per newly-gated route via a shared
+// table instead of 17 near-duplicate describe blocks. "Unaffected" is
+// checked by comparing against each route's own natural BASELINE response
+// (deployToken unset, no Authorization header) rather than hardcoding an
+// assumed status per route — this proves auth wraps around existing
+// behavior without altering it; each route's own FUNCTIONAL correctness is
+// already exercised elsewhere in this file (or, for the newer flows, is
+// exercised by this same request shape 400ing/404ing deterministically —
+// every row below uses an empty/placeholder body+params specifically so
+// the response is side-effect-free and reproducible, never a real write).
+describe("uniform conditional auth gate — every newly-gated write route (D2a security hardening, AMENDMENTS.md A59)", () => {
+  const TOKEN = "uniform-gate-token";
+
+  const ROUTES: Array<{ label: string; pathTemplate: string; path: string; body: unknown }> = [
+    { label: "POST /runs/trigger", pathTemplate: "/runs/trigger", path: "/runs/trigger", body: {} },
+    { label: "POST /approvals/:id/decision", pathTemplate: "/approvals/:id/decision", path: "/approvals/placeholder-id/decision", body: {} },
+    { label: "POST /workflows/:id/approve", pathTemplate: "/workflows/:id/approve", path: "/workflows/placeholder-id/approve", body: {} },
+    { label: "POST /workflows/:id/block-promotion", pathTemplate: "/workflows/:id/block-promotion", path: "/workflows/placeholder-id/block-promotion", body: {} },
+    { label: "POST /workflows/:id/unblock-promotion", pathTemplate: "/workflows/:id/unblock-promotion", path: "/workflows/placeholder-id/unblock-promotion", body: {} },
+    { label: "POST /workflows/:id/mark-needs-review", pathTemplate: "/workflows/:id/mark-needs-review", path: "/workflows/placeholder-id/mark-needs-review", body: {} },
+    { label: "POST /workflows/:id/clear-needs-review", pathTemplate: "/workflows/:id/clear-needs-review", path: "/workflows/placeholder-id/clear-needs-review", body: {} },
+    { label: "POST /workflows/:id/trigger-improvement", pathTemplate: "/workflows/:id/trigger-improvement", path: "/workflows/placeholder-id/trigger-improvement", body: {} },
+    { label: "POST /corrections", pathTemplate: "/corrections", path: "/corrections", body: {} },
+    { label: "POST /corrections/:key/update-run-output", pathTemplate: "/corrections/:key/update-run-output", path: "/corrections/placeholder-key/update-run-output", body: undefined },
+    { label: "POST /corrections/:key/create-eval-example", pathTemplate: "/corrections/:key/create-eval-example", path: "/corrections/placeholder-key/create-eval-example", body: {} },
+    { label: "POST /corrections/:key/create-issue", pathTemplate: "/corrections/:key/create-issue", path: "/corrections/placeholder-key/create-issue", body: undefined },
+    { label: "POST /evals/suites", pathTemplate: "/evals/suites", path: "/evals/suites", body: {} },
+    { label: "POST /evals/runs", pathTemplate: "/evals/runs", path: "/evals/runs", body: {} },
+    { label: "POST /runs/:runId/resume", pathTemplate: "/runs/:runId/resume", path: "/runs/placeholder-run/resume", body: {} },
+    { label: "POST /runs/:runId/signal", pathTemplate: "/runs/:runId/signal", path: "/runs/placeholder-run/signal", body: {} },
+    { label: "POST /runs/:runId/flag/clear", pathTemplate: "/runs/:runId/flag/clear", path: "/runs/placeholder-run/flag/clear", body: {} },
+  ];
+
+  it(`this table has exactly the 17 routes this session's brief enumerates (a guard against the table itself silently drifting)`, () => {
+    expect(ROUTES).toHaveLength(17);
+  });
+
+  for (const route of ROUTES) {
+    it(`${route.label}: wrong/missing token -> 401 when configured; correct token, and unconfigured, are BOTH byte-identical to the ungated baseline`, async () => {
+      fx = await createTestFixture();
+      handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false }); // unconfigured
+
+      // Cross-checks this table's own path template against the REAL
+      // registered router state — catches a typo'd path in this test file
+      // itself, or a route that silently lost its `auth` option, either of
+      // which would otherwise make this test pass for the wrong reason.
+      const registered = handle.getRoutes().find((r) => r.method === "POST" && r.path === route.pathTemplate);
+      expect(registered, `${route.label}: no registered route matches pathTemplate "${route.pathTemplate}" -- fix this table's pathTemplate to match the real registration in startServer`).toBeDefined();
+      expect(registered?.auth, `${route.label}: the real registered route has no auth option at all -- this table asserts it's gated`).toBeDefined();
+
+      const post = (headers: Record<string, string>) =>
+        fetch(`http://localhost:${handle!.port}${route.path}`, {
+          method: "POST",
+          headers: { "content-type": "application/json", ...headers },
+          ...(route.body === undefined ? {} : { body: JSON.stringify(route.body) }),
+        });
+
+      const baseline = await post({});
+      const baselineStatus = baseline.status;
+      const baselineBody: unknown = await baseline.json();
+      // Sanity: this test's OWN premise is broken if the route already
+      // 401s when deployToken is unconfigured (there's no OTHER 401 source
+      // on any of these routes when unconfigured -- if this fires, the
+      // route itself changed in a way this test needs updating for).
+      expect(baselineStatus, `${route.label}: unconfigured baseline was already 401 -- this test's design assumes it isn't`).not.toBe(401);
+
+      await handle.close();
+      handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false, deployToken: TOKEN });
+
+      const correct = await post({ authorization: `Bearer ${TOKEN}` });
+      expect(correct.status, `${route.label}: correct-token response status diverged from the ungated baseline`).toBe(baselineStatus);
+      await expect(correct.json(), `${route.label}: correct-token response body diverged from the ungated baseline`).resolves.toEqual(baselineBody);
+
+      const wrong = await post({ authorization: "Bearer wrong-token" });
+      expect(wrong.status, `${route.label}: a WRONG token must 401`).toBe(401);
+
+      const missing = await post({});
+      expect(missing.status, `${route.label}: a MISSING Authorization header must 401`).toBe(401);
+    });
+  }
+});
+
 describe("POST /bundles/ingest — real ingestion (AMENDMENTS.md A56)", () => {
   const TOKEN = "ingest-test-token";
 
@@ -1282,5 +1549,123 @@ describe("POST /environments — ADR-2 (AMENDMENTS.md A56)", () => {
       body: JSON.stringify({ name: "no-trust-mode-given" }),
     });
     expect(res.status).toBe(200);
+  });
+});
+
+// D2a security hardening (AMENDMENTS.md A59) — the SAME bug shape D1's fix
+// pass (AMENDMENTS.md A57, FIX 2) closed for POST /environments: trustMode
+// was cast with no runtime check, so a typo'd value silently persists and
+// every real reader downgrades an unrecognized string to "governed" with no
+// signal anywhere. Sibling test to /environments' own "invalid trustMode"
+// test immediately above.
+describe("POST /workflows/:id/approve — trustMode validation (D2a, AMENDMENTS.md A59)", () => {
+  it("invalid trustMode -> 400 naming the four valid values, workflow NOT approved", async () => {
+    fx = await createTestFixture();
+    await fx.store.workflows.put(fixtureWorkflow("1.0.0", { id: "wf_approve_trustmode", approval: "draft" }));
+    handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false });
+    const res = await fetch(`http://localhost:${handle.port}/workflows/wf_approve_trustmode/approve`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ version: "1.0.0", trustMode: "prod" }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await json(res)) as { error: string };
+    for (const validMode of ["dev", "governed", "strict", "production"]) {
+      expect(body.error).toContain(validMode);
+    }
+    expect(body.error).toContain('"prod"');
+    await expect(fx.store.workflows.get("wf_approve_trustmode", "1.0.0")).resolves.toMatchObject({ approval: "draft" }); // unchanged -- never silently downgraded into "governed" and approved anyway
+  });
+
+  it("every valid trustMode (dev/governed/strict/production) is accepted", async () => {
+    fx = await createTestFixture();
+    for (const validMode of ["dev", "governed", "strict", "production"]) {
+      await fx.store.workflows.put(fixtureWorkflow("1.0.0", { id: `wf_approve_${validMode}`, approval: "draft" }));
+    }
+    handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false });
+    for (const validMode of ["dev", "governed", "strict", "production"]) {
+      const res = await fetch(`http://localhost:${handle.port}/workflows/wf_approve_${validMode}/approve`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ version: "1.0.0", trustMode: validMode }),
+      });
+      expect(res.status).toBe(200);
+    }
+  });
+
+  it("omitting trustMode entirely is still accepted (defaults to governed, unchanged pre-D2a behavior)", async () => {
+    fx = await createTestFixture();
+    await fx.store.workflows.put(fixtureWorkflow("1.0.0", { id: "wf_approve_default", approval: "draft" }));
+    handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false });
+    const res = await fetch(`http://localhost:${handle.port}/workflows/wf_approve_default/approve`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ version: "1.0.0" }),
+    });
+    expect(res.status).toBe(200);
+  });
+});
+
+// D2a security hardening, token-derived attribution (AMENDMENTS.md A59) —
+// the mechanical half: a decision made with a matching deploy token
+// persists ApprovalTask.authenticatedAs; a tokenless-local decision (the
+// common case for most real deployments today) leaves it undefined, never
+// a false "definitely anonymous" signal.
+describe("POST /approvals/:id/decision — token-derived attribution (D2a, AMENDMENTS.md A59)", () => {
+  async function approvalSetup(fixture: TestFixture) {
+    await fixture.store.workflows.put(fixtureWorkflow("1.0.0", { id: "wf_attribution", gates: { validate: "passed", readiness: "passed", evals: "passed", riskReview: "pending", humanReview: "pending" } }));
+    await fixture.store.approvals.put({
+      id: "task_attribution",
+      runId: "workflow-version:wf_attribution@1.0.0",
+      stepId: "__gate:humanReview__",
+      title: "t",
+      description: "d",
+      status: "pending",
+      createdAt: "2026-07-10T00:00:00.000Z",
+    });
+  }
+
+  it("a decision made with a matching deploy token persists authenticatedAs: \"deploy-token\"", async () => {
+    fx = await createTestFixture();
+    await approvalSetup(fx);
+    handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false, deployToken: "attribution-token" });
+    const res = await fetch(`http://localhost:${handle.port}/approvals/task_attribution/decision`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: "Bearer attribution-token" },
+      body: JSON.stringify({ status: "approved", reviewer: "alice" }),
+    });
+    expect(res.status).toBe(200);
+    const task = await fx.store.approvals.get("task_attribution");
+    expect(task?.authenticatedAs).toBe("deploy-token");
+    expect(task?.reviewer).toBe("alice"); // the existing free-text reviewer field is untouched -- both coexist
+  });
+
+  it("a tokenless-local decision (deployToken unconfigured) leaves authenticatedAs undefined", async () => {
+    fx = await createTestFixture();
+    await approvalSetup(fx);
+    handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false }); // no deployToken
+    const res = await fetch(`http://localhost:${handle.port}/approvals/task_attribution/decision`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ status: "approved", reviewer: "bob" }),
+    });
+    expect(res.status).toBe(200);
+    const task = await fx.store.approvals.get("task_attribution");
+    expect(task?.authenticatedAs).toBeUndefined();
+    expect(task?.reviewer).toBe("bob");
+  });
+
+  it("a client-supplied authenticatedAs in the request body is IGNORED -- attribution can only come from the server's own auth check, never self-reported", async () => {
+    fx = await createTestFixture();
+    await approvalSetup(fx);
+    handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false }); // no deployToken -- so even a matching-looking claim must not stick
+    const res = await fetch(`http://localhost:${handle.port}/approvals/task_attribution/decision`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ status: "approved", reviewer: "eve", authenticatedAs: "deploy-token" }), // self-reported, must be ignored
+    });
+    expect(res.status).toBe(200);
+    const task = await fx.store.approvals.get("task_attribution");
+    expect(task?.authenticatedAs).toBeUndefined();
   });
 });

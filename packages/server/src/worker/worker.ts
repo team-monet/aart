@@ -150,6 +150,22 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
 
   const lease: LeaseHeartbeatHandle = startLeaseHeartbeat(options.store, clock, logger, claimedRunIds, leaseDurationMs, heartbeatIntervalMs);
   const health: HealthServerHandle = await startHealthServer(healthPort, () => claimedRunIds.size);
+  // D2a fix pass (AMENDMENTS.md A60, FIX 3) — mirrors @aart/server's own
+  // startServer fix (http/server.ts, same session): this listener had no
+  // startup log line at all. Deliberately still all-interfaces here, unlike
+  // the control plane's own loopback default (AMENDMENTS.md A59 PART 3's
+  // own "left DELIBERATELY UNCHANGED" ruling — this endpoint is read-only
+  // and BY DESIGN cross-container-reachable, docker-compose.yml's
+  // AART_WORKER_URLS; DEPLOY.md's "Network binding" section now calls this
+  // out explicitly too) — logging the resolved bind host here at least
+  // makes that visible at startup, via the same wired logger already used
+  // above, rather than only discoverable later via a connectivity
+  // assumption. `health.server.address()` (not a hardcoded "0.0.0.0")
+  // mirrors startServer's own `server.address()` idiom — the real bound
+  // address, not an assumed one (Node's dual-stack default can be `::`).
+  const healthAddress = health.server.address();
+  const healthHost = typeof healthAddress === "object" && healthAddress ? healthAddress.address : "0.0.0.0";
+  logger.info("aart worker health listening", { host: healthHost, port: health.port });
 
   async function stop(): Promise<void> {
     claiming = false;

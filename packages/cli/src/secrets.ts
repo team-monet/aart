@@ -113,3 +113,30 @@ export async function resolveDeployToken(root: string): Promise<string | undefin
     return undefined;
   }
 }
+
+/**
+ * D2a security hardening, token rotation (AMENDMENTS.md A59) — the SAME
+ * resolution mechanism as `resolveDeployToken` above (env var first,
+ * falling back to `<root>/secrets.json`), for a SEPARATE key:
+ * `AART_DEPLOY_TOKEN_NEXT` / `secrets.json`'s own `"AART_DEPLOY_TOKEN_NEXT"`.
+ * Threaded into `ServerConfig.deployTokenNext` (`@aart/server`'s
+ * `checkAnyDeployToken` accepts either token) so an operator can roll a
+ * compromised/expiring `AART_DEPLOY_TOKEN` without a hard cutover: publish
+ * the new value here, both old and new are accepted while callers migrate,
+ * then promote it to `AART_DEPLOY_TOKEN` proper and unset this one. Returns
+ * `undefined` (never throws) when unconfigured — the overwhelmingly common
+ * case (no rotation in progress) — matching `resolveDeployToken`'s own
+ * established never-throw discipline.
+ */
+export async function resolveDeployTokenNext(root: string): Promise<string | undefined> {
+  const envValue = process.env["AART_DEPLOY_TOKEN_NEXT"];
+  if (envValue !== undefined && envValue !== "") return envValue;
+  try {
+    const raw = await fs.readFile(secretsFilePath(root), "utf8");
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    const fileValue = parsed["AART_DEPLOY_TOKEN_NEXT"];
+    return typeof fileValue === "string" ? fileValue : undefined;
+  } catch {
+    return undefined;
+  }
+}

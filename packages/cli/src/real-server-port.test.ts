@@ -32,6 +32,7 @@ afterEach(async () => {
   handleClose = undefined;
   delete process.env.AART_SECRET_PROBE_SECRET;
   delete process.env.AART_DEPLOY_TOKEN;
+  delete process.env.AART_DEPLOY_TOKEN_NEXT;
   await Promise.all(cleanupPaths.map((p) => fs.rm(p, { recursive: true, force: true })));
   cleanupPaths = [];
 });
@@ -175,6 +176,83 @@ describe("createRealServerPort — real deployToken wiring (AMENDMENTS.md A57 fi
   });
 });
 
+// D2a security hardening, token rotation (AMENDMENTS.md A59) — mirrors the
+// A57 deploy-token-wiring describe block immediately above exactly: asserts
+// the wiring through the SAME composition root `aart server` itself uses
+// (cli.serverPort.startServer), not a hand-built ServerConfig, per this
+// sub-phase's own STANDING IMPERATIVE for every new ServerConfig field.
+describe("createRealServerPort — real deployTokenNext wiring, token rotation (D2a, AMENDMENTS.md A59)", () => {
+  it("the NEXT token is accepted on a conditionally-gated route (promote), same as the primary", async () => {
+    process.env.AART_DEPLOY_TOKEN = "primary-token";
+    process.env.AART_DEPLOY_TOKEN_NEXT = "next-token";
+    const cli = await freshCli();
+    const workflow = compileWorkflowInput(probeWorkflow("wf-rotation-next-probe"));
+    await cli.aart.store.workflows.put(workflow);
+    await cli.aart.store.environments.put({ id: "env_rotation_probe", name: "rotation-probe", config: { trustMode: "dev" } });
+    const handle = await cli.serverPort.startServer({ port: 0 });
+    handleClose = () => handle.close();
+
+    const res = await fetch(`http://localhost:${handle.port}/workflows/${workflow.id}/promote`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: "Bearer next-token" },
+      body: JSON.stringify({ version: workflow.version, environmentId: "env_rotation_probe" }),
+    });
+    expect(res.status).toBe(200);
+  });
+
+  it("the PRIMARY token is still accepted while a NEXT token is also configured (both valid during a rotation window, on a fail-closed route)", async () => {
+    process.env.AART_DEPLOY_TOKEN = "primary-token";
+    process.env.AART_DEPLOY_TOKEN_NEXT = "next-token";
+    const cli = await freshCli();
+    const handle = await cli.serverPort.startServer({ port: 0 });
+    handleClose = () => handle.close();
+
+    const res = await fetch(`http://localhost:${handle.port}/bundles/plan`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: "Bearer primary-token" },
+      body: JSON.stringify({}),
+    });
+    expect(res.status).toBe(400); // past the token gate to requireBundleEnvelope's own 400 -- proves the PRIMARY token still works, not just NEXT
+  });
+
+  it("a token matching NEITHER primary nor next is rejected 401", async () => {
+    process.env.AART_DEPLOY_TOKEN = "primary-token";
+    process.env.AART_DEPLOY_TOKEN_NEXT = "next-token";
+    const cli = await freshCli();
+    const handle = await cli.serverPort.startServer({ port: 0 });
+    handleClose = () => handle.close();
+
+    const res = await fetch(`http://localhost:${handle.port}/bundles/plan`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: "Bearer totally-unrelated-token" },
+      body: JSON.stringify({}),
+    });
+    expect(res.status).toBe(401);
+  });
+
+  it("with no AART_DEPLOY_TOKEN_NEXT configured at all, behavior is unchanged from before rotation existed (only the primary token works)", async () => {
+    process.env.AART_DEPLOY_TOKEN = "primary-token";
+    // AART_DEPLOY_TOKEN_NEXT deliberately left unset.
+    const cli = await freshCli();
+    const handle = await cli.serverPort.startServer({ port: 0 });
+    handleClose = () => handle.close();
+
+    const okRes = await fetch(`http://localhost:${handle.port}/bundles/plan`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: "Bearer primary-token" },
+      body: JSON.stringify({}),
+    });
+    expect(okRes.status).toBe(400); // past the gate
+
+    const rejectedRes = await fetch(`http://localhost:${handle.port}/bundles/plan`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: "Bearer some-guessed-next-token" },
+      body: JSON.stringify({}),
+    });
+    expect(rejectedRes.status).toBe(401); // no NEXT token configured -- nothing else is valid
+  });
+});
+
 // D1 fix pass (AMENDMENTS.md A58) — the FOURTH occurrence of the exact same
 // composition-root-gap bug class this file's own A45/A57 describe blocks
 // above already closed twice (A48, A53 are the other two, elsewhere in this
@@ -263,5 +341,101 @@ describe("createRealServerPort — produceBundle threads --environment into mani
     await cli.aart.store.workflows.put(workflow);
 
     await expect(cli.serverPort.produceBundle({ workflowId: workflow.id, workflowVersion: workflow.version, environment: "no-such-environment" })).rejects.toThrow(/not found/);
+  });
+});
+
+// D2a security hardening, breaking-change bind default (AMENDMENTS.md A59)
+// — the MANDATORY composition-root test this sub-phase's own brief calls
+// for: through `cli.serverPort.startServer` (the createCliContext ->
+// createRealServerPort path), not a hand-built ServerConfig, asserting the
+// default bind is loopback and an explicit host is honored. `ServerHandleLike`
+// (the PUBLIC type `cli.serverPort.startServer` is declared to return,
+// `@aart/mcp`'s types.ts) only exposes `{port, close()}` — `createRealServerPort`'s
+// own implementation returns the REAL `@aart/server` `ServerHandle` object
+// UNMODIFIED (real-server-port.ts: `return startRealServer({...});`), which
+// carries a genuine `.server: node:http.Server` at runtime even though the
+// declared TS type doesn't name it — the same trick this file's own A58
+// describe block above uses (spying on the real console rather than
+// injecting a substitute, because there's no public config seam to do
+// otherwise through). Captured here via an explicit cast, matching that
+// established precedent for "this IS the only place a break in the wiring
+// would be observable."
+describe("createRealServerPort — host binding (D2a security hardening, AMENDMENTS.md A59)", () => {
+  function boundAddress(handle: { close(): Promise<void> }): string | undefined {
+    const server = (handle as unknown as { server: import("node:net").Server }).server;
+    const address = server.address();
+    return typeof address === "object" && address ? address.address : undefined;
+  }
+
+  it("defaults to loopback-only (127.0.0.1), not every interface, through the real CLI entry", async () => {
+    const cli = await freshCli();
+    const handle = await cli.serverPort.startServer({ port: 0 });
+    handleClose = () => handle.close();
+    expect(boundAddress(handle)).toBe("127.0.0.1");
+  });
+
+  it("an explicit host is honored through the real CLI entry", async () => {
+    const cli = await freshCli();
+    const handle = await cli.serverPort.startServer({ port: 0, host: "0.0.0.0" });
+    handleClose = () => handle.close();
+    expect(boundAddress(handle)).toBe("0.0.0.0");
+  });
+});
+
+// D2a fix pass (AMENDMENTS.md A60, FIX 3) — `aart server` had no
+// "listening" log line at all: the bind was mechanically silent, so an
+// operator couldn't tell a loopback-only bind from an all-interfaces one at
+// the moment it mattered — only discoverable later, via a failed remote
+// connection attempt. Mirrors the A58 logSink-wiring describe block above
+// exactly: spies on the real console.log global (consoleJsonSink routes
+// info-level lines there, @aart/store's logger.ts) through the SAME real
+// composition root (cli.serverPort.startServer) — there is still no public
+// config seam to inject a substitute sink through ServerPort's own
+// {port?, environment?, host?} surface, so this remains the only place a
+// break in the wiring would be observable.
+describe("createRealServerPort — startup listening log line (D2a fix pass, AMENDMENTS.md A60, FIX 3)", () => {
+  function findListeningLine(calls: unknown[][]): { level: string; msg: string; host?: string; port?: number; service?: string; component?: string } | undefined {
+    const raw = calls.map((call) => call[0] as string).find((entry) => {
+      try {
+        const parsed = JSON.parse(entry) as { level?: string; msg?: string };
+        return parsed.level === "info" && parsed.msg === "aart server listening";
+      } catch {
+        return false;
+      }
+    });
+    return raw ? (JSON.parse(raw) as { level: string; msg: string; host?: string; port?: number; service?: string; component?: string }) : undefined;
+  }
+
+  it("logs a structured 'aart server listening' line with the resolved (default loopback) host and the real bound port, after server.listen's callback fires", async () => {
+    const cli = await freshCli();
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const handle = await cli.serverPort.startServer({ port: 0 });
+      handleClose = () => handle.close();
+
+      const parsed = findListeningLine(logSpy.mock.calls);
+      expect(parsed, `expected an info-level JSON line with msg "aart server listening" on console.log; saw: ${JSON.stringify(logSpy.mock.calls)}`).toBeDefined();
+      expect(parsed!.host).toBe("127.0.0.1"); // default loopback bind (AMENDMENTS.md A59) — not the port-0-request, the ACTUAL resolved host
+      expect(parsed!.port).toBe(handle.port); // the REAL bound port, not the port:0 request that asked for "any free port"
+      expect(parsed!.service).toBe("@aart/server");
+      expect(parsed!.component).toBe("http-server");
+    } finally {
+      logSpy.mockRestore();
+    }
+  });
+
+  it("an explicit host is reflected in the listening log line too", async () => {
+    const cli = await freshCli();
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const handle = await cli.serverPort.startServer({ port: 0, host: "0.0.0.0" });
+      handleClose = () => handle.close();
+
+      const parsed = findListeningLine(logSpy.mock.calls);
+      expect(parsed).toBeDefined();
+      expect(parsed!.host).toBe("0.0.0.0");
+    } finally {
+      logSpy.mockRestore();
+    }
   });
 });

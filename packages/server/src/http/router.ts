@@ -3,12 +3,24 @@
 // minimal footprint over a third-party dependency where the built-in
 // surface is adequate for what's actually needed here).
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { DEFAULT_MAX_BODY_BYTES } from "../config.js";
 
 export interface RouteContext {
   req: IncomingMessage;
   res: ServerResponse;
   params: Record<string, string>;
   query: URLSearchParams;
+  /**
+   * D2a security hardening, token-derived attribution (AMENDMENTS.md A59) —
+   * set by a route's own `auth` closure (below) when the request carried a
+   * PROVIDED, MATCHING deploy token — never by this framework-free file
+   * itself, which has no idea what "a token" means (see `RouteOptions.auth`'s
+   * own doc comment). `undefined` for every unauthenticated-because-
+   * unconfigured request (the conditional-gating tier's own "stays open"
+   * branch) and for any route with no `auth` option at all — a caller must
+   * treat "unset" as "no attribution available," not "definitely anonymous."
+   */
+  authenticated?: { label: string };
 }
 
 export type RouteHandler = (ctx: RouteContext, body: unknown, rawBody: Buffer) => Promise<void> | void;
@@ -21,11 +33,39 @@ export interface RouteOptions {
    * is present and honest) AND a running-total check while accumulating
    * chunks (catches a client that lies about, or omits, `Content-Length` —
    * chunked transfer-encoding has none at all). Omitted (every route that
-   * doesn't pass this option) — this file's pre-existing UNBOUNDED read is
-   * completely unchanged; this is an opt-in per-route cap, not a global
-   * behavior change. See `BodyTooLargeError`/`readBody` below.
+   * doesn't pass this option) — D2a security hardening (AMENDMENTS.md A59)
+   * changed this file's pre-existing UNBOUNDED read to `DEFAULT_MAX_BODY_
+   * BYTES` instead — a per-route cap here still OVERRIDES that default
+   * (e.g. the bundle-ingest routes' much larger `MAX_BUNDLE_INGEST_BYTES`),
+   * it just no longer means "no cap at all." See `BodyTooLargeError`/
+   * `readBody` below.
    */
   maxBodyBytes?: number;
+  /**
+   * D2a security hardening (AMENDMENTS.md A59) — an optional per-route auth
+   * gate, run BEFORE the request body is ever read (before `readBody`,
+   * before JSON-parsing) so an unauthenticated caller can never force this
+   * process to buffer/parse a body at all. Returns `true` to let the
+   * request proceed to the normal body-read + handler dispatch; returns
+   * `false` to stop it right here — in that case the closure MUST have
+   * already written the rejection response itself (matching this
+   * codebase's established `requireDeployToken`-style "writes its own 401,
+   * returns a boolean" convention, `@aart/server`'s http/server.ts) —
+   * `Router.handle` does nothing further once `auth` returns `false`.
+   * Omitted (every route that doesn't pass this option) — open, unchanged
+   * behavior, exactly as if this option didn't exist.
+   *
+   * Deliberately typed as a fully generic `(ctx) => boolean | Promise<
+   * boolean>` with ZERO reference to `ServerConfig`/`deploy-token.ts` — this
+   * file stays framework-free (no import of this package's own domain/
+   * config types); the actual auth POLICY (what a "valid token" means, what
+   * `ServerConfig.deployToken` is) lives entirely in server.ts's own
+   * closures over `config` (`requireDeployToken`/`requireDeployTokenIfConfigured`),
+   * passed in here as plain functions. This mirrors `maxBodyBytes` above,
+   * which is likewise just a number this file has no opinion about the
+   * SOURCE of.
+   */
+  auth?: (ctx: RouteContext) => boolean | Promise<boolean>;
 }
 
 interface Route {
@@ -33,6 +73,25 @@ interface Route {
   segments: string[];
   handler: RouteHandler;
   maxBodyBytes: number | undefined;
+  auth: RouteOptions["auth"];
+}
+
+/**
+ * D2a security hardening (AMENDMENTS.md A59) — one entry per registered
+ * route, returned by `Router.getRoutes()` below. Exists so a completeness
+ * test can enumerate every registered route from OUTSIDE this file and
+ * assert each POST route explicitly declares its auth stance (either a real
+ * `auth` closure, or a deliberate, hardcoded allowlist entry for a route
+ * that's supposed to stay open) — converting "a future route silently ships
+ * open" into a loud CI failure instead of a silent gap. Read-only by
+ * construction (a fresh array of plain data on every call, no reference
+ * back into this Router's own mutable `routes` array) — nothing a caller
+ * does with the returned value can affect real routing.
+ */
+export interface RegisteredRoute {
+  method: string;
+  path: string;
+  auth: RouteOptions["auth"];
 }
 
 function splitPath(path: string): string[] {
@@ -50,7 +109,7 @@ export class Router {
   private readonly routes: Route[] = [];
 
   add(method: string, path: string, handler: RouteHandler, options?: RouteOptions): void {
-    this.routes.push({ method: method.toUpperCase(), segments: splitPath(path), handler, maxBodyBytes: options?.maxBodyBytes });
+    this.routes.push({ method: method.toUpperCase(), segments: splitPath(path), handler, maxBodyBytes: options?.maxBodyBytes, auth: options?.auth });
   }
   get(path: string, handler: RouteHandler, options?: RouteOptions): void {
     this.add("GET", path, handler, options);
@@ -59,7 +118,12 @@ export class Router {
     this.add("POST", path, handler, options);
   }
 
-  private match(method: string, segments: string[]): { handler: RouteHandler; params: Record<string, string>; maxBodyBytes: number | undefined } | undefined {
+  /** D2a security hardening (AMENDMENTS.md A59) — read-only route-table accessor; see `RegisteredRoute`'s own doc comment for why this exists. */
+  getRoutes(): RegisteredRoute[] {
+    return this.routes.map((r) => ({ method: r.method, path: `/${r.segments.join("/")}`, auth: r.auth }));
+  }
+
+  private match(method: string, segments: string[]): { handler: RouteHandler; params: Record<string, string>; maxBodyBytes: number | undefined; auth: RouteOptions["auth"] } | undefined {
     for (const route of this.routes) {
       if (route.method !== method) continue;
       if (route.segments.length !== segments.length) {
@@ -89,7 +153,7 @@ export class Router {
           break;
         }
       }
-      if (ok) return { handler: route.handler, params, maxBodyBytes: route.maxBodyBytes };
+      if (ok) return { handler: route.handler, params, maxBodyBytes: route.maxBodyBytes, auth: route.auth };
     }
     return undefined;
   }
@@ -102,9 +166,24 @@ export class Router {
       res.end(JSON.stringify({ error: "not found" }));
       return;
     }
+    // D2a security hardening (AMENDMENTS.md A59) — ctx is built HERE, before
+    // any body is read, specifically so `auth` (below) can run — and, on
+    // success via a provided/matching token, stamp `ctx.authenticated` —
+    // before a single body byte is buffered or parsed. RouteContext (above)
+    // never carries the body itself (a separate positional handler arg), so
+    // building it this early is a pure no-op shape change for every route
+    // that doesn't use `auth`.
+    const ctx: RouteContext = { req, res, params: matched.params, query: url.searchParams };
+    if (matched.auth && !(await matched.auth(ctx))) {
+      // The auth closure has already written its own rejection response
+      // (matching `RouteOptions.auth`'s own documented contract) — stop
+      // here, before `readBody` ever runs, so an unauthenticated caller can
+      // never force this process to buffer/parse a request body at all.
+      return;
+    }
     let rawBody: Buffer;
     try {
-      rawBody = await readBody(req, matched.maxBodyBytes);
+      rawBody = await readBody(req, matched.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES);
     } catch (err) {
       if (err instanceof BodyTooLargeError) {
         sendJson(res, 413, { error: `${err.message} Split the payload into something smaller, or remove unused content, and retry.` });
@@ -119,7 +198,11 @@ export class Router {
       body = undefined;
     }
     try {
-      await matched.handler({ req, res, params: matched.params, query: url.searchParams }, body, rawBody);
+      // Reuses the SAME ctx object `auth` (if any) already ran against — so
+      // a `ctx.authenticated` an `auth` closure stamped is visible to the
+      // handler, not a second, freshly-built object that would silently
+      // drop it.
+      await matched.handler(ctx, body, rawBody);
     } catch (err) {
       if (!res.headersSent) {
         res.writeHead(500, { "content-type": "application/json" });
@@ -130,17 +213,22 @@ export class Router {
 }
 
 /**
- * `maxBytes` omitted (every route except the size-capped ones D1 adds) —
- * behavior is BYTE-IDENTICAL to before this parameter existed: unbounded
- * accumulation, no `Content-Length` check. `maxBytes` given: a `Content-
- * Length` pre-check rejects immediately (no body bytes ever pushed onto
- * this function's own buffer) when the header is present and already over
- * the limit; a running-total check during accumulation catches a client
- * that lies about, omits, or uses chunked transfer-encoding for (which has
- * no `Content-Length` header at all) the body size — once the limit is
- * crossed, further chunks are discarded (never pushed) rather than
- * accumulated, so an oversized upload is never fully buffered into this
- * process's memory.
+ * This function itself has no opinion on WHAT `maxBytes` is — `Router.handle`
+ * (the one caller) always passes a concrete number now (D2a security
+ * hardening, AMENDMENTS.md A59: `matched.maxBodyBytes ?? DEFAULT_MAX_BODY_
+ * BYTES` — no more truly-unbounded call site since that change; before it,
+ * `maxBytes` could be `undefined` here for any route that didn't opt in,
+ * and this whole cap was skipped). A `Content-Length` pre-check rejects
+ * immediately (no body bytes ever pushed onto this function's own buffer)
+ * when the header is present and already over the limit; a running-total
+ * check during accumulation catches a client that lies about, omits, or
+ * uses chunked transfer-encoding for (which has no `Content-Length` header
+ * at all) the body size — once the limit is crossed, further chunks are
+ * discarded (never pushed) rather than accumulated, so an oversized upload
+ * is never fully buffered into this process's memory. The `maxBytes ===
+ * undefined` branch below is kept (rather than making the parameter
+ * required) so this function's own dedicated tests, and any future direct
+ * caller, can still ask for a genuinely uncapped read.
  *
  * Deliberately does NOT call `req.destroy()` on an over-limit request:
  * `req`/`res` share the same underlying socket, and destroying it here —

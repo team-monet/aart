@@ -56,6 +56,13 @@ async function main() {
     const watermarkRow = handle.db.prepare("SELECT version FROM _migration_watermark WHERE id = 1").get();
     const columns = handle.db.prepare("PRAGMA table_info(deployments)").all();
     const hasPromotedColumn = columns.some((c) => c.name === "promoted");
+    // D2a security hardening (AMENDMENTS.md A59) — 0003_approval_task_authenticated_as
+    // is a THIRD migration subject to this exact concurrent-startup race;
+    // checked the same way as hasPromotedColumn above, proving the general
+    // coordination mechanism (runMigrationsCoordinated) handles a third
+    // migration correctly, not just the one it was originally built for.
+    const approvalTaskColumns = handle.db.prepare("PRAGMA table_info(approval_tasks)").all();
+    const hasAuthenticatedAsColumn = approvalTaskColumns.some((c) => c.name === "authenticated_as");
     // A cheap real write through the fully-migrated schema — not just a
     // watermark-number check, but proof the schema this process's own
     // connection sees is genuinely usable end to end (the same store
@@ -70,7 +77,7 @@ async function main() {
       approval: "approved",
       gates: { validate: "passed", readiness: "passed", evals: "passed", riskReview: "passed", humanReview: "passed" },
     });
-    emit({ label, ok: true, watermark: watermarkRow?.version, hasPromotedColumn });
+    emit({ label, ok: true, watermark: watermarkRow?.version, hasPromotedColumn, hasAuthenticatedAsColumn });
   } finally {
     handle.close();
   }

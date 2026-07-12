@@ -53,6 +53,8 @@ interface ApprovalTaskRow {
   decision_json: string | null;
   created_at: string;
   decided_at: string | null;
+  /** D2a security hardening, token-derived attribution (AMENDMENTS.md A59) — added by migration `0003_approval_task_authenticated_as` (migrations.ts); `NULL` for every pre-existing row and every decision made with no matching deploy token. */
+  authenticated_as: string | null;
 }
 
 function rowToApprovalTask(row: ApprovalTaskRow): ApprovalTask {
@@ -67,6 +69,7 @@ function rowToApprovalTask(row: ApprovalTaskRow): ApprovalTask {
     decision: fromJson(row.decision_json),
     createdAt: row.created_at,
     decidedAt: row.decided_at ?? undefined,
+    authenticatedAs: row.authenticated_as ?? undefined,
   };
 }
 
@@ -82,13 +85,14 @@ export class SqliteApprovalStore implements ApprovalStore {
     await this.exec((db) =>
       dbRun(
         db,
-        `INSERT INTO approval_tasks (id, run_id, step_id, title, description, status, reviewer, decision_json, created_at, decided_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO approval_tasks (id, run_id, step_id, title, description, status, reviewer, decision_json, created_at, decided_at, authenticated_as)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            run_id = excluded.run_id, step_id = excluded.step_id, title = excluded.title,
            description = excluded.description, status = excluded.status, reviewer = excluded.reviewer,
-           decision_json = excluded.decision_json, created_at = excluded.created_at, decided_at = excluded.decided_at`,
-        [task.id, task.runId, task.stepId, task.title, task.description, task.status, task.reviewer ?? null, toJson(task.decision), task.createdAt, task.decidedAt ?? null],
+           decision_json = excluded.decision_json, created_at = excluded.created_at, decided_at = excluded.decided_at,
+           authenticated_as = excluded.authenticated_as`,
+        [task.id, task.runId, task.stepId, task.title, task.description, task.status, task.reviewer ?? null, toJson(task.decision), task.createdAt, task.decidedAt ?? null, task.authenticatedAs ?? null],
       ),
     );
   }

@@ -24,6 +24,7 @@ the exact `scp`-the-bundle handoff into this document's Path A/B);
 - [Store choice: fs vs sqlite](#store-choice-fs-vs-sqlite)
 - [Secret management](#secret-management)
 - [Deploy token](#deploy-token)
+- [Network binding](#network-binding)
 - [Environment registration](#environment-registration)
 - [Backup & restore](#backup--restore)
 - [Upgrade procedure](#upgrade-procedure)
@@ -133,10 +134,14 @@ adapt the flags, the shape is the same):
 ```bash
 docker volume create aart-data
 
+# --host 0.0.0.0 (D2a security hardening, breaking-change bind default,
+# AMENDMENTS.md A59) — required: aart server binds loopback-only by
+# default, which a container's own -p 8080:8080 published port cannot
+# reach from outside without this — see "Network binding" below.
 docker run -d --name aart-server \
   -v aart-data:/data -p 8080:8080 \
   --env-file .env \
-  aart:latest server --port 8080 --store sqlite
+  aart:latest server --port 8080 --host 0.0.0.0 --store sqlite
 
 docker run -d --name aart-worker \
   -v aart-data:/data \
@@ -221,6 +226,13 @@ Type=simple
 User=aart
 Environment=AART_ROOT=/var/lib/aart
 Environment=AART_TRUST_MODE=governed
+# AART_HOST=0.0.0.0 (D2a security hardening, breaking-change bind default,
+# AMENDMENTS.md A59) — required if worker/dashboard/any remote caller runs
+# on a DIFFERENT host than this one; aart server binds loopback-only by
+# default now. Omit (or set to 127.0.0.1) for a genuinely single-host
+# deployment where everything runs here — see DEPLOY.md's "Network binding"
+# section for the full decision table.
+Environment=AART_HOST=0.0.0.0
 EnvironmentFile=/etc/aart/secrets.env
 ExecStart=/usr/bin/aart server --port 8080 --store sqlite
 Restart=on-failure
@@ -341,33 +353,47 @@ it straight to a running `aart server` over HTTP, instead of `scp`-ing a
 bundle by hand (see `AUTHORING.md`'s "(e) Deploying to the server"). A
 SEPARATE bearer token, distinct from the webhook secrets above, gates this.
 
-**Gating matrix — read this before fronting `aart server` with a reverse
-proxy (D1 fix-pass ruling, AMENDMENTS.md A57).** Not every write route
-behaves the same way; know which tier a route you care about is in:
+### Gating matrix
+
+**Read this before fronting `aart server` with a reverse proxy (D1 fix-pass
+ruling, AMENDMENTS.md A57; scope widened to nearly every write route by D2a
+security hardening, AMENDMENTS.md A59).** Not every route behaves the same
+way; know which tier a route you care about is in:
 
 | Tier | Routes | `AART_DEPLOY_TOKEN` unset | `AART_DEPLOY_TOKEN` set |
 | --- | --- | --- | --- |
-| **Fail-closed** | `POST /bundles/ingest`, `POST /bundles/plan`, `POST /environments` | Refuses **every** request, `401`, naming the env var as the remedy — no "auth disabled" state at all. | Requires a valid `Authorization: Bearer <token>`; wrong/missing -> `401`. |
-| **Conditionally gated** | `POST /workflows/:id/promote` | **Open** — unchanged pre-A56 behavior, so a tokenless local/dev/TEST-DRIVE dashboard keeps working. One loud warning is logged ONCE at server startup (not per-request) when this is the case. | Requires the SAME valid Bearer the fail-closed routes do; wrong/missing -> `401` (a differently-worded remedy — "provide a valid token," not "set `AART_DEPLOY_TOKEN`," since one already is). |
-| **Open, always** | Every GET route; the three `/webhooks/*` routes (separate, per-binding HMAC verification — [Secret management](#secret-management) above, completely untouched); every OTHER write route (`/runs/trigger`, `/workflows/:id/approve`, `/corrections`, `/evals/suites`, `/workflows/:id/block-promotion`, ...) | Unaffected either way — `AART_DEPLOY_TOKEN` plays no role here at all. | Unaffected either way. |
+| **Fail-closed** | `POST /bundles/ingest`, `POST /bundles/plan`, `POST /environments` | Refuses **every** request, `401`, naming the env var as the remedy — no "auth disabled" state at all. | Requires a valid `Authorization: Bearer <token>` (or, mid-[rotation](#deploy-token), `AART_DEPLOY_TOKEN_NEXT`); wrong/missing -> `401`. |
+| **Conditionally gated** | Every OTHER write route: `POST /workflows/:id/promote`, `/approve`, `/block-promotion`, `/unblock-promotion`, `/mark-needs-review`, `/clear-needs-review`, `/trigger-improvement`; `POST /runs/trigger`, `/runs/:runId/resume`, `/runs/:runId/signal`, `/runs/:runId/flag/clear`; `POST /approvals/:id/decision`; `POST /corrections`, `/corrections/:key/update-run-output`, `/corrections/:key/create-eval-example`, `/corrections/:key/create-issue`; `POST /evals/suites`, `/evals/runs` | **Open** — unchanged pre-A56 behavior on every one of these, so a tokenless local/dev/TEST-DRIVE deployment keeps working with zero config change. One loud warning is logged ONCE at server startup (not per-request) when this is the case. | Requires the SAME valid Bearer (or rotation-successor token) the fail-closed tier does; wrong/missing -> `401` (a differently-worded, route-specific remedy — "provide a valid token, this route requires it to <action>" — not "set `AART_DEPLOY_TOKEN`," since one already is). |
+| **Open, always** | Every GET route; the three `/webhooks/*` routes (separate, per-binding HMAC verification — [Secret management](#secret-management) above — `AART_DEPLOY_TOKEN`/rotation plays no role here at all, untouched by this gate; these three DO carry their own, larger request-body cap, unrelated to auth — see [Ops limits](#ops-limits--read-this-before-you-rely-on-it)'s "Request body size caps" bullet, AMENDMENTS.md A60) | Unaffected either way — `AART_DEPLOY_TOKEN` plays no role here at all. | Unaffected either way. |
 
-Why promote is its own tier, not fail-closed like the other three: those
-three routes never worked without a token at all (a brand-new surface, "not
-configured yet" is a correct universal refusal); `POST
-/workflows/:id/promote` predates the deploy token by a full session
-(AMENDMENTS.md A47) and is the dashboard's own promote button — failing it
-closed by default would have broken every existing tokenless deployment on
-upgrade. The trust-boundary reasoning for gating it AT ALL: promote is the
+**As of D2a (AMENDMENTS.md A59), "conditionally gated" is the norm, not the
+exception** — before this session, only `POST /workflows/:id/promote` sat
+in that tier; every other write route below it in the table above was
+"open, always," identical in practice to a route with no auth concept at
+all. A focused security review found that gap: any one of those routes was
+just as network-reachable as promote, equally capable of mutating this
+server's state, with nothing distinguishing it from a route that was NEVER
+meant to need a token. They now share promote's own tier and remedy shape.
+
+Why "conditionally gated," not fail-closed like the top tier: every route
+in this tier existed and was open BEFORE `AART_DEPLOY_TOKEN` did — failing
+them closed by default would have broken every existing tokenless
+deployment's dashboard/CLI/MCP usage on upgrade to this session's build. The
+trust-boundary reasoning for gating them AT ALL, using promote (the
+original member of this tier) as the flagship example: promote is the
 switch that flips a pushed-but-dormant `Deployment.promoted` from `false`
 to `true` (see [Environment registration](#environment-registration) and
 `AUTHORING.md`'s bundle/environment notes) — an unauthenticated promote
 would let anyone who can merely REACH this server's HTTP API activate
 evidence you deliberately pushed but hadn't yet promoted, which is exactly
-the guarantee D1's own "push now, promote later" design depends on. If you
-front this server with a reverse proxy and only intend to protect the
-fail-closed tier, you are still leaving promote (and every other write
-route) open unless you protect the whole API surface, or set
-`AART_DEPLOY_TOKEN` and forward the `Authorization` header through.
+the guarantee D1's own "push now, promote later" design depends on. The
+same "anyone who can reach this API can mutate real state" reasoning
+applies to triggering a run, deciding an approval, recording a correction,
+and every other route in this tier. If you front this server with a
+reverse proxy and only intend to protect the fail-closed tier, you are
+still leaving every conditionally-gated route open unless you protect the
+whole API surface, or set `AART_DEPLOY_TOKEN` and forward the
+`Authorization` header through.
 
 **Server side** — set `AART_DEPLOY_TOKEN`, checked in the exact same two
 places/order as `AART_SECRET_*` above: the env var first, then
@@ -388,23 +414,141 @@ and send it as `Authorization: Bearer <token>`. Skip `--token-ref` and no
 `AART_DEPLOY_TOKEN` happens to be unset too, which (see above) means the
 remote refuses the push regardless.
 
-**Client side (the dashboard's own promote button — D1 fix pass,
-AMENDMENTS.md A57)** — a SEPARATE resolution, env-var only: set
-`AART_DEPLOY_TOKEN` in the **dashboard container/process's own**
-environment (`docker-compose.yml`'s `dashboard` service reads it from the
-same `.env` the `server`/`worker` services do — see that file's own
-comments) and `@aart/dashboard`'s `createHttpApiClient` attaches it as a
-Bearer header on `POST /workflows/:id/promote` only (the one route the
-server conditionally gates — [Gating matrix](#deploy-token) above). Forget
-this on a server where `AART_DEPLOY_TOKEN` IS set, and every promote click
-from the dashboard UI will `401` — the CLI's `aart promote`/HTTP `POST
-/workflows/:id/promote` both still work fine with a correct token supplied
-directly.
+**Client side (the dashboard's own write actions — D1 fix pass, AMENDMENTS.md
+A57; extended to every write action by D2a security hardening, AMENDMENTS.md
+A59)** — a SEPARATE resolution, env-var only: set `AART_DEPLOY_TOKEN` in the
+**dashboard container/process's own** environment (`docker-compose.yml`'s
+`dashboard` service reads it from the same `.env` the `server`/`worker`
+services do — see that file's own comments) and `@aart/dashboard`'s
+`createHttpApiClient` attaches it as a Bearer header on EVERY write call it
+makes (trigger a run, decide an approval, promote/approve/block a workflow
+version, record a correction, create/run an eval suite, clear a run's flag,
+...) — as of A57 this was promote alone (the one route the server
+conditionally gated at the time); D2a widened both the server's own gating
+and this client's own header attachment together, in the same session, so
+they never drift out of sync. Forget this on a server where
+`AART_DEPLOY_TOKEN` IS set, and every one of those actions from the
+dashboard UI will `401` — the CLI's/HTTP's own equivalents still work fine
+with a correct token supplied directly. See [Gating matrix](#gating-matrix)
+above for the full route list this now covers.
 
 Comparison is constant-time (`sha256` of both sides, then
 `crypto.timingSafeEqual` — never a raw string compare, and never
 `timingSafeEqual` on the unhashed token, which throws on a length
 mismatch).
+
+**Gating scope (D2a security hardening, AMENDMENTS.md A59).** `AART_DEPLOY_TOKEN`
+now gates nearly every write route on this server, not only the three
+fail-closed deploy-surface routes and promote — see [Gating
+matrix](#gating-matrix) below for the current, precise table.
+
+**Token rotation (D2a security hardening, AMENDMENTS.md A59).** Roll a
+compromised or expiring token without a hard cutover: set `AART_DEPLOY_TOKEN_NEXT`
+(same two resolution places as `AART_DEPLOY_TOKEN` — env var first, then
+`<root>/secrets.json`'s own `"AART_DEPLOY_TOKEN_NEXT"` key) to the NEW
+value. Every gated route now accepts EITHER token — update callers
+(`aart remote`'s `--token-ref`, the dashboard's own `AART_DEPLOY_TOKEN`, a
+reverse proxy injecting the header, ...) to the new value at your own pace,
+then once every caller has switched, promote the new value to
+`AART_DEPLOY_TOKEN` proper and remove `AART_DEPLOY_TOKEN_NEXT`. Leaving
+`AART_DEPLOY_TOKEN_NEXT` unset (the default) changes nothing — behaves
+byte-identically to before rotation existed.
+
+```bash
+# .env, mid-rotation:
+AART_DEPLOY_TOKEN=the-old-token-still-valid-during-rotation
+AART_DEPLOY_TOKEN_NEXT=the-new-token-callers-are-migrating-to
+```
+
+**Token-derived attribution (D2a security hardening, "mechanical half" —
+named per-token identities are deferred, AMENDMENTS.md A59).** A decision
+made through `POST /approvals/:id/decision` with a valid, matching deploy
+token now records `ApprovalTask.authenticatedAs: "deploy-token"` alongside
+the existing free-text `reviewer` field (which is untouched — still
+whatever name the caller supplies, still the only identity signal for a
+tokenless/local decision). `POST /workflows/:id/approve` similarly logs
+(structured JSON, not persisted onto the `Workflow` record itself) which
+requests were token-authenticated. This is a coarse signal today — "SOME
+holder of the shared token made this decision," not "which teammate" —
+since the token itself has no per-holder identity; every request
+authenticated by a valid token gets the same fixed label regardless of
+which of your team's callers actually sent it. Distinguishing individual
+holders would need named, per-person tokens, which is real, deliberately
+out-of-scope future work, not something this field claims to provide.
+
+## Network binding
+
+**Breaking change (D2a security hardening, AMENDMENTS.md A59, John-ratified
+2026-07-12).** `aart server` now binds **loopback-only** (`127.0.0.1`) by
+default — previously it bound every network interface with no flag to
+control it at all. Rationale: with the [Deploy token](#deploy-token)'s
+gating now covering nearly every mutation route (not just the three
+fail-closed ones), the remaining honest default for a process nobody
+explicitly asked to expose is "reachable only from THIS machine" — a
+tokenless local/dev/TEST-DRIVE server stays fully usable from `localhost`
+with zero config change, and a genuinely remote/production deployment must
+now opt in explicitly.
+
+**Set `--host 0.0.0.0` (or a specific routable IP)** to accept connections
+from other hosts/containers — same flag either way, plus an `AART_HOST` env
+var equivalent (flag wins over env, same precedence as `--environment`/
+`AART_ENVIRONMENT`):
+
+```bash
+aart server --port 8080 --host 0.0.0.0 --store sqlite
+# or
+AART_HOST=0.0.0.0 aart server --port 8080 --store sqlite
+```
+
+**Who must set this on upgrade — read this before you upgrade an existing
+deployment:**
+
+- **`docker-compose.yml`'s `server` service** — already ships `--host
+  0.0.0.0` in its `command:` as of this session (see that file's own
+  comment on the `server` service for why this is required, not optional:
+  a loopback-bound container is unreachable via the `dashboard` service's
+  `AART_SERVER_URL: http://server:8080` Docker network alias AND via the
+  `8080:8080` published port — and the healthcheck below it runs `curl`
+  *inside* the same container's network namespace, so it would keep
+  passing even without this flag, silently masking exactly that
+  regression). If you maintain your own fork of this file, or a
+  `docker run` invocation built from the [Bare `docker run`](#bare-docker-run-no-compose)
+  section above, add `--host 0.0.0.0` to the `server` command yourself —
+  every one of those examples now needs it for the identical reason
+  (a container's loopback interface is not reachable through Docker's own
+  port-publishing NAT, even with `-p 8080:8080` on the host side).
+- **Path B / bare-process / systemd** — add `--host 0.0.0.0` (or a specific
+  interface IP) to `aart-server.service`'s `ExecStart=` if `worker`/
+  `dashboard`/any remote caller runs on a DIFFERENT host, or you intend to
+  `aart push`/`aart_deploy` at this server remotely. A single-host
+  deployment where every process (server, worker, dashboard, an operator's
+  own CLI) runs on the SAME machine needs no change at all — the new
+  loopback default is exactly sufficient there.
+- **Any other orchestrator** (Nomad, ECS, k8s, ...) — adapt the same flag;
+  the shape is identical to the Docker/compose case above (a pod/container's
+  own loopback is not reachable from a sibling pod/container or the
+  cluster's own service mesh without an explicit non-loopback bind).
+
+**Not required:** a genuinely single-machine deployment (author + server +
+worker + dashboard all on one host, nothing remote) needs no `--host` flag
+at all — the new default is exactly what that topology already needed.
+
+**Don't over-generalize this section — `aart worker`'s health listener is
+NOT covered by any of the above.** Everything on this page is about
+`aart server`'s control-plane bind. `aart worker`'s own `GET /health`
+listener (default port 8787, `packages/server/src/worker/health.ts`) still
+binds every interface, unchanged — deliberately, not an oversight
+(AMENDMENTS.md A59 PART 3): it's read-only (`{status, claimedRuns, uptime,
+version}`, zero mutation capability, categorically lower risk than the
+mutation routes this whole section is about) and BY DESIGN needs to stay
+cross-container-reachable (`docker-compose.yml`'s `AART_WORKER_URLS:
+http://worker:8787`, feeding the dashboard's worker-health page) — locking
+it to loopback would silently break that feature. If you expose a worker
+on a host beyond a trusted private network/container mesh, firewall port
+8787 yourself; this deploy kit does not do it for you, and `aart worker`
+has no `--host` (or `--health-port`) flag today to change this bind at
+all — the port is only configurable at the `WorkerConfig.healthPort`
+level (`@aart/server`, not the CLI).
 
 ## Environment registration
 
@@ -589,27 +733,67 @@ Stated plainly, matching this repo's own "What doesn't work yet" convention
   stdout+stderr with whatever your process manager or container runtime
   already does. Plus the `/health`/`/runs`/`/deployments`/
   `/rejected-triggers` HTTP endpoints for polling-based monitoring.
-- **No authentication in front of MOST of the control-plane HTTP API or the
-  dashboard.** `GET /runs`, `GET /workflows`, the webhook endpoints (HMAC-
-  verified, but that authenticates the SENDER, not a browsing operator),
-  and the dashboard's own pages have no login, API key, or network-policy
-  enforcement built in. Put a reverse proxy with real auth (or a private
-  network / VPN-only exposure) in front of anything beyond localhost —
-  this deploy kit's compose/systemd examples above bind to all interfaces
-  by default and assume you're adding that layer yourself. **Two
-  exceptions, NOT the same shape** (D1 "remotes + push," AMENDMENTS.md A56;
-  the promote exception added by a D1 fix pass, AMENDMENTS.md A57 — see
-  [Deploy token](#deploy-token)'s own gating matrix for the full table):
-  `POST /bundles/ingest`, `POST /bundles/plan`, and `POST /environments`
-  are **fail-closed**, unconditionally, by the deploy token; `POST
-  /workflows/:id/promote` is **conditionally** gated by the SAME token —
-  only once it's actually configured, staying open otherwise so upgrading
-  onto this fix pass never silently breaks a tokenless deployment's
-  promote button. Every OTHER write route (triggering a run,
-  approving a workflow version, corrections, evals, block/mark-needs-review
-  flags, ...) remains exactly as open as this bullet describes, regardless
-  of whether `AART_DEPLOY_TOKEN` is set. Don't mistake "`AART_DEPLOY_TOKEN`
-  is configured" for "this server is authenticated."
+- **Request body size caps (AMENDMENTS.md A59/A60).** Every route on
+  `aart server` has a hard cap on request body size — `Router.handle`'s own
+  `readBody` (`packages/server/src/http/router.ts`) rejects an over-cap
+  body `413` before JSON-parsing (or, for a gated route, before the request
+  is even authenticated) ever runs, via a `Content-Length` pre-check when
+  the header is present and honest, plus a running-total check during
+  accumulation otherwise (catches chunked transfer-encoding, or a client
+  that lies about/omits the header) — never a truly unbounded read. Three
+  tiers, by route:
+  1. **1MB** (`DEFAULT_MAX_BODY_BYTES`) — every control-plane route that
+     doesn't specify its own cap: trigger a run, decide an approval, record
+     a correction, create/run an eval suite, and similar small JSON
+     payloads.
+  2. **10MB** (`MAX_BUNDLE_INGEST_BYTES`) — `POST /bundles/ingest`/`POST
+     /bundles/plan`, sized for a real workflow closure bundle (100% JSON
+     text).
+  3. **25 MiB / 26,214,400 bytes** (`MAX_WEBHOOK_INGEST_BYTES`, AMENDMENTS.md
+     A60) — the three `/webhooks/*` routes, sized to (and slightly past)
+     GitHub's own documented ~25MB webhook payload ceiling. These are
+     EXTERNAL, operator-uncontrolled payloads, not small control-plane
+     JSON — GitHub does not retry a delivery it can't make, so this bound
+     has to cover the largest delivery GitHub could actually send, not a
+     typical one; a body between 1MB and this cap that would have 413'd
+     under tier 1 now reaches HMAC verification/intake normally.
+  If you front any route with your own reverse proxy, make sure it doesn't
+  impose a SMALLER cap than the tier that route actually needs.
+- **No LOGIN/API-key authentication in front of the control-plane HTTP API
+  or the dashboard — corrected from this bullet's own pre-D2a text, which
+  overstated how open every write route was.** `GET /runs`, `GET
+  /workflows`, the webhook endpoints (HMAC-verified, but that authenticates
+  the SENDER, not a browsing operator), and the dashboard's own pages have
+  no login, API key, or per-user identity built in — there is still no
+  concept of "logged-in operator" anywhere in this stack. Put a reverse
+  proxy with real auth (or a private network / VPN-only exposure) in front
+  of anything beyond localhost for that reason alone, regardless of the
+  deploy-token gating described next.
+  **What DID change (D2a security hardening, AMENDMENTS.md A59, breaking):**
+  two things, together closing most of the actual network-reachability gap
+  this bullet used to describe:
+  1. **`aart server` binds loopback-only by default now** (previously
+     every interface, with no flag to control it at all) — see [Network
+     binding](#network-binding) above for the full migration note; this
+     deploy kit's own compose/systemd examples already carry the required
+     `--host 0.0.0.0`/`AART_HOST` override, since the topology they set up
+     needs cross-process/cross-container reachability by design.
+  2. **`AART_DEPLOY_TOKEN` now gates nearly every mutation route**, not
+     only the three deploy-surface routes and promote — see [Deploy
+     token](#deploy-token)'s own [Gating matrix](#gating-matrix) for the
+     precise, current, per-route table (fail-closed / conditionally-gated
+     / open-always tiers). Unconfigured, the conditionally-gated tier
+     stays fully open (unchanged pre-D2a behavior, one loud startup
+     warning) — a tokenless local/dev/TEST-DRIVE deployment needs zero
+     config change and is no less usable than before.
+  **Still true, stated plainly:** a `AART_DEPLOY_TOKEN`-configured server
+  is a bearer-token-gated API, not a logged-in, per-user-authenticated one
+  — anyone holding the one shared token can do anything any other holder
+  can (no roles, no per-caller audit trail beyond the mechanical
+  [token-derived attribution](#deploy-token) this session also added).
+  Don't mistake "`AART_DEPLOY_TOKEN` is configured" for "this server has
+  real authentication" — it closes the "anonymous internet caller can
+  mutate my data" gap, not the "which of my three teammates did this" one.
 - **The dashboard is API-complete except two narrower gaps** (`@aart/dashboard`,
   AMENDMENTS.md A47 — owned by a different session than this deploy kit,
   which packages what exists rather than changing it). Every read AND
