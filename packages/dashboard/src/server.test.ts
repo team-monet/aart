@@ -917,11 +917,16 @@ describe("GET /api/events + GET /api/events/stream — against a REAL @aart/serv
 
     // Appended directly to the store — bypassing HTTP entirely, mirroring
     // AMENDMENTS.md A63's own "seed a real store row directly, prove the
-    // route/adapter reacts" test-seeding convention. This is deliberately
-    // timed immediately after the stream opens (not after some extra
-    // settling delay) — the exact narrow window server.ts's own seed-vs-
-    // concurrent-append race guard (its "seed" branch's own doc comment)
-    // exists to cover; this test is that guard's proof.
+    // route/adapter reacts" test-seeding convention. Deliberately timed
+    // immediately after the stream opens, no settling delay — proving the
+    // route's own cursor-anchored-at-connection-time design (server.ts's
+    // own comment on `let cursor: string = clock.nowIso()`) needs none:
+    // an earlier draft of this route derived its starting cursor from an
+    // async "seed" read instead, which raced exactly this scenario (an
+    // event appended concurrently with that read could be silently
+    // swallowed) — caught by manually reintroducing that exact shape
+    // during self-review and confirming this test failed against it before
+    // the cursor was anchored synchronously instead.
     await store.events.append({ id: "evt-live", type: "run.completed", occurredAt: new Date().toISOString(), summary: "a run just completed, live" });
 
     await waitFor(() => stream!.text().includes("evt-live"), { timeoutMs: 3000 });

@@ -432,65 +432,41 @@ export function buildDashboardRouter(
     ctx.res.flushHeaders?.();
     ctx.res.write(":ok\n\n"); // opens the stream — some proxies/clients wait for the first byte before treating the connection as live
 
-    // Cursor mechanism: `cursor` is the `occurredAt` of the newest event
-    // already sent (or seeded, at connect time) over THIS connection.
+    // Cursor mechanism: `cursor` starts at THIS connection's own open time
+    // (`clock.nowIso()`, captured SYNCHRONOUSLY here — no `await` between
+    // the `:ok` write above and this line, so no event loop turn can land
+    // between them) rather than being derived from an async `listEvents()`
+    // "seed" read. That matters: a seed read is itself asynchronous, so an
+    // event appended CONCURRENTLY with it (e.g. a client connecting at the
+    // exact moment a new event lands) could race the seed's own store read
+    // and — if the seed treated whatever it observed as "already sent" —
+    // be silently dropped forever. Anchoring the cursor to the connection's
+    // own synchronous open time instead makes that race impossible by
+    // construction: everything from here on is driven by `since: cursor`
+    // (inclusive) on the first tick, which naturally catches anything at or
+    // after this exact instant, however it interleaves.
+    //
     // `EventLogStore.list`'s own `since` filter is INCLUSIVE
     // (`occurredAt >= since` — @aart/store's adapters/fs/events.ts and
     // adapters/sqlite/stores/events.ts both implement it this way), so
     // `sentIdsAtCursor` tracks which ids AT that exact timestamp have
-    // already been sent/seeded — a same-millisecond tie (e.g. aart_approve's
-    // own 3-event emission, AMENDMENTS.md A63 FIX 4) would otherwise be
+    // already been sent — a same-millisecond tie (e.g. aart_approve's own
+    // 3-event emission, AMENDMENTS.md A63 FIX 4) would otherwise be
     // silently dropped by a plain "occurredAt > cursor" comparison instead
-    // of correctly re-checked against what's already gone out.
-    let cursor: string | undefined;
+    // of correctly re-checked against what's already gone out. Starts
+    // empty: nothing has been sent yet at the connection's own open time.
+    let cursor: string = clock.nowIso();
     let sentIdsAtCursor = new Set<string>();
 
     function isNewEvent(event: EventLogEntry): boolean {
-      if (cursor === undefined) return true;
       if (event.occurredAt > cursor) return true;
       return event.occurredAt === cursor && !sentIdsAtCursor.has(event.id);
     }
 
-    /** Records a just-BROADCAST batch (recurring ticks only — see the seed's
-     * own, deliberately different, handling in `tick` below) so later ties
-     * at the same `occurredAt` are recognized as already-sent. */
-    function recordSent(batch: readonly EventLogEntry[]): void {
-      if (batch.length === 0) return;
-      const newest = batch[0]!.occurredAt; // api.listEvents is newest-first
-      cursor = newest;
-      sentIdsAtCursor = new Set(batch.filter((e) => e.occurredAt === newest).map((e) => e.id));
-    }
-
-    // `seed`: true for the one-off call BEFORE the first interval tick;
-    // false for every recurring tick after it.
-    async function tick(seed: boolean): Promise<void> {
+    async function tick(): Promise<void> {
       if (ctx.res.writableEnded) return; // client already disconnected; the close handler below already cleared the interval, but a tick can still be in flight when it fires
       try {
-        const batch = await api.listEvents(cursor, seed ? 1 : DEFAULT_EVENTS_LIMIT);
-        if (seed) {
-          // Seed: establishes the cursor TIMESTAMP baseline only, so the
-          // stream never replays full history over SSE — the frontend's own
-          // separate `GET /api/events` fetch is the backfill/history path
-          // (ActivityFeedPage.tsx's mount effect); this stream is "what's
-          // new since I opened the connection," not a second copy of it.
-          //
-          // Deliberately does NOT call recordSent() here (which would also
-          // mark this batch's id as already-sent) — an event appended
-          // CONCURRENTLY with this exact read (racing the seed, e.g. a
-          // client connecting at the exact moment a new event lands) must
-          // still be broadcast on the next tick, not silently treated as
-          // "already sent" just because the seed happened to observe it
-          // first. Worst case this makes the FIRST recurring tick redeliver
-          // the single newest pre-existing event once, harmlessly — the
-          // frontend already dedupes by id — silently DROPPING a genuinely
-          // new event racing the seed is the failure mode this asymmetry
-          // avoids (proven directly: server.test.ts's own "opens and
-          // broadcasts a newly-appended event" case appends its live event
-          // immediately after the stream opens, the exact window this
-          // guards).
-          if (batch.length > 0) cursor = batch[0]!.occurredAt;
-          return;
-        }
+        const batch = await api.listEvents(cursor, DEFAULT_EVENTS_LIMIT);
         // Oldest-of-the-new-batch first: each SSE frame is one sequential
         // client-side "prepend to the top of the feed" (ActivityFeedPage.tsx)
         // — writing newest-first would leave the OLDEST event of this
@@ -501,7 +477,11 @@ export function buildDashboardRouter(
           if (ctx.res.writableEnded) break;
           ctx.res.write(`data: ${JSON.stringify(event)}\n\n`);
         }
-        recordSent(batch);
+        if (batch.length > 0) {
+          const newest = batch[0]!.occurredAt; // api.listEvents is newest-first
+          cursor = newest;
+          sentIdsAtCursor = new Set(batch.filter((e) => e.occurredAt === newest).map((e) => e.id));
+        }
       } catch (err) {
         // Never let a transient read failure kill the stream or crash the
         // dashboard process (this route's own explicit contract) — log and
@@ -510,10 +490,8 @@ export function buildDashboardRouter(
       }
     }
 
-    await tick(true); // seed the cursor before the first recurring tick
-
     const interval = setInterval(() => {
-      void tick(false);
+      void tick();
     }, eventsStreamPollIntervalMs);
 
     // Read-only broadcast: this stream never touches the real server's own
