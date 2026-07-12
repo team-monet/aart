@@ -394,8 +394,8 @@ describe("createRealServerPort — host binding (D2a security hardening, AMENDME
 // {port?, environment?, host?} surface, so this remains the only place a
 // break in the wiring would be observable.
 describe("createRealServerPort — startup listening log line (D2a fix pass, AMENDMENTS.md A60, FIX 3)", () => {
-  function findListeningLine(logSpy: ReturnType<typeof vi.spyOn>): { level: string; msg: string; host?: string; port?: number; service?: string; component?: string } | undefined {
-    const raw = logSpy.mock.calls.map(([entry]) => entry as string).find((entry) => {
+  function findListeningLine(calls: unknown[][]): { level: string; msg: string; host?: string; port?: number; service?: string; component?: string } | undefined {
+    const raw = calls.map((call) => call[0] as string).find((entry) => {
       try {
         const parsed = JSON.parse(entry) as { level?: string; msg?: string };
         return parsed.level === "info" && parsed.msg === "aart server listening";
@@ -413,7 +413,7 @@ describe("createRealServerPort — startup listening log line (D2a fix pass, AME
       const handle = await cli.serverPort.startServer({ port: 0 });
       handleClose = () => handle.close();
 
-      const parsed = findListeningLine(logSpy);
+      const parsed = findListeningLine(logSpy.mock.calls);
       expect(parsed, `expected an info-level JSON line with msg "aart server listening" on console.log; saw: ${JSON.stringify(logSpy.mock.calls)}`).toBeDefined();
       expect(parsed!.host).toBe("127.0.0.1"); // default loopback bind (AMENDMENTS.md A59) — not the port-0-request, the ACTUAL resolved host
       expect(parsed!.port).toBe(handle.port); // the REAL bound port, not the port:0 request that asked for "any free port"
@@ -431,7 +431,7 @@ describe("createRealServerPort — startup listening log line (D2a fix pass, AME
       const handle = await cli.serverPort.startServer({ port: 0, host: "0.0.0.0" });
       handleClose = () => handle.close();
 
-      const parsed = findListeningLine(logSpy);
+      const parsed = findListeningLine(logSpy.mock.calls);
       expect(parsed).toBeDefined();
       expect(parsed!.host).toBe("0.0.0.0");
     } finally {
