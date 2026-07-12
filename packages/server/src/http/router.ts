@@ -159,6 +159,17 @@ function readBody(req: IncomingMessage, maxBytes?: number): Promise<Buffer> {
       const declared = Number(req.headers["content-length"]);
       if (Number.isFinite(declared) && declared > maxBytes) {
         reject(new BodyTooLargeError(maxBytes));
+        // D1 fix pass (AMENDMENTS.md A57) — a defensive no-op "error"
+        // listener, attached BEFORE resume() below: this branch drains via
+        // req.resume() with no listener otherwise attached, unlike the
+        // accumulation branch below (which always has one). An empirically
+        // unhandled "error" event on a stream with zero listeners crashes
+        // the process (EventEmitter's own documented default behavior) —
+        // reviewed and found no reproducible crash on this codebase's
+        // pinned Node (22.22.2), but that's an undocumented-for-this-
+        // exact-shape implementation detail, not a contract this code
+        // should rely on. One line, removes that reliance either way.
+        req.on("error", () => {});
         req.resume(); // drain (and discard) the request body in the background rather than leaving the socket paused with unread bytes
         return;
       }
