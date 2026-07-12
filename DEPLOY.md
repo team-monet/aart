@@ -263,8 +263,28 @@ original hand-written `dashboard-dev.mjs` pattern — both call the exact same
 | | `fs` (default) | `sqlite` |
 |---|---|---|
 | Format | One JSON file per record, directory-per-collection (`architecture §5.2`) | One file, WAL mode (`architecture §5.1`) |
-| Safe with >1 process writing? | **No** — no cross-process locking; concurrent writers can race | **Yes** — this is what it's for |
+| Safe with >1 process writing? | **No** — no cross-process locking; concurrent writers can race | **Yes** — including a coordinated concurrent first startup (AMENDMENTS.md A58, see below) |
 | Use for | A single local `aart run`/authoring session | Any deployment running `server`+`worker` (or multiple workers) against the same store — which is every real deployment |
+
+**What "safe" means here, precisely (AMENDMENTS.md A58 — corrects this
+section's own prior, unqualified "Yes"):** `sqlite` is safe for the
+`server`+`worker`(+more workers) topology this deploy kit ships, INCLUDING
+the case that actually crashed before this fix — two processes racing to
+be the first to open and migrate a brand-new, empty store (e.g. `docker
+compose up` starting `server` and `worker` at the same moment against a
+fresh volume). That concurrent-startup race is now coordinated
+(`PRAGMA busy_timeout` set first on every connection, plus an exclusive
+`BEGIN IMMEDIATE` transaction around migration application —
+`packages/store/src/adapters/sqlite/index.ts`'s `runMigrationsCoordinated`)
+so neither process crashes or corrupts the schema. Beyond startup, `sqlite`
+is still single-writer-at-a-time at the SQLite level, same as any WAL-mode
+database (WAL: concurrent READERS, one writer at a time — concurrent writes
+serialize through the file lock, they don't fail or need to be avoided).
+`job_queue`'s own claim leasing (architecture ADR-05 — a conditional
+`UPDATE ... WHERE claimed_by IS NULL OR lease_expires_at <= ?`) is already
+built around exactly this constraint: multiple workers correctly contend
+for the same row without corrupting it; they just don't write in true
+parallel, which is what the leasing design already assumes.
 
 **Always pass `--store sqlite` for `server`/`worker`/`dashboard` in
 production.** `fs` is the CLI's own default (`aart run` with no flags — the
@@ -405,6 +425,45 @@ A bundle's `--environment <name>` (`aart bundle`/`aart push`) needs the
 named environment to already be registered on the DESTINATION store before
 hydration — see `AUTHORING.md`'s "Environment-scoped hydration" note.
 
+**`aart trigger add` has no `--environment` selector — stated plainly, a
+known gap (a real `--environment` flag is backlog, not built here).**
+`aart trigger add <workflowId> --type <type> ...`
+(`packages/cli/src/commands/deployment.ts`'s `triggerAddCommand`) attaches
+the trigger config to whichever of that workflow's `Deployment` rows
+`store.deployments.list({ workflowId })` happens to return LAST — this is
+**not** reliably "the most recently created one": the `fs` adapter's own
+listing sorts alphabetically by the deployment's random `id` (unrelated to
+creation time — `KeyedJsonCollection.list()`,
+`packages/store/src/adapters/fs/json-file.ts`), and the `sqlite` adapter's
+query has no `ORDER BY` at all (`SqliteDeploymentStore.list()`,
+`packages/store/src/adapters/sqlite/stores/simple-stores.ts` — an
+unspecified row order). Compounding this: every `aart deploy <id> --target
+<env>` creates a BRAND NEW `Deployment` row (`deployWorkflowHandler`,
+`packages/mcp/src/handlers/deployment.ts`'s `id: newId("deploy")`) — it
+never updates an existing one, even for a re-deploy to the SAME
+environment — so a workflow deployed more than once (to one environment
+twice, or to several) accumulates multiple rows with no way for `trigger
+add` to say which one it means.
+
+**The only reliably deterministic case: a workflow's FIRST-EVER deployment,
+before any other exists for it.** `aart deploy <workflowId> --target <env>`
+immediately followed by `aart trigger add <workflowId> --type <type> ...`,
+before deploying that workflow anywhere else — with exactly one
+`Deployment` row in existence, there is nothing left to disambiguate.
+
+**For a second (or later) deployment of the same workflow — the normal
+shape once you have, say, `staging` AND `production` both — there is no
+reliable way to target the new one through `trigger add` today.**
+Verify which row actually changed after running it, don't assume:
+`curl http://<server>:8080/deployments` (or the dashboard's Deployments/
+trigger-configs view) lists every `Deployment` with its full
+`triggerConfig` — the row whose `triggerConfig` now matches what you just
+set (and whose `id` matches what `aart deploy`'s own JSON output printed
+when you created it) is the one that actually got updated. If it picked
+the wrong row, the only recourse today is re-running `trigger add` and
+re-checking — the ordering is unspecified, not a toggle reliably
+alternating between two rows.
+
 ## Backup & restore
 
 **What to copy** depends on your store choice:
@@ -513,14 +572,22 @@ Stated plainly, matching this repo's own "What doesn't work yet" convention
   replicas), not something to fake with multiple `server` instances today.
 - **No metrics/OTel EXPORTER ships today, despite the architecture
   describing one as optional.** The logging layer supports a pluggable
-  `LogSink` (`packages/store/src/logger.ts`) — a no-op by default, a JSON-
-  to-stdout `consoleJsonSink` available, and the type is shaped so a caller
-  COULD write an OTel-bridge sink — but no `@opentelemetry/*` package is a
-  dependency anywhere in this codebase (verified: zero matches across every
-  `package.json`) and no such bridge is implemented. "Metrics via OTel" is
-  an architectural placeholder for future work, not a flag you can flip
-  today. What you get out of the box: structured JSON logs to stdout (wire
-  `consoleJsonSink`), and the `/health`/`/runs`/`/deployments`/
+  `LogSink` (`packages/store/src/logger.ts`) — the LIBRARY's own default
+  (`createLogger()` with no `sink` given) is still a no-op, and the type is
+  shaped so a caller COULD write an OTel-bridge sink — but no
+  `@opentelemetry/*` package is a dependency anywhere in this codebase
+  (verified: zero matches across every `package.json`) and no such bridge is
+  implemented. "Metrics via OTel" is an architectural placeholder for future
+  work, not a flag you can flip today. **What you get out of the box, no
+  wiring required (AMENDMENTS.md A58):** `aart server` and `aart worker`
+  (both real composition roots, `packages/cli/src/real-server-port.ts`)
+  unconditionally wire `consoleJsonSink` — one JSON-stringified line per log
+  call, shaped `{level, msg, time, ...context}` (`service`/`component` and
+  request-scoped fields like `runId` where relevant) — `debug`/`info` lines
+  to stdout, `warn`/`error` lines to stderr. There is no flag to turn this
+  off and no level filter — every level is always emitted; redirect/collect
+  stdout+stderr with whatever your process manager or container runtime
+  already does. Plus the `/health`/`/runs`/`/deployments`/
   `/rejected-triggers` HTTP endpoints for polling-based monitoring.
 - **No authentication in front of MOST of the control-plane HTTP API or the
   dashboard.** `GET /runs`, `GET /workflows`, the webhook endpoints (HMAC-

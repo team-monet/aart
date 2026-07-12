@@ -20,8 +20,11 @@
 #   curl http://localhost:8787/health
 #   open http://localhost:4000        # dashboard
 #
-# Store: sqlite (the multi-process-safe choice — see DEPLOY.md's store
-# guidance; fs is single-process-only and would race under server+worker
+# Store: sqlite (the multi-process-safe choice — see DEPLOY.md's "Store
+# choice: fs vs sqlite" section for the precise, post-AMENDMENTS.md-A58
+# statement of what "safe" means here, including the now-coordinated
+# concurrent-first-startup case this exact server+worker topology hits on a
+# fresh volume; fs is single-process-only and would race under server+worker
 # writing concurrently to the same store). One named volume, mounted
 # read-write into all three services, is what makes this "sharing a store
 # volume" — the same store, the same runs/workflows/deployments, seen from
