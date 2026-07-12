@@ -6,6 +6,7 @@
 import { createServer, type Server, type ServerResponse } from "node:http";
 import type { AartStore } from "@aart/store";
 import type { ApprovalTask, Scorer, Signal, Trigger, TrustMode, Workflow } from "@aart/types";
+import { TrustModeSchema } from "@aart/types";
 import { blockPromotion, clearNeedsReview, createEvalExampleFromCorrection, createIssueForAgent, markNeedsReview, recordCorrection, triggerImprovementProposal, unblockPromotion, updateRunOutput, type RecordCorrectionInput } from "@aart/evidence";
 import { decideApprovalTask } from "../approvals.js";
 import { type Bundle } from "../bundle/bundle.js";
@@ -123,6 +124,41 @@ function requireBundleEnvelope(ctx: RouteContext, body: unknown): Record<string,
     return undefined;
   }
   return files as Record<string, string>;
+}
+
+/**
+ * D1 fix pass (AMENDMENTS.md A57) — `POST /environments`'s `trustMode` was
+ * cast (`body as Partial<RegisterEnvironmentParams>`) and passed straight
+ * into `registerEnvironment` with no runtime check at all. A malformed/
+ * typo'd value (e.g. `"prod"` instead of `"production"`) would silently
+ * persist as-is into `Environment.config.trustMode`, and every REAL reader
+ * of that field (`requiredGatesForEnvironment`, promotion.ts;
+ * `normalizeEnvironmentTrustMode`, `@aart/governance`'s `capability.ts`)
+ * maps an unrecognized string to `"governed"` — a SILENT governance
+ * downgrade an operator would have no way to notice from this route's own
+ * `200` response, which echoes back exactly the bad string it was given
+ * (`server.test.ts`'s own upsert test already proves `config["trustMode"]`
+ * round-trips VERBATIM, typo and all). Mirrors the CLI sibling's own check
+ * (`commands/environment.ts`'s `isValidTrustMode`/`VALID_TRUST_MODES`)
+ * rather than inventing a new validation layer — this route's own siblings
+ * in this file (`requireBundleEnvelope` above) validate with a plain
+ * runtime check + a 400, not a Zod schema, so this does too; only the
+ * VALID-VALUES VOCABULARY is sourced from `@aart/types`' `TrustModeSchema`
+ * (the single canonical definition already used to derive `TrustMode`
+ * itself) rather than a third hand-typed copy of the same four strings —
+ * `normalizeEnvironmentTrustMode`'s own doc comment already flags
+ * hand-rolling this vocabulary twice as the exact cause of a past bug
+ * (root AMENDMENTS.md A42). Writes the 400 response itself; returns `false`
+ * when the caller must stop. `trustMode` omitted entirely is untouched —
+ * `registerEnvironment`'s own optional-field contract is unchanged.
+ */
+const VALID_TRUST_MODES = TrustModeSchema.options;
+
+function requireValidTrustMode(ctx: RouteContext, trustMode: unknown): boolean {
+  if (trustMode === undefined) return true;
+  if (typeof trustMode === "string" && (VALID_TRUST_MODES as readonly string[]).includes(trustMode)) return true;
+  sendJson(ctx.res, 400, { error: `trustMode must be one of: ${VALID_TRUST_MODES.join(", ")} (got ${JSON.stringify(trustMode)}).` });
+  return false;
 }
 
 /**
@@ -429,6 +465,7 @@ export async function startServer(config: ServerConfig): Promise<ServerHandle> {
     if (!requireDeployToken(config, ctx)) return;
     const { name, trustMode, config: envConfig, secretSource } = body as Partial<RegisterEnvironmentParams>;
     if (!name) return sendJson(ctx.res, 400, { error: "name is required" });
+    if (!requireValidTrustMode(ctx, trustMode)) return;
     const environment = await registerEnvironment(config.store, { name, trustMode, config: envConfig, secretSource });
     return sendJson(ctx.res, 200, { environment });
   });

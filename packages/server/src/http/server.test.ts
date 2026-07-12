@@ -1139,4 +1139,49 @@ describe("POST /environments — ADR-2 (AMENDMENTS.md A56)", () => {
     });
     expect(res.status).toBe(400);
   });
+
+  // D1 fix pass (AMENDMENTS.md A57) — trustMode was cast, never validated;
+  // an invalid value (e.g. a typo'd "prod") silently persisted verbatim and
+  // every real reader (requiredGatesForEnvironment, normalizeEnvironmentTrustMode)
+  // downgrades an unrecognized string to "governed" with no signal anywhere.
+  it("invalid trustMode -> 400 naming the four valid values, environment NOT created", async () => {
+    fx = await createTestFixture();
+    handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false, deployToken: TOKEN });
+    const res = await fetch(`http://localhost:${handle.port}/environments`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${TOKEN}` },
+      body: JSON.stringify({ name: "prod-typo", trustMode: "prod" }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await json(res)) as { error: string };
+    for (const validMode of ["dev", "governed", "strict", "production"]) {
+      expect(body.error).toContain(validMode);
+    }
+    expect(body.error).toContain('"prod"'); // echoes back what was actually rejected
+    await expect(fx.store.environments.getByName("prod-typo")).resolves.toBeUndefined(); // never silently downgraded into existence as "governed"
+  });
+
+  it("every valid trustMode (dev/governed/strict/production) is accepted", async () => {
+    fx = await createTestFixture();
+    handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false, deployToken: TOKEN });
+    for (const validMode of ["dev", "governed", "strict", "production"]) {
+      const res = await fetch(`http://localhost:${handle.port}/environments`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${TOKEN}` },
+        body: JSON.stringify({ name: `env-${validMode}`, trustMode: validMode }),
+      });
+      expect(res.status).toBe(200);
+    }
+  });
+
+  it("omitting trustMode entirely is still accepted (registerEnvironment's own optional-field contract, unchanged)", async () => {
+    fx = await createTestFixture();
+    handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false, deployToken: TOKEN });
+    const res = await fetch(`http://localhost:${handle.port}/environments`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${TOKEN}` },
+      body: JSON.stringify({ name: "no-trust-mode-given" }),
+    });
+    expect(res.status).toBe(200);
+  });
 });
