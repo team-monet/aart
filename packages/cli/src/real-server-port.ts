@@ -12,7 +12,14 @@
 //     secretResolver (secrets.ts — the piece A44 found missing, so webhook/
 //     github/slack HMAC verification can actually succeed) and resolves
 //     `config.environment`'s human-readable name into the `environmentId`
-//     ServerConfig scopes trigger-binding activation by.
+//     ServerConfig scopes trigger-binding activation by. AMENDMENTS.md A57
+//     (D1 fix pass, BLOCKER): startServer now also resolves
+//     resolveDeployToken(root) (secrets.ts) and threads it into
+//     ServerConfig.deployToken — A56 built the whole deploy-token gate
+//     (/bundles/ingest, /bundles/plan, /environments) plus this exact
+//     resolver, but never wired the resolver into this, the ONE real
+//     production composition root, so every one of those routes refused
+//     every request unconditionally through a real `aart server` until now.
 //   - produceBundle <- AMENDMENTS.md A56 (D1 "remotes + push"): now a thin
 //     call into `@aart/mcp`'s `resolveAndProduceBundle` (real-context.ts) —
 //     the resolveDeployment/bundleToBundleLike bridge that used to live
@@ -45,7 +52,7 @@ import {
   startWorker as startRealWorker,
 } from "@aart/server";
 import { writeBundleFilesToDisk } from "./bundle-files.js";
-import { createRealSecretResolver } from "./secrets.js";
+import { createRealSecretResolver, resolveDeployToken } from "./secrets.js";
 
 /** `aart server --environment <name>`'s bridge (AMENDMENTS.md A45): a human names an Environment, `ServerConfig.environmentId` (config.ts) wants its id. A genuinely CLI-only concern (unlike `produceBundle`'s own environment-name resolution above, now shared with MCP) — left as its own local implementation, not part of the `resolveAndProduceBundle` extraction. Same "throw only when the NAME itself doesn't exist" discipline, for the same reason — an operator typo in `--environment` should fail loudly at startup, not silently fall back to "every environment" (this function's caller, `startServer` below, only calls this when `config.environment` is actually given; omitting the flag entirely is the documented "all environments" default and never reaches here). */
 async function resolveEnvironmentId(store: AartStore, environmentName: string): Promise<string> {
@@ -74,7 +81,21 @@ export function createRealServerPort(store: AartStore, engine: Engine, root: str
   return {
     async startServer(config): Promise<ServerHandleLike> {
       const environmentId = config.environment ? await resolveEnvironmentId(store, config.environment) : undefined;
-      return startRealServer({ store, engine: boundary, port: config.port, secretResolver, environmentId });
+      // D1 fix pass (AMENDMENTS.md A57) — BLOCKER fixed here: this call used
+      // to omit deployToken entirely, so ServerConfig.deployToken was always
+      // undefined through a REAL `aart server`, and /bundles/ingest,
+      // /bundles/plan, /environments refused every request unconditionally
+      // ("no AART_DEPLOY_TOKEN configured") — even a correctly-token'd one.
+      // resolveDeployToken (secrets.ts) has existed since A56 but had ZERO
+      // production callers until this line. Resolved HERE, not hoisted
+      // beside secretResolver above, because resolveDeployToken is async
+      // and this factory function itself is sync — startServer is the
+      // first async boundary available, and per secrets.ts's own doc
+      // comment this resolution is meant to happen "exactly ONCE at
+      // process startup," which matches startServer being called exactly
+      // once per `aart server` invocation.
+      const deployToken = await resolveDeployToken(root);
+      return startRealServer({ store, engine: boundary, port: config.port, secretResolver, environmentId, deployToken });
     },
 
     async startWorker(options): Promise<WorkerHandleLike> {

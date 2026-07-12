@@ -31,6 +31,7 @@ afterEach(async () => {
   await handleClose?.();
   handleClose = undefined;
   delete process.env.AART_SECRET_PROBE_SECRET;
+  delete process.env.AART_DEPLOY_TOKEN;
   await Promise.all(cleanupPaths.map((p) => fs.rm(p, { recursive: true, force: true })));
   cleanupPaths = [];
 });
@@ -114,6 +115,63 @@ describe("createRealServerPort — real secretResolver wiring (AMENDMENTS.md A45
       body: rawBody,
     });
     expect(res.status).toBe(401);
+  });
+});
+
+// D1 "remotes + push" fix pass (AMENDMENTS.md A57) — the exact gap this
+// session's own review found: A56 built resolveDeployToken (secrets.ts) and
+// the entire deploy-token gate (/bundles/ingest, /bundles/plan,
+// /environments — @aart/server's http/server.ts), but createRealServerPort's
+// startServer never called it, so ServerConfig.deployToken was always
+// undefined and those three routes refused EVERY request — including a
+// correctly-token'd one — through a real `aart server`. Same class of bug
+// as A45 above (a composition-root wiring gap — the resolver/mechanism was
+// real and unit-tested, but the ONE real production caller never threaded
+// it through) and, per this fix pass's own root-cause note, the THIRD
+// occurrence of this exact bug class in this repo (A48, A53, now this) — a
+// from-the-CLI-entry test through the SAME composition root `aart server`
+// itself uses is exactly what closes it, mirroring the A45 pattern above
+// rather than only unit-testing resolveDeployToken in isolation (secrets.ts
+// already does that).
+describe("createRealServerPort — real deployToken wiring (AMENDMENTS.md A57 fix pass)", () => {
+  it("a correct Bearer token reaches past the deploy-token gate (envelope validation, never the 'not configured' 401) through a real aart server; a wrong token still 401s with the differentiated remedy", async () => {
+    process.env.AART_DEPLOY_TOKEN = "real-wired-deploy-token";
+    const cli = await freshCli();
+    const handle = await cli.serverPort.startServer({ port: 0 });
+    handleClose = () => handle.close();
+
+    const okRes = await fetch(`http://localhost:${handle.port}/bundles/plan`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: "Bearer real-wired-deploy-token" },
+      body: JSON.stringify({}), // deliberately missing `files` — proves we got PAST the token gate to requireBundleEnvelope's own 400, not full ingest success
+    });
+    expect(okRes.status).toBe(400); // requireBundleEnvelope's 400 (bad envelope), never requireDeployToken's 401
+    const okBody = (await okRes.json()) as { error: string };
+    expect(okBody.error).not.toMatch(/AART_DEPLOY_TOKEN/); // the "not configured" refusal must NOT be what we hit
+
+    const wrongRes = await fetch(`http://localhost:${handle.port}/bundles/plan`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: "Bearer totally-wrong-token" },
+      body: JSON.stringify({}),
+    });
+    expect(wrongRes.status).toBe(401);
+    const wrongBody = (await wrongRes.json()) as { error: string };
+    expect(wrongBody.error).toContain('Provide a valid "Authorization: Bearer <token>" header.'); // the DIFFERENTIATED message (deployToken IS configured, just not matched) — never the "no AART_DEPLOY_TOKEN configured" one
+  });
+
+  it("with no AART_DEPLOY_TOKEN configured at all, the route still refuses unconditionally (unchanged fail-closed behavior, not a regression from this fix)", async () => {
+    const cli = await freshCli();
+    const handle = await cli.serverPort.startServer({ port: 0 });
+    handleClose = () => handle.close();
+
+    const res = await fetch(`http://localhost:${handle.port}/bundles/plan`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: "Bearer whatever" },
+      body: JSON.stringify({}),
+    });
+    expect(res.status).toBe(401);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toMatch(/AART_DEPLOY_TOKEN/);
   });
 });
 
