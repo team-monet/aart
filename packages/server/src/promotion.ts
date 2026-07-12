@@ -128,8 +128,21 @@ export async function promoteWorkflowVersionToEnvironment(store: AartStore, para
 
   const existingForEnv = await store.deployments.list({ environmentId: params.environmentId, workflowId: params.workflowId });
   const existing = existingForEnv.find((d) => d.workflowVersion === params.workflowVersion);
+  // D1 "remotes + push" (AMENDMENTS.md A56): `promoted: true` explicit on
+  // BOTH branches below — NOT the same `promoted` as `record.promoted`
+  // just checked above (that's governance's per-call PromotionRecord
+  // ELIGIBILITY computation, never persisted). This is
+  // `Deployment.promoted`, a field on the ROW ITSELF (store-records.ts's
+  // own doc comment) answering "is this deployment active" — a LOCAL
+  // promotion reaching this line has, by construction, just satisfied every
+  // required gate for this environment, so the resulting row is
+  // definitionally live; deploymentToBinding (triggers/registry.ts) must
+  // never skip it. Stamped explicitly rather than left `undefined` so a
+  // `GET /deployments` reader can tell "reached promoted:true via a real
+  // promotion" apart from "never explicitly stamped, defaulting to active"
+  // (the legacy-bundle-hydration case, load.ts) at a glance.
   const deployment: Deployment = existing
-    ? { ...existing, triggerConfig: params.triggerConfig ?? existing.triggerConfig }
+    ? { ...existing, triggerConfig: params.triggerConfig ?? existing.triggerConfig, promoted: true }
     : {
         id: generateId("dep"),
         workflowId: params.workflowId,
@@ -137,6 +150,7 @@ export async function promoteWorkflowVersionToEnvironment(store: AartStore, para
         environmentId: params.environmentId,
         triggerConfig: params.triggerConfig ?? {},
         createdAt: clock.nowIso(),
+        promoted: true,
       };
   await store.deployments.put(deployment);
   return { kind: "promoted", record, deployment };

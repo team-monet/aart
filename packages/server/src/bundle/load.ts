@@ -38,24 +38,28 @@ import {
   type SchemaRegistryEntry,
   type Workflow,
 } from "@aart/types";
+import { normalizeEnvironmentTrustMode } from "@aart/governance";
 import { systemClock, type Clock } from "../clock.js";
 import { BundleManifestSchema, computeBundleHash, sanitizeFilename, type Bundle } from "./bundle.js";
 
 const TriggerConfigSchema = z.record(z.string(), z.unknown());
 
 /**
- * Every hydration-created `Deployment` lands under this one synthetic
- * `Environment`. A bundle's own manifest doesn't record which named
- * environment (if any) it was produced for — `BundleManifest` has no such
- * field, and `--environment` at PRODUCE time only selects which real
- * `Deployment`'s `triggerConfig` gets embedded into `triggers.json`
- * (bundle.ts's `resolveDeployment`-equivalent bridge lives in
- * `@aart/cli`'s `real-server-port.ts`, one layer up) — so there is no real
- * environment NAME to hydrate into here. This one stable, deterministic id
- * is created (idempotently — `put` is an upsert) the first time any bundle
- * is hydrated into a store, and reused by every later hydration into that
- * same store, rather than minting a fresh orphaned `Environment` row each
- * time.
+ * Every hydration-created `Deployment` for a bundle with NO
+ * `manifest.targetEnvironment` (every bundle produced before D1 "remotes +
+ * push", AMENDMENTS.md A56, plus any produced today without `--environment`)
+ * lands under this one synthetic `Environment` — the pre-D1, and still
+ * fully-supported, fallback. This one stable, deterministic id is created
+ * (idempotently — `put` is an upsert) the first time any such bundle is
+ * hydrated into a store, and reused by every later hydration into that same
+ * store, rather than minting a fresh orphaned `Environment` row each time.
+ *
+ * A bundle whose manifest DOES carry `targetEnvironment` (bundle.ts's own
+ * doc comment on that field) never touches this constant at all —
+ * `resolveHydrationTarget` below resolves it against a REAL, already-
+ * registered `Environment` instead, and `hydrateBundle` never auto-vivifies
+ * one (unlike this synthetic fallback, which is deliberately auto-created —
+ * see that function's own doc comment for why the two cases differ).
  */
 const BUNDLE_ENVIRONMENT: Environment = { id: "env_bundle", name: "bundle", config: {} };
 
@@ -72,9 +76,68 @@ const BUNDLE_ENVIRONMENT: Environment = { id: "env_bundle", name: "bundle", conf
  * and namespace-distinct from every real deploy-time `Deployment` id — never
  * collides, and self-documents in a `GET /deployments` listing which rows
  * came from a hydrated bundle versus a real `aart deploy`.
+ *
+ * Legacy/fallback form — the synthetic `env_bundle` environment only (no
+ * environment suffix). See `bundleDeploymentIdForEnvironment` below for the
+ * D1 env-scoped form used whenever a bundle names a real
+ * `targetEnvironment`; the two are deliberately DIFFERENT key shapes so a
+ * bundle hydrated once under the legacy fallback and later re-hydrated with
+ * a real named environment lands as an independent new row rather than
+ * colliding with (or being mistaken for a redeploy of) the fallback one.
  */
 function bundleDeploymentId(workflowId: string, workflowVersion: string): string {
   return `bundle:${workflowId}@${workflowVersion}`;
+}
+
+/**
+ * D1 "remotes + push" (AMENDMENTS.md A56) — env-scoped form, keyed by the
+ * REAL target environment's resolved id (never its name — ids are stable
+ * under a rename, names aren't). The SAME workflow@version hydrated into
+ * two DIFFERENT real environments is, by this key shape, always two
+ * independent rows — never a conflict, matching the design memo's explicit
+ * "this is by design" framing (each environment's own `Deployment` most
+ * recently promoted into it typically carries a different `triggerConfig`,
+ * hence a different `bundleHash`, but even a coincidental match is fine:
+ * they're different rows regardless, keyed by environment).
+ */
+function bundleDeploymentIdForEnvironment(workflowId: string, workflowVersion: string, environmentId: string): string {
+  return `bundle:${workflowId}@${workflowVersion}:${environmentId}`;
+}
+
+interface HydrationTarget {
+  /** The REAL, already-registered Environment this bundle names — never auto-vivified (see `resolveHydrationTarget`'s own doc comment). */
+  environment: Environment;
+  /** `true` iff this environment's own trust mode is `"dev"` — dev has no required gates (governance's `REQUIRED_GATES_BY_MODE.dev`, an empty array) and is meant for throwaway iteration, so a bundle ingested straight into one is immediately live, matching a human just running `aart deploy` there directly. Any OTHER trust mode leaves the resulting `Deployment.promoted` explicitly `false` — hydration recorded the evidence (defs are now in the store) but a separate promotion step (`aart promote`/`POST /workflows/:id/promote`) is still what flips a real trigger live. */
+  promoted: boolean;
+}
+
+/**
+ * Resolves `bundle.manifest.targetEnvironment` (if present) to the REAL
+ * `Environment` it names — `undefined` when the manifest carries no such
+ * field at all (the legacy/fallback case; `hydrateBundle` falls back to
+ * `BUNDLE_ENVIRONMENT` in that case, exactly as it always has).
+ *
+ * Deliberately fail-loud, NOT auto-vivifying, when a NAME is given but
+ * doesn't resolve — matching `real-server-port.ts`'s `resolveDeployment`/
+ * `resolveEnvironmentId` established discipline for the identical class of
+ * mistake (an operator typo, or a bundle produced against a different
+ * store's environment set than the one it's being hydrated into) elsewhere
+ * in this codebase: a missing environment should fail the whole hydration
+ * loudly, with an actionable remedy, never silently create a placeholder a
+ * human never asked for and might not notice.
+ */
+async function resolveHydrationTarget(store: AartStore, targetEnvironmentName: string | undefined): Promise<HydrationTarget | undefined> {
+  if (!targetEnvironmentName) return undefined;
+  const environment = await store.environments.getByName(targetEnvironmentName);
+  if (!environment) {
+    throw new Error(
+      `Bundle load: target environment "${targetEnvironmentName}" is not registered on this store. ` +
+        `Register it first — "aart environment register ${targetEnvironmentName} --trust-mode <dev|governed|strict|production>" (CLI), ` +
+        `or POST /environments (HTTP) — then retry.`,
+    );
+  }
+  const trustMode = normalizeEnvironmentTrustMode(environment.config["trustMode"]);
+  return { environment, promoted: trustMode === "dev" };
 }
 
 async function readJsonFile(filePath: string, label: string): Promise<unknown> {
@@ -284,15 +347,19 @@ export type HydrateBundleResult =
  * prompt/schema already in `store` is left exactly as it was.
  *
  * Idempotent by design, keyed on the bundle's ROOT `workflowId@workflowVersion`
- * (`bundle.manifest.workflowId`/`.workflowVersion` — not every nested
- * workflow the closure carries): hydrating the exact same bundle (same
- * bundleHash) twice into the same store is a safe no-op the second time
- * (`kind: "already_hydrated"`), matching a redeploy of an unchanged
- * artifact. Hydrating a DIFFERENT bundle for the SAME workflow@version
- * throws rather than silently overwriting — two different sealed artifacts
- * claiming the same identity is a real conflict for a human to resolve
- * (redeploy under a fresh `--root` store, or confirm which one is actually
- * meant to win), not something safe to paper over.
+ * **plus the resolved target environment, when one is named** (D1 "remotes +
+ * push", AMENDMENTS.md A56 — `resolveHydrationTarget` above; not every
+ * nested workflow the closure carries): hydrating the exact same bundle
+ * (same bundleHash) twice into the same store+environment is a safe no-op
+ * the second time (`kind: "already_hydrated"`), matching a redeploy of an
+ * unchanged artifact. Hydrating a DIFFERENT bundle for the SAME
+ * workflow@version+environment throws rather than silently overwriting —
+ * two different sealed artifacts claiming the same identity is a real
+ * conflict for a human to resolve (redeploy under a fresh `--root` store, or
+ * confirm which one is actually meant to win), not something safe to paper
+ * over. The SAME workflow@version hydrated into a DIFFERENT environment is,
+ * by design, always an independent new row — see
+ * `bundleDeploymentIdForEnvironment`'s own doc comment.
  *
  * Governance is deliberately NOT re-run here: a bundle is produced from an
  * already-approved+deployed store state (bundle.ts's own header comment),
@@ -300,18 +367,23 @@ export type HydrateBundleResult =
  * `promotionBlocked` fields land exactly as bundled, verbatim — sealing the
  * bundle IS the governance decision; loading it is not a second one.
  *
- * All writes (workflows, packs, prompts, schemas, the synthetic environment
- * + deployment marker) land inside one `store.transact()` call — either the
- * whole hydration commits or none of it does, so a mid-hydration failure
- * (disk full, process killed) can never leave the idempotency marker
- * written without the definitions it's supposed to vouch for, or vice
- * versa.
+ * All writes (workflows, packs, prompts, schemas, the environment marker —
+ * only for the legacy fallback, never for a real named target — + deployment
+ * marker) land inside one `store.transact()` call — either the whole
+ * hydration commits or none of it does, so a mid-hydration failure (disk
+ * full, process killed) can never leave the idempotency marker written
+ * without the definitions it's supposed to vouch for, or vice versa.
  */
 export async function hydrateBundle(store: AartStore, bundle: Bundle, clock: Clock = systemClock): Promise<HydrateBundleResult> {
   verifyBundleHash(bundle);
 
-  const { workflowId, workflowVersion, bundleHash } = bundle.manifest;
-  const deploymentId = bundleDeploymentId(workflowId, workflowVersion);
+  const { workflowId, workflowVersion, bundleHash, targetEnvironment: targetEnvironmentName } = bundle.manifest;
+  // Resolved BEFORE anything else — fail loud on an unregistered named
+  // target before touching the store at all (resolveHydrationTarget's own
+  // doc comment on why this never auto-vivifies, unlike the legacy
+  // BUNDLE_ENVIRONMENT fallback below).
+  const target = await resolveHydrationTarget(store, targetEnvironmentName);
+  const deploymentId = target ? bundleDeploymentIdForEnvironment(workflowId, workflowVersion, target.environment.id) : bundleDeploymentId(workflowId, workflowVersion);
   const existing = await store.deployments.get(deploymentId);
 
   if (existing?.bundleHash === bundleHash) {
@@ -330,10 +402,16 @@ export async function hydrateBundle(store: AartStore, bundle: Bundle, clock: Clo
     id: deploymentId,
     workflowId,
     workflowVersion,
-    environmentId: BUNDLE_ENVIRONMENT.id,
+    environmentId: target ? target.environment.id : BUNDLE_ENVIRONMENT.id,
     triggerConfig,
     bundleHash,
     createdAt: clock.nowIso(),
+    // Legacy fallback path: `promoted` is left OFF the object entirely
+    // (undefined = active, today's implicit behavior, byte-identical to
+    // every pre-D1 hydration — see Deployment.promoted's own doc comment,
+    // store-records.ts). Real-target path: always explicitly stamped, per
+    // `resolveHydrationTarget`'s dev-trust-mode rule.
+    ...(target ? { promoted: target.promoted } : {}),
   };
 
   await store.transact(async (tx) => {
@@ -341,7 +419,13 @@ export async function hydrateBundle(store: AartStore, bundle: Bundle, clock: Clo
     for (const pack of Object.values(bundle.packs)) await tx.packManifests.put(pack);
     for (const prompt of Object.values(bundle.registry.prompts)) await tx.promptRegistry.put(prompt);
     for (const schema of Object.values(bundle.registry.schemas)) await tx.schemaRegistry.put(schema);
-    await tx.environments.put(BUNDLE_ENVIRONMENT);
+    // Only the legacy fallback auto-vivifies its own Environment row — a
+    // real named target was already proven to exist by
+    // resolveHydrationTarget above, and must never be silently re-written
+    // here (no auto-vivification for the real path, by design).
+    if (!target) {
+      await tx.environments.put(BUNDLE_ENVIRONMENT);
+    }
     await tx.deployments.put(deployment);
   });
 

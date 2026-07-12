@@ -111,6 +111,71 @@ describe("promoteWorkflowVersionToEnvironment — staging vs production divergen
     }
   });
 
+  // D1 "remotes + push" (AMENDMENTS.md A56) — Deployment.promoted (the row's
+  // own "is this active" flag) is DISTINCT from PromotionRecord.promoted
+  // (governance's per-call eligibility computation, asserted on elsewhere in
+  // this file) — a real local promotion must always stamp the former
+  // explicitly true, on both the fresh-create AND merge-existing branches,
+  // so deploymentToBinding (triggers/registry.ts) never treats a promoted
+  // deployment as inactive.
+  describe("Deployment.promoted is stamped true (AMENDMENTS.md A56)", () => {
+    it("fresh-create branch: a brand-new Deployment is created with promoted:true", async () => {
+      fx = await createTestFixture();
+      await setUpWorkflow(fx);
+      await fx.store.environments.put({ id: "env_staging", name: "staging", config: { trustMode: "governed" } });
+      const result = await promoteWorkflowVersionToEnvironment(fx.store, { workflowId: "checkout-smoke", workflowVersion: "0.3.0", environmentId: "env_staging" });
+      expect(result.kind).toBe("promoted");
+      if (result.kind === "promoted") {
+        expect(result.deployment.promoted).toBe(true);
+        await expect(fx.store.deployments.get(result.deployment.id)).resolves.toMatchObject({ promoted: true });
+      }
+    });
+
+    it("merge-existing branch: re-promoting an already-deployed workflow version keeps promoted:true", async () => {
+      fx = await createTestFixture();
+      await setUpWorkflow(fx);
+      await fx.store.environments.put({ id: "env_staging", name: "staging", config: { trustMode: "governed" } });
+      const first = await promoteWorkflowVersionToEnvironment(fx.store, { workflowId: "checkout-smoke", workflowVersion: "0.3.0", environmentId: "env_staging" });
+      expect(first.kind).toBe("promoted");
+
+      // A second promotion call against the SAME (workflow, environment) —
+      // hits the `existing` branch (an existingForEnv match is found), not
+      // the fresh-create one.
+      const second = await promoteWorkflowVersionToEnvironment(fx.store, { workflowId: "checkout-smoke", workflowVersion: "0.3.0", environmentId: "env_staging", triggerConfig: { type: "webhook", webhookPath: "/updated" } });
+      expect(second.kind).toBe("promoted");
+      if (second.kind === "promoted" && first.kind === "promoted") {
+        expect(second.deployment.id).toBe(first.deployment.id); // same row, merged not duplicated
+        expect(second.deployment.promoted).toBe(true);
+        expect(second.deployment.triggerConfig).toEqual({ type: "webhook", webhookPath: "/updated" });
+      }
+    });
+
+    it("even a Deployment previously hydrated with promoted:false (bundle-ingest evidence) flips to true once genuinely promoted", async () => {
+      fx = await createTestFixture();
+      await setUpWorkflow(fx);
+      await fx.store.environments.put({ id: "env_staging", name: "staging", config: { trustMode: "governed" } });
+      // Simulates D-2's ingest path having already recorded evidence
+      // (promoted:false) for this exact (workflow, environment) pair before
+      // a real promotion happens.
+      await fx.store.deployments.put({
+        id: "dep_pre_existing_unpromoted",
+        workflowId: "checkout-smoke",
+        workflowVersion: "0.3.0",
+        environmentId: "env_staging",
+        triggerConfig: {},
+        createdAt: fx.clock.nowIso(),
+        promoted: false,
+      });
+
+      const result = await promoteWorkflowVersionToEnvironment(fx.store, { workflowId: "checkout-smoke", workflowVersion: "0.3.0", environmentId: "env_staging" });
+      expect(result.kind).toBe("promoted");
+      if (result.kind === "promoted") {
+        expect(result.deployment.id).toBe("dep_pre_existing_unpromoted"); // merged, not a new row
+        expect(result.deployment.promoted).toBe(true);
+      }
+    });
+  });
+
   it("does not create a Deployment when not promoted", async () => {
     fx = await createTestFixture();
     await setUpWorkflow(fx);

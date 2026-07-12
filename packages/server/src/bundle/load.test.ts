@@ -281,3 +281,156 @@ describe("readBundleFromDisk — schema validation / structural errors (S12)", (
     await expect(readBundleFromDisk(outDir)).rejects.toThrow();
   });
 });
+
+// D1 "remotes + push" (AMENDMENTS.md A56) — real-environment hydration:
+// manifest.targetEnvironment resolves against an ALREADY-REGISTERED
+// Environment on the destination store (never auto-vivified), lands the
+// resulting Deployment under an env-scoped key + the real environmentId,
+// and stamps `promoted` from that environment's own trust mode.
+describe("hydrateBundle — real targetEnvironment resolution (AMENDMENTS.md A56)", () => {
+  it("throws a clear, actionable error when the named environment is not registered on the destination store", async () => {
+    laptop = await createTestFixture();
+    await laptop.store.workflows.put(baseWorkflow({ id: "wf-unregistered-env", version: "1" }));
+    outDir = await produceAndWrite(laptop, { workflowId: "wf-unregistered-env", workflowVersion: "1", targetEnvironment: "production" });
+
+    server = await createTestFixture();
+    // Deliberately NOT registering "production" on the server store first.
+    await expect(hydrateBundleFromDisk(server.store, outDir)).rejects.toThrow(/target environment "production" is not registered/i);
+    // The remedy is actionable, not just an error label.
+    await expect(hydrateBundleFromDisk(server.store, outDir)).rejects.toThrow(/aart environment register|POST \/environments/i);
+    // No auto-vivification: refusing left no environment named "production" behind.
+    await expect(server.store.environments.getByName("production")).resolves.toBeUndefined();
+  });
+
+  it("hydrates into the REAL registered environment — env-scoped deploymentId, real environmentId, no synthetic env_bundle row created", async () => {
+    laptop = await createTestFixture();
+    await laptop.store.workflows.put(baseWorkflow({ id: "wf-real-env", version: "1" }));
+    outDir = await produceAndWrite(laptop, { workflowId: "wf-real-env", workflowVersion: "1", targetEnvironment: "staging" });
+
+    server = await createTestFixture();
+    await server.store.environments.put({ id: "env_real_staging", name: "staging", config: { trustMode: "governed" } });
+    const result = await hydrateBundleFromDisk(server.store, outDir);
+
+    expect(result.kind).toBe("hydrated");
+    expect(result.deploymentId).toBe("bundle:wf-real-env@1:env_real_staging"); // env-scoped, resolved id not name
+    const deployment = await server.store.deployments.get(result.deploymentId);
+    expect(deployment?.environmentId).toBe("env_real_staging");
+    // No synthetic env_bundle row was created for this real-target hydration.
+    await expect(server.store.environments.getByName("bundle")).resolves.toBeUndefined();
+  });
+
+  it("promoted:true when the target environment's trust mode is dev (no required gates — immediately live)", async () => {
+    laptop = await createTestFixture();
+    await laptop.store.workflows.put(baseWorkflow({ id: "wf-dev-env", version: "1" }));
+    outDir = await produceAndWrite(laptop, { workflowId: "wf-dev-env", workflowVersion: "1", targetEnvironment: "sandbox" });
+
+    server = await createTestFixture();
+    await server.store.environments.put({ id: "env_sandbox", name: "sandbox", config: { trustMode: "dev" } });
+    const result = await hydrateBundleFromDisk(server.store, outDir);
+    const deployment = await server.store.deployments.get(result.deploymentId);
+    expect(deployment?.promoted).toBe(true);
+  });
+
+  it.each(["governed", "strict", "production"] as const)("promoted:false when the target environment's trust mode is %s — evidence recorded, awaiting promotion", async (trustMode) => {
+    laptop = await createTestFixture();
+    await laptop.store.workflows.put(baseWorkflow({ id: `wf-${trustMode}-env`, version: "1" }));
+    outDir = await produceAndWrite(laptop, { workflowId: `wf-${trustMode}-env`, workflowVersion: "1", targetEnvironment: "gated" });
+
+    server = await createTestFixture();
+    await server.store.environments.put({ id: `env_${trustMode}`, name: "gated", config: { trustMode } });
+    const result = await hydrateBundleFromDisk(server.store, outDir);
+    const deployment = await server.store.deployments.get(result.deploymentId);
+    expect(deployment?.promoted).toBe(false);
+    // ...and the chokepoint actually honors it: no trigger binding is produced.
+    const bindings = await loadTriggerBindingsFromDeployments(server.store);
+    expect(bindings.find((b) => b.workflowId === `wf-${trustMode}-env`)).toBeUndefined();
+  });
+
+  it("an environment with no config.trustMode at all defaults to governed (promoted:false) — same convention as promotion.ts's requiredGatesForEnvironment", async () => {
+    laptop = await createTestFixture();
+    await laptop.store.workflows.put(baseWorkflow({ id: "wf-default-trustmode-env", version: "1" }));
+    outDir = await produceAndWrite(laptop, { workflowId: "wf-default-trustmode-env", workflowVersion: "1", targetEnvironment: "bare" });
+
+    server = await createTestFixture();
+    await server.store.environments.put({ id: "env_bare", name: "bare", config: {} });
+    const result = await hydrateBundleFromDisk(server.store, outDir);
+    const deployment = await server.store.deployments.get(result.deploymentId);
+    expect(deployment?.promoted).toBe(false);
+  });
+});
+
+describe("hydrateBundle — real-environment idempotency (AMENDMENTS.md A56)", () => {
+  it("same (workflow, version, environment) + same bundleHash: no-op the second time", async () => {
+    laptop = await createTestFixture();
+    await laptop.store.workflows.put(baseWorkflow({ id: "wf-idem-env", version: "1" }));
+    outDir = await produceAndWrite(laptop, { workflowId: "wf-idem-env", workflowVersion: "1", targetEnvironment: "staging" });
+
+    server = await createTestFixture();
+    await server.store.environments.put({ id: "env_idem_staging", name: "staging", config: { trustMode: "dev" } });
+    const first = await hydrateBundleFromDisk(server.store, outDir);
+    expect(first.kind).toBe("hydrated");
+    const second = await hydrateBundleFromDisk(server.store, outDir);
+    expect(second.kind).toBe("already_hydrated");
+    expect(second.deploymentId).toBe(first.deploymentId);
+  });
+
+  it("same (workflow, version, environment) + DIFFERENT bundleHash: refuses with the existing conflict error shape", async () => {
+    laptop = await createTestFixture();
+    await laptop.store.workflows.put(baseWorkflow({ id: "wf-conflict-env", version: "1", name: "version A" }));
+    const dirA = await produceAndWrite(laptop, { workflowId: "wf-conflict-env", workflowVersion: "1", targetEnvironment: "staging" });
+    await laptop.store.workflows.put(baseWorkflow({ id: "wf-conflict-env", version: "1", name: "version B (different content, same id@version)" }));
+    const dirB = await produceAndWrite(laptop, { workflowId: "wf-conflict-env", workflowVersion: "1", targetEnvironment: "staging" });
+
+    server = await createTestFixture();
+    await server.store.environments.put({ id: "env_conflict_staging", name: "staging", config: { trustMode: "dev" } });
+    await hydrateBundleFromDisk(server.store, dirA);
+    await expect(hydrateBundleFromDisk(server.store, dirB)).rejects.toThrow(/already hydrated.*different bundle/i);
+    const workflow = await server.store.workflows.get("wf-conflict-env", "1");
+    expect(workflow?.name).toBe("version A"); // refused, not silently overwritten
+
+    await fs.rm(dirA, { recursive: true, force: true });
+    await fs.rm(dirB, { recursive: true, force: true });
+  });
+
+  it("same workflow@version hydrated into TWO DIFFERENT real environments: independent rows, both legal, neither refused", async () => {
+    laptop = await createTestFixture();
+    await laptop.store.workflows.put(baseWorkflow({ id: "wf-multi-env", version: "1" }));
+    const dirStaging = await produceAndWrite(laptop, { workflowId: "wf-multi-env", workflowVersion: "1", targetEnvironment: "staging" });
+    const dirProd = await produceAndWrite(laptop, { workflowId: "wf-multi-env", workflowVersion: "1", targetEnvironment: "production" });
+
+    server = await createTestFixture();
+    await server.store.environments.put({ id: "env_multi_staging", name: "staging", config: { trustMode: "dev" } });
+    await server.store.environments.put({ id: "env_multi_prod", name: "production", config: { trustMode: "dev" } });
+
+    const stagingResult = await hydrateBundleFromDisk(server.store, dirStaging);
+    const prodResult = await hydrateBundleFromDisk(server.store, dirProd);
+    expect(stagingResult.kind).toBe("hydrated");
+    expect(prodResult.kind).toBe("hydrated");
+    expect(stagingResult.deploymentId).not.toBe(prodResult.deploymentId);
+    expect(stagingResult.deploymentId).toBe("bundle:wf-multi-env@1:env_multi_staging");
+    expect(prodResult.deploymentId).toBe("bundle:wf-multi-env@1:env_multi_prod");
+
+    await fs.rm(dirStaging, { recursive: true, force: true });
+    await fs.rm(dirProd, { recursive: true, force: true });
+  });
+
+  it("a real-target hydration and a legacy (no targetEnvironment) hydration of the SAME workflow@version never collide — different key shapes entirely", async () => {
+    laptop = await createTestFixture();
+    await laptop.store.workflows.put(baseWorkflow({ id: "wf-legacy-vs-real", version: "1" }));
+    const dirReal = await produceAndWrite(laptop, { workflowId: "wf-legacy-vs-real", workflowVersion: "1", targetEnvironment: "staging" });
+    const dirLegacy = await produceAndWrite(laptop, { workflowId: "wf-legacy-vs-real", workflowVersion: "1" });
+
+    server = await createTestFixture();
+    await server.store.environments.put({ id: "env_legacy_vs_real", name: "staging", config: { trustMode: "dev" } });
+
+    const realResult = await hydrateBundleFromDisk(server.store, dirReal);
+    const legacyResult = await hydrateBundleFromDisk(server.store, dirLegacy);
+    expect(realResult.kind).toBe("hydrated");
+    expect(legacyResult.kind).toBe("hydrated"); // NOT already_hydrated — genuinely independent rows
+    expect(realResult.deploymentId).toBe("bundle:wf-legacy-vs-real@1:env_legacy_vs_real");
+    expect(legacyResult.deploymentId).toBe("bundle:wf-legacy-vs-real@1");
+
+    await fs.rm(dirReal, { recursive: true, force: true });
+    await fs.rm(dirLegacy, { recursive: true, force: true });
+  });
+});
