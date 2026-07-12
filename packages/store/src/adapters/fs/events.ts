@@ -49,7 +49,26 @@ export class FsEventLogStore implements EventLogStore {
     const all = await this.listStored();
     const filtered = all
       .filter((e) => (filter?.since ? e.occurredAt >= filter.since : true))
-      .sort((a, b) => (a.occurredAt < b.occurredAt ? 1 : a.occurredAt > b.occurredAt ? -1 : 0)); // newest-first
-    return filter?.limit !== undefined ? filtered.slice(0, filter.limit) : filtered;
+      // Newest-first by occurredAt; ties (e.g. a burst of same-ms events,
+      // aart_approve's own 3-event emission) broken DESC by `id` (D2b/V1 fix
+      // pass, AMENDMENTS.md A63 FIX 4) — without this, ties fell back to
+      // Array.prototype.sort's stability, i.e. whatever order `readdir()`
+      // (listStored, above) happened to return them in, which is NOT a
+      // total order this store's own contract promises and is not
+      // guaranteed to agree with the sqlite adapter's own tie behavior.
+      .sort((a, b) => (a.occurredAt < b.occurredAt ? 1 : a.occurredAt > b.occurredAt ? -1 : a.id < b.id ? 1 : a.id > b.id ? -1 : 0));
+    if (filter?.limit === undefined) return filtered;
+    // D2b/V1 fix pass (AMENDMENTS.md A63, FIX 3) — a negative limit must
+    // never reach `slice()` directly: `slice(0, -N)` means "drop the last N
+    // items," not "give me none" or "give me everything," which silently
+    // returned MORE of the log than a caller passing a negative number could
+    // have intended. The route layer (http/server.ts's parseEventsLimit)
+    // already prevents a negative value from reaching here via HTTP, but
+    // this store is not reachable only through that one route — treated as
+    // "zero" here, the same safe-direction choice this store's sqlite
+    // sibling adapter (adapters/sqlite/stores/events.ts) makes, never
+    // "unlimited."
+    if (filter.limit < 0) return [];
+    return filtered.slice(0, filter.limit);
   }
 }

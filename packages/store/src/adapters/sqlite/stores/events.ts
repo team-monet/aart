@@ -77,10 +77,28 @@ export class SqliteEventLogStore implements EventLogStore {
     const where = clauses.length ? ` WHERE ${clauses.join(" AND ")}` : "";
     let limitClause = "";
     if (filter?.limit !== undefined) {
+      // D2b/V1 fix pass (AMENDMENTS.md A63, FIX 3) — SQLite treats a
+      // negative `LIMIT` as "no limit at all" (its own documented
+      // behavior), the OPPOSITE of the fs sibling adapter's pre-fix
+      // `slice(0, -N)` ("drop the last N") — two adapters silently
+      // disagreeing about what a negative limit even means, let alone
+      // returning the same rows. Clamped to 0 here — "zero rows," the same
+      // safe-direction choice `adapters/fs/events.ts` makes, never
+      // "unlimited" (the route layer, http/server.ts's parseEventsLimit,
+      // already keeps a negative value from reaching here via HTTP, but
+      // this store is not reachable only through that one route).
+      const safeLimit = filter.limit < 0 ? 0 : filter.limit;
       limitClause = " LIMIT ?";
-      params.push(filter.limit);
+      params.push(safeLimit);
     }
-    const rows = await this.exec((db) => dbAll<EventRow>(db, `SELECT * FROM events${where} ORDER BY occurred_at DESC${limitClause}`, params));
+    // Newest-first by occurred_at; ties (e.g. a burst of same-ms events,
+    // aart_approve's own 3-event emission) broken DESC by `id` (D2b/V1 fix
+    // pass, AMENDMENTS.md A63 FIX 4) — without a secondary key, SQLite's tie
+    // order for equal occurred_at values is unspecified (no ORDER BY key
+    // forces one), which is NOT a total order this store's own contract
+    // promises and is not guaranteed to agree with the fs adapter's own tie
+    // behavior.
+    const rows = await this.exec((db) => dbAll<EventRow>(db, `SELECT * FROM events${where} ORDER BY occurred_at DESC, id DESC${limitClause}`, params));
     return rows.map(rowToEvent);
   }
 }
