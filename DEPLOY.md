@@ -364,7 +364,7 @@ way; know which tier a route you care about is in:
 | --- | --- | --- | --- |
 | **Fail-closed** | `POST /bundles/ingest`, `POST /bundles/plan`, `POST /environments` | Refuses **every** request, `401`, naming the env var as the remedy — no "auth disabled" state at all. | Requires a valid `Authorization: Bearer <token>` (or, mid-[rotation](#deploy-token), `AART_DEPLOY_TOKEN_NEXT`); wrong/missing -> `401`. |
 | **Conditionally gated** | Every OTHER write route: `POST /workflows/:id/promote`, `/approve`, `/block-promotion`, `/unblock-promotion`, `/mark-needs-review`, `/clear-needs-review`, `/trigger-improvement`; `POST /runs/trigger`, `/runs/:runId/resume`, `/runs/:runId/signal`, `/runs/:runId/flag/clear`; `POST /approvals/:id/decision`; `POST /corrections`, `/corrections/:key/update-run-output`, `/corrections/:key/create-eval-example`, `/corrections/:key/create-issue`; `POST /evals/suites`, `/evals/runs` | **Open** — unchanged pre-A56 behavior on every one of these, so a tokenless local/dev/TEST-DRIVE deployment keeps working with zero config change. One loud warning is logged ONCE at server startup (not per-request) when this is the case. | Requires the SAME valid Bearer (or rotation-successor token) the fail-closed tier does; wrong/missing -> `401` (a differently-worded, route-specific remedy — "provide a valid token, this route requires it to <action>" — not "set `AART_DEPLOY_TOKEN`," since one already is). |
-| **Open, always** | Every GET route; the three `/webhooks/*` routes (separate, per-binding HMAC verification — [Secret management](#secret-management) above, completely untouched) | Unaffected either way — `AART_DEPLOY_TOKEN` plays no role here at all. | Unaffected either way. |
+| **Open, always** | Every GET route; the three `/webhooks/*` routes (separate, per-binding HMAC verification — [Secret management](#secret-management) above — `AART_DEPLOY_TOKEN`/rotation plays no role here at all, untouched by this gate; these three DO carry their own, larger request-body cap, unrelated to auth — see [Ops limits](#ops-limits--read-this-before-you-rely-on-it)'s "Request body size caps" bullet, AMENDMENTS.md A60) | Unaffected either way — `AART_DEPLOY_TOKEN` plays no role here at all. | Unaffected either way. |
 
 **As of D2a (AMENDMENTS.md A59), "conditionally gated" is the norm, not the
 exception** — before this session, only `POST /workflows/:id/promote` sat
@@ -716,6 +716,32 @@ Stated plainly, matching this repo's own "What doesn't work yet" convention
   stdout+stderr with whatever your process manager or container runtime
   already does. Plus the `/health`/`/runs`/`/deployments`/
   `/rejected-triggers` HTTP endpoints for polling-based monitoring.
+- **Request body size caps (AMENDMENTS.md A59/A60).** Every route on
+  `aart server` has a hard cap on request body size — `Router.handle`'s own
+  `readBody` (`packages/server/src/http/router.ts`) rejects an over-cap
+  body `413` before JSON-parsing (or, for a gated route, before the request
+  is even authenticated) ever runs, via a `Content-Length` pre-check when
+  the header is present and honest, plus a running-total check during
+  accumulation otherwise (catches chunked transfer-encoding, or a client
+  that lies about/omits the header) — never a truly unbounded read. Three
+  tiers, by route:
+  1. **1MB** (`DEFAULT_MAX_BODY_BYTES`) — every control-plane route that
+     doesn't specify its own cap: trigger a run, decide an approval, record
+     a correction, create/run an eval suite, and similar small JSON
+     payloads.
+  2. **10MB** (`MAX_BUNDLE_INGEST_BYTES`) — `POST /bundles/ingest`/`POST
+     /bundles/plan`, sized for a real workflow closure bundle (100% JSON
+     text).
+  3. **25 MiB / 26,214,400 bytes** (`MAX_WEBHOOK_INGEST_BYTES`, AMENDMENTS.md
+     A60) — the three `/webhooks/*` routes, sized to (and slightly past)
+     GitHub's own documented ~25MB webhook payload ceiling. These are
+     EXTERNAL, operator-uncontrolled payloads, not small control-plane
+     JSON — GitHub does not retry a delivery it can't make, so this bound
+     has to cover the largest delivery GitHub could actually send, not a
+     typical one; a body between 1MB and this cap that would have 413'd
+     under tier 1 now reaches HMAC verification/intake normally.
+  If you front any route with your own reverse proxy, make sure it doesn't
+  impose a SMALLER cap than the tier that route actually needs.
 - **No LOGIN/API-key authentication in front of the control-plane HTTP API
   or the dashboard — corrected from this bullet's own pre-D2a text, which
   overstated how open every write route was.** `GET /runs`, `GET

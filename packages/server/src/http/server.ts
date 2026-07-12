@@ -13,7 +13,7 @@ import { type Bundle } from "../bundle/bundle.js";
 import { hydrateBundle, readBundleFromEnvelope } from "../bundle/load.js";
 import { planBundleIngest } from "../bundle/plan.js";
 import { systemClock, type Clock } from "../clock.js";
-import { DEFAULT_HTTP_HOST, DEFAULT_HTTP_PORT, MAX_BUNDLE_INGEST_BYTES, type ServerConfig } from "../config.js";
+import { DEFAULT_HTTP_HOST, DEFAULT_HTTP_PORT, MAX_BUNDLE_INGEST_BYTES, MAX_WEBHOOK_INGEST_BYTES, type ServerConfig } from "../config.js";
 import { findCorrectionByKey } from "../corrections.js";
 import { checkAnyDeployToken, extractBearerToken } from "../deploy-token.js";
 import { registerEnvironment, type RegisterEnvironmentParams } from "../environments.js";
@@ -316,7 +316,7 @@ export async function startServer(config: ServerConfig): Promise<ServerHandle> {
     }
     const outcome = await processTriggerIntake(intakeDeps(), binding, adapted);
     return sendJson(ctx.res, outcomeStatus(outcome), outcome);
-  });
+  }, { maxBodyBytes: MAX_WEBHOOK_INGEST_BYTES });
 
   router.post("/webhooks/github/:bindingId", async (ctx, body, rawBody) => {
     const binding = await findBinding(config, ctx.params["bindingId"]!);
@@ -334,7 +334,7 @@ export async function startServer(config: ServerConfig): Promise<ServerHandle> {
     }
     const outcome = await processTriggerIntake(intakeDeps(), binding, adapted);
     return sendJson(ctx.res, outcomeStatus(outcome), outcome);
-  });
+  }, { maxBodyBytes: MAX_WEBHOOK_INGEST_BYTES });
 
   router.post("/webhooks/slack/:bindingId", async (ctx, body, rawBody) => {
     const binding = await findBinding(config, ctx.params["bindingId"]!);
@@ -348,7 +348,7 @@ export async function startServer(config: ServerConfig): Promise<ServerHandle> {
     }
     const outcome = await processTriggerIntake(intakeDeps(), binding, adapted);
     return sendJson(ctx.res, outcomeStatus(outcome), outcome);
-  });
+  }, { maxBodyBytes: MAX_WEBHOOK_INGEST_BYTES });
 
   // Approval endpoints (spec §17.5's CLI/dashboard authority surfaces —
   // this HTTP API is what @aart/cli and @aart/dashboard, S5/S8, call; the

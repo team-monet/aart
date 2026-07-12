@@ -144,6 +144,60 @@ describe("webhook ingress (architecture §6.1/§15)", () => {
     const res = await fetch(`http://localhost:${handle.port}/webhooks/no-such-binding`, { method: "POST", body: "{}" });
     expect(res.status).toBe(404);
   });
+
+  // D2a fix pass (AMENDMENTS.md A60, FIX 1) — before this fix, these three
+  // routes passed no maxBodyBytes of their own, so they silently inherited
+  // D2a's GLOBAL DEFAULT_MAX_BODY_BYTES (1MB, AMENDMENTS.md A59) the moment
+  // that default started applying to every uncapped route — a real
+  // regression for webhook deliveries specifically (external,
+  // operator-uncontrolled payloads; GitHub's own ceiling is 25MB, and
+  // GitHub does not retry a delivery it can't make). This proves the fix:
+  // a body clearly over the OLD 1MB default, but under the new
+  // MAX_WEBHOOK_INGEST_BYTES cap, now succeeds all the way through HMAC
+  // verification and trigger intake instead of 413ing before either ever run.
+  it("size cap: a body between 1MB and MAX_WEBHOOK_INGEST_BYTES succeeds through to HMAC verification and intake (previously 413'd under the global 1MB default)", async () => {
+    fx = await createTestFixture();
+    await fx.store.deployments.put({
+      id: "binding_large",
+      workflowId: "wf_webhook",
+      workflowVersion: "1",
+      environmentId: "env_1",
+      triggerConfig: { type: "webhook", webhookPath: "/webhooks/binding_large", webhookHmacSecretRef: "secrets.WEBHOOK_SECRET" },
+      createdAt: fx.clock.nowIso(),
+    });
+    handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false, secretResolver: async () => "real-secret" });
+
+    // ~2MB — comfortably over the pre-fix 1MB global default, comfortably
+    // under the new 25 MiB webhook cap.
+    const payload = { file_url: "https://x/bill.pdf", padding: "a".repeat(2 * 1024 * 1024) };
+    const rawBody = JSON.stringify(payload);
+    expect(rawBody.length).toBeGreaterThan(1_048_576);
+    const sig = computeHmacSignature(new TextEncoder().encode(rawBody), "real-secret");
+    const res = await fetch(`http://localhost:${handle.port}/webhooks/binding_large`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-aart-signature": sig },
+      body: rawBody,
+    });
+    expect(res.status).toBe(200);
+    const body = (await json(res)) as { kind: string };
+    expect(body.kind).toBe("started");
+  });
+
+  it("size cap: a body over MAX_WEBHOOK_INGEST_BYTES is rejected 413", async () => {
+    fx = await createTestFixture();
+    handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false });
+    // A plain oversized body — 413 fires from the router's Content-Length
+    // pre-check before this handler (or HMAC verification) ever runs, so
+    // the content doesn't need to be a real signed payload or a real
+    // binding id (mirrors /bundles/ingest's own size-cap test below).
+    const oversized = "x".repeat(27 * 1024 * 1024); // 27MB > the 25 MiB (26,214,400-byte) cap
+    const res = await fetch(`http://localhost:${handle.port}/webhooks/no-such-binding`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: oversized,
+    });
+    expect(res.status).toBe(413);
+  });
 });
 
 describe("--environment scoping (AMENDMENTS.md A45) — config.environmentId restricts which deployments' trigger bindings activate", () => {

@@ -146,6 +146,33 @@ export const DEFAULT_HTTP_PORT = 8080;
 /** D1 "remotes + push" (AMENDMENTS.md A56) — hard request-body cap for `POST /bundles/ingest` and `POST /bundles/plan` (http/server.ts, `Router.post`'s `maxBodyBytes` option). Bundles are 100% JSON text (bundle.ts's own doc comment) — 10MB is generous headroom for a real workflow closure while still bounding memory a single deploy-surface request can force this process to buffer. */
 export const MAX_BUNDLE_INGEST_BYTES = 10 * 1024 * 1024;
 /**
+ * D2a fix pass (AMENDMENTS.md A60, FIX 1) — hard request-body cap for the
+ * three `/webhooks/*` routes (http/server.ts, `Router.post`'s
+ * `maxBodyBytes` option). These routes pass no `maxBodyBytes` of their own
+ * pre-this-fix, so once D2a's own `DEFAULT_MAX_BODY_BYTES` (below) started
+ * applying to every route that doesn't opt out, they silently inherited a
+ * 1MB cap sized for small control-plane JSON, not for these routes' actual
+ * payload shape: webhook deliveries are EXTERNAL, operator-uncontrolled
+ * payloads. GitHub's own documented webhook ceiling is 25 MB ("Payloads
+ * are capped at 25 MB," https://docs.github.com/en/webhooks/webhook-events-and-payloads,
+ * confirmed unchanged across GitHub Enterprise Cloud/Server doc versions
+ * too) and GitHub does not retry a delivery it can't make — so a >1MB
+ * delivery arriving under the global default would 413 before HMAC/intake
+ * ever ran and be PERMANENTLY, SILENTLY dropped, never redelivered. 25 MiB
+ * (26,214,400 bytes) — not 25 MB decimal (25,000,000) — is chosen to
+ * slightly exceed GitHub's own ceiling under either unit convention,
+ * mirroring `MAX_BUNDLE_INGEST_BYTES`'s own "generous headroom, hard
+ * constant" shape above. Applied uniformly to all three `/webhooks/*`
+ * routes (generic, github, slack), not sized per-provider: the generic and
+ * Slack routes are the identical "external, operator-uncontrolled sender"
+ * surface this constant exists for, even though GitHub is the only one of
+ * the three with a documented ceiling this large. Still strictly safer
+ * than pre-A59 `main`'s fully UNBOUNDED webhook body read (this is a cap,
+ * not a return to no cap at all) while no longer silently dropping
+ * legitimate large deliveries the way the global 1MB default did.
+ */
+export const MAX_WEBHOOK_INGEST_BYTES = 26_214_400;
+/**
  * D2a security hardening (AMENDMENTS.md A59) — the GLOBAL default body cap
  * `Router.handle` (http/router.ts) now applies to every route that doesn't
  * pass its own `maxBodyBytes` (previously: no cap at all, unless a route
@@ -155,9 +182,11 @@ export const MAX_BUNDLE_INGEST_BYTES = 10 * 1024 * 1024;
  * construction; 1MB is generous headroom for any of them while still
  * bounding the memory an unauthenticated-until-this-session, now
  * conditionally-gated caller could force this process to buffer per
- * request. The two bundle routes keep their own, much larger, explicit
- * `MAX_BUNDLE_INGEST_BYTES` cap above — this default only applies where no
- * explicit `maxBodyBytes` is given.
+ * request. The bundle routes keep their own, much larger, explicit
+ * `MAX_BUNDLE_INGEST_BYTES` cap above, and (AMENDMENTS.md A60, FIX 1) the
+ * three `/webhooks/*` routes now keep their own explicit
+ * `MAX_WEBHOOK_INGEST_BYTES` cap above too — this default only applies
+ * where no explicit `maxBodyBytes` is given.
  */
 export const DEFAULT_MAX_BODY_BYTES = 1_048_576;
 /**
