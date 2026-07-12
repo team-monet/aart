@@ -140,18 +140,64 @@ async function resolveHydrationTarget(store: AartStore, targetEnvironmentName: s
   return { environment, promoted: trustMode === "dev" };
 }
 
-async function readJsonFile(filePath: string, label: string): Promise<unknown> {
-  let raw: string;
-  try {
-    raw = await fs.readFile(filePath, "utf8");
-  } catch (err) {
-    throw new Error(`Bundle load: cannot read ${label} (${filePath}): ${err instanceof Error ? err.message : String(err)}`);
-  }
-  try {
-    return JSON.parse(raw);
-  } catch (err) {
-    throw new Error(`Bundle load: ${label} (${filePath}) is not valid JSON: ${err instanceof Error ? err.message : String(err)}`);
-  }
+/**
+ * D1 "remotes + push" (AMENDMENTS.md A56) — the one abstraction
+ * `readBundleFromDisk` (a real directory on disk) and `readBundleFromEnvelope`
+ * (an in-memory `{files: Record<relPath, string>}` map — `POST
+ * /bundles/ingest`'s own envelope shape, exactly `bundleToBundleLike`'s
+ * `{manifest, files}` — `@aart/cli`'s `real-server-port.ts`) both implement,
+ * so `readBundleFromSource` below runs the IDENTICAL parsing / hash-
+ * verification / schema-validation pipeline over either — same failure
+ * modes, same error message shapes, one implementation maintained once, not
+ * two independently-drifting copies. `relPath` is always the bundle-
+ * relative, forward-slash path `writeBundleToDisk`/`bundleToBundleLike` both
+ * use (e.g. `"manifest.json"`, `"definitions/wf@1.json"`,
+ * `"registry/prompts/p@1.json"`) — never an absolute filesystem path, so
+ * both implementations key off exactly the same strings.
+ */
+interface BundleSource {
+  /** Reads and JSON.parses the file at bundle-relative `relPath`. Throws `Bundle load: cannot read ${label} (...): ...` on a missing/unreadable entry, or `Bundle load: ${label} (...) is not valid JSON: ...` on unparseable content — the same two failure shapes regardless of which source implementation is doing the reading. */
+  readJson(relPath: string, label: string): Promise<unknown>;
+  /** How this source describes itself in an error message that names the WHOLE bundle, not one file within it (e.g. the bundleHash-mismatch / schemaVersion messages below) — a directory path for disk, a fixed label for an envelope (which has no path of its own). */
+  describe(): string;
+}
+
+function diskSource(bundleDir: string): BundleSource {
+  return {
+    async readJson(relPath, label) {
+      const filePath = join(bundleDir, ...relPath.split("/"));
+      let raw: string;
+      try {
+        raw = await fs.readFile(filePath, "utf8");
+      } catch (err) {
+        throw new Error(`Bundle load: cannot read ${label} (${filePath}): ${err instanceof Error ? err.message : String(err)}`);
+      }
+      try {
+        return JSON.parse(raw);
+      } catch (err) {
+        throw new Error(`Bundle load: ${label} (${filePath}) is not valid JSON: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    },
+    describe: () => bundleDir,
+  };
+}
+
+/** `files` is exactly `bundleToBundleLike`'s (`@aart/cli`'s `real-server-port.ts`) / the `POST /bundles/ingest` envelope's `files: Record<relPath, string>` map — every value is the file's raw text content (not pre-parsed), matching `writeBundleFilesToDisk`'s (`packages/cli/src/bundle-files.ts`) own documented shape one layer up. */
+function envelopeSource(files: Readonly<Record<string, string>>): BundleSource {
+  return {
+    async readJson(relPath, label) {
+      const raw = files[relPath];
+      if (raw === undefined) {
+        throw new Error(`Bundle load: cannot read ${label} (${relPath}): missing from the bundle envelope.`);
+      }
+      try {
+        return JSON.parse(raw);
+      } catch (err) {
+        throw new Error(`Bundle load: ${label} (${relPath}) is not valid JSON: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    },
+    describe: () => "<bundle envelope>",
+  };
 }
 
 interface RawEntry {
@@ -160,12 +206,12 @@ interface RawEntry {
   raw: unknown;
 }
 
-/** Reads one raw (not yet Zod-validated) JSON file per `key`, at the exact path `writeBundleToDisk` would have written it to (same `sanitizeFilename`, bundle.ts). Fails fast (throws immediately) on a missing file or invalid JSON — unlike the schema-validation pass below, there's no useful "aggregate every missing file" story: a directory that doesn't match its own manifest is a structural problem, not a per-definition content problem. */
-async function readRawEntries(bundleDir: string, subpath: string, keys: readonly string[], label: string): Promise<RawEntry[]> {
+/** Reads one raw (not yet Zod-validated) JSON file per `key`, at the exact bundle-relative path `writeBundleToDisk`/`bundleToBundleLike` would have written/keyed it under (same `sanitizeFilename`, bundle.ts). Fails fast (throws immediately) on a missing entry or invalid JSON — unlike the schema-validation pass below, there's no useful "aggregate every missing file" story: a bundle that doesn't match its own manifest is a structural problem, not a per-definition content problem. */
+async function readRawEntries(source: BundleSource, subpath: string, keys: readonly string[], label: string): Promise<RawEntry[]> {
   const out: RawEntry[] = [];
   for (const key of keys) {
-    const filePath = join(bundleDir, subpath, `${sanitizeFilename(key)}.json`);
-    out.push({ key, filePath, raw: await readJsonFile(filePath, label) });
+    const relPath = `${subpath}/${sanitizeFilename(key)}.json`;
+    out.push({ key, filePath: relPath, raw: await source.readJson(relPath, label) });
   }
   return out;
 }
@@ -199,57 +245,62 @@ function validateRegistryEntries<T extends { name: string; version: string; cont
 }
 
 /**
- * Reads a bundle directory (architecture §0.3's layout) off disk into an
+ * Reads a bundle (architecture §0.3's layout) from `source` into an
  * in-memory `Bundle`, as strict as `produceBundle`'s own output: verifies
  * `bundleHash` (see this module's header for why that runs first) then
  * validates every workflow/pack/prompt/schema definition against the REAL
  * `@aart/types` Zod schemas, aggregating every failure into one error
  * rather than stopping at the first — a bundle with several bad files
  * should report all of them in one pass. Throws — never returns a
- * partially-valid `Bundle` — on any of: a missing/unreadable file, invalid
+ * partially-valid `Bundle` — on any of: a missing/unreadable entry, invalid
  * JSON, a manifest/definition that fails its Zod schema, a definition's own
  * identity (id/version, or name/version/contentHash for packs/prompts/
  * schemas) not matching its manifest entry, or a bundleHash mismatch.
+ *
+ * D1 "remotes + push" (AMENDMENTS.md A56) — the shared core both
+ * `readBundleFromDisk` and `readBundleFromEnvelope` below call; see
+ * `BundleSource`'s own doc comment for why this exists as one function over
+ * an abstraction rather than two independently-maintained copies.
  */
-export async function readBundleFromDisk(bundleDir: string): Promise<Bundle> {
-  const manifestRaw = await readJsonFile(join(bundleDir, "manifest.json"), "manifest.json");
+async function readBundleFromSource(source: BundleSource): Promise<Bundle> {
+  const manifestRaw = await source.readJson("manifest.json", "manifest.json");
   const manifestParsed = BundleManifestSchema.safeParse(manifestRaw);
   if (!manifestParsed.success) {
-    throw new Error(`Bundle load: manifest.json (${bundleDir}) failed schema validation:\n${manifestParsed.error.message}`);
+    throw new Error(`Bundle load: manifest.json (${source.describe()}) failed schema validation:\n${manifestParsed.error.message}`);
   }
   const manifest = manifestParsed.data;
   if (manifest.schemaVersion !== 1) {
-    throw new Error(`Bundle load: manifest.json (${bundleDir}) declares schemaVersion ${manifest.schemaVersion as number} — this build only understands schemaVersion 1. Refusing to load.`);
+    throw new Error(`Bundle load: manifest.json (${source.describe()}) declares schemaVersion ${manifest.schemaVersion as number} — this build only understands schemaVersion 1. Refusing to load.`);
   }
 
-  const triggersRaw = await readJsonFile(join(bundleDir, "triggers.json"), "triggers.json");
+  const triggersRaw = await source.readJson("triggers.json", "triggers.json");
   const triggersParsed = TriggerConfigSchema.safeParse(triggersRaw);
   if (!triggersParsed.success) {
-    throw new Error(`Bundle load: triggers.json (${bundleDir}) must be a JSON object (produceBundle always writes one, even when empty: "{}"). ${triggersParsed.error.message}`);
+    throw new Error(`Bundle load: triggers.json (${source.describe()}) must be a JSON object (produceBundle always writes one, even when empty: "{}"). ${triggersParsed.error.message}`);
   }
   const triggers = triggersParsed.data;
 
   const rawWorkflows = await readRawEntries(
-    bundleDir,
+    source,
     "definitions",
     manifest.workflows.map((w) => `${w.workflowId}@${w.version}`),
     "workflow definition",
   );
   const rawPacks = await readRawEntries(
-    bundleDir,
+    source,
     "packs",
     manifest.packs.map((p) => `${p.name}@${p.version}`),
     "pack manifest",
   );
   const rawPrompts = await readRawEntries(
-    bundleDir,
-    join("registry", "prompts"),
+    source,
+    "registry/prompts",
     manifest.prompts.map((p) => `${p.name}@${p.version}`),
     "prompt registry entry",
   );
   const rawSchemas = await readRawEntries(
-    bundleDir,
-    join("registry", "schemas"),
+    source,
+    "registry/schemas",
     manifest.schemas.map((s) => `${s.name}@${s.version}`),
     "schema registry entry",
   );
@@ -270,9 +321,9 @@ export async function readBundleFromDisk(bundleDir: string): Promise<Bundle> {
   });
   if (recomputedHash !== bundleHash) {
     throw new Error(
-      `Bundle load: bundleHash mismatch for "${manifest.workflowId}@${manifest.workflowVersion}" (${bundleDir}) — ` +
-        `manifest.json claims ${bundleHash}, recomputed ${recomputedHash} from the bundle's actual on-disk contents. ` +
-        `This bundle directory has been modified or corrupted since it was produced — refusing to load it.`,
+      `Bundle load: bundleHash mismatch for "${manifest.workflowId}@${manifest.workflowVersion}" (${source.describe()}) — ` +
+        `manifest.json claims ${bundleHash}, recomputed ${recomputedHash} from the bundle's actual contents. ` +
+        `This bundle has been modified or corrupted since it was produced — refusing to load it.`,
     );
   }
 
@@ -300,10 +351,30 @@ export async function readBundleFromDisk(bundleDir: string): Promise<Bundle> {
   const schemas = validateRegistryEntries<SchemaRegistryEntry>(rawSchemas, manifest.schemas, SchemaRegistryEntrySchema, errors);
 
   if (errors.length > 0) {
-    throw new Error(`Bundle load: ${errors.length} definition(s) in ${bundleDir} failed validation:\n${errors.join("\n")}`);
+    throw new Error(`Bundle load: ${errors.length} definition(s) in ${source.describe()} failed validation:\n${errors.join("\n")}`);
   }
 
   return { manifest, definitions, packs, registry: { prompts, schemas }, triggers };
+}
+
+/** Reads a bundle directory (architecture §0.3's layout) off disk into an in-memory `Bundle` — see `readBundleFromSource`'s own doc comment for the full validation contract this delegates to. */
+export async function readBundleFromDisk(bundleDir: string): Promise<Bundle> {
+  return readBundleFromSource(diskSource(bundleDir));
+}
+
+/**
+ * D1 "remotes + push" (AMENDMENTS.md A56) — reads a bundle from an in-memory
+ * envelope (`POST /bundles/ingest`/`POST /bundles/plan`'s own request body
+ * shape: `{ files: Record<relPath, string> }`, exactly what
+ * `bundleToBundleLike` (`@aart/cli`'s `real-server-port.ts`) already builds
+ * client-side — see D-1 of the design memo) into an in-memory `Bundle`.
+ * Mirrors EVERY `readBundleFromDisk` failure mode with the identical error
+ * shape (missing file, invalid JSON, hash mismatch, schema failure) — see
+ * `readBundleFromSource`'s own doc comment for why this is the same
+ * function under the hood, not a re-derived parallel implementation.
+ */
+export async function readBundleFromEnvelope(files: Readonly<Record<string, string>>): Promise<Bundle> {
+  return readBundleFromSource(envelopeSource(files));
 }
 
 /**

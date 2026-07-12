@@ -10,8 +10,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { Workflow } from "@aart/types";
 import { loadTriggerBindingsFromDeployments } from "../triggers/registry.js";
 import { createTestFixture, type TestFixture } from "../test-helpers.js";
-import { produceBundle, writeBundleToDisk } from "./bundle.js";
-import { hydrateBundle, hydrateBundleFromDisk, readBundleFromDisk, verifyBundleHash } from "./load.js";
+import { produceBundle, sanitizeFilename, writeBundleToDisk, type Bundle } from "./bundle.js";
+import { hydrateBundle, hydrateBundleFromDisk, readBundleFromDisk, readBundleFromEnvelope, verifyBundleHash } from "./load.js";
 
 let laptop: TestFixture | undefined;
 let server: TestFixture | undefined;
@@ -77,6 +77,28 @@ async function produceAndWrite(fx: TestFixture, params: Parameters<typeof produc
   const dir = await fs.mkdtemp(join(tmpdir(), "aart-bundle-load-test-"));
   await writeBundleToDisk(bundle, dir);
   return dir;
+}
+
+/**
+ * D1 "remotes + push" (AMENDMENTS.md A56) — a local, test-only mirror of
+ * `bundleToBundleLike`'s file-flattening (`@aart/cli`'s `real-server-port.ts`)
+ * for exercising `readBundleFromEnvelope` in isolation, WITHOUT this
+ * package taking a (backwards — @aart/server must never depend on
+ * @aart/cli) dependency on that sibling package's implementation. Same
+ * on-disk-equivalent layout `writeBundleToDisk` uses, just as an in-memory
+ * `Record<relPath, string>` instead of real files — the exact envelope shape
+ * `POST /bundles/ingest`/`POST /bundles/plan` receive as their request body.
+ */
+function bundleToFiles(bundle: Bundle): Record<string, string> {
+  const files: Record<string, string> = {
+    "manifest.json": JSON.stringify(bundle.manifest, null, 2),
+    "triggers.json": JSON.stringify(bundle.triggers, null, 2),
+  };
+  for (const [key, workflow] of Object.entries(bundle.definitions)) files[`definitions/${sanitizeFilename(key)}.json`] = JSON.stringify(workflow, null, 2);
+  for (const [key, manifest] of Object.entries(bundle.packs)) files[`packs/${sanitizeFilename(key)}.json`] = JSON.stringify(manifest, null, 2);
+  for (const [key, entry] of Object.entries(bundle.registry.prompts)) files[`registry/prompts/${sanitizeFilename(key)}.json`] = JSON.stringify(entry, null, 2);
+  for (const [key, entry] of Object.entries(bundle.registry.schemas)) files[`registry/schemas/${sanitizeFilename(key)}.json`] = JSON.stringify(entry, null, 2);
+  return files;
 }
 
 describe("readBundleFromDisk / hydrateBundle — round-trip (S12)", () => {
@@ -279,6 +301,90 @@ describe("readBundleFromDisk — schema validation / structural errors (S12)", (
     await fs.writeFile(manifestPath, JSON.stringify({ ...manifest, schemaVersion: 2 }, null, 2));
 
     await expect(readBundleFromDisk(outDir)).rejects.toThrow();
+  });
+});
+
+// D1 "remotes + push" (AMENDMENTS.md A56) — readBundleFromEnvelope mirrors
+// EVERY readBundleFromDisk failure mode above (missing file, invalid JSON,
+// hash mismatch, schema failure) with the identical error shape, since both
+// are the SAME readBundleFromSource core (load.ts) fed a different
+// BundleSource. Each test below is the direct envelope-shaped counterpart
+// of one disk-shaped test above, in the same order.
+describe("readBundleFromEnvelope — mirrors readBundleFromDisk's failure modes (AMENDMENTS.md A56)", () => {
+  it("a bundle produced then flattened to an envelope round-trips identically to the disk-read Bundle", async () => {
+    laptop = await createTestFixture();
+    await setUpTwoLevelFixture(laptop);
+    const produced = await produceBundle(laptop.store, { workflowId: "root-wf", workflowVersion: "1" });
+    const files = bundleToFiles(produced);
+
+    const fromEnvelope = await readBundleFromEnvelope(files);
+    expect(fromEnvelope).toEqual(produced);
+  });
+
+  it("throws a clear, aggregated error when a definition entry fails WorkflowSchema validation", async () => {
+    laptop = await createTestFixture();
+    await laptop.store.workflows.put(baseWorkflow({ id: "invalid-wf-env", version: "1" }));
+    const produced = await produceBundle(laptop.store, { workflowId: "invalid-wf-env", workflowVersion: "1" });
+    const files = bundleToFiles(produced);
+    // Corrupt the definition entry post-hoc with something that will not
+    // pass WorkflowSchema (missing "execution") — same corruption
+    // load.test.ts's disk-mode counterpart applies.
+    files["definitions/invalid-wf-env@1.json"] = JSON.stringify({ id: "invalid-wf-env", version: "1" });
+
+    await expect(readBundleFromEnvelope(files)).rejects.toThrow();
+  });
+
+  it("throws a clear error when an expected definition entry is missing entirely from the envelope", async () => {
+    laptop = await createTestFixture();
+    await setUpTwoLevelFixture(laptop);
+    const produced = await produceBundle(laptop.store, { workflowId: "root-wf", workflowVersion: "1" });
+    const files = bundleToFiles(produced);
+    delete files["definitions/child-wf@1.json"];
+
+    await expect(readBundleFromEnvelope(files)).rejects.toThrow(/cannot read workflow definition/i);
+  });
+
+  it("throws a clear error for an unsupported manifest schemaVersion", async () => {
+    laptop = await createTestFixture();
+    await laptop.store.workflows.put(baseWorkflow({ id: "future-wf-env", version: "1" }));
+    const produced = await produceBundle(laptop.store, { workflowId: "future-wf-env", workflowVersion: "1" });
+    const files = bundleToFiles(produced);
+    const manifest = JSON.parse(files["manifest.json"]!) as Record<string, unknown>;
+    files["manifest.json"] = JSON.stringify({ ...manifest, schemaVersion: 2 });
+
+    await expect(readBundleFromEnvelope(files)).rejects.toThrow();
+  });
+
+  it("throws loudly when a definition entry is modified after the bundle was produced (bundleHash mismatch)", async () => {
+    laptop = await createTestFixture();
+    await laptop.store.workflows.put(baseWorkflow({ id: "tamper-wf-env", version: "1" }));
+    const produced = await produceBundle(laptop.store, { workflowId: "tamper-wf-env", workflowVersion: "1" });
+    const files = bundleToFiles(produced);
+    const original = JSON.parse(files["definitions/tamper-wf-env@1.json"]!) as Workflow;
+    files["definitions/tamper-wf-env@1.json"] = JSON.stringify({ ...original, name: "tampered after sealing" });
+
+    await expect(readBundleFromEnvelope(files)).rejects.toThrow(/bundleHash mismatch/i);
+  });
+
+  it("throws loudly when the envelope's own manifest.bundleHash field is edited directly", async () => {
+    laptop = await createTestFixture();
+    await laptop.store.workflows.put(baseWorkflow({ id: "tamper-manifest-wf-env", version: "1" }));
+    const produced = await produceBundle(laptop.store, { workflowId: "tamper-manifest-wf-env", workflowVersion: "1" });
+    const files = bundleToFiles(produced);
+    const manifest = JSON.parse(files["manifest.json"]!) as { bundleHash: string };
+    files["manifest.json"] = JSON.stringify({ ...manifest, bundleHash: "0".repeat(64) });
+
+    await expect(readBundleFromEnvelope(files)).rejects.toThrow(/bundleHash mismatch/i);
+  });
+
+  it("a malformed (non-JSON) entry throws 'is not valid JSON', not a generic parse crash", async () => {
+    laptop = await createTestFixture();
+    await laptop.store.workflows.put(baseWorkflow({ id: "malformed-wf-env", version: "1" }));
+    const produced = await produceBundle(laptop.store, { workflowId: "malformed-wf-env", workflowVersion: "1" });
+    const files = bundleToFiles(produced);
+    files["manifest.json"] = "{ this is not valid JSON";
+
+    await expect(readBundleFromEnvelope(files)).rejects.toThrow(/manifest\.json.*is not valid JSON/i);
   });
 });
 
