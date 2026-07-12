@@ -132,4 +132,46 @@ export function createSqliteAddDeploymentPromotedMigration(db: DatabaseSync): Mi
   };
 }
 
-export const ALL_SQLITE_MIGRATIONS = (db: DatabaseSync): Migration[] => [createSqliteInitMigration(db), createSqliteAddDeploymentPromotedMigration(db)];
+/**
+ * D2a security hardening, token-derived attribution (AMENDMENTS.md A59) —
+ * this adapter's THIRD migration, same shape as `createSqliteAddDeploymentPromotedMigration`
+ * above (D1's own precedent for "add a nullable column, don't touch the
+ * baseline DDL"): adds `approval_tasks.authenticated_as` (nullable TEXT, no
+ * DEFAULT — deliberately NOT added to `SQLITE_SCHEMA_STATEMENTS`' own
+ * `approval_tasks` DDL in schema.ts, which stays exactly as `0001_init`
+ * always created it) so a pre-existing row's column reads back SQL `NULL`,
+ * which this adapter's `ApprovalTaskRow` -> `ApprovalTask` mapping
+ * (`stores/simple-stores.ts`'s `rowToApprovalTask`) maps to `undefined` —
+ * "no attribution available" (the correct reading for every row written
+ * before this field existed), never a false "definitely anonymous"
+ * `authenticatedAs: ""`.
+ */
+export function createSqliteAddApprovalTaskAuthenticatedAsMigration(db: DatabaseSync): Migration {
+  return {
+    id: "0003_approval_task_authenticated_as",
+    async up(): Promise<void> {
+      // Belt-and-braces, mirroring 0002's own identical tolerance (see that
+      // migration's doc comment for the full reasoning — a watermark that
+      // fell out of sync with the actual schema through some path outside
+      // this adapter's own tracking must not throw here when there is
+      // nothing left to DO).
+      try {
+        db.exec(`ALTER TABLE approval_tasks ADD COLUMN authenticated_as TEXT`);
+      } catch (err) {
+        if (err instanceof Error && err.message.includes("duplicate column name")) {
+          return;
+        }
+        throw err;
+      }
+    },
+    async down(): Promise<void> {
+      db.exec(`ALTER TABLE approval_tasks DROP COLUMN authenticated_as`);
+    },
+  };
+}
+
+export const ALL_SQLITE_MIGRATIONS = (db: DatabaseSync): Migration[] => [
+  createSqliteInitMigration(db),
+  createSqliteAddDeploymentPromotedMigration(db),
+  createSqliteAddApprovalTaskAuthenticatedAsMigration(db),
+];

@@ -288,6 +288,23 @@ export function runAartStoreConformanceSuite(label: string, options: Conformance
         await expect(store.approvals.list({ runId })).resolves.toHaveLength(2);
         await expect(store.approvals.list({ runId, status: "approved" })).resolves.toHaveLength(1);
       });
+
+      // D2a security hardening, token-derived attribution (AMENDMENTS.md
+      // A59) — an additive optional field (same pattern as A56's own
+      // `promoted` round-trip test above); every adapter must round-trip
+      // both "set" and "omitted" losslessly, never collapsing an omitted
+      // value into an empty string.
+      it("authenticatedAs round-trips when set, and stays undefined when omitted", async () => {
+        const base = { runId: uniqueId("run"), stepId: "approve", title: "Approve", description: "desc", status: "pending" as const, createdAt: new Date().toISOString() };
+        const withAuth: ApprovalTask = { ...base, id: uniqueId("at"), authenticatedAs: "deploy-token" };
+        await store.approvals.put(withAuth);
+        await expect(store.approvals.get(withAuth.id)).resolves.toEqual(withAuth);
+
+        const withoutAuth: ApprovalTask = { ...base, id: uniqueId("at") };
+        await store.approvals.put(withoutAuth);
+        await expect(store.approvals.get(withoutAuth.id)).resolves.toEqual(withoutAuth);
+        await expect(store.approvals.get(withoutAuth.id)).resolves.not.toHaveProperty("authenticatedAs", "");
+      });
     });
 
     describe("corrections", () => {
