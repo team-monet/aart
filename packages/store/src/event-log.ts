@@ -32,14 +32,30 @@ export interface RecordEventInput extends Omit<EventLogEntry, "id" | "occurredAt
  * durably persisted by the time this is called — this call can fail
  * without leaving the store in an inconsistent state, only a quieter
  * activity feed.
+ *
+ * D2b/V1 fix pass (AMENDMENTS.md A63, FIX 5) — the `entry` object used to
+ * be constructed OUTSIDE this try/catch (including the caller-supplied
+ * `now()`, a plain function this module does not control). `async
+ * function` bodies convert ANY synchronous throw into a rejected promise,
+ * try/catch or not — so a throwing `now()`/clock (or, in principle, a
+ * `randomUUID()` failure) rejected the promise this function returns
+ * instead of being absorbed like every OTHER failure mode this function's
+ * own doc comment above promises to swallow, silently contradicting the
+ * "never fails the primary operation" contract for the ~21 unguarded
+ * `await recordEvent(...)` call sites across this codebase (none of them
+ * wrap this call in their own try/catch — they rely on THIS function never
+ * throwing). Moved inside the try block, mirroring
+ * `recordRunTerminalEvent`'s own belt-and-braces wrapping below, which
+ * already wraps ITSELF for exactly this shape of gap (its own `store.runs.get`
+ * read sits outside `recordEvent`'s try/catch, so it needed an outer one).
  */
 export async function recordEvent(store: Pick<AartStore, "events">, input: RecordEventInput, now: () => Date = () => new Date()): Promise<void> {
-  const entry: EventLogEntry = {
-    ...input,
-    id: input.id ?? randomUUID(),
-    occurredAt: input.occurredAt ?? now().toISOString(),
-  };
   try {
+    const entry: EventLogEntry = {
+      ...input,
+      id: input.id ?? randomUUID(),
+      occurredAt: input.occurredAt ?? now().toISOString(),
+    };
     await store.events.append(entry);
   } catch {
     // Best-effort, deliberately swallowed — see doc comment above.
