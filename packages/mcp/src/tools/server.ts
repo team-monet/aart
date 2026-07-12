@@ -16,13 +16,20 @@
 // `aart_trigger_workflow` on >=1 Environment; `aart_create_eval_from_correction`/
 // `aart_run_eval`/`aart_promote_workflow` on >=1 EvalSuite) — "a soft
 // progressive-disclosure heuristic ... rather than a hard mode gate like
-// aart_approve's." The other 7 extended tools (6 original + D1's
-// `aart_deploy`, AMENDMENTS.md A56 — deliberately NOT added to
-// ENVIRONMENT_GATED_TOOLS: a real LOCAL Environment existing has no bearing
-// on whether a REMOTE push is possible; server-side enforcement, the
-// remote's own AART_DEPLOY_TOKEN gate, is the actual chokepoint) have no
-// data-existence precondition, so they register unconditionally alongside
-// the 9 non-gated core tools.
+// aart_approve's." D2b (AMENDMENTS.md, this session) adds a THIRD such
+// precondition: the four `aart_remote_*` read tools gate on >=1 configured
+// remote existing (REMOTE_GATED_TOOLS, below) — pointless to offer an agent
+// when there is nothing to read. `aart_deploy` (D1, AMENDMENTS.md A56) is
+// the deliberate exception among the remote/deploy-adjacent tools — NOT
+// added to REMOTE_GATED_TOOLS or ENVIRONMENT_GATED_TOOLS: a real LOCAL
+// Environment existing has no bearing on whether a REMOTE push is possible,
+// and (unlike the four read tools, which need an existing remote to read
+// FROM) `aart_deploy` is how a caller would configure their first remote's
+// content in the first place — gating it on one already existing would be
+// circular. Server-side enforcement, the remote's own AART_DEPLOY_TOKEN
+// gate, is `aart_deploy`'s actual chokepoint. The remaining 6 original
+// extended tools have no data-existence precondition at all, registering
+// unconditionally alongside the 9 non-gated core tools.
 import type { AartContext } from "../context.js";
 import { HANDLERS } from "../handlers/index.js";
 import { TOOL_NAMES, wrapResult, type HandlerResult, type ToolName } from "../response.js";
@@ -30,6 +37,19 @@ import { getToolDefinition, TOOL_DEFINITIONS, type ToolDefinition } from "./defi
 
 const ENVIRONMENT_GATED_TOOLS: ReadonlySet<ToolName> = new Set(["aart_deploy_workflow", "aart_trigger_workflow"]);
 const EVAL_SUITE_GATED_TOOLS: ReadonlySet<ToolName> = new Set(["aart_create_eval_from_correction", "aart_run_eval", "aart_promote_workflow"]);
+/**
+ * D2b "remote reads" (AMENDMENTS.md, this session) — the four new
+ * `aart_remote_*` read tools, gated on >=1 configured remote existing
+ * (`ctx.remotes.list()`), the SAME list-construction filtering shape
+ * `ENVIRONMENT_GATED_TOOLS`/`EVAL_SUITE_GATED_TOOLS` above already use for
+ * their own data-existence preconditions — a soft progressive-disclosure
+ * heuristic, not a hard mode gate like `aart_approve`'s. Unlike `aart_deploy`
+ * (D1, AMENDMENTS.md A56 — deliberately NOT environment-gated: "a real LOCAL
+ * Environment existing has no bearing on whether a REMOTE push is
+ * possible"), these four tools are pointless with zero remotes configured
+ * at all — there is nothing for them to read.
+ */
+const REMOTE_GATED_TOOLS: ReadonlySet<ToolName> = new Set(["aart_remote_status", "aart_remote_why", "aart_remote_runs", "aart_remote_run"]);
 
 export async function isToolRegistered(ctx: AartContext, tool: ToolName): Promise<boolean> {
   if (tool === "aart_approve") {
@@ -42,6 +62,10 @@ export async function isToolRegistered(ctx: AartContext, tool: ToolName): Promis
   if (EVAL_SUITE_GATED_TOOLS.has(tool)) {
     const suites = await ctx.store.evals.listSuites();
     return suites.length > 0;
+  }
+  if (REMOTE_GATED_TOOLS.has(tool)) {
+    const remotes = await ctx.remotes.list();
+    return Object.keys(remotes).length > 0;
   }
   return true;
 }
