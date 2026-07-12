@@ -460,6 +460,22 @@ AART_DEPLOY_TOKEN=the-old-token-still-valid-during-rotation
 AART_DEPLOY_TOKEN_NEXT=the-new-token-callers-are-migrating-to
 ```
 
+**Token-derived attribution (D2a security hardening, "mechanical half" —
+named per-token identities are deferred, AMENDMENTS.md A59).** A decision
+made through `POST /approvals/:id/decision` with a valid, matching deploy
+token now records `ApprovalTask.authenticatedAs: "deploy-token"` alongside
+the existing free-text `reviewer` field (which is untouched — still
+whatever name the caller supplies, still the only identity signal for a
+tokenless/local decision). `POST /workflows/:id/approve` similarly logs
+(structured JSON, not persisted onto the `Workflow` record itself) which
+requests were token-authenticated. This is a coarse signal today — "SOME
+holder of the shared token made this decision," not "which teammate" —
+since the token itself has no per-holder identity; every request
+authenticated by a valid token gets the same fixed label regardless of
+which of your team's callers actually sent it. Distinguishing individual
+holders would need named, per-person tokens, which is real, deliberately
+out-of-scope future work, not something this field claims to provide.
+
 ## Network binding
 
 **Breaking change (D2a security hardening, AMENDMENTS.md A59, John-ratified
@@ -700,27 +716,41 @@ Stated plainly, matching this repo's own "What doesn't work yet" convention
   stdout+stderr with whatever your process manager or container runtime
   already does. Plus the `/health`/`/runs`/`/deployments`/
   `/rejected-triggers` HTTP endpoints for polling-based monitoring.
-- **No authentication in front of MOST of the control-plane HTTP API or the
-  dashboard.** `GET /runs`, `GET /workflows`, the webhook endpoints (HMAC-
-  verified, but that authenticates the SENDER, not a browsing operator),
-  and the dashboard's own pages have no login, API key, or network-policy
-  enforcement built in. Put a reverse proxy with real auth (or a private
-  network / VPN-only exposure) in front of anything beyond localhost —
-  this deploy kit's compose/systemd examples above bind to all interfaces
-  by default and assume you're adding that layer yourself. **Two
-  exceptions, NOT the same shape** (D1 "remotes + push," AMENDMENTS.md A56;
-  the promote exception added by a D1 fix pass, AMENDMENTS.md A57 — see
-  [Deploy token](#deploy-token)'s own gating matrix for the full table):
-  `POST /bundles/ingest`, `POST /bundles/plan`, and `POST /environments`
-  are **fail-closed**, unconditionally, by the deploy token; `POST
-  /workflows/:id/promote` is **conditionally** gated by the SAME token —
-  only once it's actually configured, staying open otherwise so upgrading
-  onto this fix pass never silently breaks a tokenless deployment's
-  promote button. Every OTHER write route (triggering a run,
-  approving a workflow version, corrections, evals, block/mark-needs-review
-  flags, ...) remains exactly as open as this bullet describes, regardless
-  of whether `AART_DEPLOY_TOKEN` is set. Don't mistake "`AART_DEPLOY_TOKEN`
-  is configured" for "this server is authenticated."
+- **No LOGIN/API-key authentication in front of the control-plane HTTP API
+  or the dashboard — corrected from this bullet's own pre-D2a text, which
+  overstated how open every write route was.** `GET /runs`, `GET
+  /workflows`, the webhook endpoints (HMAC-verified, but that authenticates
+  the SENDER, not a browsing operator), and the dashboard's own pages have
+  no login, API key, or per-user identity built in — there is still no
+  concept of "logged-in operator" anywhere in this stack. Put a reverse
+  proxy with real auth (or a private network / VPN-only exposure) in front
+  of anything beyond localhost for that reason alone, regardless of the
+  deploy-token gating described next.
+  **What DID change (D2a security hardening, AMENDMENTS.md A59, breaking):**
+  two things, together closing most of the actual network-reachability gap
+  this bullet used to describe:
+  1. **`aart server` binds loopback-only by default now** (previously
+     every interface, with no flag to control it at all) — see [Network
+     binding](#network-binding) above for the full migration note; this
+     deploy kit's own compose/systemd examples already carry the required
+     `--host 0.0.0.0`/`AART_HOST` override, since the topology they set up
+     needs cross-process/cross-container reachability by design.
+  2. **`AART_DEPLOY_TOKEN` now gates nearly every mutation route**, not
+     only the three deploy-surface routes and promote — see [Deploy
+     token](#deploy-token)'s own [Gating matrix](#gating-matrix) for the
+     precise, current, per-route table (fail-closed / conditionally-gated
+     / open-always tiers). Unconfigured, the conditionally-gated tier
+     stays fully open (unchanged pre-D2a behavior, one loud startup
+     warning) — a tokenless local/dev/TEST-DRIVE deployment needs zero
+     config change and is no less usable than before.
+  **Still true, stated plainly:** a `AART_DEPLOY_TOKEN`-configured server
+  is a bearer-token-gated API, not a logged-in, per-user-authenticated one
+  — anyone holding the one shared token can do anything any other holder
+  can (no roles, no per-caller audit trail beyond the mechanical
+  [token-derived attribution](#deploy-token) this session also added).
+  Don't mistake "`AART_DEPLOY_TOKEN` is configured" for "this server has
+  real authentication" — it closes the "anonymous internet caller can
+  mutate my data" gap, not the "which of my three teammates did this" one.
 - **The dashboard is API-complete except two narrower gaps** (`@aart/dashboard`,
   AMENDMENTS.md A47 — owned by a different session than this deploy kit,
   which packages what exists rather than changing it). Every read AND
