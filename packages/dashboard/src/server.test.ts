@@ -15,7 +15,7 @@ import { createFakeEngine, startServer as startRealServer, type ServerHandle } f
 import { createFakeApiClient, createHttpApiClient } from "./api-client.js";
 import { createFakeClock } from "./clock.js";
 import { startDashboard, type DashboardHandle } from "./server.js";
-import { createTestFixture, makeCorrection, makeEnvironment, makeRun, makeWorkflow, type TestFixture } from "./test-support/fixtures.js";
+import { createTestFixture, makeCorrection, makeEnvironment, makeEvent, makeRun, makeWorkflow, type TestFixture } from "./test-support/fixtures.js";
 import fs from "node:fs/promises";
 import { existsSync } from "node:fs";
 import http from "node:http";
@@ -252,6 +252,37 @@ describe("dashboard HTTP server — JSON REST API & SPA fallback routing", () =>
 
       const missing = await fetch(`${baseUrl}/api/runs/does-not-exist`);
       expect(missing.status).toBe(404);
+    });
+
+    // V2 Wave 2A (activity feed, AMENDMENTS.md A64) — the backfill/
+    // initial-load route ActivityFeedPage.tsx calls once on mount. A bare
+    // array (this route's own response shape, matching every sibling
+    // list route in this file — /api/environments, /api/deployments,
+    // /api/approvals, /api/corrections — none of which wrap in an
+    // envelope object either), NOT the real server's own `{ events }`
+    // shape (api-client.ts's listEvents already unwraps that).
+    it("GET /api/events lists events newest-first, honoring ?since & ?limit", async () => {
+      await fixture.store.events.append(makeEvent({ id: "evt-1", occurredAt: "2026-07-10T00:00:00.000Z", summary: "first" }));
+      await fixture.store.events.append(makeEvent({ id: "evt-2", occurredAt: "2026-07-10T00:01:00.000Z", summary: "second" }));
+      await fixture.store.events.append(makeEvent({ id: "evt-3", occurredAt: "2026-07-10T00:02:00.000Z", summary: "third" }));
+
+      const all = await fetch(`${baseUrl}/api/events`);
+      expect(all.status).toBe(200);
+      expect(((await all.json()) as Array<{ id: string }>).map((e) => e.id)).toEqual(["evt-3", "evt-2", "evt-1"]);
+
+      const limited = await fetch(`${baseUrl}/api/events?limit=1`);
+      expect(((await limited.json()) as Array<{ id: string }>).map((e) => e.id)).toEqual(["evt-3"]);
+
+      const since = await fetch(`${baseUrl}/api/events?since=${encodeURIComponent("2026-07-10T00:01:00.000Z")}`);
+      expect(((await since.json()) as Array<{ id: string }>).map((e) => e.id)).toEqual(["evt-3", "evt-2"]);
+
+      // A malformed ?limit= is ignored (falls back to "no limit" through
+      // this route's own parsing, mirroring @aart/server's own
+      // parseEventsLimit "never 400 on a stray query value" looseness for
+      // this same route family), not a 400 or a crash.
+      const malformed = await fetch(`${baseUrl}/api/events?limit=not-a-number`);
+      expect(malformed.status).toBe(200);
+      expect(((await malformed.json()) as unknown[]).length).toBe(3);
     });
 
     it("GET /api/workflows lists ids; GET /api/workflows/:id returns workflow details", async () => {
@@ -778,5 +809,157 @@ describe("dashboard HTTP server — /api/* error mapping preserves upstream stat
     const health = await fetch(`${dashboardBaseUrl}/api/health`);
     expect(health.status).toBe(200);
     expect(await health.json()).toEqual({ status: "ok" });
+  });
+});
+
+// V2 Wave 2A — activity feed + live updates (AMENDMENTS.md A64). STANDING
+// IMPERATIVE: the SSE stream and listEvents must be wired through the REAL
+// composition path — real @aart/server + real startDashboard(createHttpApiClient(...))
+// over real HTTP, the same "no hand-rolled response mocking" bar the
+// error-mapping describe block immediately above already holds itself to.
+
+/**
+ * Polls `condition()` on a short real interval until it's true, or throws
+ * once `timeoutMs` of real wall-clock time has elapsed. A local
+ * reimplementation of @aart/server's own test-helpers.ts `waitFor` (that
+ * file is not re-exported through @aart/server's public index.ts barrel —
+ * this package's own file-ownership boundary doesn't reach into another
+ * package's internals to import it), same reasoning as that file's own doc
+ * comment: a real setInterval-driven side effect (this file's own SSE poll
+ * tick) needs "keep checking until it's actually true," not a fixed sleep
+ * guessing how long is enough.
+ */
+async function waitFor(condition: () => boolean, options: { timeoutMs?: number; intervalMs?: number } = {}): Promise<void> {
+  const timeoutMs = options.timeoutMs ?? 3000;
+  const intervalMs = options.intervalMs ?? 20;
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (condition()) return;
+    if (Date.now() >= deadline) throw new Error(`waitFor: condition not met within ${timeoutMs}ms`);
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+}
+
+/**
+ * Opens a raw, long-lived GET connection and accumulates every chunk as
+ * UTF-8 text — SSE has no natural home in this file's other HTTP test
+ * helper (`rawGet`, above), which reads a single complete response and
+ * returns; a stream is read incrementally, and stays open until the caller
+ * explicitly destroys it (the client-side equivalent of a browser tab
+ * closing an EventSource).
+ */
+function openSseStream(port: number, path: string): { text: () => string; destroy: () => void } {
+  let buffer = "";
+  const req = http.request({ host: "127.0.0.1", port, path, method: "GET" }, (res) => {
+    res.on("data", (chunk: Buffer) => {
+      buffer += chunk.toString("utf8");
+    });
+  });
+  req.on("error", () => {
+    // A destroyed in-flight request legitimately errors (ECONNRESET) — this
+    // helper's own destroy() below is the only thing that ever triggers it
+    // in these tests, and every caller is already done reading by then.
+  });
+  req.end();
+  return { text: () => buffer, destroy: () => req.destroy() };
+}
+
+describe("GET /api/events + GET /api/events/stream — against a REAL @aart/server instance (V2 Wave 2A, AMENDMENTS.md A64)", () => {
+  let serverHandle: ServerHandle | undefined;
+  let dashboardHandle: DashboardHandle | undefined;
+  let cleanupStore: (() => Promise<void>) | undefined;
+  let stream: { text: () => string; destroy: () => void } | undefined;
+
+  afterEach(async () => {
+    stream?.destroy();
+    stream = undefined;
+    await dashboardHandle?.close();
+    dashboardHandle = undefined;
+    await serverHandle?.close();
+    serverHandle = undefined;
+    await cleanupStore?.();
+    cleanupStore = undefined;
+  });
+
+  it("GET /api/events backfills through the real server via the same real ApiClient.listEvents the stream itself uses", async () => {
+    const { store, cleanup } = await createTestFixture();
+    cleanupStore = cleanup;
+    const clock = createFakeClock();
+    const engine = createFakeEngine(store, { ...clock, setTimeout: () => ({ cancel() {} }) });
+    await store.events.append({ id: "evt-a", type: "run.started", occurredAt: "2026-07-10T00:00:00.000Z", summary: "run started" });
+    await store.events.append({ id: "evt-b", type: "run.completed", occurredAt: "2026-07-10T00:01:00.000Z", summary: "run completed" });
+    serverHandle = await startRealServer({ store, engine, clock: { ...clock, setTimeout: () => ({ cancel() {} }) }, port: 0, runTicker: false });
+    dashboardHandle = await startDashboard({ api: createHttpApiClient(`http://127.0.0.1:${serverHandle.port}`), port: 0 });
+
+    const res = await fetch(`http://127.0.0.1:${dashboardHandle.port}/api/events`);
+    expect(res.status).toBe(200);
+    const events = (await res.json()) as Array<{ id: string }>;
+    expect(events.map((e) => e.id)).toEqual(["evt-b", "evt-a"]);
+  });
+
+  it("GET /api/events/stream opens (writes the :ok comment) and broadcasts a newly-appended event within a couple poll intervals, through the real composition path", async () => {
+    const { store, cleanup } = await createTestFixture();
+    cleanupStore = cleanup;
+    const clock = createFakeClock();
+    const engine = createFakeEngine(store, { ...clock, setTimeout: () => ({ cancel() {} }) });
+    serverHandle = await startRealServer({ store, engine, clock: { ...clock, setTimeout: () => ({ cancel() {} }) }, port: 0, runTicker: false });
+    const serverBaseUrl = `http://127.0.0.1:${serverHandle.port}`;
+
+    // A short poll interval (config.ts's own eventsStreamPollIntervalMs,
+    // V2 Wave 2A) — the production default is 1500ms; overridden here so
+    // this test observes a live update in well under a second instead of
+    // several real seconds, without touching the route's own logic at all.
+    dashboardHandle = await startDashboard({ api: createHttpApiClient(serverBaseUrl), port: 0, eventsStreamPollIntervalMs: 30 });
+    const dashboardBaseUrl = `http://127.0.0.1:${dashboardHandle.port}`;
+
+    stream = openSseStream(dashboardHandle.port, "/api/events/stream");
+    await waitFor(() => stream!.text().includes(":ok"));
+
+    // Appended directly to the store — bypassing HTTP entirely, mirroring
+    // AMENDMENTS.md A63's own "seed a real store row directly, prove the
+    // route/adapter reacts" test-seeding convention. This is deliberately
+    // timed immediately after the stream opens (not after some extra
+    // settling delay) — the exact narrow window server.ts's own seed-vs-
+    // concurrent-append race guard (its "seed" branch's own doc comment)
+    // exists to cover; this test is that guard's proof.
+    await store.events.append({ id: "evt-live", type: "run.completed", occurredAt: new Date().toISOString(), summary: "a run just completed, live" });
+
+    await waitFor(() => stream!.text().includes("evt-live"), { timeoutMs: 3000 });
+    const frame = stream.text();
+    expect(frame).toContain('"id":"evt-live"');
+    expect(frame).toContain('"summary":"a run just completed, live"');
+    expect(frame).toMatch(/data: \{.*"id":"evt-live".*\}\n\n/); // real SSE wire format, not just JSON floating in the body
+
+    // The dashboard stays healthy through all of this (the same acceptance
+    // bar the /api/* error-mapping describe block above already applies) —
+    // proves the stream's own poll-tick error handling and the open
+    // connection itself never destabilize the rest of the process.
+    const health = await fetch(`${dashboardBaseUrl}/api/health`);
+    expect(health.status).toBe(200);
+  });
+
+  // Disconnect cleanup: destroying the client connection must clear the
+  // server's own interval (never leak a timer per abandoned connection) and
+  // must never crash the dashboard process. No assertion can directly
+  // observe "the interval was cleared" from outside the process — the
+  // black-box proof is behavioral: the dashboard keeps serving fine,
+  // immediately and repeatedly, well past several poll intervals' worth of
+  // real time after the disconnect.
+  it("destroying the client connection stops the server-side poll with no crash — the dashboard answers fresh requests immediately after", async () => {
+    const { store, cleanup } = await createTestFixture();
+    cleanupStore = cleanup;
+    const clock = createFakeClock();
+    const engine = createFakeEngine(store, { ...clock, setTimeout: () => ({ cancel() {} }) });
+    serverHandle = await startRealServer({ store, engine, clock: { ...clock, setTimeout: () => ({ cancel() {} }) }, port: 0, runTicker: false });
+    dashboardHandle = await startDashboard({ api: createHttpApiClient(`http://127.0.0.1:${serverHandle.port}`), port: 0, eventsStreamPollIntervalMs: 30 });
+    const dashboardBaseUrl = `http://127.0.0.1:${dashboardHandle.port}`;
+
+    stream = openSseStream(dashboardHandle.port, "/api/events/stream");
+    await waitFor(() => stream!.text().includes(":ok"));
+    stream.destroy();
+
+    await new Promise((resolve) => setTimeout(resolve, 150)); // several 30ms poll intervals' worth of real time
+    const health = await fetch(`${dashboardBaseUrl}/api/health`);
+    expect(health.status).toBe(200);
   });
 });
