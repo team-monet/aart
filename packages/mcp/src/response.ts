@@ -41,6 +41,14 @@ export const TOOL_NAMES = [
   "aart_trigger_workflow",
   "aart_list_waiting_runs",
   "aart_resume_run",
+  // D2b "remote reads" (AMENDMENTS.md, this session) — the READ half of
+  // letting an authoring agent SEE a deployed server (D1's "remotes +
+  // push," AMENDMENTS.md A56, shipped the WRITE half). The write-against-
+  // remote half (aart_remote_approve) is deferred to Wave 2, not built here.
+  "aart_remote_status",
+  "aart_remote_why",
+  "aart_remote_runs",
+  "aart_remote_run",
 ] as const;
 
 export type ToolName = (typeof TOOL_NAMES)[number];
@@ -78,6 +86,16 @@ export const TOOL_TIERS: Readonly<Record<ToolName, ToolTier>> = {
   aart_trigger_workflow: "extended",
   aart_list_waiting_runs: "extended",
   aart_resume_run: "extended",
+  // D2b "remote reads" (AMENDMENTS.md, this session) — extended, same tier
+  // as every other remote/deploy-adjacent tool (aart_deploy included);
+  // gated on >=1 configured remote existing (REMOTE_GATED_TOOLS,
+  // tools/server.ts), the same progressive-disclosure SHAPE
+  // ENVIRONMENT_GATED_TOOLS/EVAL_SUITE_GATED_TOOLS already use, not a hard
+  // mode gate like aart_approve's.
+  aart_remote_status: "extended",
+  aart_remote_why: "extended",
+  aart_remote_runs: "extended",
+  aart_remote_run: "extended",
 };
 
 export type ToolOutcome = "success" | "failure";
@@ -170,6 +188,22 @@ const NEXT_TABLE: Readonly<Record<ToolName, Readonly<Record<ToolOutcome, string>
   aart_resume_run: {
     success: "Resumed. Call `aart_get_report` to see how the run continued.",
     failure: "No matching wait found — call `aart_list_waiting_runs` to see what's actually pending.",
+  },
+  aart_remote_status: {
+    success: "Review the local-vs-remote diff. If versions or gates differ, that's real drift — `aart push`/`aart_deploy` an updated version, or call `aart_remote_why` on a specific remote for the full story on what's actually live and why.",
+    failure: "Could not check status — register the workflow locally first (`aart_register_block`, then `aart_validate`) if it doesn't exist yet.",
+  },
+  aart_remote_why: {
+    success: "If nothing is live yet, push it (`aart_deploy`/`aart push`) and promote it on the remote. If it IS live, call `aart_remote_runs` to see recent runs of it.",
+    failure: "Could not explain what's live — check the remote is configured (`aart remote list`) and reachable.",
+  },
+  aart_remote_runs: {
+    success: "Pick a run and call `aart_remote_run` for its full evidence report.",
+    failure: "Could not list runs — check the remote is configured (`aart remote list`) and reachable.",
+  },
+  aart_remote_run: {
+    success: "Report retrieved. If the run failed, fix the workflow locally, `aart_validate`/`aart_run_workflow` to confirm the fix, then push a corrected version.",
+    failure: "Run not found on that remote — call `aart_remote_runs` to see what's actually there.",
   },
 };
 

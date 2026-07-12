@@ -61,6 +61,20 @@ const DESCRIPTIONS: Record<ToolName, string> = {
     "List every run currently paused on a wait (signal, timer, webhook, external job, queue, manual, or human approval). Check this before assuming a long-running workflow died — a 'waiting' run is durable and expected to still be there.",
   aart_resume_run:
     "Resume a specific waiting run — with a direct payload, or by delivering a matching signal. Call aart_list_waiting_runs first if you don't already know exactly which run/step is waiting.",
+  // D2b "remote reads" (AMENDMENTS.md, this session) — the READ half of
+  // seeing a deployed server (D1's "remotes + push," AMENDMENTS.md A56,
+  // shipped the WRITE half). Descriptions deliberately do NOT claim these
+  // give you a redacted-for-secrets view of a remote's data beyond what
+  // aart_remote_run's own report-rendering seam already inherits — see that
+  // tool's own description below for the precise, non-overclaiming wording.
+  aart_remote_status:
+    "Check whether a workflow's local state matches what's actually live on a remote aart server — one named remote, or every configured remote at once. Call this before assuming a deployed workflow reflects your latest local changes: drift (a version that was never pushed, or the SAME version with different gate/approval state) is invisible from local state alone, and a stale remote is a common reason 'it works locally but not in production' happens.",
+  aart_remote_why:
+    "Explain exactly what's live for one workflow on one remote, and why: which version is currently promoted/active there, its gates and approval, and — where tracked — who approved it. Call this when a deployed workflow behaves unexpectedly and you need the full picture before debugging further; 'is this even the version I think it's running' is the first question to answer, not an assumption to skip.",
+  aart_remote_runs:
+    "List recent runs of workflows on a remote aart server, optionally filtered by status — a compact summary per run (not full traces), so you can spot a failing remote run before pulling its full detail. Call this before aart_remote_run when you don't already know exactly which runId you're looking for.",
+  aart_remote_run:
+    "Fetch the full evidence report for one run on a remote aart server — the model-facing summary or markdown rendering, the same rendering aart_get_report gives for a local run. This is how you actually SEE what happened on a deployed workflow instead of guessing from local code or assuming a push succeeded — never claim a remote run worked without having read its report.",
 };
 
 const inputSchemas: Record<ToolName, z.ZodType> = {
@@ -125,6 +139,15 @@ const inputSchemas: Record<ToolName, z.ZodType> = {
     payload: z.unknown().optional(),
     signal: signalSchema.optional(),
   }),
+  // D2b "remote reads" (AMENDMENTS.md, this session).
+  aart_remote_status: z.object({ workflowId: z.string(), remote: z.string().optional() }),
+  aart_remote_why: z.object({ remote: z.string(), workflowId: z.string() }),
+  // The six literal values mirror @aart/types' RunStatusSchema (run.ts)
+  // exactly — reproduced as a literal enum here (not imported) to match
+  // this file's own established convention: every OTHER inputSchema below
+  // is a self-contained Zod definition, never a cross-package schema reuse.
+  aart_remote_runs: z.object({ remote: z.string(), status: z.enum(["pending", "running", "waiting", "completed", "failed", "cancelled"]).optional() }),
+  aart_remote_run: z.object({ remote: z.string(), runId: z.string(), format: z.enum(["model", "markdown"]).optional() }),
 };
 
 export const TOOL_DEFINITIONS: readonly ToolDefinition[] = (Object.keys(DESCRIPTIONS) as ToolName[]).map((name) => ({

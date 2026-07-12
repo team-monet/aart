@@ -14,6 +14,7 @@ import { approveCommand, correctionCommand, diffCommand, promoteCommand, request
 import { evalCommand } from "./commands/evals.js";
 import { bundleCommand, flagCommand, mcpCommand, serverCommand, workerCommand } from "./commands/process.js";
 import { remoteCommand } from "./commands/remote.js";
+import { remoteRunCommand, remoteRunsCommand, remoteStatusCommand, remoteWhyCommand } from "./commands/remote-observability.js";
 
 export const USAGE = `AART CLI — usage:
   aart run <workflowId> --input <json> [--version <v>]
@@ -44,6 +45,10 @@ export const USAGE = `AART CLI — usage:
   aart remote list
   aart remote remove <name>
   aart push <remote> <workflowId> [--version <v>] [--plan]
+  aart remote-status <workflowId> [--remote <name>]
+  aart remote-why <remote> <workflowId>
+  aart remote-runs <remote> [--status <status>]
+  aart remote-run <remote> <runId> [--format model|markdown]
   aart environment register <name> --trust-mode <dev|governed|strict|production>
   aart environment list
 
@@ -200,6 +205,14 @@ export async function run(argv: readonly string[], options: RunOptions = {}): Pr
         return asOutcome(await remoteCommand(tokens, cli));
       case "push":
         return asOutcome(await pushCommand(tokens, cli));
+      case "remote-status":
+        return asOutcome(await remoteStatusCommand(tokens, cli));
+      case "remote-why":
+        return asOutcome(await remoteWhyCommand(tokens, cli));
+      case "remote-runs":
+        return asOutcome(await remoteRunsCommand(tokens, cli));
+      case "remote-run":
+        return asOutcome(await remoteRunCommand(tokens, cli));
       case "environment":
         return asOutcome(await environmentCommand(tokens, cli));
       case "approve":

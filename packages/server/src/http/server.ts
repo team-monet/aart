@@ -198,6 +198,18 @@ function requireDeployToken(config: ServerConfig, ctx: RouteContext): boolean {
  * so the fail-closed (deploy-surface routes) vs conditional (everything
  * else) semantics stay explicit in the code, not hidden behind a boolean.
  *
+ * D2b "remote reads" (AMENDMENTS.md, this session, John-ratified
+ * 2026-07-12) — this function now ALSO gates two GET routes (`GET /runs`,
+ * `GET /runs/:id`, below), not only POST/mutation routes as every doc
+ * comment above this point still frames it. Same conditional semantics,
+ * same reused mechanism — a run's full trace/inputs/outputs is exactly the
+ * kind of content D2b makes newly reachable to a REMOTE authoring agent
+ * (the new `aart_remote_run` MCP tool, `@aart/mcp`), so it gets the same
+ * "gated once a token is configured, open otherwise" treatment every other
+ * conditionally-sensitive route already has — see those two routes' own
+ * registration comment (below, "Read surface") for the full rationale.
+ *
+
  * Token-derived attribution (D2a, AMENDMENTS.md A59, "mechanical half" —
  * named per-token labels are deferred) — on success via a PROVIDED,
  * MATCHING token (never the "unconfigured, proceed" branch, which has no
@@ -730,20 +742,55 @@ export async function startServer(config: ServerConfig): Promise<ServerHandle> {
 
   // Read surface — the "API surface S8 will consume" (this session's DoD note).
   router.get("/health", (ctx) => sendJson(ctx.res, 200, { status: "ok" }));
-  router.get("/runs", async (ctx) => {
-    const status = ctx.query.get("status");
-    const workflowId = ctx.query.get("workflowId");
-    const runs = await config.store.runs.list({
-      status: (status as never) ?? undefined,
-      workflowId: workflowId ?? undefined,
-    });
-    sendJson(ctx.res, 200, { runs });
-  });
-  router.get("/runs/:id", async (ctx) => {
-    const run = await config.store.runs.get(ctx.params["id"]!);
-    if (!run) return sendJson(ctx.res, 404, { error: "not found" });
-    sendJson(ctx.res, 200, { run });
-  });
+  // D2b "remote reads" (AMENDMENTS.md, this session, John-ratified
+  // 2026-07-12's "gate the run-read routes" fork) — GET /runs and GET
+  // /runs/:id are now the ONLY two GET routes on this server that carry an
+  // `auth` option; every other GET route (workflows, deployments,
+  // environments, approvals, ...) stays deliberately open, per this
+  // session's own narrow mandate. Reusing `requireDeployTokenIfConfigured`
+  // (this file, above) rather than a new mechanism — the SAME conditional
+  // semantics every other gated route already has: unconfigured
+  // `AART_DEPLOY_TOKEN` -> stays open (unchanged pre-D2b behavior, a
+  // tokenless local/dev/TEST-DRIVE deployment needs zero config change);
+  // configured -> requires the same valid Bearer the rest of the
+  // conditionally-gated tier does. Why THESE two specifically, now that D2b
+  // makes a run's full trace/inputs/outputs agent-discoverable from a
+  // REMOTE caller too (the new aart_remote_run tool, @aart/mcp) — a run's
+  // trace can carry residual secret-adjacent content (tool call arguments,
+  // external-call metadata, ...) that was previously only reachable by
+  // someone who could already read this server's local disk or was
+  // deliberately handed a report; D2b's whole point is making that content
+  // reachable to an AUTHORING AGENT over the network, which raises the bar
+  // on "who can read it" the same way D2a's own uniform write-gating raised
+  // it for mutation. `Router.handle`'s own `auth` closure runs before
+  // `readBody` regardless of HTTP method (router.ts) — a GET carrying an
+  // `Authorization` header works the identical way a gated POST already
+  // does; `fetchFromRemote` (@aart/mcp's remote-client.ts) already attaches
+  // a resolved token on EVERY call it makes, GET included, so
+  // aart_remote_runs/aart_remote_run keep working against a gated server
+  // with zero changes on their own side.
+  router.get(
+    "/runs",
+    async (ctx) => {
+      const status = ctx.query.get("status");
+      const workflowId = ctx.query.get("workflowId");
+      const runs = await config.store.runs.list({
+        status: (status as never) ?? undefined,
+        workflowId: workflowId ?? undefined,
+      });
+      sendJson(ctx.res, 200, { runs });
+    },
+    { auth: (ctx) => requireDeployTokenIfConfigured(config, ctx, "read run data") },
+  );
+  router.get(
+    "/runs/:id",
+    async (ctx) => {
+      const run = await config.store.runs.get(ctx.params["id"]!);
+      if (!run) return sendJson(ctx.res, 404, { error: "not found" });
+      sendJson(ctx.res, 200, { run });
+    },
+    { auth: (ctx) => requireDeployTokenIfConfigured(config, ctx, "read run data") },
+  );
   router.get("/waiting-runs", async (ctx) => sendJson(ctx.res, 200, { waits: await config.store.waits.list() }));
   router.get("/flagged-runs", async (ctx) => sendJson(ctx.res, 200, { runs: await listFlaggedRuns(config.store) }));
   router.get("/workflows", async (ctx) => sendJson(ctx.res, 200, { workflowIds: await config.store.workflows.listWorkflowIds() }));

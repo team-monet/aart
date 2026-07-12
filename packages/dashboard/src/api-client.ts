@@ -159,8 +159,19 @@ export interface ApiClient {
 // Real HTTP implementation
 // ---------------------------------------------------------------------------
 
-async function getJson<T>(url: string): Promise<T> {
-  const res = await fetch(url);
+/**
+ * `extraHeaders` (D2b "remote reads," AMENDMENTS.md, this session) — this
+ * function had NO way to attach a header at all before this change (unlike
+ * its `postJson`/`postJsonOrThrow` siblings below, which have carried an
+ * `extraHeaders` param since D1's fix pass, AMENDMENTS.md A57); every
+ * pre-D2b call site omits it and gets byte-identical behavior. Needed now
+ * because `GET /runs`/`GET /runs/:id` (`@aart/server`'s `http/server.ts`)
+ * became the first GET routes this codebase conditionally deploy-token-gates
+ * (D2b's own "gate the run-read routes" ruling) — `listRuns`/`getRun` below
+ * are the two callers that actually pass one.
+ */
+async function getJson<T>(url: string, extraHeaders?: Record<string, string>): Promise<T> {
+  const res = await fetch(url, extraHeaders ? { headers: extraHeaders } : undefined);
   if (!res.ok) throw new HttpError(res.status, `GET ${url} -> ${res.status}`);
   return (await res.json()) as T;
 }
@@ -189,45 +200,54 @@ async function postJsonOrThrow<T>(url: string, body: unknown, extraHeaders?: Rec
  * hardcoded here, caller supplies it).
  *
  * `deployToken` (D1 fix pass, AMENDMENTS.md A57; scope widened by D2a
- * security hardening, AMENDMENTS.md A59) — this dashboard-server ->
+ * security hardening, AMENDMENTS.md A59; widened again by D2b "remote
+ * reads," AMENDMENTS.md, this session) — this dashboard-server ->
  * runtime-server hop's OWN deploy token, attached as `Authorization: Bearer
- * <token>` on EVERY write call this client makes (`writeAuthHeaders`,
- * below). The server's `requireDeployTokenIfConfigured` (`@aart/server`'s
- * `http/server.ts`) conditionally requires this exact header on nearly
- * every mutation route once `AART_DEPLOY_TOKEN` is configured server-side
- * — an unauthenticated dashboard hop would 401 on every one of those
- * actions the moment an operator sets that env var, unless this client
- * attaches the identical token. As of A57 this was scoped to `promoteWorkflow`
- * alone, because promote was the ONE route the server conditionally gated
- * at the time — see `requireDeployTokenIfConfigured`'s own doc comment for
- * the full trust-boundary rationale, now generalized to every write route
- * this client calls. Resolved ONCE by this function's own caller
- * (`deploy/serve-dashboard.mjs`) and passed in here — this client never
- * re-resolves it itself, matching how `@aart/cli`'s `secretResolver`/
- * `resolveDeployToken` are likewise resolved once by their own callers,
- * not self-resolving. `createHttpApiClient`'s own public signature is
- * UNCHANGED (still `(baseUrl, deployToken?)`) — `deploy/serve-dashboard.mjs`
- * needs no update; the same already-resolved token now simply reaches
- * further.
+ * <token>` on EVERY write call this client makes, AND (as of D2b) the two
+ * now-conditionally-gated reads, `listRuns`/`getRun` (`deployAuthHeaders`,
+ * below — renamed from A59's own `writeAuthHeaders` now that it covers two
+ * reads too, same value, same construction). The server's
+ * `requireDeployTokenIfConfigured` (`@aart/server`'s `http/server.ts`)
+ * conditionally requires this exact header on nearly every mutation route,
+ * plus (D2b) `GET /runs`/`GET /runs/:id`, once `AART_DEPLOY_TOKEN` is
+ * configured server-side — an unauthenticated dashboard hop would 401 on
+ * every one of those the moment an operator sets that env var, unless this
+ * client attaches the identical token. As of A57 this was scoped to
+ * `promoteWorkflow` alone, because promote was the ONE route the server
+ * conditionally gated at the time — see `requireDeployTokenIfConfigured`'s
+ * own doc comment for the full trust-boundary rationale, now generalized to
+ * every write route this client calls PLUS the two run-read routes. Resolved
+ * ONCE by this function's own caller (`deploy/serve-dashboard.mjs`) and
+ * passed in here — this client never re-resolves it itself, matching how
+ * `@aart/cli`'s `secretResolver`/`resolveDeployToken` are likewise resolved
+ * once by their own callers, not self-resolving. `createHttpApiClient`'s own
+ * public signature is UNCHANGED (still `(baseUrl, deployToken?)`) —
+ * `deploy/serve-dashboard.mjs` needs no update; the same already-resolved
+ * token now simply reaches further.
  */
 export function createHttpApiClient(baseUrl: string, deployToken?: string): ApiClient {
   const base = baseUrl.replace(/\/$/, "");
   // D2a security hardening (AMENDMENTS.md A59) — renamed from
   // `promoteAuthHeaders` (A57's own name, when this was promote-only) to
-  // reflect its now-general scope; same value, same construction, applied
-  // to every write call below instead of promoteWorkflow alone.
-  const writeAuthHeaders: Record<string, string> | undefined = deployToken ? { authorization: `Bearer ${deployToken}` } : undefined;
+  // reflect its now-general scope; D2b "remote reads" (AMENDMENTS.md, this
+  // session) renamed it AGAIN, from `writeAuthHeaders` to `deployAuthHeaders`
+  // — the exact same value/construction, unchanged, but the name itself
+  // stopped being accurate once `listRuns`/`getRun` (both reads) started
+  // needing it too (GET /runs, GET /runs/:id are now conditionally gated —
+  // see server.ts's own "Read surface" registration comment for the full
+  // rationale). Applied to every write call below, plus those two reads.
+  const deployAuthHeaders: Record<string, string> | undefined = deployToken ? { authorization: `Bearer ${deployToken}` } : undefined;
   return {
     async listRuns(filter) {
       const params = new URLSearchParams();
       if (filter?.status) params.set("status", filter.status);
       if (filter?.workflowId) params.set("workflowId", filter.workflowId);
       const qs = params.toString();
-      const { runs } = await getJson<{ runs: RunRecord[] }>(`${base}/runs${qs ? `?${qs}` : ""}`);
+      const { runs } = await getJson<{ runs: RunRecord[] }>(`${base}/runs${qs ? `?${qs}` : ""}`, deployAuthHeaders);
       return runs;
     },
     async getRun(id) {
-      const res = await fetch(`${base}/runs/${encodeURIComponent(id)}`);
+      const res = await fetch(`${base}/runs/${encodeURIComponent(id)}`, deployAuthHeaders ? { headers: deployAuthHeaders } : undefined);
       if (res.status === 404) return undefined;
       if (!res.ok) throw new HttpError(res.status, `GET /runs/${id} -> ${res.status}`);
       const { run } = (await res.json()) as { run: RunRecord };
@@ -277,38 +297,38 @@ export function createHttpApiClient(baseUrl: string, deployToken?: string): ApiC
       return tasks;
     },
     async decideApproval(taskId, input) {
-      return postJsonOrThrow<DecideApprovalResult>(`${base}/approvals/${encodeURIComponent(taskId)}/decision`, input, writeAuthHeaders);
+      return postJsonOrThrow<DecideApprovalResult>(`${base}/approvals/${encodeURIComponent(taskId)}/decision`, input, deployAuthHeaders);
     },
     async triggerRun(params) {
-      const { run } = await postJsonOrThrow<{ kind: string; run?: RunRecord }>(`${base}/runs/trigger`, params, writeAuthHeaders);
+      const { run } = await postJsonOrThrow<{ kind: string; run?: RunRecord }>(`${base}/runs/trigger`, params, deployAuthHeaders);
       if (!run) throw new Error(`POST /runs/trigger: server accepted the run but did not return it`);
       return run;
     },
     async approveOrDeprecateWorkflow(workflowId, version, action, trustMode) {
-      const { workflow } = await postJsonOrThrow<{ workflow: Workflow }>(`${base}/workflows/${encodeURIComponent(workflowId)}/approve`, { version, action, trustMode }, writeAuthHeaders);
+      const { workflow } = await postJsonOrThrow<{ workflow: Workflow }>(`${base}/workflows/${encodeURIComponent(workflowId)}/approve`, { version, action, trustMode }, deployAuthHeaders);
       return workflow;
     },
     async promoteWorkflow(workflowId, version, environmentId, triggerConfig) {
-      return postJsonOrThrow<PromoteToEnvironmentResult>(`${base}/workflows/${encodeURIComponent(workflowId)}/promote`, { version, environmentId, triggerConfig }, writeAuthHeaders);
+      return postJsonOrThrow<PromoteToEnvironmentResult>(`${base}/workflows/${encodeURIComponent(workflowId)}/promote`, { version, environmentId, triggerConfig }, deployAuthHeaders);
     },
     async blockPromotion(workflowId, version) {
-      const { workflow } = await postJsonOrThrow<{ workflow: Workflow }>(`${base}/workflows/${encodeURIComponent(workflowId)}/block-promotion`, { version }, writeAuthHeaders);
+      const { workflow } = await postJsonOrThrow<{ workflow: Workflow }>(`${base}/workflows/${encodeURIComponent(workflowId)}/block-promotion`, { version }, deployAuthHeaders);
       return workflow;
     },
     async unblockPromotion(workflowId, version) {
-      const { workflow } = await postJsonOrThrow<{ workflow: Workflow }>(`${base}/workflows/${encodeURIComponent(workflowId)}/unblock-promotion`, { version }, writeAuthHeaders);
+      const { workflow } = await postJsonOrThrow<{ workflow: Workflow }>(`${base}/workflows/${encodeURIComponent(workflowId)}/unblock-promotion`, { version }, deployAuthHeaders);
       return workflow;
     },
     async markNeedsReview(workflowId, version) {
-      const { workflow } = await postJsonOrThrow<{ workflow: Workflow }>(`${base}/workflows/${encodeURIComponent(workflowId)}/mark-needs-review`, { version }, writeAuthHeaders);
+      const { workflow } = await postJsonOrThrow<{ workflow: Workflow }>(`${base}/workflows/${encodeURIComponent(workflowId)}/mark-needs-review`, { version }, deployAuthHeaders);
       return workflow;
     },
     async clearNeedsReview(workflowId, version) {
-      const { workflow } = await postJsonOrThrow<{ workflow: Workflow }>(`${base}/workflows/${encodeURIComponent(workflowId)}/clear-needs-review`, { version }, writeAuthHeaders);
+      const { workflow } = await postJsonOrThrow<{ workflow: Workflow }>(`${base}/workflows/${encodeURIComponent(workflowId)}/clear-needs-review`, { version }, deployAuthHeaders);
       return workflow;
     },
     async triggerImprovementProposal(workflowId, version) {
-      return postJsonOrThrow<ImprovementBrief>(`${base}/workflows/${encodeURIComponent(workflowId)}/trigger-improvement`, { version }, writeAuthHeaders);
+      return postJsonOrThrow<ImprovementBrief>(`${base}/workflows/${encodeURIComponent(workflowId)}/trigger-improvement`, { version }, deployAuthHeaders);
     },
     async listCorrections(filter) {
       const params = new URLSearchParams();
@@ -319,15 +339,15 @@ export function createHttpApiClient(baseUrl: string, deployToken?: string): ApiC
       return corrections;
     },
     async recordCorrection(input) {
-      const { correction } = await postJsonOrThrow<{ correction: Correction }>(`${base}/corrections`, input, writeAuthHeaders);
+      const { correction } = await postJsonOrThrow<{ correction: Correction }>(`${base}/corrections`, input, deployAuthHeaders);
       return correction;
     },
     async updateCorrectionRunOutput(key) {
       // D2a security hardening (AMENDMENTS.md A59) — a raw fetch (not
-      // postJson/postJsonOrThrow), so writeAuthHeaders is spread into this
+      // postJson/postJsonOrThrow), so deployAuthHeaders is spread into this
       // call's own headers object structurally rather than passed as a
       // third function argument.
-      const res = await fetch(`${base}/corrections/${encodeURIComponent(key)}/update-run-output`, { method: "POST", headers: { ...writeAuthHeaders } });
+      const res = await fetch(`${base}/corrections/${encodeURIComponent(key)}/update-run-output`, { method: "POST", headers: { ...deployAuthHeaders } });
       if (res.status === 404) return undefined;
       if (!res.ok) throw new HttpError(res.status, `POST /corrections/${key}/update-run-output -> ${res.status}`);
       const { run } = (await res.json()) as { run: RunRecord };
@@ -336,7 +356,7 @@ export function createHttpApiClient(baseUrl: string, deployToken?: string): ApiC
     async createEvalExampleFromCorrection(key, suiteId) {
       const res = await fetch(`${base}/corrections/${encodeURIComponent(key)}/create-eval-example`, {
         method: "POST",
-        headers: { "content-type": "application/json", ...writeAuthHeaders },
+        headers: { "content-type": "application/json", ...deployAuthHeaders },
         body: JSON.stringify({ suiteId }),
       });
       if (res.status === 404) return undefined;
@@ -345,7 +365,7 @@ export function createHttpApiClient(baseUrl: string, deployToken?: string): ApiC
       return example;
     },
     async createIssueForCorrection(key) {
-      const res = await fetch(`${base}/corrections/${encodeURIComponent(key)}/create-issue`, { method: "POST", headers: { ...writeAuthHeaders } });
+      const res = await fetch(`${base}/corrections/${encodeURIComponent(key)}/create-issue`, { method: "POST", headers: { ...deployAuthHeaders } });
       if (res.status === 404) return undefined;
       if (!res.ok) throw new HttpError(res.status, `POST /corrections/${key}/create-issue -> ${res.status}`);
       return (await res.json()) as ImprovementBrief;
@@ -354,14 +374,14 @@ export function createHttpApiClient(baseUrl: string, deployToken?: string): ApiC
       return getJson<{ suites: EvalSuite[]; runs: EvalRun[] }>(`${base}/evals`);
     },
     async createEvalSuite(input) {
-      const { suite } = await postJsonOrThrow<{ suite: EvalSuite }>(`${base}/evals/suites`, input, writeAuthHeaders);
+      const { suite } = await postJsonOrThrow<{ suite: EvalSuite }>(`${base}/evals/suites`, input, deployAuthHeaders);
       return suite;
     },
     async runEvalSuite(suiteId, workflowId, workflowVersion) {
-      return postJsonOrThrow<RunEvalSuiteResult>(`${base}/evals/runs`, { suiteId, workflowId, workflowVersion }, writeAuthHeaders);
+      return postJsonOrThrow<RunEvalSuiteResult>(`${base}/evals/runs`, { suiteId, workflowId, workflowVersion }, deployAuthHeaders);
     },
     async clearRunFlag(runId, clearedBy) {
-      const { status, body } = await postJson<ClearRunFlagResult>(`${base}/runs/${encodeURIComponent(runId)}/flag/clear`, { clearedBy }, writeAuthHeaders);
+      const { status, body } = await postJson<ClearRunFlagResult>(`${base}/runs/${encodeURIComponent(runId)}/flag/clear`, { clearedBy }, deployAuthHeaders);
       if (status !== 200 && status !== 404 && status !== 409) throw new HttpError(status, `POST /runs/${runId}/flag/clear -> ${status}`);
       return body;
     },
