@@ -89,6 +89,15 @@ export async function applyGateResult(
   // (packages/server/src/approvals.ts's decideApprovalTask) needs its OWN,
   // independent copy of this same gate_passed/gate_failed write — required
   // by package layering: @aart/server cannot import @aart/mcp.
+  // Confirmed intended, not a duplicate-emission bug (Wave 1 fix pass,
+  // AMENDMENTS.md A63) — a `validate` call that passes/fails emits BOTH
+  // `workflow.validated` (below) and `workflow.gate_passed`/`gate_failed`
+  // (next block) on the SAME call. Distinct taxonomy concepts, not the same
+  // fact twice: "a validation ran" (this block, `validate`-specific, always
+  // fires for this one gate) vs "the validate gate passed/failed" (the
+  // general gate-outcome event every gate emits, next block) — a consumer
+  // of the activity feed that only cares about gate outcomes in general can
+  // filter on the latter without needing `validate` special-cased.
   if (gate === "validate") {
     await recordEvent(ctx.store, { type: "workflow.validated", workflowId, workflowVersion, summary: `${workflowId}@${workflowVersion} ${status} validate` }, ctx.now);
   }
