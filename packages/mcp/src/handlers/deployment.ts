@@ -157,13 +157,19 @@ export async function resumeRunHandler(ctx: AartContext, input: ResumeRunInput):
 // inconsistency to silently "fix" here.
 //
 // This function performs its own HTTP POST via Node 22's GLOBAL `fetch` —
-// no import, so no @aart/cli dependency needed (this package cannot depend
-// on that one; the dependency runs the other way). `@aart/cli`'s own
-// `deploy-client.ts` holds a small, independently-defined, directly-tested
-// mirror of this exact POST shape for CLI-side use/testing in isolation —
-// see that module's own doc comment for why it isn't imported here (same
-// unavoidable-duplication class as stubs/deploy.ts's remotes.json/
-// secrets.json reading).
+// no import, so no @aart/cli dependency needed. `@aart/cli`'s own
+// `pushCommand` (commands/deployment.ts) calls THIS function directly, the
+// same same-function-reference three-clients precedent as
+// `deployWorkflowHandler` above — @aart/cli already depends on @aart/mcp
+// (architecture's three-clients principle), so there was never a real
+// reason for a second, CLI-local mirror of this POST shape. D1 fix pass
+// (AMENDMENTS.md A57) deleted `@aart/cli`'s `deploy-client.ts` +
+// `deploy-client.test.ts` for exactly this reason — that module's own
+// header comment claimed "this package cannot depend on that one" as the
+// reason for its existence, which was false (the dependency direction is
+// @aart/cli -> @aart/mcp, always has been), making the "mirror" dead code
+// from the day it was written. This function is now the ONE implementation;
+// its coverage lives in this file's own `deployToRemoteHandler` tests.
 export interface DeployToRemoteInput {
   remote: string;
   workflowId: string;
