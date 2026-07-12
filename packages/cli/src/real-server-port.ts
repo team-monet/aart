@@ -130,7 +130,14 @@ export function createRealServerPort(store: AartStore, engine: Engine, root: str
 
     async produceBundle(params): Promise<BundleLike> {
       const deployment = await resolveDeployment(store, params.workflowId, params.workflowVersion, params.environment);
-      const bundle = await produceRealBundle(store, { workflowId: params.workflowId, workflowVersion: params.workflowVersion, deployment });
+      // AMENDMENTS.md A56 (D1 "remotes + push"): thread the SAME validated
+      // environment name `resolveDeployment` just resolved (it throws above
+      // if `params.environment` was given but didn't name a real
+      // Environment) into the manifest's own `targetEnvironment` field,
+      // instead of discarding it after only using it for the triggerConfig
+      // lookup — this is what lets a later `hydrateBundle` land in the REAL
+      // named environment rather than the synthetic `env_bundle` fallback.
+      const bundle = await produceRealBundle(store, { workflowId: params.workflowId, workflowVersion: params.workflowVersion, deployment, targetEnvironment: params.environment });
       return bundleToBundleLike(bundle);
     },
 

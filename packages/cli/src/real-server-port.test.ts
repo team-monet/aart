@@ -116,3 +116,33 @@ describe("createRealServerPort — real secretResolver wiring (AMENDMENTS.md A45
     expect(res.status).toBe(401);
   });
 });
+
+// D1 "remotes + push" (AMENDMENTS.md A56).
+describe("createRealServerPort — produceBundle threads --environment into manifest.targetEnvironment", () => {
+  it("a real, registered environment name is threaded through into the produced bundle's manifest", async () => {
+    const cli = await freshCli();
+    const workflow = compileWorkflowInput(probeWorkflow("wf-target-env-probe"));
+    await cli.aart.store.workflows.put(workflow);
+    await cli.aart.store.environments.put({ id: "env_prod_probe", name: "production-probe", config: {} });
+
+    const bundle = await cli.serverPort.produceBundle({ workflowId: workflow.id, workflowVersion: workflow.version, environment: "production-probe" });
+    expect((bundle.manifest as { targetEnvironment?: string }).targetEnvironment).toBe("production-probe");
+  });
+
+  it("omitting --environment leaves the manifest without targetEnvironment at all", async () => {
+    const cli = await freshCli();
+    const workflow = compileWorkflowInput(probeWorkflow("wf-no-target-env-probe"));
+    await cli.aart.store.workflows.put(workflow);
+
+    const bundle = await cli.serverPort.produceBundle({ workflowId: workflow.id, workflowVersion: workflow.version });
+    expect(Object.keys(bundle.manifest)).not.toContain("targetEnvironment");
+  });
+
+  it("naming an environment that doesn't exist still throws (unchanged pre-D1 behavior) — never silently produces a bundle with a dangling targetEnvironment", async () => {
+    const cli = await freshCli();
+    const workflow = compileWorkflowInput(probeWorkflow("wf-bad-target-env-probe"));
+    await cli.aart.store.workflows.put(workflow);
+
+    await expect(cli.serverPort.produceBundle({ workflowId: workflow.id, workflowVersion: workflow.version, environment: "no-such-environment" })).rejects.toThrow(/not found/);
+  });
+});

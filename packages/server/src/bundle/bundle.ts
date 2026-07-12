@@ -22,6 +22,17 @@ export const BundleManifestSchema = z.object({
   schemaVersion: z.literal(1),
   workflowId: z.string(),
   workflowVersion: z.string(),
+  // D1 "remotes + push" (AMENDMENTS.md A56) — the environment NAME this
+  // bundle was produced for (`aart bundle --environment <name>` /
+  // `aart push`'s own resolved remote environment), if any. Purely
+  // additive: schemaVersion stays 1 (safe both directions — an old build
+  // reading a new manifest simply never looks at this key; a new build
+  // reading an old manifest sees it as absent/undefined, load.ts's own
+  // documented "no real target recorded" legacy case). See load.ts's
+  // hydrateBundle for the two hydration paths this field now selects
+  // between (a real, already-registered Environment vs. the synthetic
+  // `env_bundle` fallback).
+  targetEnvironment: z.string().optional(),
   createdAt: z.string(),
   bundleHash: z.string(),
   workflows: z.array(z.object({ workflowId: z.string(), version: z.string() })),
@@ -96,6 +107,19 @@ export interface ProduceBundleParams {
   workflowVersion?: string;
   /** Pass a `Deployment` to pin `triggers.json` to its `triggerConfig` and record its id in the manifest; omit for a bare workflow-closure bundle (e.g. `aart bundle` invoked without `--target`/`--deployment`). */
   deployment?: Deployment;
+  /**
+   * D1 "remotes + push" (AMENDMENTS.md A56) — the environment NAME to
+   * record on `manifest.targetEnvironment` (see that field's own doc
+   * comment). Independent of `deployment` above — a caller can name a real
+   * target environment with no existing `Deployment` for this workflow in
+   * it yet (a bare-closure bundle aimed at a real, empty environment); the
+   * two are never assumed to agree with each other, and this function
+   * doesn't cross-check them. The caller (`@aart/cli`'s `real-server-port.ts`
+   * `produceBundle` bridge) resolves the human-typed `--environment <name>`
+   * once and threads the SAME validated name into both this field and
+   * (via `deployment`) the triggerConfig lookup.
+   */
+  targetEnvironment?: string;
 }
 
 export async function produceBundle(store: AartStore, params: ProduceBundleParams): Promise<Bundle> {
@@ -121,6 +145,16 @@ export async function produceBundle(store: AartStore, params: ProduceBundleParam
     schemaVersion: 1,
     workflowId: params.workflowId,
     workflowVersion: resolvedVersion!,
+    // Conditional spread, not `targetEnvironment: params.targetEnvironment`
+    // directly — an omitted `--environment` must produce a manifest object
+    // with NO `targetEnvironment` key at all (matching every pre-D1 bundle
+    // byte-for-byte), not an explicit `undefined`-valued one. JSON.stringify
+    // drops undefined-valued keys either way (so the two forms hash and
+    // serialize identically), but this keeps the in-memory shape unambiguous
+    // too, and matches this same file's own established style for optional
+    // fields elsewhere (real-server-port.ts's resolveDeployment/
+    // resolveEnvironmentId bridges).
+    ...(params.targetEnvironment ? { targetEnvironment: params.targetEnvironment } : {}),
     createdAt: new Date().toISOString(),
     workflows: [...resolved.workflows.keys()].map((k) => {
       const [workflowId, version] = k.split("@");

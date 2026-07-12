@@ -141,6 +141,42 @@ describe("produceBundle — transitive closure (architecture §0.3, ADR-04)", ()
     expect(after.manifest.bundleHash).not.toBe(before.manifest.bundleHash);
     expect(after.registry.prompts["extract-prompt@4"]).toBeDefined();
   });
+
+  // D1 "remotes + push" (AMENDMENTS.md A56).
+  describe("manifest.targetEnvironment", () => {
+    it("records the given targetEnvironment on the manifest", async () => {
+      fx = await createTestFixture();
+      await fx.store.workflows.put(baseWorkflow({ id: "wf-env", version: "1" }));
+      const bundle = await produceBundle(fx.store, { workflowId: "wf-env", workflowVersion: "1", targetEnvironment: "production" });
+      expect(bundle.manifest.targetEnvironment).toBe("production");
+    });
+
+    it("omits targetEnvironment entirely when not given — matches every pre-D1 bundle byte-for-byte", async () => {
+      fx = await createTestFixture();
+      await fx.store.workflows.put(baseWorkflow({ id: "wf-no-env", version: "1" }));
+      const bundle = await produceBundle(fx.store, { workflowId: "wf-no-env", workflowVersion: "1" });
+      expect(bundle.manifest.targetEnvironment).toBeUndefined();
+      expect(Object.keys(bundle.manifest)).not.toContain("targetEnvironment");
+    });
+
+    it("is independent of `deployment` — a caller may name a real target environment with no Deployment for this workflow", async () => {
+      fx = await createTestFixture();
+      await fx.store.workflows.put(baseWorkflow({ id: "wf-bare-env", version: "1" }));
+      const bundle = await produceBundle(fx.store, { workflowId: "wf-bare-env", workflowVersion: "1", targetEnvironment: "staging" });
+      expect(bundle.manifest.targetEnvironment).toBe("staging");
+      expect(bundle.triggers).toEqual({}); // no deployment given -> no triggerConfig, exactly as before this field existed
+    });
+
+    it("round-trips through a real bundleHash computation deterministically (targetEnvironment is part of the hashed manifest)", async () => {
+      fx = await createTestFixture();
+      await fx.store.workflows.put(baseWorkflow({ id: "wf-env-hash", version: "1" }));
+      const withEnv = await produceBundle(fx.store, { workflowId: "wf-env-hash", workflowVersion: "1", targetEnvironment: "production" });
+      const withoutEnv = await produceBundle(fx.store, { workflowId: "wf-env-hash", workflowVersion: "1" });
+      expect(withEnv.manifest.bundleHash).not.toBe(withoutEnv.manifest.bundleHash);
+      const withEnvAgain = await produceBundle(fx.store, { workflowId: "wf-env-hash", workflowVersion: "1", targetEnvironment: "production" });
+      expect(withEnvAgain.manifest.bundleHash).toBe(withEnv.manifest.bundleHash);
+    });
+  });
 });
 
 describe("writeBundleToDisk — architecture §0.3's documented layout", () => {
