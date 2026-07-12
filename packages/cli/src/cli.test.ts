@@ -9,7 +9,7 @@ import { compileWorkflowInput, requestApprovalHandler, runWorkflowHandler as mcp
 import { createFakeEngine, startServer, systemClock, type ServerHandle } from "@aart/server";
 import { createFsStore } from "@aart/store";
 import { afterEach, describe, expect, it } from "vitest";
-import { run } from "./cli.js";
+import { run, USAGE } from "./cli.js";
 import { createCliContext, type CliContext } from "./cli-context.js";
 import { approvalWaitWorkflowYaml, createTestCli, sampleWorkflowYaml, type TestCli } from "./test-utils.js";
 
@@ -1302,5 +1302,27 @@ describe("unknown / missing command", () => {
     tc = await createTestCli();
     const outcome = await run(["frobnicate"], { cliContext: tc.cli });
     expect(outcome.ok).toBe(false);
+  });
+});
+
+// AMENDMENTS.md A63 FIX 7 (optional/low-priority, tester UX) — pre-fix,
+// "--help"/"-h"/"help" fell through to the exact same `default:` case as a
+// genuinely unknown command ("frobnicate", above): ok:false, exitCode 1,
+// and a misleading `error: 'Unknown command "--help".'` — even though
+// `usage` (the correct block) was already present in the result. This
+// describe block proves `run()` itself no longer misclassifies these three
+// as unknown commands. The real `aart` binary (bin.ts) additionally
+// short-circuits before ever calling `run()`, printing USAGE as plain
+// stdout text at exit 0 (mirroring bin.ts's own pre-existing zero-arg
+// special case) — not exercised here, since bin.ts is a top-level-await
+// process entry point with no exported function to call directly.
+describe("--help / -h / help (AMENDMENTS.md A63 FIX 7)", () => {
+  it.each(["--help", "-h", "help"])("%s returns ok:true with the USAGE block, not a false 'unknown command'", async (arg) => {
+    tc = await createTestCli();
+    const outcome = await run([arg], { cliContext: tc.cli });
+    expect(outcome.ok).toBe(true);
+    expect(outcome.exitCode).toBe(0);
+    expect((outcome.result as { usage: string }).usage).toBe(USAGE);
+    expect(JSON.stringify(outcome.result)).not.toMatch(/Unknown command/);
   });
 });
