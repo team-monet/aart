@@ -41,7 +41,7 @@
 //     (the stub already reimplemented these correctly against the real,
 //     frozen RunRecord.flag field — this just delegates to the canonical
 //     implementation instead of a second copy of the same logic).
-import type { AartStore } from "@aart/store";
+import { consoleJsonSink, type AartStore } from "@aart/store";
 import { resolveAndProduceBundle } from "@aart/mcp";
 import type { BundleLike, ClearRunFlagResult, Engine, ServerHandleLike, ServerPort, WorkerHandleLike } from "@aart/mcp";
 import {
@@ -95,7 +95,23 @@ export function createRealServerPort(store: AartStore, engine: Engine, root: str
       // process startup," which matches startServer being called exactly
       // once per `aart server` invocation.
       const deployToken = await resolveDeployToken(root);
-      return startRealServer({ store, engine: boundary, port: config.port, secretResolver, environmentId, deployToken });
+      // D1 fix pass (AMENDMENTS.md A58) — logSink: consoleJsonSink is the
+      // FOURTH occurrence of this exact composition-root-gap bug class in
+      // this repo (A48, A53, A57's own FIX 1, now this): @aart/store's
+      // createLogger defaults to a silent noopSink (architecture §16's own
+      // documented default), and ServerConfig.logSink/WorkerConfig.logSink
+      // have existed since S2 — but nothing under packages/cli/src ever
+      // passed one through, so a real `aart server`'s structured JSON
+      // logging (including this very file's own FIX-3 tokenless-promote
+      // startup warning, @aart/server's http/server.ts:232) was firing into
+      // a sink that discards every line, despite DEPLOY.md documenting
+      // "structured JSON logs to stdout" as the out-of-the-box behavior.
+      // Default-on, unconditionally — no new CLI flag/env var: this repo has
+      // no existing log-level/format convention to extend (checked), and
+      // "structured JSON logs to stdout by default" is the exact claim
+      // DEPLOY.md already made and this fix makes true rather than inventing
+      // new config surface for.
+      return startRealServer({ store, engine: boundary, port: config.port, secretResolver, environmentId, deployToken, logSink: consoleJsonSink });
     },
 
     async startWorker(options): Promise<WorkerHandleLike> {
@@ -105,7 +121,9 @@ export function createRealServerPort(store: AartStore, engine: Engine, root: str
       // so it can also print a clean "stopped" result) rather than letting
       // @aart/server's own default self-installed handler race it — see
       // process.ts's workerCommand/serverCommand.
-      return startRealWorker({ store, engine: boundary, workerId: options.workerId, installSignalHandler: false });
+      // logSink: consoleJsonSink — same fix, same reasoning, as startServer
+      // above (AMENDMENTS.md A58).
+      return startRealWorker({ store, engine: boundary, workerId: options.workerId, installSignalHandler: false, logSink: consoleJsonSink });
     },
 
     // AMENDMENTS.md A56: the shared bridge (real-context.ts) resolves

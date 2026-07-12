@@ -13,7 +13,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { compileWorkflowInput } from "@aart/mcp";
 import { computeHmacSignature } from "@aart/server";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createCliContext, type CliContext } from "./cli-context.js";
 
 function probeWorkflow(id: string) {
@@ -172,6 +172,67 @@ describe("createRealServerPort — real deployToken wiring (AMENDMENTS.md A57 fi
     expect(res.status).toBe(401);
     const body = (await res.json()) as { error: string };
     expect(body.error).toMatch(/AART_DEPLOY_TOKEN/);
+  });
+});
+
+// D1 fix pass (AMENDMENTS.md A58) — the FOURTH occurrence of the exact same
+// composition-root-gap bug class this file's own A45/A57 describe blocks
+// above already closed twice (A48, A53 are the other two, elsewhere in this
+// repo): @aart/store's createLogger defaults to a silent noopSink
+// (architecture §16), and ServerConfig.logSink/WorkerConfig.logSink have
+// existed since S2 — but createRealServerPort never passed one through, so
+// a real `aart server`'s entire structured-logging surface (including this
+// very file's own FIX 1 describe block's tokenless-promote startup warning,
+// @aart/server's http/server.ts:232) fired into a sink that discards every
+// line, despite DEPLOY.md documenting "structured JSON logs to stdout" as
+// the out-of-the-box behavior. Mirrors the A57 deploy-token describe block's
+// own discipline immediately above: assert the wiring through the SAME
+// composition root `aart server` itself uses, not a hand-built ServerConfig
+// (which would only prove consoleJsonSink itself works — already covered by
+// @aart/store's own logger.test.ts — not that THIS composition root
+// actually passes it through).
+describe("createRealServerPort — real logSink wiring (AMENDMENTS.md A58 fix pass)", () => {
+  it("a tokenless real aart server's own startup warning is actually observable on the wired console JSON sink — not silently discarded by the default noopSink", async () => {
+    const cli = await freshCli();
+    // consoleJsonSink (@aart/store's logger.ts) routes warn/error-level
+    // lines to console.error, one JSON-stringified line per call — spying
+    // on the real global rather than injecting a substitute sink is
+    // deliberate: there is no config surface for a caller to override the
+    // sink through cli.serverPort.startServer's own public options (`{
+    // port?, environment? }, @aart/mcp's ServerPort type) — this IS the
+    // only place a break in the wiring would be observable, and the point
+    // is to prove this exact, unmodified real path.
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      // No AART_DEPLOY_TOKEN in env (afterEach deletes it either way) — the
+      // tokenless "POST /workflows/:id/promote is UNAUTHENTICATED..."
+      // warning (http/server.ts:232) fires exactly once, unconditionally,
+      // at startup, regardless of whether any request is ever made.
+      const handle = await cli.serverPort.startServer({ port: 0 });
+      handleClose = () => handle.close();
+
+      const warningLine = errorSpy.mock.calls.map(([line]) => line as string).find((line) => {
+        try {
+          const parsed = JSON.parse(line) as { level?: string; msg?: string };
+          return parsed.level === "warn" && typeof parsed.msg === "string" && parsed.msg.includes("UNAUTHENTICATED");
+        } catch {
+          return false;
+        }
+      });
+      expect(warningLine, `expected a warn-level JSON line containing "UNAUTHENTICATED" on console.error; saw: ${JSON.stringify(errorSpy.mock.calls)}`).toBeDefined();
+      // Structured, not just "some text landed on stderr" — the exact shape
+      // createServerLogger(config.logSink).child({component: "http-server"})
+      // (http/server.ts) produces, proving this is genuinely the real
+      // shared logger wired all the way through, not a coincidental stray
+      // console.error from somewhere else.
+      const parsed = JSON.parse(warningLine!) as { level: string; msg: string; service?: string; component?: string; time?: string };
+      expect(parsed.level).toBe("warn");
+      expect(parsed.service).toBe("@aart/server");
+      expect(parsed.component).toBe("http-server");
+      expect(typeof parsed.time).toBe("string");
+    } finally {
+      errorSpy.mockRestore();
+    }
   });
 });
 
