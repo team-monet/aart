@@ -81,7 +81,7 @@ describe("SQLite adapter — job_queue claim race safety across connections (arc
 
     // A second, independent connection to the SAME file — simulating a
     // second `aart worker` process racing this one for the same claim.
-    const otherDb = openSqliteDb(dbPath);
+    const otherDb = await openSqliteDb(dbPath);
     try {
       const future = new Date(Date.now() + 60_000).toISOString();
 

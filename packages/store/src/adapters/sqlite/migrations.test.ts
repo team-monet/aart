@@ -78,6 +78,48 @@ describe("0002_deployment_promoted — pre-populated-db upgrade (D1, AMENDMENTS.
     expect((await handle.store.deployments.get("dep_new"))?.promoted).toBe(false);
   });
 
+  it("up() tolerates the column already existing at watermark 1 (AMENDMENTS.md A58 belt-and-braces) — advances to 2 instead of throwing 'duplicate column name'", async () => {
+    dir = await fs.mkdtemp(join(tmpdir(), "aart-sqlite-migration-test-"));
+    const dbPath = join(dir, "aart.db");
+
+    // Same watermark-1, 0001-only fixture as the test above, EXCEPT the
+    // `promoted` column has somehow already been added — modeling a
+    // database whose on-disk schema fell out of sync with its own
+    // watermark through some path outside MigrationRunner's own tracking
+    // (the exact residual-symptom shape this belt-and-braces defense
+    // targets — see migrations.ts's own createSqliteAddDeploymentPromotedMigration
+    // doc comment; the real fix for the CONCURRENCY race itself is
+    // index.ts's runMigrationsCoordinated, exercised by
+    // src/e2e/migration-race.e2e.test.ts).
+    handle = await openSqliteStore(dbPath, { runMigrations: false });
+    runMigrationDdl(handle.db);
+    handle.db.exec(`ALTER TABLE deployments ADD COLUMN promoted INTEGER`);
+    await new SqliteMigrationWatermarkStore(handle.db).write(1);
+
+    const runner = new MigrationRunner(ALL_SQLITE_MIGRATIONS(handle.db), new SqliteMigrationWatermarkStore(handle.db), handle.store);
+    expect(await runner.currentVersion()).toBe(1);
+    // Without the tolerance, this throws "duplicate column name: promoted"
+    // instead of resolving — verified directly (this fix's own development):
+    // reverting just the try/catch in createSqliteAddDeploymentPromotedMigration's
+    // up() while keeping this exact fixture reproduces that rejection.
+    await expect(runner.up()).resolves.toBe(2);
+
+    // The watermark genuinely advanced (this isn't a silent early-return
+    // that leaves the store thinking it's still on 1) and the column is
+    // still exactly one column, still usable normally.
+    await expect(new SqliteMigrationWatermarkStore(handle.db).read()).resolves.toBe(2);
+    await handle.store.deployments.put({
+      id: "dep_after_tolerant_upgrade",
+      workflowId: "wf",
+      workflowVersion: "1",
+      environmentId: "env_prod",
+      triggerConfig: {},
+      createdAt: "2026-01-01T00:00:00.000Z",
+      promoted: true,
+    });
+    expect((await handle.store.deployments.get("dep_after_tolerant_upgrade"))?.promoted).toBe(true);
+  });
+
   it("down() reverts 0002 (drops the column) cleanly, and up() re-adds it", async () => {
     dir = await fs.mkdtemp(join(tmpdir(), "aart-sqlite-migration-test-"));
     const dbPath = join(dir, "aart.db");

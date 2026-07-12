@@ -91,7 +91,37 @@ export function createSqliteAddDeploymentPromotedMigration(db: DatabaseSync): Mi
   return {
     id: "0002_deployment_promoted",
     async up(): Promise<void> {
-      db.exec(`ALTER TABLE deployments ADD COLUMN promoted INTEGER`);
+      // AMENDMENTS.md A58 — belt-and-braces, NOT a substitute for
+      // index.ts's own runMigrationsCoordinated (the real fix for the
+      // concurrent-startup race this tolerates a residual symptom of).
+      // `ALTER TABLE` has no `IF NOT EXISTS` in SQLite (unlike 0001_init's
+      // `CREATE TABLE IF NOT EXISTS`, which was always naturally idempotent)
+      // — so a database whose schema already has this column, for whatever
+      // reason the in-process watermark check didn't catch (e.g. a
+      // watermark that fell out of sync with the actual schema through some
+      // path outside this adapter's own tracking), would otherwise throw
+      // here even though there is nothing left to DO. Tolerating exactly
+      // this one, specifically-matched failure and returning (log-and-
+      // continue) mirrors `MigrationRunner.up()`'s own silent
+      // `if (ordinal <= current) continue` skip for an already-applied
+      // migration — "already done" is success, not an error, on either
+      // path. Matched on the message text, not a numeric error code:
+      // verified directly (node:sqlite) that `errcode`/`errstr` for this
+      // specific SQLite failure are the generic SQLITE_ERROR/"SQL logic
+      // error" shared by every other schema-mismatch error this driver can
+      // throw — only `message` distinguishes "duplicate column name" from
+      // any other reason this statement could fail, the same message-
+      // substring-matching discipline `packages/server/src/http/server.ts`'s
+      // `bundleErrorStatus` already uses for the identical reason (no typed
+      // error hierarchy to switch on instead).
+      try {
+        db.exec(`ALTER TABLE deployments ADD COLUMN promoted INTEGER`);
+      } catch (err) {
+        if (err instanceof Error && err.message.includes("duplicate column name")) {
+          return;
+        }
+        throw err;
+      }
     },
     async down(): Promise<void> {
       // Modern SQLite (3.35+, well below node:sqlite's bundled floor —

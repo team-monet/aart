@@ -79,6 +79,19 @@ services:
       AART_TRUST_MODE: governed
     env_file:
       - .env
+    depends_on:
+      server:
+        condition: service_healthy
+      # AMENDMENTS.md A58: sqlite's concurrent-startup migration race is now
+      # coordinated (packages/store/src/adapters/sqlite/index.ts's
+      # runMigrationsCoordinated) so a genuinely concurrent server+worker
+      # start no longer crashes either process — this dependency isn't load-
+      # bearing for correctness anymore. Kept anyway (mirroring the
+      # `dashboard` service's own existing depends_on below) as the simpler,
+      # deterministic startup order: the server is the one process this
+      # compose file expects to apply this store's schema first in the
+      # common case, so waiting for its healthcheck avoids EVERY process
+      # racing to be first, not just avoiding a crash.
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8787/health"]
       interval: 10s

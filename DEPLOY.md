@@ -234,6 +234,17 @@ WantedBy=multi-user.target
 # /etc/systemd/system/aart-worker.service — same shape, ExecStart=/usr/bin/aart worker --store sqlite, no port
 ```
 
+With the `sqlite` store, a genuinely concurrent `aart server` + `aart worker`
+start on a fresh store is now coordinated and safe either order (AMENDMENTS.md
+A58 — see [Store choice: fs vs sqlite](#store-choice-fs-vs-sqlite) below), so
+this ordering is a startup-determinism nicety, not a correctness requirement.
+Still worth doing: add `After=aart-server.service` (and, if you want systemd
+to also refuse to start the worker unit at all without the server unit,
+`Requires=aart-server.service`) to `aart-worker.service`'s `[Unit]` section
+above, or otherwise stagger the two units' start — this makes the schema-
+applying process predictable (the server applies it first in the common case)
+instead of leaving it to whichever process happens to win the race.
+
 `aart server`/`aart worker` already handle `SIGTERM`/`SIGINT` cleanly
 (graceful shutdown, drains in-flight steps to their next checkpoint before
 exiting — architecture §4.7; verified directly against a real signal in

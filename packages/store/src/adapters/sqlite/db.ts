@@ -68,24 +68,110 @@ export function createDirectExec(db: DatabaseSync): SqlExec {
   return (fn) => Promise.resolve(fn(db));
 }
 
-export function openSqliteDb(path: string): DatabaseSync {
+// ---------------------------------------------------------------------------
+// Cross-process busy/lock retry (AMENDMENTS.md A58) — shared by this file's
+// own openSqliteDb (bootstrapping a brand-new connection) and adapters/
+// sqlite/index.ts's runMigrationsCoordinated (applying migrations). Both
+// need the identical primitive: "retry a synchronous, possibly-throwing
+// sqlite call a bounded number of times if — and only if — it failed because
+// another connection currently holds the lock this one needs."
+// ---------------------------------------------------------------------------
+
+/**
+ * `true` iff `err` is `node:sqlite`'s own SQLITE_BUSY ("database is locked")
+ * — verified directly (a real BEGIN IMMEDIATE-vs-BEGIN IMMEDIATE contention
+ * and, separately, two connections racing `PRAGMA journal_mode = WAL` on the
+ * same brand-new file) that `node:sqlite` attaches a numeric `errcode` (the
+ * raw SQLite result code, 5 for SQLITE_BUSY) to every thrown error — matching
+ * that stable numeric code rather than `err.message`'s text, since `errstr`
+ * for this code is always the same generic "database is locked" string
+ * SQLite uses for every SQLITE_BUSY regardless of which statement hit it.
+ */
+export function isSqliteBusy(err: unknown): boolean {
+  return typeof err === "object" && err !== null && "errcode" in err && (err as { errcode?: unknown }).errcode === 5;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Retries `fn` — a single synchronous `db.exec`/statement call — with a
+ * short, bounded linear backoff, when it throws SQLITE_BUSY. Belt-and-braces
+ * on top of `PRAGMA busy_timeout` (openSqliteDb below), not a substitute for
+ * it: `busy_timeout` covers the OVERWHELMING majority of real contention
+ * (SQLite's own internal wait-then-retry, no application code involved) —
+ * but verified directly, not assumed, that it does NOT reliably cover every
+ * statement. Two genuinely separate OS processes racing to be the first to
+ * switch the SAME brand-new database file to WAL mode (openSqliteDb's own
+ * `PRAGMA journal_mode = WAL`) reproducibly threw SQLITE_BUSY immediately —
+ * a real SQLITE_BUSY (errcode 5), not a different/unretriable error code —
+ * DESPITE `PRAGMA busy_timeout` already being configured on both
+ * connections beforehand: switching journal mode for the first time on a
+ * file is a one-time operation that apparently doesn't route through the
+ * same internal busy-handler retry path a normal statement does. An
+ * application-level catch/sleep/retry closes that gap; `MIGRATION_LOCK_*`'s
+ * own doc comment (adapters/sqlite/index.ts) has the analogous story for
+ * `BEGIN IMMEDIATE` contention during migration application.
+ */
+export async function withSqliteBusyRetry<T>(fn: () => T, options: { maxAttempts?: number; baseDelayMs?: number } = {}): Promise<T> {
+  const maxAttempts = options.maxAttempts ?? 5;
+  const baseDelayMs = options.baseDelayMs ?? 50;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return fn();
+    } catch (err) {
+      if (isSqliteBusy(err) && attempt < maxAttempts) {
+        await sleep(baseDelayMs * attempt);
+        continue;
+      }
+      throw err;
+    }
+  }
+  // Unreachable: the loop above always either returns (fn() succeeded) or
+  // throws (a non-busy error, or the final attempt's busy error).
+  // TypeScript can't see that from the loop shape alone.
+  throw new Error("withSqliteBusyRetry: exhausted retry attempts without returning or throwing — unreachable.");
+}
+
+/**
+ * Async (AMENDMENTS.md A58 — was synchronous before this fix) because
+ * bootstrapping a connection against a database file another OS process may
+ * be concurrently bootstrapping for the very first time (`aart server` +
+ * `aart worker`'s documented concurrent-startup topology, DEPLOY.md) now
+ * needs `withSqliteBusyRetry`'s own retry-with-backoff, which requires
+ * awaiting a real delay between attempts. Both of this function's only two
+ * callers in this package (adapters/sqlite/index.ts's `openSqliteStore`,
+ * this file's own sibling test `sqlite-store.test.ts`) already run inside an
+ * `async` function — this is not part of this package's public export
+ * surface (see adapters/sqlite/index.ts's own bottom-of-file export list),
+ * so the blast radius of this signature change is fully contained to this
+ * one package.
+ */
+export async function openSqliteDb(path: string): Promise<DatabaseSync> {
   const db = new DatabaseSync(path);
+  // Order matters: busy_timeout MUST be the very first statement on this
+  // connection, before anything else touches the file (including `PRAGMA
+  // journal_mode = WAL` next) — a second/third connection's busy_timeout
+  // can't help a FIRST connection that hasn't reached its own `PRAGMA
+  // busy_timeout` line yet, and every statement below this one is itself
+  // wrapped in withSqliteBusyRetry precisely because — per that function's
+  // own doc comment — busy_timeout being SET is not, by itself, a complete
+  // guarantee for every statement.
+  await withSqliteBusyRetry(() => db.exec("PRAGMA busy_timeout = 5000"));
   // WAL mode — architecture §5.1: "One file, WAL mode for concurrent
   // worker+server reads." This matters across PROCESSES/connections (e.g.
   // `aart server` and `aart worker` both pointed at the same local SQLite
   // file) even though this adapter's own single connection is internally
   // serialized by AsyncMutex above for a different reason (BEGIN/COMMIT
   // correctness, not read concurrency).
-  db.exec("PRAGMA journal_mode = WAL");
-  db.exec("PRAGMA foreign_keys = ON");
-  // A second process/connection contending for the write lock gets a
-  // bounded retry window instead of an immediate SQLITE_BUSY.
-  db.exec("PRAGMA busy_timeout = 5000");
+  await withSqliteBusyRetry(() => db.exec("PRAGMA journal_mode = WAL"));
+  await withSqliteBusyRetry(() => db.exec("PRAGMA foreign_keys = ON"));
   // Bootstrapping infrastructure, not a migration — see schema.ts's doc
   // comment on MIGRATION_WATERMARK_TABLE_STATEMENT for why this must exist
   // before MigrationRunner's first watermark read, independent of whether
   // migration 0001_init has applied yet.
-  db.exec(MIGRATION_WATERMARK_TABLE_STATEMENT);
+  await withSqliteBusyRetry(() => db.exec(MIGRATION_WATERMARK_TABLE_STATEMENT));
   return db;
 }
 
