@@ -28,12 +28,22 @@ import { processTriggerIntake, recordRejectedTrigger } from "../triggers/intake.
 import { loadTriggerBindingsFromDeployments } from "../triggers/registry.js";
 import type { InboundDelivery, IntakeOutcome, TriggerBinding } from "../triggers/types.js";
 import { approveOrDeprecateWorkflow } from "../workflow-actions.js";
-import { sendJson, Router, type RouteContext } from "./router.js";
+import { sendJson, Router, type RegisteredRoute, type RouteContext } from "./router.js";
 
 export interface ServerHandle {
   server: Server;
   port: number;
   ticker?: TickerHandle;
+  /**
+   * D2a security hardening (AMENDMENTS.md A59) — read-only route-table
+   * introspection (`Router.getRoutes()`), exposed here so a completeness
+   * test can enumerate every route this server actually registered and
+   * assert each POST route explicitly declares its auth stance, without
+   * needing a second, parallel way to construct a populated `Router`
+   * outside `startServer` itself. Not meant for runtime/production use
+   * beyond this — nothing in this codebase calls it outside tests.
+   */
+  getRoutes(): readonly RegisteredRoute[];
   close(): Promise<void>;
 }
 
@@ -117,39 +127,77 @@ function requireDeployToken(config: ServerConfig, ctx: RouteContext): boolean {
 }
 
 /**
- * D1 fix pass (AMENDMENTS.md A57, trust-boundary ruling) — the CONDITIONAL
- * sibling of `requireDeployToken` above, for `POST /workflows/:id/promote`
- * specifically. Rationale: promote is the switch that flips
- * `Deployment.promoted` `false` -> `true` (A56's own push-without-activation
- * story); D1 both tells operators it's reasonable to network-expose
- * `aart server` and created that exact dormancy property, so an
- * UNAUTHENTICATED promote would defeat D1's own guarantee that a pushed
- * bundle stays inert until someone deliberately activates it.
+ * D1 fix pass (AMENDMENTS.md A57, trust-boundary ruling); scope widened to
+ * (almost) every mutation route by D2a security hardening (AMENDMENTS.md
+ * A59, uniform coverage) — the CONDITIONAL sibling of `requireDeployToken`
+ * above. Originally built for `POST /workflows/:id/promote` alone:
+ * promote is the switch that flips `Deployment.promoted` `false` -> `true`
+ * (A56's own push-without-activation story); D1 both tells operators it's
+ * reasonable to network-expose `aart server` and created that exact
+ * dormancy property, so an UNAUTHENTICATED promote would defeat D1's own
+ * guarantee that a pushed bundle stays inert until someone deliberately
+ * activates it. A D2a security review found the SAME reasoning applies to
+ * every OTHER mutation route this server exposes (trigger a run, decide an
+ * approval, record a correction, ...) — all equally network-reachable and
+ * equally unauthenticated by design, once `deployToken` existed, the moment
+ * an operator follows this codebase's own documented advice to expose
+ * `aart server` beyond localhost. This function is now that route's
+ * conditional gate too, applied at registration via `RouteOptions.auth` —
+ * see `startServer` below for the full route list.
  *
  * Unlike the three routes `requireDeployToken` guards (which have NEVER
  * worked without a token, by design — "not configured yet" is the correct
- * universal refusal for a brand-new surface), `POST /workflows/:id/promote`
- * existed and was open long before `deployToken` did (AMENDMENTS.md A47) —
- * tokenless local/dev/TEST-DRIVE dashboards must keep working unmodified.
- * So this does NOT fail closed when unconfigured:
- *   - `config.deployToken` unset -> proceeds exactly as pre-A56 (`true`),
- *     never refuses — see `startServer`'s own one-time startup warning
- *     below for the operator-facing signal instead of a per-request one.
+ * universal refusal for a brand-new surface), every route THIS function
+ * guards existed and was open before `deployToken` did — tokenless local/
+ * dev/TEST-DRIVE deployments must keep working unmodified. So this does
+ * NOT fail closed when unconfigured:
+ *   - `config.deployToken` unset -> proceeds exactly as before this route
+ *     was gated (`true`), never refuses — see `startServer`'s own one-time
+ *     startup warning below for the operator-facing signal instead of a
+ *     per-request one.
  *   - configured -> the SAME bearer check `requireDeployToken` uses
  *     (`checkDeployToken`/`extractBearerToken`), reused rather than
- *     reimplemented, just with a promote-specific 401 remedy — "set
+ *     reimplemented, just with a route-specific 401 remedy — "set
  *     AART_DEPLOY_TOKEN" would be the WRONG instruction here, since a
  *     token already IS configured and simply wasn't supplied or matched.
  *
+ * `actionLabel` (D2a) — the 401 remedy's own trailing clause ("...requires
+ * it to <actionLabel>"), so a route's refusal can still name what it
+ * specifically gates (e.g. promote's own call site passes "promote a
+ * workflow version", preserving A57's exact original wording byte-for-
+ * byte) rather than every one of the ~17 call sites sharing a single
+ * hardcoded phrase that was only ever true for promote. Defaults to a
+ * route-neutral phrase for call sites that don't need anything more
+ * specific.
+ *
  * A distinct helper (not a parameter/flag on `requireDeployToken` itself)
- * so the fail-closed (new deploy-surface routes) vs conditional (promote)
- * semantics stay explicit in the code, not hidden behind a boolean.
+ * so the fail-closed (deploy-surface routes) vs conditional (everything
+ * else) semantics stay explicit in the code, not hidden behind a boolean.
+ *
+ * Token-derived attribution (D2a, AMENDMENTS.md A59, "mechanical half" —
+ * named per-token labels are deferred) — on success via a PROVIDED,
+ * MATCHING token (never the "unconfigured, proceed" branch, which has no
+ * caller identity to attribute anything to), stamps `ctx.authenticated =
+ * { label: "deploy-token" }` before returning `true`. Hardcoded rather than
+ * a configurable `ServerConfig.deployTokenLabel` — flagged explicitly as a
+ * deliberate scope decision, not an oversight: with exactly one shared
+ * token (plus, since D2a, one rotation successor — see `checkAnyDeployToken`
+ * — neither individually NAMED), a single fixed label is all "attribution"
+ * can honestly mean today; a per-token label would need per-token
+ * identities to attach it to, which is what "named tokens" (out of scope
+ * here) would actually add. `requireDeployToken` (the fail-closed sibling)
+ * deliberately does NOT set this — none of its three routes consume
+ * `ctx.authenticated` today, and stamping it there with no reader would be
+ * unused surface, not a real capability.
  */
-function requireDeployTokenIfConfigured(config: ServerConfig, ctx: RouteContext): boolean {
+function requireDeployTokenIfConfigured(config: ServerConfig, ctx: RouteContext, actionLabel = "perform this action"): boolean {
   if (!config.deployToken) return true;
   const provided = extractBearerToken(ctx.req.headers.authorization);
-  if (checkDeployToken(config.deployToken, provided)) return true;
-  sendJson(ctx.res, 401, { error: 'Unauthorized. Provide a valid "Authorization: Bearer <token>" header — this server has AART_DEPLOY_TOKEN configured and requires it to promote a workflow version.' });
+  if (checkDeployToken(config.deployToken, provided)) {
+    ctx.authenticated = { label: "deploy-token" };
+    return true;
+  }
+  sendJson(ctx.res, 401, { error: `Unauthorized. Provide a valid "Authorization: Bearer <token>" header — this server has AART_DEPLOY_TOKEN configured and requires it to ${actionLabel}.` });
   return false;
 }
 
@@ -219,18 +267,24 @@ export async function startServer(config: ServerConfig): Promise<ServerHandle> {
   const logger: Logger = createServerLogger(config.logSink).child({ component: "http-server" });
   const router = new Router();
 
-  // D1 fix pass (AMENDMENTS.md A57) — requireDeployTokenIfConfigured's own
-  // conditional (not fail-closed) semantics for POST /workflows/:id/promote
-  // means an unconfigured deployToken has no per-request refusal to make
-  // the exposure visible the way requireDeployToken's 401 does for the
-  // three fail-closed routes. One loud warning at startup instead of a
-  // per-request log line (which would spam this at up to one entry per
-  // promote call, every process lifetime) — surfaced once, here, so an
-  // operator scanning startup logs sees it regardless of whether they ever
-  // trip the condition in a request.
+  // D1 fix pass (AMENDMENTS.md A57); reworded for D2a's uniform-coverage
+  // scope widening (AMENDMENTS.md A59) — requireDeployTokenIfConfigured's
+  // own conditional (not fail-closed) semantics mean an unconfigured
+  // deployToken has no per-request refusal to make the exposure visible the
+  // way requireDeployToken's 401 does for the three fail-closed routes. One
+  // loud warning at startup instead of a per-request log line (which would
+  // spam this at up to one entry per gated call, every process lifetime) —
+  // surfaced once, here, so an operator scanning startup logs sees it
+  // regardless of whether they ever trip the condition in a request. Scope
+  // note: this used to name `POST /workflows/:id/promote` alone (the only
+  // route this conditional gate covered pre-D2a) — D2a widened
+  // requireDeployTokenIfConfigured to nearly every mutation route this
+  // server exposes, so the warning now describes that scope generically
+  // rather than re-listing ~17 routes inline; DEPLOY.md's gating matrix is
+  // the canonical full list.
   if (!config.deployToken) {
     logger.warn(
-      "POST /workflows/:id/promote is UNAUTHENTICATED — no AART_DEPLOY_TOKEN configured. Any caller that can reach this server's HTTP API can activate a pushed-but-dormant Deployment. Set AART_DEPLOY_TOKEN to require a bearer token on this route (D1 fix pass, AMENDMENTS.md A57).",
+      "Every mutation route on this server EXCEPT POST /bundles/ingest, POST /bundles/plan, POST /environments (fail-closed regardless) and the three /webhooks/* endpoints (separate per-binding HMAC verification) is UNAUTHENTICATED — no AART_DEPLOY_TOKEN configured. Any caller that can reach this server's HTTP API can trigger runs, decide approvals, promote or otherwise modify workflow/governance state, and more. Set AART_DEPLOY_TOKEN to require a bearer token on these routes (D2a security hardening, AMENDMENTS.md A59) — see DEPLOY.md's gating matrix for the full route list.",
     );
   }
 
@@ -295,51 +349,86 @@ export async function startServer(config: ServerConfig): Promise<ServerHandle> {
   // assuming `humanReview` — root AMENDMENTS.md A46's flagged dashboard
   // bug, fixed at its source here since this is now the ONE real
   // implementation the dashboard itself calls instead of reimplementing).
-  router.post("/approvals/:id/decision", async (ctx, body) => {
-    const decision = body as { status: ApprovalTask["status"]; reviewer: string; decision?: unknown; trustMode?: TrustMode };
-    const result = await decideApprovalTask(config.store, config.engine, ctx.params["id"]!, decision, clock);
-    switch (result.kind) {
-      case "not_found":
-        return sendJson(ctx.res, 404, { error: "approval task not found" });
-      case "missing_reviewer":
-        return sendJson(ctx.res, 400, { error: "reviewer is required" });
-      case "invalid_gate":
-        return sendJson(ctx.res, 400, { error: `A human decision cannot set gate "${result.gate}" — only humanReview, riskReview are decided via approval tasks.` });
-      case "workflow_not_found":
-        return sendJson(ctx.res, 404, { error: `Workflow ${result.workflowId}@${result.workflowVersion} not found.` });
-      case "workflow_version":
-        return sendJson(ctx.res, 200, { kind: result.kind, task: result.task, workflowId: result.workflowId, workflowVersion: result.workflowVersion, gates: result.gates, approval: result.approval });
-      case "run_step":
-        return sendJson(ctx.res, 200, result.resume ? { kind: result.kind, task: result.task, resume: result.resume } : { kind: result.kind, task: result.task });
-    }
-  });
+  // D2a security hardening (AMENDMENTS.md A59) — conditionally gated
+  // (requireDeployTokenIfConfigured): see that function's own doc comment
+  // for the full trust-boundary rationale, now applied uniformly across
+  // this file's mutation routes rather than to promote alone.
+  router.post(
+    "/approvals/:id/decision",
+    async (ctx, body) => {
+      const decision = body as { status: ApprovalTask["status"]; reviewer: string; decision?: unknown; trustMode?: TrustMode };
+      // D2a token-derived attribution (AMENDMENTS.md A59) — built as an
+      // explicit allowlist, NOT `{ ...decision, authenticatedAs: ... }`:
+      // spreading the client-supplied body first would let a caller inject
+      // its own `authenticatedAs` value that this line's own assignment
+      // then only wins over by KEY-ORDERING luck (the exact object-literal
+      // spread-ordering vulnerability class A57's own FIX 6 closed
+      // elsewhere in this codebase, `deployment.ts`) — authenticatedAs must
+      // ALWAYS come from the server's own auth check, never from the body.
+      const input: typeof decision & { authenticatedAs?: string } = {
+        status: decision.status,
+        reviewer: decision.reviewer,
+        decision: decision.decision,
+        trustMode: decision.trustMode,
+        authenticatedAs: ctx.authenticated?.label,
+      };
+      const result = await decideApprovalTask(config.store, config.engine, ctx.params["id"]!, input, clock);
+      switch (result.kind) {
+        case "not_found":
+          return sendJson(ctx.res, 404, { error: "approval task not found" });
+        case "missing_reviewer":
+          return sendJson(ctx.res, 400, { error: "reviewer is required" });
+        case "invalid_gate":
+          return sendJson(ctx.res, 400, { error: `A human decision cannot set gate "${result.gate}" — only humanReview, riskReview are decided via approval tasks.` });
+        case "workflow_not_found":
+          return sendJson(ctx.res, 404, { error: `Workflow ${result.workflowId}@${result.workflowVersion} not found.` });
+        case "workflow_version":
+          return sendJson(ctx.res, 200, { kind: result.kind, task: result.task, workflowId: result.workflowId, workflowVersion: result.workflowVersion, gates: result.gates, approval: result.approval });
+        case "run_step":
+          return sendJson(ctx.res, 200, result.resume ? { kind: result.kind, task: result.task, resume: result.resume } : { kind: result.kind, task: result.task });
+      }
+    },
+    { auth: (ctx) => requireDeployTokenIfConfigured(config, ctx, "decide an approval task") },
+  );
 
-  router.post("/runs/:runId/resume", async (ctx, body) => {
-    const { stepId, payload } = body as { stepId: string; payload?: unknown };
-    if (!stepId) return sendJson(ctx.res, 400, { error: "stepId is required" });
-    const result = await config.engine.resumeDirect(ctx.params["runId"]!, stepId, payload);
-    return sendJson(ctx.res, 200, result);
-  });
+  router.post(
+    "/runs/:runId/resume",
+    async (ctx, body) => {
+      const { stepId, payload } = body as { stepId: string; payload?: unknown };
+      if (!stepId) return sendJson(ctx.res, 400, { error: "stepId is required" });
+      const result = await config.engine.resumeDirect(ctx.params["runId"]!, stepId, payload);
+      return sendJson(ctx.res, 200, result);
+    },
+    { auth: (ctx) => requireDeployTokenIfConfigured(config, ctx, "resume a run") },
+  );
 
-  router.post("/runs/:runId/signal", async (ctx, body) => {
-    const { name, correlationId, payload } = body as { name: string; correlationId: string; payload?: unknown };
-    if (!name || !correlationId) return sendJson(ctx.res, 400, { error: "name and correlationId are required" });
-    const signal: Signal = { id: generateId("sig"), name, correlationId, payload, receivedAt: clock.nowIso() };
-    await config.store.signals.append(signal);
-    const result = await config.engine.resumeWithSignal(signal);
-    return sendJson(ctx.res, 200, result);
-  });
+  router.post(
+    "/runs/:runId/signal",
+    async (ctx, body) => {
+      const { name, correlationId, payload } = body as { name: string; correlationId: string; payload?: unknown };
+      if (!name || !correlationId) return sendJson(ctx.res, 400, { error: "name and correlationId are required" });
+      const signal: Signal = { id: generateId("sig"), name, correlationId, payload, receivedAt: clock.nowIso() };
+      await config.store.signals.append(signal);
+      const result = await config.engine.resumeWithSignal(signal);
+      return sendJson(ctx.res, 200, result);
+    },
+    { auth: (ctx) => requireDeployTokenIfConfigured(config, ctx, "send a signal") },
+  );
 
   // The flagged-run clear action (architecture §4.1/§4.7/§6.2/§13.3) — this
   // HTTP route IS the "dashboard/CLI only, not MCP" surface: no MCP tool
   // anywhere in this codebase calls it, and none should.
-  router.post("/runs/:runId/flag/clear", async (ctx, body) => {
-    const { clearedBy } = body as { clearedBy?: string };
-    if (!clearedBy) return sendJson(ctx.res, 400, { error: "clearedBy is required" });
-    const result = await clearRunFlag(config.store, ctx.params["runId"]!, clearedBy, clock);
-    const status = result.kind === "cleared" ? 200 : result.kind === "not_found" ? 404 : 409;
-    return sendJson(ctx.res, status, result);
-  });
+  router.post(
+    "/runs/:runId/flag/clear",
+    async (ctx, body) => {
+      const { clearedBy } = body as { clearedBy?: string };
+      if (!clearedBy) return sendJson(ctx.res, 400, { error: "clearedBy is required" });
+      const result = await clearRunFlag(config.store, ctx.params["runId"]!, clearedBy, clock);
+      const status = result.kind === "cleared" ? 200 : result.kind === "not_found" ? 404 : 409;
+      return sendJson(ctx.res, status, result);
+    },
+    { auth: (ctx) => requireDeployTokenIfConfigured(config, ctx, "clear a run's flag") },
+  );
 
   // AMENDMENTS.md A47 — every dashboard write action below now has a real
   // server-side implementation, closing the store-divergence bug class
@@ -351,114 +440,188 @@ export async function startServer(config: ServerConfig): Promise<ServerHandle> {
   // "Trigger workflow" (§35.2) — via the REAL EngineBoundary.startRun
   // (`engine/boundary.ts`), the SAME real `Engine.triggerRun` a webhook/CLI
   // trigger uses; not a dashboard-local RunRecord-construction stub.
-  router.post("/runs/trigger", async (ctx, body) => {
-    const { workflowId, workflowVersion, inputs, environment } = body as { workflowId?: string; workflowVersion?: string; inputs?: Record<string, unknown>; environment?: string };
-    if (!workflowId) return sendJson(ctx.res, 400, { error: "workflowId is required" });
-    const trigger: Trigger = { type: "manual", id: generateId("trig"), source: "dashboard", payload: {}, receivedAt: clock.nowIso() };
-    const result = await config.engine.startRun({ workflowId, workflowVersion, trigger, mappedInputs: inputs ?? {}, environment });
-    if (result.kind === "rejected") return sendJson(ctx.res, 409, { error: result.reason });
-    const run = await config.store.runs.get(result.runId);
-    return sendJson(ctx.res, 200, { kind: result.kind, run });
-  });
+  router.post(
+    "/runs/trigger",
+    async (ctx, body) => {
+      const { workflowId, workflowVersion, inputs, environment } = body as { workflowId?: string; workflowVersion?: string; inputs?: Record<string, unknown>; environment?: string };
+      if (!workflowId) return sendJson(ctx.res, 400, { error: "workflowId is required" });
+      const trigger: Trigger = { type: "manual", id: generateId("trig"), source: "dashboard", payload: {}, receivedAt: clock.nowIso() };
+      const result = await config.engine.startRun({ workflowId, workflowVersion, trigger, mappedInputs: inputs ?? {}, environment });
+      if (result.kind === "rejected") return sendJson(ctx.res, 409, { error: result.reason });
+      const run = await config.store.runs.get(result.runId);
+      return sendJson(ctx.res, 200, { kind: result.kind, run });
+    },
+    { auth: (ctx) => requireDeployTokenIfConfigured(config, ctx, "trigger a run") },
+  );
 
-  router.post("/workflows/:id/approve", async (ctx, body) => {
-    const { version, action, trustMode } = body as { version?: string; action?: "approve" | "deprecate"; trustMode?: TrustMode };
-    if (!version) return sendJson(ctx.res, 400, { error: "version is required" });
-    const result = await approveOrDeprecateWorkflow(config.store, ctx.params["id"]!, version, action === "deprecate" ? "deprecate" : "approve", trustMode ?? "governed");
-    if (result.kind === "not_found") return sendJson(ctx.res, 404, { error: "not found" });
-    return sendJson(ctx.res, 200, { workflow: result.workflow });
-  });
+  router.post(
+    "/workflows/:id/approve",
+    async (ctx, body) => {
+      const { version, action, trustMode } = body as { version?: string; action?: "approve" | "deprecate"; trustMode?: TrustMode };
+      if (!version) return sendJson(ctx.res, 400, { error: "version is required" });
+      // D2a fix (AMENDMENTS.md A59) — this route cast `trustMode` with no
+      // runtime check, the SAME bug shape D1's fix pass (AMENDMENTS.md A57,
+      // FIX 2) closed for POST /environments: a typo'd value (e.g. "prod")
+      // would silently persist into computeApprovalState's REQUIRED_GATES_BY_MODE
+      // lookup, which maps an unrecognized string to "governed" with no
+      // signal anywhere. requireValidTrustMode (this file, above) is the
+      // same helper /environments already uses.
+      if (!requireValidTrustMode(ctx, trustMode)) return;
+      const resolvedAction = action === "deprecate" ? "deprecate" : "approve";
+      const result = await approveOrDeprecateWorkflow(config.store, ctx.params["id"]!, version, resolvedAction, trustMode ?? "governed");
+      if (result.kind === "not_found") return sendJson(ctx.res, 404, { error: "not found" });
+      // D2a token-derived attribution, log-only half (AMENDMENTS.md A59) —
+      // approveOrDeprecateWorkflow has no actor param today and its
+      // persisted shape isn't extended by this change (see this route's own
+      // PART 5(b) scope note); logging who authenticated this decision is
+      // the mechanism available without changing that function's signature.
+      logger.info("workflow version approve/deprecate decided", { workflowId: ctx.params["id"]!, version, action: resolvedAction, authenticatedAs: ctx.authenticated?.label });
+      return sendJson(ctx.res, 200, { workflow: result.workflow });
+    },
+    { auth: (ctx) => requireDeployTokenIfConfigured(config, ctx, "approve or deprecate a workflow version") },
+  );
 
   // D1 fix pass (AMENDMENTS.md A57) — conditionally gated: see
   // requireDeployTokenIfConfigured's own doc comment for the full
   // trust-boundary rationale (promote is the switch that activates a
-  // pushed-but-dormant Deployment).
-  router.post("/workflows/:id/promote", async (ctx, body) => {
-    if (!requireDeployTokenIfConfigured(config, ctx)) return;
-    const { version, environmentId, triggerConfig } = body as { version?: string; environmentId?: string; triggerConfig?: Record<string, unknown> };
-    if (!version || !environmentId) return sendJson(ctx.res, 400, { error: "version and environmentId are required" });
-    const result = await promoteWorkflowVersionToEnvironment(config.store, { workflowId: ctx.params["id"]!, workflowVersion: version, environmentId, triggerConfig }, clock);
-    return sendJson(ctx.res, 200, result);
-  });
+  // pushed-but-dormant Deployment). D2a (AMENDMENTS.md A59): migrated from
+  // an inline `if (!requireDeployTokenIfConfigured(...)) return;` first line
+  // to the `auth` route option — same check, now runs before body-read too
+  // (this route's own body is trivial, so the ordering fix is mostly
+  // symbolic here, but it keeps every gated route on the one mechanism).
+  router.post(
+    "/workflows/:id/promote",
+    async (ctx, body) => {
+      const { version, environmentId, triggerConfig } = body as { version?: string; environmentId?: string; triggerConfig?: Record<string, unknown> };
+      if (!version || !environmentId) return sendJson(ctx.res, 400, { error: "version and environmentId are required" });
+      const result = await promoteWorkflowVersionToEnvironment(config.store, { workflowId: ctx.params["id"]!, workflowVersion: version, environmentId, triggerConfig }, clock);
+      return sendJson(ctx.res, 200, result);
+    },
+    { auth: (ctx) => requireDeployTokenIfConfigured(config, ctx, "promote a workflow version") },
+  );
 
-  router.post("/workflows/:id/block-promotion", async (ctx, body) => {
-    const { version } = body as { version?: string };
-    if (!version) return sendJson(ctx.res, 400, { error: "version is required" });
-    await respondWorkflowFlagAction(ctx.res, blockPromotion, config.store, ctx.params["id"]!, version);
-  });
-  router.post("/workflows/:id/unblock-promotion", async (ctx, body) => {
-    const { version } = body as { version?: string };
-    if (!version) return sendJson(ctx.res, 400, { error: "version is required" });
-    await respondWorkflowFlagAction(ctx.res, unblockPromotion, config.store, ctx.params["id"]!, version);
-  });
-  router.post("/workflows/:id/mark-needs-review", async (ctx, body) => {
-    const { version } = body as { version?: string };
-    if (!version) return sendJson(ctx.res, 400, { error: "version is required" });
-    await respondWorkflowFlagAction(ctx.res, markNeedsReview, config.store, ctx.params["id"]!, version);
-  });
-  router.post("/workflows/:id/clear-needs-review", async (ctx, body) => {
-    const { version } = body as { version?: string };
-    if (!version) return sendJson(ctx.res, 400, { error: "version is required" });
-    await respondWorkflowFlagAction(ctx.res, clearNeedsReview, config.store, ctx.params["id"]!, version);
-  });
-  router.post("/workflows/:id/trigger-improvement", async (ctx, body) => {
-    const { version } = body as { version?: string };
-    if (!version) return sendJson(ctx.res, 400, { error: "version is required" });
-    const brief = await triggerImprovementProposal(config.store, ctx.params["id"]!, version);
-    return sendJson(ctx.res, 200, brief);
-  });
-
-  router.post("/corrections", async (ctx, body) => {
-    const input = body as Partial<RecordCorrectionInput>;
-    if (!input.runId || !input.stepId || !input.fieldPath || !input.reason || !input.reviewer) {
-      return sendJson(ctx.res, 400, { error: "runId, stepId, fieldPath, reason, and reviewer are required" });
-    }
-    const correction = await recordCorrection(config.store, input as RecordCorrectionInput);
-    return sendJson(ctx.res, 200, { correction });
-  });
-  router.post("/corrections/:key/update-run-output", async (ctx) => {
-    const correction = await findCorrectionByKey(config.store, ctx.params["key"]!);
-    if (!correction) return sendJson(ctx.res, 404, { error: "not found" });
-    try {
-      const run = await updateRunOutput(config.store, correction);
-      return sendJson(ctx.res, 200, { run });
-    } catch (err) {
-      return sendJson(ctx.res, 404, { error: err instanceof Error ? err.message : "not found" });
-    }
-  });
-  router.post("/corrections/:key/create-eval-example", async (ctx, body) => {
-    const correction = await findCorrectionByKey(config.store, ctx.params["key"]!);
-    if (!correction) return sendJson(ctx.res, 404, { error: "not found" });
-    const { suiteId } = body as { suiteId?: string };
-    if (!suiteId) return sendJson(ctx.res, 400, { error: "suiteId is required" });
-    const example = await createEvalExampleFromCorrection(config.store, correction, suiteId);
-    return sendJson(ctx.res, 200, { example });
-  });
-  router.post("/corrections/:key/create-issue", async (ctx) => {
-    const correction = await findCorrectionByKey(config.store, ctx.params["key"]!);
-    if (!correction) return sendJson(ctx.res, 404, { error: "not found" });
-    try {
-      const brief = await createIssueForAgent(config.store, correction);
+  router.post(
+    "/workflows/:id/block-promotion",
+    async (ctx, body) => {
+      const { version } = body as { version?: string };
+      if (!version) return sendJson(ctx.res, 400, { error: "version is required" });
+      await respondWorkflowFlagAction(ctx.res, blockPromotion, config.store, ctx.params["id"]!, version);
+    },
+    { auth: (ctx) => requireDeployTokenIfConfigured(config, ctx, "block a workflow version's promotion") },
+  );
+  router.post(
+    "/workflows/:id/unblock-promotion",
+    async (ctx, body) => {
+      const { version } = body as { version?: string };
+      if (!version) return sendJson(ctx.res, 400, { error: "version is required" });
+      await respondWorkflowFlagAction(ctx.res, unblockPromotion, config.store, ctx.params["id"]!, version);
+    },
+    { auth: (ctx) => requireDeployTokenIfConfigured(config, ctx, "unblock a workflow version's promotion") },
+  );
+  router.post(
+    "/workflows/:id/mark-needs-review",
+    async (ctx, body) => {
+      const { version } = body as { version?: string };
+      if (!version) return sendJson(ctx.res, 400, { error: "version is required" });
+      await respondWorkflowFlagAction(ctx.res, markNeedsReview, config.store, ctx.params["id"]!, version);
+    },
+    { auth: (ctx) => requireDeployTokenIfConfigured(config, ctx, "mark a workflow version as needing review") },
+  );
+  router.post(
+    "/workflows/:id/clear-needs-review",
+    async (ctx, body) => {
+      const { version } = body as { version?: string };
+      if (!version) return sendJson(ctx.res, 400, { error: "version is required" });
+      await respondWorkflowFlagAction(ctx.res, clearNeedsReview, config.store, ctx.params["id"]!, version);
+    },
+    { auth: (ctx) => requireDeployTokenIfConfigured(config, ctx, "clear a workflow version's needs-review flag") },
+  );
+  router.post(
+    "/workflows/:id/trigger-improvement",
+    async (ctx, body) => {
+      const { version } = body as { version?: string };
+      if (!version) return sendJson(ctx.res, 400, { error: "version is required" });
+      const brief = await triggerImprovementProposal(config.store, ctx.params["id"]!, version);
       return sendJson(ctx.res, 200, brief);
-    } catch (err) {
-      return sendJson(ctx.res, 404, { error: err instanceof Error ? err.message : "not found" });
-    }
-  });
+    },
+    { auth: (ctx) => requireDeployTokenIfConfigured(config, ctx, "trigger an improvement proposal") },
+  );
 
-  router.post("/evals/suites", async (ctx, body) => {
-    const { name, description, scorer } = body as { name?: string; description?: string; scorer?: Scorer };
-    if (!name || !scorer) return sendJson(ctx.res, 400, { error: "name and scorer are required" });
-    const suite = await createEvalSuite(config.store, { name, description, scorer });
-    return sendJson(ctx.res, 200, { suite });
-  });
-  router.post("/evals/runs", async (ctx, body) => {
-    const { suiteId, workflowId, workflowVersion } = body as { suiteId?: string; workflowId?: string; workflowVersion?: string };
-    if (!suiteId || !workflowId) return sendJson(ctx.res, 400, { error: "suiteId and workflowId are required" });
-    const result = await runEvalSuiteForWorkflow(config.store, suiteId, workflowId, workflowVersion);
-    if (result.kind === "suite_not_found") return sendJson(ctx.res, 404, { error: `eval suite not found: ${suiteId}` });
-    if (result.kind === "workflow_not_found") return sendJson(ctx.res, 404, { error: `workflow not found: ${workflowId}${workflowVersion ? `@${workflowVersion}` : ""}` });
-    return sendJson(ctx.res, 200, { evalRun: result.evalRun, results: result.results });
-  });
+  router.post(
+    "/corrections",
+    async (ctx, body) => {
+      const input = body as Partial<RecordCorrectionInput>;
+      if (!input.runId || !input.stepId || !input.fieldPath || !input.reason || !input.reviewer) {
+        return sendJson(ctx.res, 400, { error: "runId, stepId, fieldPath, reason, and reviewer are required" });
+      }
+      const correction = await recordCorrection(config.store, input as RecordCorrectionInput);
+      return sendJson(ctx.res, 200, { correction });
+    },
+    { auth: (ctx) => requireDeployTokenIfConfigured(config, ctx, "record a correction") },
+  );
+  router.post(
+    "/corrections/:key/update-run-output",
+    async (ctx) => {
+      const correction = await findCorrectionByKey(config.store, ctx.params["key"]!);
+      if (!correction) return sendJson(ctx.res, 404, { error: "not found" });
+      try {
+        const run = await updateRunOutput(config.store, correction);
+        return sendJson(ctx.res, 200, { run });
+      } catch (err) {
+        return sendJson(ctx.res, 404, { error: err instanceof Error ? err.message : "not found" });
+      }
+    },
+    { auth: (ctx) => requireDeployTokenIfConfigured(config, ctx, "apply a correction to a run's output") },
+  );
+  router.post(
+    "/corrections/:key/create-eval-example",
+    async (ctx, body) => {
+      const correction = await findCorrectionByKey(config.store, ctx.params["key"]!);
+      if (!correction) return sendJson(ctx.res, 404, { error: "not found" });
+      const { suiteId } = body as { suiteId?: string };
+      if (!suiteId) return sendJson(ctx.res, 400, { error: "suiteId is required" });
+      const example = await createEvalExampleFromCorrection(config.store, correction, suiteId);
+      return sendJson(ctx.res, 200, { example });
+    },
+    { auth: (ctx) => requireDeployTokenIfConfigured(config, ctx, "create an eval example from a correction") },
+  );
+  router.post(
+    "/corrections/:key/create-issue",
+    async (ctx) => {
+      const correction = await findCorrectionByKey(config.store, ctx.params["key"]!);
+      if (!correction) return sendJson(ctx.res, 404, { error: "not found" });
+      try {
+        const brief = await createIssueForAgent(config.store, correction);
+        return sendJson(ctx.res, 200, brief);
+      } catch (err) {
+        return sendJson(ctx.res, 404, { error: err instanceof Error ? err.message : "not found" });
+      }
+    },
+    { auth: (ctx) => requireDeployTokenIfConfigured(config, ctx, "create an issue from a correction") },
+  );
+
+  router.post(
+    "/evals/suites",
+    async (ctx, body) => {
+      const { name, description, scorer } = body as { name?: string; description?: string; scorer?: Scorer };
+      if (!name || !scorer) return sendJson(ctx.res, 400, { error: "name and scorer are required" });
+      const suite = await createEvalSuite(config.store, { name, description, scorer });
+      return sendJson(ctx.res, 200, { suite });
+    },
+    { auth: (ctx) => requireDeployTokenIfConfigured(config, ctx, "create an eval suite") },
+  );
+  router.post(
+    "/evals/runs",
+    async (ctx, body) => {
+      const { suiteId, workflowId, workflowVersion } = body as { suiteId?: string; workflowId?: string; workflowVersion?: string };
+      if (!suiteId || !workflowId) return sendJson(ctx.res, 400, { error: "suiteId and workflowId are required" });
+      const result = await runEvalSuiteForWorkflow(config.store, suiteId, workflowId, workflowVersion);
+      if (result.kind === "suite_not_found") return sendJson(ctx.res, 404, { error: `eval suite not found: ${suiteId}` });
+      if (result.kind === "workflow_not_found") return sendJson(ctx.res, 404, { error: `workflow not found: ${workflowId}${workflowVersion ? `@${workflowVersion}` : ""}` });
+      return sendJson(ctx.res, 200, { evalRun: result.evalRun, results: result.results });
+    },
+    { auth: (ctx) => requireDeployTokenIfConfigured(config, ctx, "run an eval suite") },
+  );
 
   // Deploy surface — D1 "remotes + push" (AMENDMENTS.md A56). `aart push`
   // (and the MCP `aart_deploy` tool) POST a bundle envelope here instead of
@@ -466,11 +629,17 @@ export async function startServer(config: ServerConfig): Promise<ServerHandle> {
   // run through a zero-write dry-run preview first. Both, plus `POST
   // /environments` below (ADR-2), are gated by `requireDeployToken` — the
   // three `/webhooks/*` routes above are NOT (separate, per-binding HMAC
-  // mechanism, untouched).
+  // mechanism, untouched). D2a (AMENDMENTS.md A59): migrated from an inline
+  // `if (!requireDeployToken(...)) return;` first line to the `auth` route
+  // option — same fail-closed check, now genuinely runs BEFORE readBody
+  // (previously these three routes' own inline check ran AFTER the router
+  // had already buffered the full request body — an unauthenticated caller
+  // could force up to MAX_BUNDLE_INGEST_BYTES of buffering before ever
+  // being refused; `auth` closes that gap for these routes too, not just
+  // the newly-gated ones).
   router.post(
     "/bundles/ingest",
     async (ctx, body) => {
-      if (!requireDeployToken(config, ctx)) return;
       const files = requireBundleEnvelope(ctx, body);
       if (!files) return;
       let bundle: Bundle;
@@ -487,13 +656,12 @@ export async function startServer(config: ServerConfig): Promise<ServerHandle> {
         return sendJson(ctx.res, bundleErrorStatus(message), { error: message });
       }
     },
-    { maxBodyBytes: MAX_BUNDLE_INGEST_BYTES },
+    { auth: (ctx) => requireDeployToken(config, ctx), maxBodyBytes: MAX_BUNDLE_INGEST_BYTES },
   );
 
   router.post(
     "/bundles/plan",
     async (ctx, body) => {
-      if (!requireDeployToken(config, ctx)) return;
       const files = requireBundleEnvelope(ctx, body);
       if (!files) return;
       let bundle: Bundle;
@@ -510,22 +678,27 @@ export async function startServer(config: ServerConfig): Promise<ServerHandle> {
         return sendJson(ctx.res, bundleErrorStatus(message), { error: message });
       }
     },
-    { maxBodyBytes: MAX_BUNDLE_INGEST_BYTES },
+    { auth: (ctx) => requireDeployToken(config, ctx), maxBodyBytes: MAX_BUNDLE_INGEST_BYTES },
   );
 
   // ADR-2: wires the previously-dead registerEnvironment (environments.ts)
   // to a real mutation route — without this there was no legal way to
   // create a production-trust Environment on a server at all (the only
   // caller was aart_deploy_workflow's own auto-vivified, always-empty-config
-  // ensureEnvironment, packages/mcp/src/handlers/deployment.ts).
-  router.post("/environments", async (ctx, body) => {
-    if (!requireDeployToken(config, ctx)) return;
-    const { name, trustMode, config: envConfig, secretSource } = body as Partial<RegisterEnvironmentParams>;
-    if (!name) return sendJson(ctx.res, 400, { error: "name is required" });
-    if (!requireValidTrustMode(ctx, trustMode)) return;
-    const environment = await registerEnvironment(config.store, { name, trustMode, config: envConfig, secretSource });
-    return sendJson(ctx.res, 200, { environment });
-  });
+  // ensureEnvironment, packages/mcp/src/handlers/deployment.ts). D2a
+  // (AMENDMENTS.md A59): migrated to the `auth` route option, same reasoning
+  // as the two bundle routes above.
+  router.post(
+    "/environments",
+    async (ctx, body) => {
+      const { name, trustMode, config: envConfig, secretSource } = body as Partial<RegisterEnvironmentParams>;
+      if (!name) return sendJson(ctx.res, 400, { error: "name is required" });
+      if (!requireValidTrustMode(ctx, trustMode)) return;
+      const environment = await registerEnvironment(config.store, { name, trustMode, config: envConfig, secretSource });
+      return sendJson(ctx.res, 200, { environment });
+    },
+    { auth: (ctx) => requireDeployToken(config, ctx) },
+  );
 
   // Read surface — the "API surface S8 will consume" (this session's DoD note).
   router.get("/health", (ctx) => sendJson(ctx.res, 200, { status: "ok" }));
@@ -622,6 +795,7 @@ export async function startServer(config: ServerConfig): Promise<ServerHandle> {
     server,
     port: boundPort,
     ticker,
+    getRoutes: () => router.getRoutes(),
     close: async () => {
       ticker?.stop();
       await new Promise<void>((resolve) => server.close(() => resolve()));

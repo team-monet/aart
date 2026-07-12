@@ -57,6 +57,8 @@ export interface DecideApprovalTaskInput {
   decision?: unknown;
   /** Required-gate set `computeApprovalState` recomputes `Workflow.approval` against, for a workflow-version-level decision only — ignored for a genuine per-run decision. Defaults to `"governed"`, matching this codebase's other established defaults (the now-deleted dashboard-local `decideApprovalAction`, `cli-context.ts`'s `resolveTrustModeFromEnv`). */
   trustMode?: TrustMode;
+  /** D2a security hardening, token-derived attribution (AMENDMENTS.md A59) — mirrors `ApprovalTask.authenticatedAs` (`@aart/types`' own doc comment has the full story); persisted verbatim onto the decided task below. The HTTP route (`http/server.ts`'s `POST /approvals/:id/decision`) is this field's one real caller — it derives the value from `ctx.authenticated?.label`, NEVER from the request body, so a caller cannot self-attribute a decision by simply including this field in its JSON. */
+  authenticatedAs?: string;
 }
 
 export type DecideApprovalTaskResult =
@@ -81,7 +83,7 @@ export async function decideApprovalTask(store: AartStore, engine: EngineBoundar
   if (!task) return { kind: "not_found" };
   if (!input.reviewer) return { kind: "missing_reviewer" };
 
-  const updated: ApprovalTask = { ...task, status: input.status, reviewer: input.reviewer, decision: input.decision, decidedAt: clock.nowIso() };
+  const updated: ApprovalTask = { ...task, status: input.status, reviewer: input.reviewer, decision: input.decision, decidedAt: clock.nowIso(), authenticatedAs: input.authenticatedAs };
   await store.approvals.put(updated);
 
   const versionSubject = decodeWorkflowVersionApprovalSubject(task.runId, task.stepId);

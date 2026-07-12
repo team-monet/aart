@@ -16,6 +16,19 @@ export const ApprovalTaskSchema = z.object({
   decision: z.unknown().optional(),
   createdAt: z.string(),
   decidedAt: z.string().optional(),
+  // D2a security hardening, token-derived attribution (AMENDMENTS.md A59) —
+  // additive optional, same pattern as A56's Deployment.promoted: WHICH
+  // configured deploy token (by label — "mechanical half," named per-token
+  // identities are deferred) authenticated the HTTP request that decided
+  // this task, when one did. Undefined for every pre-D2a row, every
+  // tokenless/local decision, and every decision made when the token was
+  // unconfigured — "unset" means "no attribution available," never
+  // "definitely anonymous." Distinct from, and does not replace, the
+  // existing free-text `reviewer` field above (a human name/identity the
+  // caller supplies) — this is a SEPARATE, server-derived signal of which
+  // credential authenticated the write, kept for the tokenless-local case
+  // and backward compatibility.
+  authenticatedAs: z.string().optional(),
 });
 export type ApprovalTask = z.infer<typeof ApprovalTaskSchema>;
 
