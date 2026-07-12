@@ -131,7 +131,7 @@ export type PreconditionResult = { ok: true } | { ok: false; error: string };
  * checking the parent directory's mere existence.
  */
 export function checkWatchPreconditions(paths: Pick<WatchPaths, "dashboardDistDir" | "serveDashboardScript">): PreconditionResult {
-  const frontendEntry = path.join(paths.dashboardDistDir, "index.html");
+  const frontendEntry = path.join(paths.dashboardDistDir, "frontend", "index.html");
   const dashboardMissing = !existsSync(frontendEntry);
   const launcherMissing = !existsSync(paths.serveDashboardScript);
   if (!dashboardMissing && !launcherMissing) return { ok: true };

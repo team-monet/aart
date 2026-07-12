@@ -93,17 +93,29 @@ describe("resolveWatchPaths", () => {
 });
 
 describe("checkWatchPreconditions", () => {
-  it("ok when both the dashboard frontend and the launcher script exist", async () => {
+  // Fixtures write index.html under "<dashboardDistDir>/frontend/", NOT
+  // directly under dashboardDistDir -- verified live against a real `pnpm
+  // run build` before this was pinned in a test at all: packages/dashboard/
+  // frontend/vite.config.ts's `build.outDir: '../dist/frontend'` really does
+  // land the SPA at packages/dashboard/dist/frontend/index.html. An earlier
+  // draft of this function (and these fixtures) checked
+  // "<dashboardDistDir>/index.html" directly -- self-consistent with itself,
+  // but wrong against the real repo layout, which only a live run against
+  // the actual built artifacts caught (a real `aart watch` reported the
+  // dashboard frontend as missing even though `pnpm run build` had just
+  // built it) -- fixed here alongside the implementation, not just in it.
+  it("ok when both the dashboard frontend (under frontend/) and the launcher script exist", async () => {
     const dashboardDistDir = await freshDir();
-    await fs.writeFile(path.join(dashboardDistDir, "index.html"), "<html></html>", "utf8");
+    await fs.mkdir(path.join(dashboardDistDir, "frontend"), { recursive: true });
+    await fs.writeFile(path.join(dashboardDistDir, "frontend", "index.html"), "<html></html>", "utf8");
     const serveDashboardScript = path.join(await freshDir(), "serve-dashboard.mjs");
     await fs.writeFile(serveDashboardScript, "// stub", "utf8");
 
     expect(checkWatchPreconditions({ dashboardDistDir, serveDashboardScript })).toEqual({ ok: true });
   });
 
-  it("refuses, naming the frontend specifically, when packages/dashboard/dist exists but has no index.html (a bare tsc -b output with no SPA build)", async () => {
-    const dashboardDistDir = await freshDir(); // directory exists, deliberately no index.html written
+  it("refuses, naming the frontend specifically, when packages/dashboard/dist exists but has no frontend/index.html (a bare tsc -b output with no SPA build)", async () => {
+    const dashboardDistDir = await freshDir(); // directory exists, deliberately no frontend/index.html written
     const serveDashboardScript = path.join(await freshDir(), "serve-dashboard.mjs");
     await fs.writeFile(serveDashboardScript, "// stub", "utf8");
 
@@ -111,13 +123,24 @@ describe("checkWatchPreconditions", () => {
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error("unreachable");
     expect(result.error).toContain("dashboard frontend");
-    expect(result.error).toContain(path.join(dashboardDistDir, "index.html"));
+    expect(result.error).toContain(path.join(dashboardDistDir, "frontend", "index.html"));
     expect(result.error).not.toContain("dashboard launcher");
+  });
+
+  it("a bare dashboardDistDir with an index.html directly inside it (not under frontend/) still counts as missing -- the exact regression this suite now pins", async () => {
+    const dashboardDistDir = await freshDir();
+    await fs.writeFile(path.join(dashboardDistDir, "index.html"), "<html></html>", "utf8"); // wrong location on purpose
+    const serveDashboardScript = path.join(await freshDir(), "serve-dashboard.mjs");
+    await fs.writeFile(serveDashboardScript, "// stub", "utf8");
+
+    const result = checkWatchPreconditions({ dashboardDistDir, serveDashboardScript });
+    expect(result.ok).toBe(false);
   });
 
   it("refuses, naming build:dashboard-launcher specifically, when only the launcher script is missing", async () => {
     const dashboardDistDir = await freshDir();
-    await fs.writeFile(path.join(dashboardDistDir, "index.html"), "<html></html>", "utf8");
+    await fs.mkdir(path.join(dashboardDistDir, "frontend"), { recursive: true });
+    await fs.writeFile(path.join(dashboardDistDir, "frontend", "index.html"), "<html></html>", "utf8");
     const serveDashboardScript = path.join(await freshDir(), "serve-dashboard.mjs"); // never written
 
     const result = checkWatchPreconditions({ dashboardDistDir, serveDashboardScript });
