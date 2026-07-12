@@ -107,12 +107,16 @@ const apiUrl = process.env.AART_SERVER_URL ?? "http://localhost:8080";
 // AART_STORE, AART_SERVER_URL, AART_WORKER_URLS) is env-var-only too, so
 // this matches rather than introduces a new resolution shape. Threaded into
 // createHttpApiClient below so this dashboard's server-side ApiClient can
-// attach it to POST /workflows/:id/promote — the one route the real server
-// conditionally gates on AART_DEPLOY_TOKEN (requireDeployTokenIfConfigured,
-// @aart/server's http/server.ts) — without it, promoting a workflow from
-// the dashboard would 401 the moment an operator sets AART_DEPLOY_TOKEN on
-// the server. Unset here -> undefined -> createHttpApiClient's own
-// documented no-header behavior, unchanged from before this fix.
+// attach it to every write call it makes (trigger a run, decide an
+// approval, promote/approve/block a workflow version, record a correction,
+// create/run an eval suite, clear a run's flag, ...) — D2a security
+// hardening widened server-side gating from promote alone to nearly every
+// mutation route (AMENDMENTS.md A59/A60; requireDeployTokenIfConfigured/
+// requireDeployToken, @aart/server's http/server.ts) — without it, every
+// one of those actions from the dashboard would 401 the moment an operator
+// sets AART_DEPLOY_TOKEN on the server. Unset here -> undefined ->
+// createHttpApiClient's own documented no-header behavior, unchanged from
+// before this fix.
 const deployToken = process.env.AART_DEPLOY_TOKEN;
 const workerUrls = (process.env.AART_WORKER_URLS ?? "http://localhost:8787")
   .split(",")
@@ -141,7 +145,7 @@ const handle = await startDashboard({
   ...(port !== undefined ? { port } : {}),
 });
 
-console.log(`[dashboard] listening on :${handle.port} — store=${storeKind}:${root}, api=${apiUrl}, workers=[${workerUrls.join(", ")}], deployToken=${deployToken ? "configured" : "unconfigured (promote requests will be sent unauthenticated)"}`);
+console.log(`[dashboard] listening on :${handle.port} — store=${storeKind}:${root}, api=${apiUrl}, workers=[${workerUrls.join(", ")}], deployToken=${deployToken ? "configured" : "unconfigured (every dashboard write action -- not just promote -- will be sent unauthenticated)"}`);
 
 let stopping = false;
 async function stop() {
