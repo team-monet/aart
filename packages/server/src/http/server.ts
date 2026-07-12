@@ -13,7 +13,7 @@ import { type Bundle } from "../bundle/bundle.js";
 import { hydrateBundle, readBundleFromEnvelope } from "../bundle/load.js";
 import { planBundleIngest } from "../bundle/plan.js";
 import { systemClock, type Clock } from "../clock.js";
-import { DEFAULT_HTTP_PORT, MAX_BUNDLE_INGEST_BYTES, type ServerConfig } from "../config.js";
+import { DEFAULT_HTTP_HOST, DEFAULT_HTTP_PORT, MAX_BUNDLE_INGEST_BYTES, type ServerConfig } from "../config.js";
 import { findCorrectionByKey } from "../corrections.js";
 import { checkDeployToken, extractBearerToken } from "../deploy-token.js";
 import { registerEnvironment, type RegisterEnvironmentParams } from "../environments.js";
@@ -774,9 +774,15 @@ export async function startServer(config: ServerConfig): Promise<ServerHandle> {
     void router.handle(req, res);
   });
   const port = config.port ?? DEFAULT_HTTP_PORT;
+  // D2a security hardening, breaking-change bind default (AMENDMENTS.md
+  // A59, John-ratified 2026-07-12) — was `server.listen(port, cb)` (no host
+  // -> Node's own default, every interface). See DEFAULT_HTTP_HOST's own
+  // doc comment (config.ts) for the full rationale and DEPLOY.md's
+  // "Network binding" section for the operator-facing migration note.
+  const host = config.host ?? DEFAULT_HTTP_HOST;
   const boundPort = await new Promise<number>((resolve, reject) => {
     server.once("error", reject);
-    server.listen(port, () => {
+    server.listen(port, host, () => {
       const address = server.address();
       resolve(typeof address === "object" && address ? address.port : port);
     });

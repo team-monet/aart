@@ -24,6 +24,7 @@ the exact `scp`-the-bundle handoff into this document's Path A/B);
 - [Store choice: fs vs sqlite](#store-choice-fs-vs-sqlite)
 - [Secret management](#secret-management)
 - [Deploy token](#deploy-token)
+- [Network binding](#network-binding)
 - [Environment registration](#environment-registration)
 - [Backup & restore](#backup--restore)
 - [Upgrade procedure](#upgrade-procedure)
@@ -133,10 +134,14 @@ adapt the flags, the shape is the same):
 ```bash
 docker volume create aart-data
 
+# --host 0.0.0.0 (D2a security hardening, breaking-change bind default,
+# AMENDMENTS.md A59) — required: aart server binds loopback-only by
+# default, which a container's own -p 8080:8080 published port cannot
+# reach from outside without this — see "Network binding" below.
 docker run -d --name aart-server \
   -v aart-data:/data -p 8080:8080 \
   --env-file .env \
-  aart:latest server --port 8080 --store sqlite
+  aart:latest server --port 8080 --host 0.0.0.0 --store sqlite
 
 docker run -d --name aart-worker \
   -v aart-data:/data \
@@ -221,6 +226,13 @@ Type=simple
 User=aart
 Environment=AART_ROOT=/var/lib/aart
 Environment=AART_TRUST_MODE=governed
+# AART_HOST=0.0.0.0 (D2a security hardening, breaking-change bind default,
+# AMENDMENTS.md A59) — required if worker/dashboard/any remote caller runs
+# on a DIFFERENT host than this one; aart server binds loopback-only by
+# default now. Omit (or set to 127.0.0.1) for a genuinely single-host
+# deployment where everything runs here — see DEPLOY.md's "Network binding"
+# section for the full decision table.
+Environment=AART_HOST=0.0.0.0
 EnvironmentFile=/etc/aart/secrets.env
 ExecStart=/usr/bin/aart server --port 8080 --store sqlite
 Restart=on-failure
@@ -405,6 +417,63 @@ Comparison is constant-time (`sha256` of both sides, then
 `crypto.timingSafeEqual` — never a raw string compare, and never
 `timingSafeEqual` on the unhashed token, which throws on a length
 mismatch).
+
+## Network binding
+
+**Breaking change (D2a security hardening, AMENDMENTS.md A59, John-ratified
+2026-07-12).** `aart server` now binds **loopback-only** (`127.0.0.1`) by
+default — previously it bound every network interface with no flag to
+control it at all. Rationale: with the [Deploy token](#deploy-token)'s
+gating now covering nearly every mutation route (not just the three
+fail-closed ones), the remaining honest default for a process nobody
+explicitly asked to expose is "reachable only from THIS machine" — a
+tokenless local/dev/TEST-DRIVE server stays fully usable from `localhost`
+with zero config change, and a genuinely remote/production deployment must
+now opt in explicitly.
+
+**Set `--host 0.0.0.0` (or a specific routable IP)** to accept connections
+from other hosts/containers — same flag either way, plus an `AART_HOST` env
+var equivalent (flag wins over env, same precedence as `--environment`/
+`AART_ENVIRONMENT`):
+
+```bash
+aart server --port 8080 --host 0.0.0.0 --store sqlite
+# or
+AART_HOST=0.0.0.0 aart server --port 8080 --store sqlite
+```
+
+**Who must set this on upgrade — read this before you upgrade an existing
+deployment:**
+
+- **`docker-compose.yml`'s `server` service** — already ships `--host
+  0.0.0.0` in its `command:` as of this session (see that file's own
+  comment on the `server` service for why this is required, not optional:
+  a loopback-bound container is unreachable via the `dashboard` service's
+  `AART_SERVER_URL: http://server:8080` Docker network alias AND via the
+  `8080:8080` published port — and the healthcheck below it runs `curl`
+  *inside* the same container's network namespace, so it would keep
+  passing even without this flag, silently masking exactly that
+  regression). If you maintain your own fork of this file, or a
+  `docker run` invocation built from the [Bare `docker run`](#bare-docker-run-no-compose)
+  section above, add `--host 0.0.0.0` to the `server` command yourself —
+  every one of those examples now needs it for the identical reason
+  (a container's loopback interface is not reachable through Docker's own
+  port-publishing NAT, even with `-p 8080:8080` on the host side).
+- **Path B / bare-process / systemd** — add `--host 0.0.0.0` (or a specific
+  interface IP) to `aart-server.service`'s `ExecStart=` if `worker`/
+  `dashboard`/any remote caller runs on a DIFFERENT host, or you intend to
+  `aart push`/`aart_deploy` at this server remotely. A single-host
+  deployment where every process (server, worker, dashboard, an operator's
+  own CLI) runs on the SAME machine needs no change at all — the new
+  loopback default is exactly sufficient there.
+- **Any other orchestrator** (Nomad, ECS, k8s, ...) — adapt the same flag;
+  the shape is identical to the Docker/compose case above (a pod/container's
+  own loopback is not reachable from a sibling pod/container or the
+  cluster's own service mesh without an explicit non-loopback bind).
+
+**Not required:** a genuinely single-machine deployment (author + server +
+worker + dashboard all on one host, nothing remote) needs no `--host` flag
+at all — the new default is exactly what that topology already needed.
 
 ## Environment registration
 

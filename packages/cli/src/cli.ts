@@ -38,7 +38,7 @@ export const USAGE = `AART CLI — usage:
   aart flag list
   aart bundle <workflowId> [--version <v>] [--out <dir>] [--environment <name>]
   aart worker [--bundle <dir>] [--store fs|sqlite] [--root <dir>]
-  aart server [--port <n>] [--bundle <dir>] [--environment <name>] [--store fs|sqlite] [--root <dir>]
+  aart server [--port <n>] [--host <addr>] [--bundle <dir>] [--environment <name>] [--store fs|sqlite] [--root <dir>]
   aart mcp [--store fs|sqlite] [--root <dir>]
   aart remote add <name> <url> --environment <envName> [--token-ref <name>]
   aart remote list

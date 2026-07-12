@@ -5,7 +5,7 @@ import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises"
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { compileWorkflowInput, requestApprovalHandler, runWorkflowHandler as mcpRunWorkflowHandler } from "@aart/mcp";
+import { compileWorkflowInput, requestApprovalHandler, runWorkflowHandler as mcpRunWorkflowHandler, type ServerPort } from "@aart/mcp";
 import { afterEach, describe, expect, it } from "vitest";
 import { run } from "./cli.js";
 import { createCliContext, type CliContext } from "./cli-context.js";
@@ -875,6 +875,87 @@ describe("aart server / aart worker — composition-time root check (AMENDMENTS.
     tc = await createTestCli(); // tc.root is a real tmpdir but NEVER passed as --root here
     const outcome = await run(["server", "--port", "0"], { cliContext: tc.cli, blocking: false });
     expect(outcome.ok).toBe(true);
+  });
+});
+
+// D2a security hardening, breaking-change bind default (AMENDMENTS.md A59)
+// — proves --host/AART_HOST actually flows all the way from argv through
+// run() -> serverCommand (commands/process.ts) -> cli.serverPort.startServer
+// -> the REAL bind, not just that serverCommand builds the right config
+// object. Needs the REAL composition (createCliContext WITHOUT `real:
+// false`, same reasoning as the S12 deploy-story block below) — the stub
+// ServerPort never binds a real socket at all, so there'd be nothing to
+// observe. serverCommand's own non-blocking mode calls handle.close()
+// immediately after starting it, before run() ever returns — there is no
+// window to inspect the live socket through run()'s own return value alone,
+// so this wraps the REAL ServerPort to capture the bound address the
+// instant the real startServer resolves, before handing the handle back to
+// serverCommand (which then proceeds to close it, same as it always would).
+describe("aart server --host / AART_HOST (D2a security hardening, AMENDMENTS.md A59)", () => {
+  let base: string;
+  afterEach(async () => {
+    await rm(base, { recursive: true, force: true });
+    delete process.env.AART_HOST;
+  });
+
+  function captureBoundHost(realPort: ServerPort): { port: ServerPort; seen: () => string | undefined } {
+    let seen: string | undefined;
+    return {
+      seen: () => seen,
+      port: {
+        ...realPort,
+        async startServer(config) {
+          const handle = await realPort.startServer(config);
+          const server = (handle as unknown as { server: import("node:net").Server }).server;
+          const address = server.address();
+          seen = typeof address === "object" && address ? address.address : undefined;
+          return handle;
+        },
+      },
+    };
+  }
+
+  it("--host threads through the real CLI entry (run -> serverCommand -> cli.serverPort.startServer -> the real bind)", async () => {
+    base = await mkdtemp(join(tmpdir(), "aart-server-host-flag-"));
+    const root = join(base, ".aart");
+    await mkdir(root, { recursive: true });
+    const realCli = createCliContext({ root, trustMode: "governed" });
+    const capture = captureBoundHost(realCli.serverPort);
+
+    const outcome = await run(["server", "--host", "0.0.0.0", "--port", "0"], { cliContext: { ...realCli, serverPort: capture.port }, blocking: false });
+
+    expect(outcome.ok).toBe(true);
+    expect(capture.seen()).toBe("0.0.0.0");
+  });
+
+  it("AART_HOST env var is honored the same way --host is; --host wins when both are given (mirrors --environment/AART_ENVIRONMENT's own established precedence)", async () => {
+    base = await mkdtemp(join(tmpdir(), "aart-server-host-env-"));
+    const root = join(base, ".aart");
+    await mkdir(root, { recursive: true });
+    const realCli = createCliContext({ root, trustMode: "governed" });
+
+    process.env.AART_HOST = "0.0.0.0";
+    const capture1 = captureBoundHost(realCli.serverPort);
+    const outcome1 = await run(["server", "--port", "0"], { cliContext: { ...realCli, serverPort: capture1.port }, blocking: false });
+    expect(outcome1.ok).toBe(true);
+    expect(capture1.seen()).toBe("0.0.0.0");
+
+    const capture2 = captureBoundHost(realCli.serverPort);
+    const outcome2 = await run(["server", "--host", "127.0.0.1", "--port", "0"], { cliContext: { ...realCli, serverPort: capture2.port }, blocking: false });
+    expect(outcome2.ok).toBe(true);
+    expect(capture2.seen()).toBe("127.0.0.1"); // flag wins over env
+  });
+
+  it("omitting both --host and AART_HOST leaves the default (loopback) in effect", async () => {
+    base = await mkdtemp(join(tmpdir(), "aart-server-host-default-"));
+    const root = join(base, ".aart");
+    await mkdir(root, { recursive: true });
+    const realCli = createCliContext({ root, trustMode: "governed" });
+    const capture = captureBoundHost(realCli.serverPort);
+
+    const outcome = await run(["server", "--port", "0"], { cliContext: { ...realCli, serverPort: capture.port }, blocking: false });
+    expect(outcome.ok).toBe(true);
+    expect(capture.seen()).toBe("127.0.0.1");
   });
 });
 

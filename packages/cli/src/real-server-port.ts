@@ -20,6 +20,12 @@
 //     resolver, but never wired the resolver into this, the ONE real
 //     production composition root, so every one of those routes refused
 //     every request unconditionally through a real `aart server` until now.
+//     AMENDMENTS.md A59 (D2a security hardening): startServer now also
+//     threads `config.host` straight through to ServerConfig.host — the
+//     breaking-change loopback-only bind default lives in @aart/server
+//     itself (ServerHttpConfig.host's own doc comment), this composition
+//     root just passes whatever commands/process.ts's --host/AART_HOST
+//     resolved (or undefined, letting @aart/server's own default apply).
 //   - produceBundle <- AMENDMENTS.md A56 (D1 "remotes + push"): now a thin
 //     call into `@aart/mcp`'s `resolveAndProduceBundle` (real-context.ts) —
 //     the resolveDeployment/bundleToBundleLike bridge that used to live
@@ -111,7 +117,13 @@ export function createRealServerPort(store: AartStore, engine: Engine, root: str
       // "structured JSON logs to stdout by default" is the exact claim
       // DEPLOY.md already made and this fix makes true rather than inventing
       // new config surface for.
-      return startRealServer({ store, engine: boundary, port: config.port, secretResolver, environmentId, deployToken, logSink: consoleJsonSink });
+      // D2a security hardening, breaking-change bind default (AMENDMENTS.md
+      // A59) — config.host threaded straight through; @aart/server's own
+      // ServerHttpConfig.host defaults to loopback-only when omitted (see
+      // that type's doc comment) — this composition root doesn't need its
+      // own default, just to pass through whatever the caller (commands/
+      // process.ts's --host/AART_HOST) resolved.
+      return startRealServer({ store, engine: boundary, port: config.port, host: config.host, secretResolver, environmentId, deployToken, logSink: consoleJsonSink });
     },
 
     async startWorker(options): Promise<WorkerHandleLike> {

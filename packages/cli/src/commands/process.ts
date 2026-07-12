@@ -67,7 +67,13 @@ export async function serverCommand(tokens: Tokenized, cli: CliContext, options:
   // unset) -> `environment: undefined`, ServerPort's own documented "every
   // deployment across every environment" default.
   const environment = flagString(tokens.flags, "environment") ?? process.env.AART_ENVIRONMENT;
-  const handle = await cli.serverPort.startServer({ port: portFlag ? Number(portFlag) : undefined, environment });
+  // --host / AART_HOST (D2a security hardening, breaking-change bind
+  // default, AMENDMENTS.md A59) — SAME flag > env > default precedence as
+  // --environment/AART_ENVIRONMENT immediately above. Omitted entirely ->
+  // `host: undefined`, ServerPort's own documented loopback-only default
+  // (@aart/server's ServerHttpConfig.host doc comment).
+  const host = flagString(tokens.flags, "host") ?? process.env.AART_HOST;
+  const handle = await cli.serverPort.startServer({ port: portFlag ? Number(portFlag) : undefined, environment, host });
   if (options.blocking ?? true) {
     await waitForShutdownSignal();
   }

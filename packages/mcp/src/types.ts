@@ -265,8 +265,25 @@ export interface BundleLike {
 export type ClearRunFlagResult = { kind: "cleared"; run: RunRecord } | { kind: "not_found" } | { kind: "no_flag" };
 
 export interface ServerPort {
-  /** `environment` (AMENDMENTS.md A45): an `Environment` NAME (mirroring `produceBundle`'s own `environment?: string` convention below) — scopes which `Deployment`-sourced trigger bindings this server instance activates. Omitted (the default) activates every deployment across every environment, a documented dev convenience. The real port (`@aart/cli`'s `createRealServerPort`) resolves the name to an id and throws if it doesn't exist; the stub port ignores it (matching its existing `produceBundle`'s own documented "never looks at `environment`" behavior — see `cli-context.test.ts`). */
-  startServer(config: { port?: number; environment?: string }): Promise<ServerHandleLike>;
+  /**
+   * `environment` (AMENDMENTS.md A45): an `Environment` NAME (mirroring
+   * `produceBundle`'s own `environment?: string` convention below) — scopes
+   * which `Deployment`-sourced trigger bindings this server instance
+   * activates. Omitted (the default) activates every deployment across
+   * every environment, a documented dev convenience. The real port
+   * (`@aart/cli`'s `createRealServerPort`) resolves the name to an id and
+   * throws if it doesn't exist; the stub port ignores it (matching its
+   * existing `produceBundle`'s own documented "never looks at `environment`"
+   * behavior — see `cli-context.test.ts`).
+   *
+   * `host` (D2a security hardening, breaking-change bind default,
+   * AMENDMENTS.md A59) — which interface the real server binds; mirrors
+   * `@aart/server`'s `ServerHttpConfig.host` exactly (that type's own doc
+   * comment has the full rationale). Omitted -> loopback-only
+   * (`DEFAULT_HTTP_HOST`, `"127.0.0.1"`), this session's new default. The
+   * stub port ignores it (never binds a real socket at all).
+   */
+  startServer(config: { port?: number; environment?: string; host?: string }): Promise<ServerHandleLike>;
   startWorker(options: { workerId?: string }): Promise<WorkerHandleLike>;
   produceBundle(params: { workflowId: string; workflowVersion: string; environment?: string }): Promise<BundleLike>;
   writeBundleToDisk(bundle: BundleLike, outDir: string): Promise<void>;

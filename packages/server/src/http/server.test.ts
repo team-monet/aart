@@ -64,6 +64,32 @@ describe("GET /health", () => {
   });
 });
 
+// D2a security hardening, breaking-change bind default (AMENDMENTS.md A59)
+// — a fast, direct unit-level proof (no CLI/store-root overhead) that
+// startServer itself honors config.host and defaults to loopback-only when
+// omitted. `ServerHandle`'s own PUBLIC type only exposes {server, port,
+// ticker?, getRoutes, close} -- `.server` is the real `node:http` `Server`
+// instance underneath (ServerHandle.server, this file's own interface), so
+// `.address()` is reachable directly without any cast; used here (not just
+// a fetch-succeeds check) because a fetch to `localhost` would succeed
+// whether bound to 127.0.0.1 OR 0.0.0.0 -- only inspecting the actual bound
+// address distinguishes them.
+describe("HTTP bind address (D2a security hardening, AMENDMENTS.md A59)", () => {
+  it("defaults to loopback-only (127.0.0.1) when config.host is omitted", async () => {
+    fx = await createTestFixture();
+    handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false });
+    const address = handle.server.address();
+    expect(address).toMatchObject({ address: "127.0.0.1" });
+  });
+
+  it("an explicit config.host is honored", async () => {
+    fx = await createTestFixture();
+    handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false, host: "0.0.0.0" });
+    const address = handle.server.address();
+    expect(address).toMatchObject({ address: "0.0.0.0" });
+  });
+});
+
 describe("webhook ingress (architecture §6.1/§15)", () => {
   it("valid HMAC: 200, starts a run", async () => {
     fx = await createTestFixture();

@@ -265,3 +265,41 @@ describe("createRealServerPort — produceBundle threads --environment into mani
     await expect(cli.serverPort.produceBundle({ workflowId: workflow.id, workflowVersion: workflow.version, environment: "no-such-environment" })).rejects.toThrow(/not found/);
   });
 });
+
+// D2a security hardening, breaking-change bind default (AMENDMENTS.md A59)
+// — the MANDATORY composition-root test this sub-phase's own brief calls
+// for: through `cli.serverPort.startServer` (the createCliContext ->
+// createRealServerPort path), not a hand-built ServerConfig, asserting the
+// default bind is loopback and an explicit host is honored. `ServerHandleLike`
+// (the PUBLIC type `cli.serverPort.startServer` is declared to return,
+// `@aart/mcp`'s types.ts) only exposes `{port, close()}` — `createRealServerPort`'s
+// own implementation returns the REAL `@aart/server` `ServerHandle` object
+// UNMODIFIED (real-server-port.ts: `return startRealServer({...});`), which
+// carries a genuine `.server: node:http.Server` at runtime even though the
+// declared TS type doesn't name it — the same trick this file's own A58
+// describe block above uses (spying on the real console rather than
+// injecting a substitute, because there's no public config seam to do
+// otherwise through). Captured here via an explicit cast, matching that
+// established precedent for "this IS the only place a break in the wiring
+// would be observable."
+describe("createRealServerPort — host binding (D2a security hardening, AMENDMENTS.md A59)", () => {
+  function boundAddress(handle: { close(): Promise<void> }): string | undefined {
+    const server = (handle as unknown as { server: import("node:net").Server }).server;
+    const address = server.address();
+    return typeof address === "object" && address ? address.address : undefined;
+  }
+
+  it("defaults to loopback-only (127.0.0.1), not every interface, through the real CLI entry", async () => {
+    const cli = await freshCli();
+    const handle = await cli.serverPort.startServer({ port: 0 });
+    handleClose = () => handle.close();
+    expect(boundAddress(handle)).toBe("127.0.0.1");
+  });
+
+  it("an explicit host is honored through the real CLI entry", async () => {
+    const cli = await freshCli();
+    const handle = await cli.serverPort.startServer({ port: 0, host: "0.0.0.0" });
+    handleClose = () => handle.close();
+    expect(boundAddress(handle)).toBe("0.0.0.0");
+  });
+});
