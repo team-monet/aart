@@ -201,22 +201,24 @@ async function postJsonOrThrow<T>(url: string, body: unknown, extraHeaders?: Rec
  *
  * `deployToken` (D1 fix pass, AMENDMENTS.md A57; scope widened by D2a
  * security hardening, AMENDMENTS.md A59; widened again by D2b "remote
- * reads," AMENDMENTS.md, this session) — this dashboard-server ->
+ * reads," AMENDMENTS.md, this session; widened a third time by the D2b/V1
+ * fix pass, AMENDMENTS.md A63 FIX 1) — this dashboard-server ->
  * runtime-server hop's OWN deploy token, attached as `Authorization: Bearer
- * <token>` on EVERY write call this client makes, AND (as of D2b) the two
- * now-conditionally-gated reads, `listRuns`/`getRun` (`deployAuthHeaders`,
- * below — renamed from A59's own `writeAuthHeaders` now that it covers two
- * reads too, same value, same construction). The server's
- * `requireDeployTokenIfConfigured` (`@aart/server`'s `http/server.ts`)
- * conditionally requires this exact header on nearly every mutation route,
- * plus (D2b) `GET /runs`/`GET /runs/:id`, once `AART_DEPLOY_TOKEN` is
+ * <token>` on EVERY write call this client makes, AND (as of D2b, extended
+ * by A63 FIX 1) the three now-conditionally-gated reads, `listRuns`/
+ * `getRun`/`listFlaggedRunsViaApi` (`deployAuthHeaders`, below — renamed
+ * from A59's own `writeAuthHeaders` now that it covers reads too, same
+ * value, same construction). The server's `requireDeployTokenIfConfigured`
+ * (`@aart/server`'s `http/server.ts`) conditionally requires this exact
+ * header on nearly every mutation route, plus (D2b/A63) `GET /runs`, `GET
+ * /runs/:id`, and `GET /flagged-runs`, once `AART_DEPLOY_TOKEN` is
  * configured server-side — an unauthenticated dashboard hop would 401 on
  * every one of those the moment an operator sets that env var, unless this
  * client attaches the identical token. As of A57 this was scoped to
  * `promoteWorkflow` alone, because promote was the ONE route the server
  * conditionally gated at the time — see `requireDeployTokenIfConfigured`'s
  * own doc comment for the full trust-boundary rationale, now generalized to
- * every write route this client calls PLUS the two run-read routes. Resolved
+ * every write route this client calls PLUS the three run-read routes. Resolved
  * ONCE by this function's own caller (`deploy/serve-dashboard.mjs`) and
  * passed in here — this client never re-resolves it itself, matching how
  * `@aart/cli`'s `secretResolver`/`resolveDeployToken` are likewise resolved
@@ -258,7 +260,12 @@ export function createHttpApiClient(baseUrl: string, deployToken?: string): ApiC
       return waits;
     },
     async listFlaggedRunsViaApi() {
-      const { runs } = await getJson<{ runs: RunRecord[] }>(`${base}/flagged-runs`);
+      // deployAuthHeaders (D2b/V1 fix pass, AMENDMENTS.md A63 FIX 1) — GET
+      // /flagged-runs joined GET /runs/GET /runs/:id's conditionally-gated
+      // tier (server.ts) in this fix pass; omitting the token here would
+      // 401 against a token-configured real server the moment an operator
+      // sets AART_DEPLOY_TOKEN, exactly the gap this fix closes.
+      const { runs } = await getJson<{ runs: RunRecord[] }>(`${base}/flagged-runs`, deployAuthHeaders);
       return runs;
     },
     async listWorkflowIds() {

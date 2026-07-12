@@ -463,10 +463,17 @@ describe("createHttpApiClient against a REAL @aart/server instance (AMENDMENTS.m
   // /runs/:id (server.ts) are the first GET routes this codebase
   // conditionally deploy-token-gates. Same shape as the write-method suite
   // immediately above (positive round-trip with the token, negative 401
-  // without it), scoped to the two newly-gated READS instead of writes —
-  // proves getJson's new extraHeaders param (api-client.ts) is genuinely
-  // wired to listRuns/getRun, not just accepted and ignored.
-  describe("the two newly-gated READ methods (D2b, AMENDMENTS.md this session)", () => {
+  // without it), scoped to the three newly-gated READS instead of writes —
+  // proves getJson's extraHeaders param (api-client.ts) is genuinely wired
+  // to listRuns/getRun/listFlaggedRunsViaApi, not just accepted and ignored.
+  // GET /flagged-runs joined this tier one fix pass later than the other
+  // two (D2b/V1 fix pass, AMENDMENTS.md A63 FIX 1 — a MAJOR verification
+  // finding: it returns the same full RunRecord[] shape GET /runs does, and
+  // staying open after GET /runs/GET /runs/:id were gated defeated the
+  // gate's own purpose), covered in its own `it` blocks below rather than
+  // folded into the two above, to keep each method's own positive/negative
+  // pair independently readable.
+  describe("the three newly-gated READ methods (D2b, AMENDMENTS.md this session; extended to listFlaggedRunsViaApi by the D2b/V1 fix pass, AMENDMENTS.md A63 FIX 1)", () => {
     it("listRuns / getRun succeed against a TOKEN-GATED server when the client carries the token", async () => {
       const store = await startRealServer("run-read-gate-token-1");
       await store.runs.put(makeRun({ runId: "run-read-gated-1", workflowId: "wf-read-gated" }));
@@ -492,6 +499,23 @@ describe("createHttpApiClient against a REAL @aart/server instance (AMENDMENTS.m
 
       await expect(client.listRuns()).rejects.toThrow(/401/);
       await expect(client.getRun("run-read-gated-3")).rejects.toThrow(/401/);
+    });
+
+    it("listFlaggedRunsViaApi succeeds against a TOKEN-GATED server when the client carries the token (AMENDMENTS.md A63 FIX 1)", async () => {
+      const store = await startRealServer("flagged-read-gate-token-1");
+      await store.runs.put(makeRun({ runId: "run-flagged-gated-1", status: "failed", flag: { kind: "poison", flaggedAt: "2026-07-09T00:00:00.000Z" } }));
+      const client = createHttpApiClient(baseUrl, "flagged-read-gate-token-1");
+
+      const runs = await client.listFlaggedRunsViaApi();
+      expect(runs.map((r) => r.runId)).toEqual(["run-flagged-gated-1"]);
+    });
+
+    it("WITHOUT a deployToken, listFlaggedRunsViaApi fails 401 against a token-gated real server (AMENDMENTS.md A63 FIX 1 — proves the gap this fix closes, the same way the listRuns/getRun negative case above proves it for D2b's original two)", async () => {
+      const store = await startRealServer("flagged-read-gate-token-2");
+      await store.runs.put(makeRun({ runId: "run-flagged-gated-2", status: "failed", flag: { kind: "poison", flaggedAt: "2026-07-09T00:00:00.000Z" } }));
+      const client = createHttpApiClient(baseUrl); // no deployToken given to the dashboard client
+
+      await expect(client.listFlaggedRunsViaApi()).rejects.toThrow(/401/);
     });
   });
 });

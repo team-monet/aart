@@ -190,6 +190,23 @@ export const MAX_WEBHOOK_INGEST_BYTES = 26_214_400;
  */
 export const DEFAULT_MAX_BODY_BYTES = 1_048_576;
 /**
+ * D2b/V1 fix pass (AMENDMENTS.md A63, FIX 3) — `GET /events`'s (http/
+ * server.ts) own `?limit=` bound, applied when the query param is absent
+ * OR fails validation (non-integer, negative — see that route's own parsing
+ * comment). Pre-this-fix, an absent `limit` meant "no limit at all" —
+ * `GET /events` with no query params serialized the ENTIRE append-only
+ * event log, unauthenticated (this route is deliberately open — see its
+ * own registration comment). 100 is a defensible default for the
+ * dashboard's activity-feed use case (recent activity, not a full-log
+ * export) — chosen the same way `DEFAULT_MAX_BODY_BYTES` above picked "1MB,
+ * generous headroom for the common case" rather than deriving a number from
+ * a documented external constraint the way `MAX_WEBHOOK_INGEST_BYTES`
+ * mirrors GitHub's own ceiling.
+ */
+export const DEFAULT_EVENTS_LIMIT = 100;
+/** D2b/V1 fix pass (AMENDMENTS.md A63, FIX 3) — the hard ceiling `GET /events`'s `?limit=` clamps to even when a caller explicitly asks for more; a full unauthenticated log export (see `DEFAULT_EVENTS_LIMIT`'s own doc comment above) stays unavailable through this route regardless of what `limit` value is supplied. */
+export const MAX_EVENTS_LIMIT = 1000;
+/**
  * D2a security hardening, breaking-change bind default (AMENDMENTS.md A59,
  * John-ratified 2026-07-12) — `aart server` now binds loopback-ONLY by
  * default, not every interface. Rationale: with D2a's own auth middleware
