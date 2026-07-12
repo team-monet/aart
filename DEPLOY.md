@@ -357,14 +357,30 @@ SEPARATE bearer token, distinct from the webhook secrets above, gates this.
 
 **Read this before fronting `aart server` with a reverse proxy (D1 fix-pass
 ruling, AMENDMENTS.md A57; scope widened to nearly every write route by D2a
-security hardening, AMENDMENTS.md A59).** Not every route behaves the same
-way; know which tier a route you care about is in:
+security hardening, AMENDMENTS.md A59; extended to two READ routes by D2b
+"remote reads," AMENDMENTS.md, this session).** Not every route behaves the
+same way; know which tier a route you care about is in:
 
 | Tier | Routes | `AART_DEPLOY_TOKEN` unset | `AART_DEPLOY_TOKEN` set |
 | --- | --- | --- | --- |
 | **Fail-closed** | `POST /bundles/ingest`, `POST /bundles/plan`, `POST /environments` | Refuses **every** request, `401`, naming the env var as the remedy — no "auth disabled" state at all. | Requires a valid `Authorization: Bearer <token>` (or, mid-[rotation](#deploy-token), `AART_DEPLOY_TOKEN_NEXT`); wrong/missing -> `401`. |
-| **Conditionally gated** | Every OTHER write route: `POST /workflows/:id/promote`, `/approve`, `/block-promotion`, `/unblock-promotion`, `/mark-needs-review`, `/clear-needs-review`, `/trigger-improvement`; `POST /runs/trigger`, `/runs/:runId/resume`, `/runs/:runId/signal`, `/runs/:runId/flag/clear`; `POST /approvals/:id/decision`; `POST /corrections`, `/corrections/:key/update-run-output`, `/corrections/:key/create-eval-example`, `/corrections/:key/create-issue`; `POST /evals/suites`, `/evals/runs` | **Open** — unchanged pre-A56 behavior on every one of these, so a tokenless local/dev/TEST-DRIVE deployment keeps working with zero config change. One loud warning is logged ONCE at server startup (not per-request) when this is the case. | Requires the SAME valid Bearer (or rotation-successor token) the fail-closed tier does; wrong/missing -> `401` (a differently-worded, route-specific remedy — "provide a valid token, this route requires it to <action>" — not "set `AART_DEPLOY_TOKEN`," since one already is). |
-| **Open, always** | Every GET route; the three `/webhooks/*` routes (separate, per-binding HMAC verification — [Secret management](#secret-management) above — `AART_DEPLOY_TOKEN`/rotation plays no role here at all, untouched by this gate; these three DO carry their own, larger request-body cap, unrelated to auth — see [Ops limits](#ops-limits--read-this-before-you-rely-on-it)'s "Request body size caps" bullet, AMENDMENTS.md A60) | Unaffected either way — `AART_DEPLOY_TOKEN` plays no role here at all. | Unaffected either way. |
+| **Conditionally gated** | Every OTHER write route: `POST /workflows/:id/promote`, `/approve`, `/block-promotion`, `/unblock-promotion`, `/mark-needs-review`, `/clear-needs-review`, `/trigger-improvement`; `POST /runs/trigger`, `/runs/:runId/resume`, `/runs/:runId/signal`, `/runs/:runId/flag/clear`; `POST /approvals/:id/decision`; `POST /corrections`, `/corrections/:key/update-run-output`, `/corrections/:key/create-eval-example`, `/corrections/:key/create-issue`; `POST /evals/suites`, `/evals/runs` — **plus two READS** (D2b, AMENDMENTS.md this session): `GET /runs`, `GET /runs/:id`. See the note directly below this table for why two GETs sit in a tier every other member of is otherwise a write. | **Open** — unchanged pre-A56 (writes)/pre-D2b (the two reads) behavior on every one of these, so a tokenless local/dev/TEST-DRIVE deployment keeps working with zero config change. One loud warning is logged ONCE at server startup (not per-request) when this is the case. | Requires the SAME valid Bearer (or rotation-successor token) the fail-closed tier does; wrong/missing -> `401` (a differently-worded, route-specific remedy — "provide a valid token, this route requires it to <action>" — not "set `AART_DEPLOY_TOKEN`," since one already is; `GET /runs`/`GET /runs/:id`'s own remedy names "read run data"). |
+| **Open, always** | Every OTHER GET route (`/workflows`, `/workflows/:id`, `/deployments`, `/environments`, `/approvals`, `/corrections`, `/evals`, `/waiting-runs`, `/flagged-runs`, `/rejected-triggers`, `/health`); the three `/webhooks/*` routes (separate, per-binding HMAC verification — [Secret management](#secret-management) above — `AART_DEPLOY_TOKEN`/rotation plays no role here at all, untouched by this gate; these three DO carry their own, larger request-body cap, unrelated to auth — see [Ops limits](#ops-limits--read-this-before-you-rely-on-it)'s "Request body size caps" bullet, AMENDMENTS.md A60) | Unaffected either way — `AART_DEPLOY_TOKEN` plays no role here at all. | Unaffected either way. |
+
+**Why `GET /runs`/`GET /runs/:id` specifically (D2b "remote reads,"
+AMENDMENTS.md, this session, John-ratified 2026-07-12's "gate the run-read
+routes" fork).** D2b added four new `aart_remote_*` MCP tools (`@aart/mcp`)
+that let an authoring agent read a DEPLOYED server's run history and
+individual run reports over the network — the same real
+`GET /runs`/`GET /runs/:id` these two routes always served, just newly
+reachable through an agent's tool call instead of only a human hitting the
+API directly. A run's full trace/inputs/outputs can carry residual
+secret-adjacent content (tool-call arguments, external-call metadata, ...),
+so once that content is agent-discoverable over the network the same way
+D2a's own write-gating raised the bar on "who can mutate this server,"
+these two reads get the identical "gated once a token is configured, open
+otherwise" treatment. Every other GET route is UNCHANGED — still always
+open, D2b did not widen this beyond these two routes.
 
 **As of D2a (AMENDMENTS.md A59), "conditionally gated" is the norm, not the
 exception** — before this session, only `POST /workflows/:id/promote` sat
@@ -690,7 +706,7 @@ needed — these processes just read whatever's at `AART_ROOT` on next start.
 curl http://<server>:8080/health    # {"status":"ok"}
 curl http://<worker>:8787/health    # {"status":"ok","claimedRuns":N,"uptime":...}
 curl http://<server>:8080/workflows # real registered workflows from the real store
-curl http://<server>:8080/runs      # real run history
+curl http://<server>:8080/runs      # real run history -- 401s if AART_DEPLOY_TOKEN is set (D2b, Gating matrix); add -H "Authorization: Bearer <token>"
 ```
 
 For a full functional smoke test, register the "no browser, no LLM" smoke
@@ -761,15 +777,24 @@ Stated plainly, matching this repo's own "What doesn't work yet" convention
   impose a SMALLER cap than the tier that route actually needs.
 - **No LOGIN/API-key authentication in front of the control-plane HTTP API
   or the dashboard — corrected from this bullet's own pre-D2a text, which
-  overstated how open every write route was.** `GET /runs`, `GET
-  /workflows`, the webhook endpoints (HMAC-verified, but that authenticates
+  overstated how open every write route was.** `GET /workflows`, most other
+  GET routes, the webhook endpoints (HMAC-verified, but that authenticates
   the SENDER, not a browsing operator), and the dashboard's own pages have
   no login, API key, or per-user identity built in — there is still no
   concept of "logged-in operator" anywhere in this stack. Put a reverse
   proxy with real auth (or a private network / VPN-only exposure) in front
   of anything beyond localhost for that reason alone, regardless of the
   deploy-token gating described next.
-  **What DID change (D2a security hardening, AMENDMENTS.md A59, breaking):**
+  **`GET /runs`/`GET /runs/:id` are the one GET exception (D2b "remote
+  reads," AMENDMENTS.md this session)** — see the [Gating
+  matrix](#gating-matrix)'s own note for why: once `AART_DEPLOY_TOKEN` is
+  configured, these two now require the same bearer token every gated write
+  route does. Still not "login" or per-user identity in any real sense —
+  same shared-secret, no-roles, no-per-caller-audit-trail caveat the rest of
+  this bullet already states — just no longer unconditionally open the way
+  every OTHER GET route still is.
+  **What DID change (D2a security hardening, AMENDMENTS.md A59, breaking;
+  D2b, AMENDMENTS.md this session, extended it to the two run-read routes):**
   two things, together closing most of the actual network-reachability gap
   this bullet used to describe:
   1. **`aart server` binds loopback-only by default now** (previously
@@ -778,12 +803,13 @@ Stated plainly, matching this repo's own "What doesn't work yet" convention
      deploy kit's own compose/systemd examples already carry the required
      `--host 0.0.0.0`/`AART_HOST` override, since the topology they set up
      needs cross-process/cross-container reachability by design.
-  2. **`AART_DEPLOY_TOKEN` now gates nearly every mutation route**, not
-     only the three deploy-surface routes and promote — see [Deploy
+  2. **`AART_DEPLOY_TOKEN` now gates nearly every mutation route, plus two
+     reads** (`GET /runs`, `GET /runs/:id`, D2b) — not only the three
+     deploy-surface routes and promote — see [Deploy
      token](#deploy-token)'s own [Gating matrix](#gating-matrix) for the
      precise, current, per-route table (fail-closed / conditionally-gated
      / open-always tiers). Unconfigured, the conditionally-gated tier
-     stays fully open (unchanged pre-D2a behavior, one loud startup
+     stays fully open (unchanged pre-D2a/pre-D2b behavior, one loud startup
      warning) — a tokenless local/dev/TEST-DRIVE deployment needs zero
      config change and is no less usable than before.
   **Still true, stated plainly:** a `AART_DEPLOY_TOKEN`-configured server

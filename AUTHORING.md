@@ -33,6 +33,7 @@ below is about right now, pre-`1.0.0`).
 - [(c) Wiring the coding agent](#c-wiring-the-coding-agent)
 - [(d) The authoring lifecycle](#d-the-authoring-lifecycle)
 - [(e) Deploying to the server](#e-deploying-to-the-server)
+  - [Debugging a deployed workflow](#debugging-a-deployed-workflow)
 - [(f) Updating the authoring install](#f-updating-the-authoring-install)
 - [(g) Honest limits](#g-honest-limits)
 
@@ -393,6 +394,70 @@ push": `bundle:<workflowId>@<version>:<environmentId>`, env-scoped so the
 same version can be independently hydrated into more than one environment)
 — returns `{"kind": "started", "runId": "..."}`.
 
+### Debugging a deployed workflow
+
+**D2b "remote reads" (AMENDMENTS.md, this session)** closes a real gap the
+rest of this section leaves open: once you've pushed (`aart push`/
+`aart_deploy`) or bare-process-deployed a workflow, YOUR coding agent has no
+visibility into what actually happens when it runs on that remote server —
+`aart_get_report` only ever reads YOUR OWN local `.aart` store (see part
+(g)'s "Honest limits," below). Four new MCP tools (and their CLI mirrors)
+close that: your agent can ask a deployed server directly, the same way you
+would over `curl`, without you having to `ssh` in and read logs by hand.
+
+```bash
+aart remote-status greeting-workflow                # local-vs-remote drift: is what's live the version/gates you think it is?
+aart remote-why production greeting-workflow        # what's actually live on `production`, and why (gates/approval/who-approved)
+aart remote-runs production --status failed         # compact summaries of recent runs -- find the failing one first
+aart remote-run production run_abc123               # that run's FULL evidence report -- the same rendering aart_get_report gives locally
+```
+
+The debug loop this unlocks, in your coding agent's own conversation
+(equivalently: `aart_remote_status`/`aart_remote_why`/`aart_remote_runs`/
+`aart_remote_run` — all four register once you've configured at least one
+`aart remote add`, progressive disclosure — unlike `aart_deploy`, which
+registers unconditionally regardless of whether a remote exists yet, these
+four are pointless with nothing to read and stay hidden until one does):
+
+1. **`aart remote-runs <remote> --status failed`** — a deployed workflow
+   isn't behaving as expected; find the failing run(s) first, compact
+   summaries only (not a wall of trace data).
+2. **`aart remote-run <remote> <runId>`** — pull that one run's full
+   evidence report and actually read what happened, the same "never claim
+   it worked without reading the report" discipline `aart_get_report`
+   already holds you to for local runs.
+3. **Fix the workflow locally** — `aart_validate`/`aart_run_workflow`
+   against your own local copy until it's right.
+4. **`aart push <remote> <workflowId>`** (or `aart_deploy`) a corrected
+   version, then `aart remote-why <remote> <workflowId>` to confirm what's
+   now live actually reflects it — or promote it first if it isn't yet.
+
+`aart_remote_why` is worth calling BEFORE you start debugging a "works
+locally, not remotely" report too — it's entirely possible the remote is
+simply running an older, different version than the one you've been
+testing against locally (`aart_remote_status` catches this across every
+configured remote at once; `aart_remote_why` gives the full story — live
+version, gates, approval, and who approved it where tracked — for one
+specific remote).
+
+**Redaction, stated precisely, not overclaimed.** `aart_remote_run` routes
+the remote-fetched run through the EXACT SAME rendering path
+`aart_get_report` uses locally (`ctx.evidence.modelFacingReport`/
+`markdownReport`) — the one chokepoint this codebase's real evidence
+rendering goes through, inheriting the blocking `lint:redaction` CI gate.
+This is a CONSISTENCY move, not a new protection layer: per
+`@aart/evidence`'s own `redact.ts` doc comment, the render-time scrub is
+defense-in-depth over a `RunRecord` already redacted at write time (resolved
+secret VALUES are never persisted onto a run in the first place) — reading
+a remote run through this tool doesn't expose anything a real deployment
+wasn't already storing in its own run history.
+
+**`aart_remote_status`/`aart_remote_why` do NOT track who pushed or
+promoted a deployment** — `whoPushed`/`whoPromoted` always report `null`,
+explicitly, rather than guessing. Only human/token APPROVAL decisions carry
+an `authenticatedAs` (D2a security hardening, AMENDMENTS.md A59) — surfaced
+by `aart_remote_why` when one exists.
+
 ## (f) Updating the authoring install
 
 ```bash
@@ -445,7 +510,13 @@ Stated plainly, matching this repo's own convention (`TEST-DRIVE.md`'s
   not against your local authoring store. If you want to browse what you've
   authored, `aart server --port 8080` locally and hit its `/workflows`/
   `/runs` JSON endpoints, or read `aart_get_report` through your coding
-  agent.
+  agent — **`aart_get_report` covers LOCAL runs only** (it reads your own
+  `.aart` store, nothing else — corrected here, this was previously
+  unqualified and read as if it covered everything you'd authored). A run
+  that happened on a REMOTE server (`aart push`/`aart_deploy`, or a
+  bare-process deploy, part (e)) is invisible to it — for that, D2b's
+  `aart_remote_runs`/`aart_remote_run` (part (e)'s new "Debugging a deployed
+  workflow" subsection) are what actually reach it.
 - **A bundle carrying `--environment <name>` needs that environment
   pre-registered on the destination, or hydration refuses** (part (e), D1
   "remotes + push," AMENDMENTS.md A56 — fixed this session; previously a

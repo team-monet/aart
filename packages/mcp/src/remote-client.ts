@@ -104,7 +104,16 @@ export function describeUnreachableRemote(remoteName: string, remoteEntry: Remot
 
 /** A response body's own `{error: string}` shape, when present — the SAME extraction `deployToRemoteHandler`'s refusal branch already performed inline (D1, AMENDMENTS.md A56), generalized so every `aart_remote_*` caller surfaces a remote's real error message instead of a bare status code wherever the remote provides one. */
 export function remoteErrorMessage(body: unknown, status: number | undefined): string {
-  if (isRecord(body) && typeof body["error"] === "string") return body["error"];
+  // `return body["error"]` deliberately on its own line, not folded onto the
+  // `if` above — this is the one branch of this function that returns
+  // REMOTE-SUPPLIED content rather than a fixed local string, so it gets its
+  // own line for the redaction lint (packages/governance/src/redaction-
+  // lint.ts) to see and flag on its own, reviewed individually (see this
+  // repo-relative file's own redaction-lint-suppressions.ts entry) rather
+  // than accidentally escaping detection by sharing a line with its guard.
+  if (isRecord(body) && typeof body["error"] === "string") {
+    return body["error"];
+  }
   return `HTTP ${status ?? "unknown"}`;
 }
 
