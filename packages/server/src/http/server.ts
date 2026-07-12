@@ -125,14 +125,28 @@ async function respondWorkflowFlagAction(
  * means fail-closed regardless of `deployTokenNext` (rotation only ever
  * ADDS a second valid value; it cannot substitute for the primary token
  * being configured at all).
+ *
+ * D2a fix pass (AMENDMENTS.md A60, FIX 2) — the paragraph above was
+ * aspirational, not actually true, until this fix: this function used to
+ * fall straight into `checkAnyDeployToken([config.deployToken,
+ * config.deployTokenNext], provided)` with no guard, so a caller who
+ * supplied EXACTLY `config.deployTokenNext`'s value would authenticate
+ * even with `config.deployToken` unset — `deployTokenNext` substituting
+ * for the primary after all, contradicting both this comment and the 401
+ * remedy below. Now enforced by an explicit early guard: `deployToken`
+ * unset refuses unconditionally, matching `requireDeployTokenIfConfigured`'s
+ * own `if (!config.deployToken) ...` guard (below), and never even
+ * constructs the `[deployToken, deployTokenNext]` candidate list in that
+ * case.
  */
 function requireDeployToken(config: ServerConfig, ctx: RouteContext): boolean {
+  if (!config.deployToken) {
+    sendJson(ctx.res, 401, { error: 'Unauthorized. This server has no AART_DEPLOY_TOKEN configured — set it (env var, or the "AART_DEPLOY_TOKEN" key in <root>/secrets.json) before this route will accept any request.' });
+    return false;
+  }
   const provided = extractBearerToken(ctx.req.headers.authorization);
   if (checkAnyDeployToken([config.deployToken, config.deployTokenNext], provided)) return true;
-  const remedy = config.deployToken
-    ? 'Provide a valid "Authorization: Bearer <token>" header.'
-    : 'This server has no AART_DEPLOY_TOKEN configured — set it (env var, or the "AART_DEPLOY_TOKEN" key in <root>/secrets.json) before this route will accept any request.';
-  sendJson(ctx.res, 401, { error: `Unauthorized. ${remedy}` });
+  sendJson(ctx.res, 401, { error: 'Unauthorized. Provide a valid "Authorization: Bearer <token>" header.' });
   return false;
 }
 

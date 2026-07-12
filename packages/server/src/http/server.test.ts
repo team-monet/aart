@@ -974,6 +974,56 @@ describe("POST /workflows/:id/promote — conditional deploy-token gating (AMEND
   });
 });
 
+// D2a fix pass (AMENDMENTS.md A60, FIX 2) — requireDeployToken (the
+// fail-closed tier: /bundles/ingest, /bundles/plan, /environments) called
+// checkAnyDeployToken([config.deployToken, config.deployTokenNext], provided)
+// with NO guard that config.deployToken was actually set, unlike its
+// conditional sibling requireDeployTokenIfConfigured (which already guards
+// `if (!config.deployToken) return true`). A server configured with ONLY
+// AART_DEPLOY_TOKEN_NEXT (no primary) would therefore ACCEPT a caller who
+// supplied exactly that NEXT token on a fail-closed route — contradicting
+// both the 401 remedy (which claims "no AART_DEPLOY_TOKEN configured") and
+// this file's/config.ts's own doc comments on deployTokenNext ("cannot
+// substitute for the primary token being configured at all"). Closed with
+// an explicit `if (!config.deployToken)` guard in requireDeployToken,
+// mirroring requireDeployTokenIfConfigured's own.
+describe("deploy token rotation — deployTokenNext without a primary (D2a fix pass, AMENDMENTS.md A60, FIX 2)", () => {
+  it("fail-closed tier (/bundles/ingest): a request bearing exactly the configured deployTokenNext value is STILL refused when deployToken (the primary) is unset — the NEXT token must not unlock a fail-closed route on its own", async () => {
+    fx = await createTestFixture();
+    await fx.store.workflows.put(deployableWorkflow("wf_next_only_fail_closed"));
+    const bundle = await produceBundle(fx.store, { workflowId: "wf_next_only_fail_closed", workflowVersion: "1" });
+    handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false, deployTokenNext: "next-token-only" }); // deployToken deliberately unset
+    const res = await fetch(`http://localhost:${handle.port}/bundles/ingest`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: "Bearer next-token-only" },
+      body: JSON.stringify({ files: bundleToFiles(bundle) }),
+    });
+    expect(res.status).toBe(401);
+    const body = (await json(res)) as { error: string };
+    // The SAME "not configured" remedy as if no token existed at all —
+    // proves this is treated exactly like the fully-unconfigured case, not
+    // a differentiated "wrong token" 401 (which would mean deployTokenNext
+    // was still being consulted as a candidate).
+    expect(body.error).toMatch(/AART_DEPLOY_TOKEN/);
+    await expect(fx.store.deployments.list({ workflowId: "wf_next_only_fail_closed" })).resolves.toHaveLength(0);
+  });
+
+  it("conditionally-gated tier (/runs/trigger): behaves byte-identically to the fully-unconfigured baseline when only deployTokenNext is set — deployToken unset already short-circuits requireDeployTokenIfConfigured before deployTokenNext is ever consulted, so this is a non-regression check, not a hole", async () => {
+    fx = await createTestFixture();
+    handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false }); // fully unconfigured baseline
+    const baseline = await fetch(`http://localhost:${handle.port}/runs/trigger`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({}) });
+    const baselineStatus = baseline.status;
+    const baselineBody: unknown = await baseline.json();
+    expect(baselineStatus, "this test's own premise is broken if the fully-unconfigured baseline is already 401").not.toBe(401);
+
+    await handle.close();
+    handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false, deployTokenNext: "next-token-only" }); // deployToken deliberately unset
+    const res = await fetch(`http://localhost:${handle.port}/runs/trigger`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({}) });
+    expect(res.status, "deployTokenNext alone must not change this route's behavior at all").toBe(baselineStatus);
+    await expect(res.json()).resolves.toEqual(baselineBody);
+  });
+});
+
 // D2a security hardening (AMENDMENTS.md A59) — the completeness test: the
 // single most important test in this sub-phase (per this session's own
 // brief). Converts "a future route silently ships open" (this repo's named
