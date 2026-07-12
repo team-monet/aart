@@ -140,6 +140,49 @@ steps:
     const finished = await tc.ctx.store.runs.get(run.runId as string);
     expect(finished?.status).toBe("completed");
   });
+
+  // D1 fix pass (AMENDMENTS.md A57) — deploymentToBinding (@aart/server's
+  // triggers/registry.ts) already skips promoted:false rows for every
+  // REAL trigger path; this handler's own "is this deployed" check must
+  // apply the same rule, not treat ANY Deployment row as runnable.
+  it("refuses to trigger when every Deployment for this workflow is promoted:false (D1's push-without-promote dormancy)", async () => {
+    tc = await createTestContext();
+    await registerWorkflowHandler(tc.ctx, { workflow: sampleWorkflowYaml("wf-trigger-dormant") });
+    await tc.ctx.store.deployments.put({
+      id: "dep_dormant",
+      workflowId: "wf-trigger-dormant",
+      workflowVersion: "0.1.0",
+      environmentId: "env_dormant",
+      triggerConfig: {},
+      createdAt: new Date().toISOString(),
+      promoted: false,
+    });
+
+    const result = await triggerWorkflowHandler(tc.ctx, { workflowId: "wf-trigger-dormant" });
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/promote/i);
+    expect(result.error).toMatch(/dashboard/i);
+  });
+
+  it("triggers fine when at least one Deployment is runnable, even if another for the same workflow is promoted:false", async () => {
+    tc = await createTestContext({ trustMode: "governed" });
+    await registerWorkflowHandler(tc.ctx, { workflow: sampleWorkflowYaml("wf-trigger-mixed") });
+    await approveAllGates(tc.ctx.store, "wf-trigger-mixed", "0.1.0");
+    await tc.ctx.store.deployments.put({
+      id: "dep_mixed_dormant",
+      workflowId: "wf-trigger-mixed",
+      workflowVersion: "0.1.0",
+      environmentId: "env_mixed_dormant",
+      triggerConfig: {},
+      createdAt: new Date().toISOString(),
+      promoted: false,
+    });
+    await deployWorkflowHandler(tc.ctx, { workflowId: "wf-trigger-mixed", workflowVersion: "0.1.0", target: "staging" }); // undefined promoted -> active
+
+    const result = await triggerWorkflowHandler(tc.ctx, { workflowId: "wf-trigger-mixed", input: { url: "https://example.com" } });
+    expect(result.ok).toBe(true);
+    expect(result.kind).toBe("run");
+  });
 });
 
 describe("listWaitingRunsHandler (aart_list_waiting_runs)", () => {

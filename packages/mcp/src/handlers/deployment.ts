@@ -88,6 +88,20 @@ export async function triggerWorkflowHandler(ctx: AartContext, input: TriggerWor
   if (deployments.length === 0) {
     return { ok: false, error: `Workflow "${input.workflowId}" is not deployed anywhere. Call aart_deploy_workflow first.` };
   }
+  // D1 fix pass (AMENDMENTS.md A57) — a promoted:false Deployment (D1,
+  // AMENDMENTS.md A56: evidence recorded via `aart push`/`POST
+  // /bundles/ingest` into a non-"dev"-trust environment, awaiting a real
+  // promotion) does NOT make a workflow runnable. `deploymentToBinding`
+  // (`@aart/server`'s `triggers/registry.ts`) already skips these for
+  // every REAL trigger path (webhook/github/slack HTTP, the poll ticker) —
+  // this handler's own "is this workflow deployed" precondition must apply
+  // the identical rule, or a pushed-but-unpromoted workflow would report as
+  // triggerable here while every other real trigger path treats it as
+  // dormant.
+  const runnableDeployments = deployments.filter((d) => d.promoted !== false);
+  if (runnableDeployments.length === 0) {
+    return { ok: false, error: `Workflow "${input.workflowId}" has been pushed/deployed but not yet promoted (promoted:false — evidence recorded via ingest/deploy, awaiting a real promotion) in any environment. Nothing is live to trigger yet. Promote it first: "aart promote ${input.workflowId}" (CLI), POST /workflows/${input.workflowId}/promote (HTTP), or via the dashboard.` };
+  }
   const runResult = await runWorkflowHandler(ctx, { workflowId: input.workflowId, input: input.input });
   return { ...runResult, kind: "run" };
 }
