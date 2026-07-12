@@ -15,7 +15,7 @@ import { planBundleIngest } from "../bundle/plan.js";
 import { systemClock, type Clock } from "../clock.js";
 import { DEFAULT_HTTP_HOST, DEFAULT_HTTP_PORT, MAX_BUNDLE_INGEST_BYTES, type ServerConfig } from "../config.js";
 import { findCorrectionByKey } from "../corrections.js";
-import { checkDeployToken, extractBearerToken } from "../deploy-token.js";
+import { checkAnyDeployToken, extractBearerToken } from "../deploy-token.js";
 import { registerEnvironment, type RegisterEnvironmentParams } from "../environments.js";
 import { createEvalSuite, runEvalSuiteForWorkflow } from "../evals.js";
 import { clearRunFlag, listFlaggedRuns } from "../flags.js";
@@ -115,10 +115,20 @@ async function respondWorkflowFlagAction(
  * (fail-closed, matching `checkDeployToken`'s own contract) — there is no
  * "auth disabled" state for this specific surface, only "not configured
  * yet," always surfaced with the exact remedy (set `AART_DEPLOY_TOKEN`).
+ *
+ * D2a security hardening, token rotation (AMENDMENTS.md A59) — checks
+ * BOTH `config.deployToken` and `config.deployTokenNext` (via
+ * `checkAnyDeployToken`, deploy-token.ts), accepting a match against
+ * either. `deployTokenNext` unset (the common case) behaves byte-
+ * identically to the pre-rotation single-token check. The "unconfigured"
+ * remedy below still only names `AART_DEPLOY_TOKEN` — `deployToken` unset
+ * means fail-closed regardless of `deployTokenNext` (rotation only ever
+ * ADDS a second valid value; it cannot substitute for the primary token
+ * being configured at all).
  */
 function requireDeployToken(config: ServerConfig, ctx: RouteContext): boolean {
   const provided = extractBearerToken(ctx.req.headers.authorization);
-  if (checkDeployToken(config.deployToken, provided)) return true;
+  if (checkAnyDeployToken([config.deployToken, config.deployTokenNext], provided)) return true;
   const remedy = config.deployToken
     ? 'Provide a valid "Authorization: Bearer <token>" header.'
     : 'This server has no AART_DEPLOY_TOKEN configured — set it (env var, or the "AART_DEPLOY_TOKEN" key in <root>/secrets.json) before this route will accept any request.';
@@ -193,7 +203,11 @@ function requireDeployToken(config: ServerConfig, ctx: RouteContext): boolean {
 function requireDeployTokenIfConfigured(config: ServerConfig, ctx: RouteContext, actionLabel = "perform this action"): boolean {
   if (!config.deployToken) return true;
   const provided = extractBearerToken(ctx.req.headers.authorization);
-  if (checkDeployToken(config.deployToken, provided)) {
+  // D2a security hardening, token rotation (AMENDMENTS.md A59) — accepts
+  // EITHER the primary or the rotation-successor token (checkAnyDeployToken,
+  // deploy-token.ts); deployTokenNext unset is byte-identical to the
+  // pre-rotation single-token check.
+  if (checkAnyDeployToken([config.deployToken, config.deployTokenNext], provided)) {
     ctx.authenticated = { label: "deploy-token" };
     return true;
   }

@@ -32,6 +32,7 @@ afterEach(async () => {
   handleClose = undefined;
   delete process.env.AART_SECRET_PROBE_SECRET;
   delete process.env.AART_DEPLOY_TOKEN;
+  delete process.env.AART_DEPLOY_TOKEN_NEXT;
   await Promise.all(cleanupPaths.map((p) => fs.rm(p, { recursive: true, force: true })));
   cleanupPaths = [];
 });
@@ -172,6 +173,83 @@ describe("createRealServerPort — real deployToken wiring (AMENDMENTS.md A57 fi
     expect(res.status).toBe(401);
     const body = (await res.json()) as { error: string };
     expect(body.error).toMatch(/AART_DEPLOY_TOKEN/);
+  });
+});
+
+// D2a security hardening, token rotation (AMENDMENTS.md A59) — mirrors the
+// A57 deploy-token-wiring describe block immediately above exactly: asserts
+// the wiring through the SAME composition root `aart server` itself uses
+// (cli.serverPort.startServer), not a hand-built ServerConfig, per this
+// sub-phase's own STANDING IMPERATIVE for every new ServerConfig field.
+describe("createRealServerPort — real deployTokenNext wiring, token rotation (D2a, AMENDMENTS.md A59)", () => {
+  it("the NEXT token is accepted on a conditionally-gated route (promote), same as the primary", async () => {
+    process.env.AART_DEPLOY_TOKEN = "primary-token";
+    process.env.AART_DEPLOY_TOKEN_NEXT = "next-token";
+    const cli = await freshCli();
+    const workflow = compileWorkflowInput(probeWorkflow("wf-rotation-next-probe"));
+    await cli.aart.store.workflows.put(workflow);
+    await cli.aart.store.environments.put({ id: "env_rotation_probe", name: "rotation-probe", config: { trustMode: "dev" } });
+    const handle = await cli.serverPort.startServer({ port: 0 });
+    handleClose = () => handle.close();
+
+    const res = await fetch(`http://localhost:${handle.port}/workflows/${workflow.id}/promote`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: "Bearer next-token" },
+      body: JSON.stringify({ version: workflow.version, environmentId: "env_rotation_probe" }),
+    });
+    expect(res.status).toBe(200);
+  });
+
+  it("the PRIMARY token is still accepted while a NEXT token is also configured (both valid during a rotation window, on a fail-closed route)", async () => {
+    process.env.AART_DEPLOY_TOKEN = "primary-token";
+    process.env.AART_DEPLOY_TOKEN_NEXT = "next-token";
+    const cli = await freshCli();
+    const handle = await cli.serverPort.startServer({ port: 0 });
+    handleClose = () => handle.close();
+
+    const res = await fetch(`http://localhost:${handle.port}/bundles/plan`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: "Bearer primary-token" },
+      body: JSON.stringify({}),
+    });
+    expect(res.status).toBe(400); // past the token gate to requireBundleEnvelope's own 400 -- proves the PRIMARY token still works, not just NEXT
+  });
+
+  it("a token matching NEITHER primary nor next is rejected 401", async () => {
+    process.env.AART_DEPLOY_TOKEN = "primary-token";
+    process.env.AART_DEPLOY_TOKEN_NEXT = "next-token";
+    const cli = await freshCli();
+    const handle = await cli.serverPort.startServer({ port: 0 });
+    handleClose = () => handle.close();
+
+    const res = await fetch(`http://localhost:${handle.port}/bundles/plan`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: "Bearer totally-unrelated-token" },
+      body: JSON.stringify({}),
+    });
+    expect(res.status).toBe(401);
+  });
+
+  it("with no AART_DEPLOY_TOKEN_NEXT configured at all, behavior is unchanged from before rotation existed (only the primary token works)", async () => {
+    process.env.AART_DEPLOY_TOKEN = "primary-token";
+    // AART_DEPLOY_TOKEN_NEXT deliberately left unset.
+    const cli = await freshCli();
+    const handle = await cli.serverPort.startServer({ port: 0 });
+    handleClose = () => handle.close();
+
+    const okRes = await fetch(`http://localhost:${handle.port}/bundles/plan`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: "Bearer primary-token" },
+      body: JSON.stringify({}),
+    });
+    expect(okRes.status).toBe(400); // past the gate
+
+    const rejectedRes = await fetch(`http://localhost:${handle.port}/bundles/plan`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: "Bearer some-guessed-next-token" },
+      body: JSON.stringify({}),
+    });
+    expect(rejectedRes.status).toBe(401); // no NEXT token configured -- nothing else is valid
   });
 });
 

@@ -20,8 +20,14 @@
 //     resolver, but never wired the resolver into this, the ONE real
 //     production composition root, so every one of those routes refused
 //     every request unconditionally through a real `aart server` until now.
-//     AMENDMENTS.md A59 (D2a security hardening): startServer now also
-//     threads `config.host` straight through to ServerConfig.host — the
+//     AMENDMENTS.md A59 (D2a security hardening, token rotation): startServer
+//     now also resolves resolveDeployTokenNext(root) (secrets.ts) and
+//     threads it into ServerConfig.deployTokenNext, the same way/timing as
+//     deployToken immediately above — @aart/server's checkAnyDeployToken
+//     accepts either token, so this is the ONE real production caller that
+//     lets an operator actually roll a token via AART_DEPLOY_TOKEN_NEXT.
+//     AMENDMENTS.md A59 (D2a security hardening, bind default): startServer
+//     now also threads `config.host` straight through to ServerConfig.host — the
 //     breaking-change loopback-only bind default lives in @aart/server
 //     itself (ServerHttpConfig.host's own doc comment), this composition
 //     root just passes whatever commands/process.ts's --host/AART_HOST
@@ -58,7 +64,7 @@ import {
   startWorker as startRealWorker,
 } from "@aart/server";
 import { writeBundleFilesToDisk } from "./bundle-files.js";
-import { createRealSecretResolver, resolveDeployToken } from "./secrets.js";
+import { createRealSecretResolver, resolveDeployToken, resolveDeployTokenNext } from "./secrets.js";
 
 /** `aart server --environment <name>`'s bridge (AMENDMENTS.md A45): a human names an Environment, `ServerConfig.environmentId` (config.ts) wants its id. A genuinely CLI-only concern (unlike `produceBundle`'s own environment-name resolution above, now shared with MCP) — left as its own local implementation, not part of the `resolveAndProduceBundle` extraction. Same "throw only when the NAME itself doesn't exist" discipline, for the same reason — an operator typo in `--environment` should fail loudly at startup, not silently fall back to "every environment" (this function's caller, `startServer` below, only calls this when `config.environment` is actually given; omitting the flag entirely is the documented "all environments" default and never reaches here). */
 async function resolveEnvironmentId(store: AartStore, environmentName: string): Promise<string> {
@@ -101,6 +107,14 @@ export function createRealServerPort(store: AartStore, engine: Engine, root: str
       // process startup," which matches startServer being called exactly
       // once per `aart server` invocation.
       const deployToken = await resolveDeployToken(root);
+      // D2a security hardening, token rotation (AMENDMENTS.md A59) —
+      // resolved the SAME way/timing as deployToken immediately above
+      // (secrets.ts's own doc comment on resolveDeployTokenNext has the
+      // full rotation story). Unset in the overwhelmingly common case (no
+      // rotation in progress) -> undefined -> ServerConfig.deployTokenNext
+      // undefined -> checkAnyDeployToken behaves byte-identically to the
+      // pre-rotation single-token check.
+      const deployTokenNext = await resolveDeployTokenNext(root);
       // D1 fix pass (AMENDMENTS.md A58) — logSink: consoleJsonSink is the
       // FOURTH occurrence of this exact composition-root-gap bug class in
       // this repo (A48, A53, A57's own FIX 1, now this): @aart/store's
@@ -123,7 +137,7 @@ export function createRealServerPort(store: AartStore, engine: Engine, root: str
       // that type's doc comment) — this composition root doesn't need its
       // own default, just to pass through whatever the caller (commands/
       // process.ts's --host/AART_HOST) resolved.
-      return startRealServer({ store, engine: boundary, port: config.port, host: config.host, secretResolver, environmentId, deployToken, logSink: consoleJsonSink });
+      return startRealServer({ store, engine: boundary, port: config.port, host: config.host, secretResolver, environmentId, deployToken, deployTokenNext, logSink: consoleJsonSink });
     },
 
     async startWorker(options): Promise<WorkerHandleLike> {

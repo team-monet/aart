@@ -353,33 +353,47 @@ it straight to a running `aart server` over HTTP, instead of `scp`-ing a
 bundle by hand (see `AUTHORING.md`'s "(e) Deploying to the server"). A
 SEPARATE bearer token, distinct from the webhook secrets above, gates this.
 
-**Gating matrix — read this before fronting `aart server` with a reverse
-proxy (D1 fix-pass ruling, AMENDMENTS.md A57).** Not every write route
-behaves the same way; know which tier a route you care about is in:
+### Gating matrix
+
+**Read this before fronting `aart server` with a reverse proxy (D1 fix-pass
+ruling, AMENDMENTS.md A57; scope widened to nearly every write route by D2a
+security hardening, AMENDMENTS.md A59).** Not every route behaves the same
+way; know which tier a route you care about is in:
 
 | Tier | Routes | `AART_DEPLOY_TOKEN` unset | `AART_DEPLOY_TOKEN` set |
 | --- | --- | --- | --- |
-| **Fail-closed** | `POST /bundles/ingest`, `POST /bundles/plan`, `POST /environments` | Refuses **every** request, `401`, naming the env var as the remedy — no "auth disabled" state at all. | Requires a valid `Authorization: Bearer <token>`; wrong/missing -> `401`. |
-| **Conditionally gated** | `POST /workflows/:id/promote` | **Open** — unchanged pre-A56 behavior, so a tokenless local/dev/TEST-DRIVE dashboard keeps working. One loud warning is logged ONCE at server startup (not per-request) when this is the case. | Requires the SAME valid Bearer the fail-closed routes do; wrong/missing -> `401` (a differently-worded remedy — "provide a valid token," not "set `AART_DEPLOY_TOKEN`," since one already is). |
-| **Open, always** | Every GET route; the three `/webhooks/*` routes (separate, per-binding HMAC verification — [Secret management](#secret-management) above, completely untouched); every OTHER write route (`/runs/trigger`, `/workflows/:id/approve`, `/corrections`, `/evals/suites`, `/workflows/:id/block-promotion`, ...) | Unaffected either way — `AART_DEPLOY_TOKEN` plays no role here at all. | Unaffected either way. |
+| **Fail-closed** | `POST /bundles/ingest`, `POST /bundles/plan`, `POST /environments` | Refuses **every** request, `401`, naming the env var as the remedy — no "auth disabled" state at all. | Requires a valid `Authorization: Bearer <token>` (or, mid-[rotation](#deploy-token), `AART_DEPLOY_TOKEN_NEXT`); wrong/missing -> `401`. |
+| **Conditionally gated** | Every OTHER write route: `POST /workflows/:id/promote`, `/approve`, `/block-promotion`, `/unblock-promotion`, `/mark-needs-review`, `/clear-needs-review`, `/trigger-improvement`; `POST /runs/trigger`, `/runs/:runId/resume`, `/runs/:runId/signal`, `/runs/:runId/flag/clear`; `POST /approvals/:id/decision`; `POST /corrections`, `/corrections/:key/update-run-output`, `/corrections/:key/create-eval-example`, `/corrections/:key/create-issue`; `POST /evals/suites`, `/evals/runs` | **Open** — unchanged pre-A56 behavior on every one of these, so a tokenless local/dev/TEST-DRIVE deployment keeps working with zero config change. One loud warning is logged ONCE at server startup (not per-request) when this is the case. | Requires the SAME valid Bearer (or rotation-successor token) the fail-closed tier does; wrong/missing -> `401` (a differently-worded, route-specific remedy — "provide a valid token, this route requires it to <action>" — not "set `AART_DEPLOY_TOKEN`," since one already is). |
+| **Open, always** | Every GET route; the three `/webhooks/*` routes (separate, per-binding HMAC verification — [Secret management](#secret-management) above, completely untouched) | Unaffected either way — `AART_DEPLOY_TOKEN` plays no role here at all. | Unaffected either way. |
 
-Why promote is its own tier, not fail-closed like the other three: those
-three routes never worked without a token at all (a brand-new surface, "not
-configured yet" is a correct universal refusal); `POST
-/workflows/:id/promote` predates the deploy token by a full session
-(AMENDMENTS.md A47) and is the dashboard's own promote button — failing it
-closed by default would have broken every existing tokenless deployment on
-upgrade. The trust-boundary reasoning for gating it AT ALL: promote is the
+**As of D2a (AMENDMENTS.md A59), "conditionally gated" is the norm, not the
+exception** — before this session, only `POST /workflows/:id/promote` sat
+in that tier; every other write route below it in the table above was
+"open, always," identical in practice to a route with no auth concept at
+all. A focused security review found that gap: any one of those routes was
+just as network-reachable as promote, equally capable of mutating this
+server's state, with nothing distinguishing it from a route that was NEVER
+meant to need a token. They now share promote's own tier and remedy shape.
+
+Why "conditionally gated," not fail-closed like the top tier: every route
+in this tier existed and was open BEFORE `AART_DEPLOY_TOKEN` did — failing
+them closed by default would have broken every existing tokenless
+deployment's dashboard/CLI/MCP usage on upgrade to this session's build. The
+trust-boundary reasoning for gating them AT ALL, using promote (the
+original member of this tier) as the flagship example: promote is the
 switch that flips a pushed-but-dormant `Deployment.promoted` from `false`
 to `true` (see [Environment registration](#environment-registration) and
 `AUTHORING.md`'s bundle/environment notes) — an unauthenticated promote
 would let anyone who can merely REACH this server's HTTP API activate
 evidence you deliberately pushed but hadn't yet promoted, which is exactly
-the guarantee D1's own "push now, promote later" design depends on. If you
-front this server with a reverse proxy and only intend to protect the
-fail-closed tier, you are still leaving promote (and every other write
-route) open unless you protect the whole API surface, or set
-`AART_DEPLOY_TOKEN` and forward the `Authorization` header through.
+the guarantee D1's own "push now, promote later" design depends on. The
+same "anyone who can reach this API can mutate real state" reasoning
+applies to triggering a run, deciding an approval, recording a correction,
+and every other route in this tier. If you front this server with a
+reverse proxy and only intend to protect the fail-closed tier, you are
+still leaving every conditionally-gated route open unless you protect the
+whole API surface, or set `AART_DEPLOY_TOKEN` and forward the
+`Authorization` header through.
 
 **Server side** — set `AART_DEPLOY_TOKEN`, checked in the exact same two
 places/order as `AART_SECRET_*` above: the env var first, then
@@ -400,23 +414,51 @@ and send it as `Authorization: Bearer <token>`. Skip `--token-ref` and no
 `AART_DEPLOY_TOKEN` happens to be unset too, which (see above) means the
 remote refuses the push regardless.
 
-**Client side (the dashboard's own promote button — D1 fix pass,
-AMENDMENTS.md A57)** — a SEPARATE resolution, env-var only: set
-`AART_DEPLOY_TOKEN` in the **dashboard container/process's own**
-environment (`docker-compose.yml`'s `dashboard` service reads it from the
-same `.env` the `server`/`worker` services do — see that file's own
-comments) and `@aart/dashboard`'s `createHttpApiClient` attaches it as a
-Bearer header on `POST /workflows/:id/promote` only (the one route the
-server conditionally gates — [Gating matrix](#deploy-token) above). Forget
-this on a server where `AART_DEPLOY_TOKEN` IS set, and every promote click
-from the dashboard UI will `401` — the CLI's `aart promote`/HTTP `POST
-/workflows/:id/promote` both still work fine with a correct token supplied
-directly.
+**Client side (the dashboard's own write actions — D1 fix pass, AMENDMENTS.md
+A57; extended to every write action by D2a security hardening, AMENDMENTS.md
+A59)** — a SEPARATE resolution, env-var only: set `AART_DEPLOY_TOKEN` in the
+**dashboard container/process's own** environment (`docker-compose.yml`'s
+`dashboard` service reads it from the same `.env` the `server`/`worker`
+services do — see that file's own comments) and `@aart/dashboard`'s
+`createHttpApiClient` attaches it as a Bearer header on EVERY write call it
+makes (trigger a run, decide an approval, promote/approve/block a workflow
+version, record a correction, create/run an eval suite, clear a run's flag,
+...) — as of A57 this was promote alone (the one route the server
+conditionally gated at the time); D2a widened both the server's own gating
+and this client's own header attachment together, in the same session, so
+they never drift out of sync. Forget this on a server where
+`AART_DEPLOY_TOKEN` IS set, and every one of those actions from the
+dashboard UI will `401` — the CLI's/HTTP's own equivalents still work fine
+with a correct token supplied directly. See [Gating matrix](#gating-matrix)
+above for the full route list this now covers.
 
 Comparison is constant-time (`sha256` of both sides, then
 `crypto.timingSafeEqual` — never a raw string compare, and never
 `timingSafeEqual` on the unhashed token, which throws on a length
 mismatch).
+
+**Gating scope (D2a security hardening, AMENDMENTS.md A59).** `AART_DEPLOY_TOKEN`
+now gates nearly every write route on this server, not only the three
+fail-closed deploy-surface routes and promote — see [Gating
+matrix](#gating-matrix) below for the current, precise table.
+
+**Token rotation (D2a security hardening, AMENDMENTS.md A59).** Roll a
+compromised or expiring token without a hard cutover: set `AART_DEPLOY_TOKEN_NEXT`
+(same two resolution places as `AART_DEPLOY_TOKEN` — env var first, then
+`<root>/secrets.json`'s own `"AART_DEPLOY_TOKEN_NEXT"` key) to the NEW
+value. Every gated route now accepts EITHER token — update callers
+(`aart remote`'s `--token-ref`, the dashboard's own `AART_DEPLOY_TOKEN`, a
+reverse proxy injecting the header, ...) to the new value at your own pace,
+then once every caller has switched, promote the new value to
+`AART_DEPLOY_TOKEN` proper and remove `AART_DEPLOY_TOKEN_NEXT`. Leaving
+`AART_DEPLOY_TOKEN_NEXT` unset (the default) changes nothing — behaves
+byte-identically to before rotation existed.
+
+```bash
+# .env, mid-rotation:
+AART_DEPLOY_TOKEN=the-old-token-still-valid-during-rotation
+AART_DEPLOY_TOKEN_NEXT=the-new-token-callers-are-migrating-to
+```
 
 ## Network binding
 
