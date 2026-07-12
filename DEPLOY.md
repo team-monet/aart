@@ -533,6 +533,23 @@ deployment:**
 worker + dashboard all on one host, nothing remote) needs no `--host` flag
 at all — the new default is exactly what that topology already needed.
 
+**Don't over-generalize this section — `aart worker`'s health listener is
+NOT covered by any of the above.** Everything on this page is about
+`aart server`'s control-plane bind. `aart worker`'s own `GET /health`
+listener (default port 8787, `packages/server/src/worker/health.ts`) still
+binds every interface, unchanged — deliberately, not an oversight
+(AMENDMENTS.md A59 PART 3): it's read-only (`{status, claimedRuns, uptime,
+version}`, zero mutation capability, categorically lower risk than the
+mutation routes this whole section is about) and BY DESIGN needs to stay
+cross-container-reachable (`docker-compose.yml`'s `AART_WORKER_URLS:
+http://worker:8787`, feeding the dashboard's worker-health page) — locking
+it to loopback would silently break that feature. If you expose a worker
+on a host beyond a trusted private network/container mesh, firewall port
+8787 yourself; this deploy kit does not do it for you, and `aart worker`
+has no `--host` (or `--health-port`) flag today to change this bind at
+all — the port is only configurable at the `WorkerConfig.healthPort`
+level (`@aart/server`, not the CLI).
+
 ## Environment registration
 
 ADR-2 (same session, AMENDMENTS.md A56): `aart environment register <name>
