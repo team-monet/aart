@@ -132,3 +132,92 @@ export async function resumeRunHandler(ctx: AartContext, input: ResumeRunInput):
   const outcome = await ctx.engine.resumeManual(input.runId, stepId, input.payload);
   return { ok: outcome.kind === "resumed", outcome };
 }
+
+// ---------------------------------------------------------------------------
+// deployToRemoteHandler — D1 "remotes + push" (AMENDMENTS.md A56). The ONE
+// shared handler `aart push` (CLI, commands/deployment.ts) and the MCP
+// `aart_deploy` tool BOTH route through directly (three-clients precedent:
+// deployCommand -> deployWorkflowHandler above already works exactly this
+// way) — bundles the named workflow@version via `ctx.bundler` (resolving
+// the remote's OWN configured environment, never a caller-supplied one —
+// D-4's remotes.json shape makes `environment` a required field per remote,
+// so which environment a push targets is a property of the REMOTE, not a
+// per-call input), then POSTs it to the remote's `/bundles/ingest` (or
+// `/bundles/plan` for a dry-run preview) using the remote's resolved
+// deploy token.
+//
+// Deliberately named DIFFERENTLY from `deployWorkflowHandler` above and its
+// `aart_deploy_workflow` tool — ADR-1's ruling (ratified): the verb for
+// THIS operation is "push"/"deploy" as a NEW, distinct concept (shipping a
+// bundle to a remote HTTP server), not a rename or replacement of the
+// existing LOCAL environment-promotion `aart deploy --target`/
+// `aart_deploy_workflow`, which stays completely untouched. The MCP tool
+// name is `aart_deploy` (not `aart_push`) per that same ratified naming —
+// a deliberate asymmetry with the CLI's `aart push` verb, not an
+// inconsistency to silently "fix" here.
+//
+// This function performs its own HTTP POST via Node 22's GLOBAL `fetch` —
+// no import, so no @aart/cli dependency needed (this package cannot depend
+// on that one; the dependency runs the other way). `@aart/cli`'s own
+// `deploy-client.ts` holds a small, independently-defined, directly-tested
+// mirror of this exact POST shape for CLI-side use/testing in isolation —
+// see that module's own doc comment for why it isn't imported here (same
+// unavoidable-duplication class as stubs/deploy.ts's remotes.json/
+// secrets.json reading).
+export interface DeployToRemoteInput {
+  remote: string;
+  workflowId: string;
+  workflowVersion: string;
+  /** Dry-run preview via `POST /bundles/plan` instead of `POST /bundles/ingest` — zero writes on the remote server (plan.ts's own documented contract). */
+  plan?: boolean;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+export async function deployToRemoteHandler(ctx: AartContext, input: DeployToRemoteInput): Promise<HandlerResult> {
+  const remoteEntry = await ctx.remotes.get(input.remote);
+  if (!remoteEntry) {
+    return { ok: false, error: `Remote "${input.remote}" not found. Add it first — "aart remote add ${input.remote} <url> --environment <envName>", then "aart remote list" to confirm.` };
+  }
+
+  let bundle: Awaited<ReturnType<typeof ctx.bundler.produceBundle>>;
+  try {
+    bundle = await ctx.bundler.produceBundle({ workflowId: input.workflowId, workflowVersion: input.workflowVersion, environment: remoteEntry.environment });
+  } catch (err) {
+    return { ok: false, error: `Could not produce a bundle for "${input.workflowId}@${input.workflowVersion}": ${err instanceof Error ? err.message : String(err)}` };
+  }
+
+  // Resolved but NEVER included in this function's own return value below —
+  // used only to construct the outbound Authorization header (see this
+  // file's own redaction-lint suppression entries for stubs/deploy.ts's
+  // resolveTokenRef, which this ultimately calls).
+  const token = await ctx.remotes.resolveToken(input.remote);
+  const path = input.plan ? "/bundles/plan" : "/bundles/ingest";
+
+  let response: Response;
+  try {
+    response = await fetch(new URL(path, remoteEntry.url), {
+      method: "POST",
+      headers: { "content-type": "application/json", ...(token ? { authorization: `Bearer ${token}` } : {}) },
+      body: JSON.stringify({ files: bundle.files }),
+    });
+  } catch (err) {
+    return { ok: false, error: `Could not reach remote "${input.remote}" (${remoteEntry.url}): ${err instanceof Error ? err.message : String(err)}. Check the URL ("aart remote list") and your network connection, then retry.` };
+  }
+
+  let responseBody: unknown;
+  try {
+    responseBody = await response.json();
+  } catch {
+    responseBody = undefined;
+  }
+
+  if (!response.ok) {
+    const message = isRecord(responseBody) && typeof responseBody["error"] === "string" ? responseBody["error"] : `HTTP ${response.status}`;
+    return { ok: false, error: `Remote "${input.remote}" refused the ${input.plan ? "plan request" : "push"}: ${message}`, status: response.status };
+  }
+
+  return { ok: true, remote: input.remote, plan: input.plan === true, ...(isRecord(responseBody) ? responseBody : {}) };
+}
