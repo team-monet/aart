@@ -170,8 +170,59 @@ export function createSqliteAddApprovalTaskAuthenticatedAsMigration(db: Database
   };
 }
 
+/**
+ * V1 event log foundation (AMENDMENTS.md A61) — this adapter's FOURTH
+ * migration, and its first that adds a whole new TABLE rather than a
+ * column on an existing one (0002/0003's own precedent above). Unlike
+ * `ALTER TABLE ... ADD COLUMN` (which SQLite gives no `IF NOT EXISTS` for
+ * — see 0002's own doc comment on exactly this gap), `CREATE TABLE IF NOT
+ * EXISTS`/`CREATE INDEX IF NOT EXISTS` ARE naturally idempotent (the same
+ * primitive `0001_init`'s own baseline DDL already relies on, schema.ts) —
+ * so this migration does NOT need 0002/0003's try/catch
+ * "duplicate column name" tolerance dance; a database whose schema already
+ * has this table (for whatever reason its watermark fell out of sync)
+ * simply no-ops on re-`CREATE TABLE IF NOT EXISTS`, no special-casing
+ * required.
+ *
+ * The `events` table itself is NOT added to `SQLITE_SCHEMA_STATEMENTS`
+ * (schema.ts) — same reasoning 0002/0003 already established for their
+ * own added columns (that file's own note on the `deployments` table):
+ * `0001_init`'s baseline DDL stays exactly as it always was, so a fresh
+ * database running 0001→0002→0003→0004 in sequence and a pre-existing
+ * database upgrading through 0004 both converge on the identical final
+ * schema — there is exactly one `events` table shape reachable either way.
+ */
+export function createSqliteAddEventsTableMigration(db: DatabaseSync): Migration {
+  return {
+    id: "0004_events_table",
+    async up(): Promise<void> {
+      db.exec(`CREATE TABLE IF NOT EXISTS events (
+        id TEXT PRIMARY KEY,
+        type TEXT NOT NULL,
+        occurred_at TEXT NOT NULL,
+        summary TEXT NOT NULL,
+        workflow_id TEXT,
+        workflow_version TEXT,
+        run_id TEXT,
+        deployment_id TEXT,
+        environment_id TEXT,
+        approval_task_id TEXT,
+        actor TEXT
+      )`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_events_occurred_at ON events(occurred_at)`);
+    },
+    async down(): Promise<void> {
+      // Mirrors 0001_init's own down() idiom (DROP TABLE IF EXISTS per
+      // table) rather than 0002/0003's DROP COLUMN — this migration adds a
+      // whole table, so reverting it means dropping the table entirely.
+      db.exec(`DROP TABLE IF EXISTS events`);
+    },
+  };
+}
+
 export const ALL_SQLITE_MIGRATIONS = (db: DatabaseSync): Migration[] => [
   createSqliteInitMigration(db),
   createSqliteAddDeploymentPromotedMigration(db),
   createSqliteAddApprovalTaskAuthenticatedAsMigration(db),
+  createSqliteAddEventsTableMigration(db),
 ];

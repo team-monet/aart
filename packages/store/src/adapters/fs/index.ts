@@ -6,6 +6,7 @@
 // on `withStaging` below).
 import type { AartStore } from "../../types.js";
 import { FsArtifactStore } from "./artifacts.js";
+import { FsEventLogStore } from "./events.js";
 import { createStagingBuffer, flushStagingBuffer, type StagingBuffer } from "./json-file.js";
 import * as paths from "./paths.js";
 import { FsRunStore } from "./runs.js";
@@ -58,6 +59,8 @@ function buildStore(root: string, staging: StagingBuffer | undefined): AartStore
     packManifests: new FsPackManifestStore(paths.registryPacksDir(root), staging),
     rejectedTriggers: new FsRejectedTriggerStore(paths.rejectedTriggersDir(root), staging),
     standingApprovals: new FsStandingApprovalStore(paths.standingApprovalsDir(root), staging),
+    // Not staged — see doc comment above (mirrors signals/artifacts).
+    events: new FsEventLogStore(paths.eventsDir(root)),
     jobQueue: new FsJobQueueStore(paths.jobQueueDir(root), staging),
     idempotencyLedger: new FsIdempotencyLedgerStore(paths.idempotencyDir(root), staging),
     async transact<T>(fn: (tx: AartStore) => Promise<T>): Promise<T> {

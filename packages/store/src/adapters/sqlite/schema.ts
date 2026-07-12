@@ -272,7 +272,7 @@ export const SQLITE_SCHEMA_STATEMENTS: readonly string[] = [
     PRIMARY KEY (name, version)
   )`,
 
-  // job_queue — architecture §5.3/§4.7. NOT one of AartStore's 16 members
+  // job_queue — architecture §5.3/§4.7. NOT one of AartStore's 17 members
   // (engine/worker-internal plumbing, same as the fs adapter's treatment).
   `CREATE TABLE IF NOT EXISTS job_queue (
     run_id TEXT PRIMARY KEY,

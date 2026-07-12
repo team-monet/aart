@@ -13,6 +13,7 @@ import type { AartStore } from "../../types.js";
 import { AsyncMutex, createDirectExec, createLockedExec, openSqliteDb, withSqliteBusyRetry, type SqlExec } from "./db.js";
 import { ALL_SQLITE_MIGRATIONS } from "./migrations.js";
 import { SqliteArtifactStore } from "./stores/artifacts.js";
+import { SqliteEventLogStore } from "./stores/events.js";
 import { SqliteRunStore } from "./stores/runs.js";
 import { SqliteSignalStore } from "./stores/signals.js";
 import {
@@ -140,6 +141,7 @@ function buildStore(exec: SqlExec, blobsDir: string, transact: AartStore["transa
     packManifests: new SqlitePackManifestStore(exec),
     rejectedTriggers: new SqliteRejectedTriggerStore(exec),
     standingApprovals: new SqliteStandingApprovalStore(exec),
+    events: new SqliteEventLogStore(exec),
     jobQueue: new SqliteJobQueueStore(exec),
     idempotencyLedger: new SqliteIdempotencyLedgerStore(exec),
     transact,
@@ -230,5 +232,5 @@ export async function createSqliteStore(path: string, options: CreateSqliteStore
 
 /** Applies this adapter's migration DDL directly against a connection, bypassing `MigrationRunner`/the watermark table entirely — exposed for the rare case a caller wants schema-only setup with no migration bookkeeping (e.g. a disposable test fixture). Prefer `openSqliteStore`'s default (`runMigrations: true`, watermark-tracked) for anything that behaves like a real deployment. */
 export { runMigrationDdl } from "./db.js";
-export { createSqliteInitMigration, createSqliteAddDeploymentPromotedMigration, ALL_SQLITE_MIGRATIONS } from "./migrations.js";
+export { createSqliteInitMigration, createSqliteAddDeploymentPromotedMigration, createSqliteAddEventsTableMigration, ALL_SQLITE_MIGRATIONS } from "./migrations.js";
 export { SqliteMigrationWatermarkStore } from "./watermark.js";
