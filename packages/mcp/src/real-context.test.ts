@@ -375,6 +375,27 @@ describe("createRealAartContext — ctx.bundler / ctx.remotes (AMENDMENTS.md A56
     await expect(ctx.bundler.produceBundle({ workflowId: "real-ctx-bundle-env", workflowVersion: "1", environment: "no-such-env" })).rejects.toThrow(/not found/i);
   });
 
+  // D1 fix pass (AMENDMENTS.md A57, tester finding) — resolveDeploymentForEnvironmentName
+  // checks the CALLER's OWN store (by design: the caller's local Deployment
+  // for that environment carries the triggerConfig a bundle ships with),
+  // which confused first-time users who only ever registered the
+  // environment on a REMOTE server. The remedy now names the local CLI
+  // registration command AND explicitly distinguishes it from server-side
+  // registration, rather than a bare "not found."
+  it("an unregistered environment's error names the local registration command AND distinguishes it from server-side registration", async () => {
+    ctx = await setup();
+    let message = "";
+    try {
+      await ctx.bundler.produceBundle({ workflowId: "real-ctx-bundle-env-remedy", workflowVersion: "1", environment: "production" });
+    } catch (err) {
+      message = err instanceof Error ? err.message : String(err);
+    }
+    expect(message).toMatch(/not found on THIS store/i); // fact 1: this is a check against the CALLER's own store
+    expect(message).toContain('aart environment register production --trust-mode'); // the exact local remedy command, naming the actual environment
+    expect(message).toMatch(/POST \/environments/); // the HTTP form of the SAME local remedy
+    expect(message).toMatch(/separately from.*REMOTE server|REMOTE server.*separately from/is); // fact 2: explicitly distinguished from server-side registration
+  });
+
   it("ctx.remotes reads real remotes.json/secrets.json from the same root this context is rooted at", async () => {
     ctx = await setup();
     const { promises: fs } = await import("node:fs");

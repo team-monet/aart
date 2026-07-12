@@ -308,41 +308,67 @@ D1 "remotes + push" (AMENDMENTS.md A56) added a REMOTE deploy surface —
 `aart push`/the MCP `aart_deploy` tool bundle a workflow version and POST
 it straight to a running `aart server` over HTTP, instead of `scp`-ing a
 bundle by hand (see `AUTHORING.md`'s "(e) Deploying to the server"). A
-SEPARATE bearer token, distinct from the webhook secrets above, gates this:
+SEPARATE bearer token, distinct from the webhook secrets above, gates this.
 
-- **`POST /bundles/ingest`** — ingests a pushed bundle for real.
-- **`POST /bundles/plan`** — a zero-write dry-run preview of the same.
-- **`POST /environments`** — registers a new `Environment` over HTTP (the
-  network-only counterpart to the `aart environment register` CLI command —
-  see [Environment registration](#environment-registration) below).
+**Gating matrix — read this before fronting `aart server` with a reverse
+proxy (D1 fix-pass ruling, AMENDMENTS.md A57).** Not every write route
+behaves the same way; know which tier a route you care about is in:
 
-Every GET route, and the three `/webhooks/*` routes (which keep their own,
-separate per-binding HMAC verification — [Secret management](#secret-management)
-above — completely untouched), are **not** gated by this token.
+| Tier | Routes | `AART_DEPLOY_TOKEN` unset | `AART_DEPLOY_TOKEN` set |
+| --- | --- | --- | --- |
+| **Fail-closed** | `POST /bundles/ingest`, `POST /bundles/plan`, `POST /environments` | Refuses **every** request, `401`, naming the env var as the remedy — no "auth disabled" state at all. | Requires a valid `Authorization: Bearer <token>`; wrong/missing -> `401`. |
+| **Conditionally gated** | `POST /workflows/:id/promote` | **Open** — unchanged pre-A56 behavior, so a tokenless local/dev/TEST-DRIVE dashboard keeps working. One loud warning is logged ONCE at server startup (not per-request) when this is the case. | Requires the SAME valid Bearer the fail-closed routes do; wrong/missing -> `401` (a differently-worded remedy — "provide a valid token," not "set `AART_DEPLOY_TOKEN`," since one already is). |
+| **Open, always** | Every GET route; the three `/webhooks/*` routes (separate, per-binding HMAC verification — [Secret management](#secret-management) above, completely untouched); every OTHER write route (`/runs/trigger`, `/workflows/:id/approve`, `/corrections`, `/evals/suites`, `/workflows/:id/block-promotion`, ...) | Unaffected either way — `AART_DEPLOY_TOKEN` plays no role here at all. | Unaffected either way. |
+
+Why promote is its own tier, not fail-closed like the other three: those
+three routes never worked without a token at all (a brand-new surface, "not
+configured yet" is a correct universal refusal); `POST
+/workflows/:id/promote` predates the deploy token by a full session
+(AMENDMENTS.md A47) and is the dashboard's own promote button — failing it
+closed by default would have broken every existing tokenless deployment on
+upgrade. The trust-boundary reasoning for gating it AT ALL: promote is the
+switch that flips a pushed-but-dormant `Deployment.promoted` from `false`
+to `true` (see [Environment registration](#environment-registration) and
+`AUTHORING.md`'s bundle/environment notes) — an unauthenticated promote
+would let anyone who can merely REACH this server's HTTP API activate
+evidence you deliberately pushed but hadn't yet promoted, which is exactly
+the guarantee D1's own "push now, promote later" design depends on. If you
+front this server with a reverse proxy and only intend to protect the
+fail-closed tier, you are still leaving promote (and every other write
+route) open unless you protect the whole API surface, or set
+`AART_DEPLOY_TOKEN` and forward the `Authorization` header through.
 
 **Server side** — set `AART_DEPLOY_TOKEN`, checked in the exact same two
 places/order as `AART_SECRET_*` above: the env var first, then
-`<root>/secrets.json`'s own `"AART_DEPLOY_TOKEN"` key. **Unconditionally
-fail-closed**: with `AART_DEPLOY_TOKEN` unset, all three routes above
-refuse every request — including a genuinely correct one — with `401` and
-a remedy naming the env var. There is no "auth disabled, allow anything"
-state for this surface, unlike the rest of this HTTP API (which, per
-[Ops limits](#ops-limits--read-this-before-you-rely-on-it) below, has none
-at all by default).
+`<root>/secrets.json`'s own `"AART_DEPLOY_TOKEN"` key.
 
 ```bash
 # .env (docker compose) or your process manager's own secret injection:
 AART_DEPLOY_TOKEN=a-long-random-value-you-generate-yourself
 ```
 
-**Client side** — `aart remote add <name> <url> --environment <envName>
---token-ref secrets.<NAME>` records only the *reference*, never the value
-(same discipline as `--webhook-hmac-secret-ref`); `aart push`/`aart_deploy`
-resolve it at push time via the identical `AART_SECRET_<NAME>`-then-
-`secrets.json` mechanism and send it as `Authorization: Bearer <token>`.
-Skip `--token-ref` and no `Authorization` header is sent at all — fine only
-if the remote's own `AART_DEPLOY_TOKEN` happens to be unset too, which (see
-above) means the remote refuses the push regardless.
+**Client side (`aart push`/`aart_deploy`)** — `aart remote add <name> <url>
+--environment <envName> --token-ref secrets.<NAME>` records only the
+*reference*, never the value (same discipline as
+`--webhook-hmac-secret-ref`); `aart push`/`aart_deploy` resolve it at push
+time via the identical `AART_SECRET_<NAME>`-then-`secrets.json` mechanism
+and send it as `Authorization: Bearer <token>`. Skip `--token-ref` and no
+`Authorization` header is sent at all — fine only if the remote's own
+`AART_DEPLOY_TOKEN` happens to be unset too, which (see above) means the
+remote refuses the push regardless.
+
+**Client side (the dashboard's own promote button — D1 fix pass,
+AMENDMENTS.md A57)** — a SEPARATE resolution, env-var only: set
+`AART_DEPLOY_TOKEN` in the **dashboard container/process's own**
+environment (`docker-compose.yml`'s `dashboard` service reads it from the
+same `.env` the `server`/`worker` services do — see that file's own
+comments) and `@aart/dashboard`'s `createHttpApiClient` attaches it as a
+Bearer header on `POST /workflows/:id/promote` only (the one route the
+server conditionally gates — [Gating matrix](#deploy-token) above). Forget
+this on a server where `AART_DEPLOY_TOKEN` IS set, and every promote click
+from the dashboard UI will `401` — the CLI's `aart promote`/HTTP `POST
+/workflows/:id/promote` both still work fine with a correct token supplied
+directly.
 
 Comparison is constant-time (`sha256` of both sides, then
 `crypto.timingSafeEqual` — never a raw string compare, and never
@@ -492,14 +518,20 @@ Stated plainly, matching this repo's own "What doesn't work yet" convention
   enforcement built in. Put a reverse proxy with real auth (or a private
   network / VPN-only exposure) in front of anything beyond localhost —
   this deploy kit's compose/systemd examples above bind to all interfaces
-  by default and assume you're adding that layer yourself. **The one
-  exception** (D1 "remotes + push," AMENDMENTS.md A56): `POST
-  /bundles/ingest`, `POST /bundles/plan`, and `POST /environments` ARE
-  gated, by the [deploy token](#deploy-token) above — but that's the ONLY
-  part of this API a bearer token protects; every other route (triggering a
-  run, approving/promoting a workflow version, reading run history, ...)
-  remains exactly as open as this bullet describes. Don't mistake
-  "`AART_DEPLOY_TOKEN` is configured" for "this server is authenticated."
+  by default and assume you're adding that layer yourself. **Two
+  exceptions, NOT the same shape** (D1 "remotes + push," AMENDMENTS.md A56;
+  the promote exception added by a D1 fix pass, AMENDMENTS.md A57 — see
+  [Deploy token](#deploy-token)'s own gating matrix for the full table):
+  `POST /bundles/ingest`, `POST /bundles/plan`, and `POST /environments`
+  are **fail-closed**, unconditionally, by the deploy token; `POST
+  /workflows/:id/promote` is **conditionally** gated by the SAME token —
+  only once it's actually configured, staying open otherwise so upgrading
+  onto this fix pass never silently breaks a tokenless deployment's
+  promote button. Every OTHER write route (triggering a run,
+  approving a workflow version, corrections, evals, block/mark-needs-review
+  flags, ...) remains exactly as open as this bullet describes, regardless
+  of whether `AART_DEPLOY_TOKEN` is set. Don't mistake "`AART_DEPLOY_TOKEN`
+  is configured" for "this server is authenticated."
 - **The dashboard is API-complete except two narrower gaps** (`@aart/dashboard`,
   AMENDMENTS.md A47 — owned by a different session than this deploy kit,
   which packages what exists rather than changing it). Every read AND

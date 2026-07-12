@@ -505,13 +505,26 @@ function bundleToBundleLike(bundle: Bundle): BundleLike {
  * `real-server-port.ts`'s own separate `resolveEnvironmentId` (a genuinely
  * CLI-only concern — `aart server --environment`'s own resolution — left
  * untouched, not part of this extraction).
+ *
+ * D1 fix pass (AMENDMENTS.md A57) — this SAME function backs `aart push`/
+ * `aart_deploy`'s own environment resolution (`resolveAndProduceBundle`
+ * below, called with `params.environment` set from the REMOTE's OWN
+ * configured environment, `deployToRemoteHandler`'s doc comment). That
+ * made this exact error a confusing, real first-push gotcha (tester
+ * finding): it checks the CALLER's OWN store — by design, since the
+ * caller's local `Deployment` for that environment is what carries the
+ * `triggerConfig` the bundle ships with — but a first-time user who only
+ * ever registered the environment on the REMOTE server (over SSH, or via
+ * `POST /environments` against the remote) reads a bare "not found" here
+ * with no hint that a SECOND, separate, LOCAL registration is what's
+ * actually missing. The message now says both things explicitly.
  */
 async function resolveDeploymentForEnvironmentName(store: AartStore, workflowId: string, workflowVersion: string, environmentName: string | undefined): Promise<Deployment | undefined> {
   if (!environmentName) return undefined;
   const environment = await store.environments.getByName(environmentName);
   if (!environment) {
     throw new Error(
-      `Environment "${environmentName}" not found. Register it first — "aart environment register ${environmentName} --trust-mode <dev|governed|strict|production>" (CLI), or POST /environments (HTTP) — then retry.`,
+      `Environment "${environmentName}" not found on THIS store (the one this command/tool is running against). Register it HERE first — "aart environment register ${environmentName} --trust-mode <dev|governed|strict|production>" (CLI), or POST /environments (HTTP) against this same store — then retry. This is a LOCAL requirement even for "aart push"/"aart_deploy": resolving "${environmentName}" here finds YOUR OWN Deployment for it, whose triggerConfig is what the bundle ships with — so it must exist on YOUR store, separately from (and in addition to) registering "${environmentName}" on the REMOTE server you may be pushing to, which is a different store entirely (see DEPLOY.md's "Environment registration" section).`,
     );
   }
   const deployments = await store.deployments.list({ environmentId: environment.id, workflowId });

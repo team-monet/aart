@@ -280,11 +280,42 @@ resolved at push time the same way webhook secrets already are:
 bundles the named workflow version and ships it straight to the remote's
 `POST /bundles/ingest` — the remote server must have `AART_DEPLOY_TOKEN`
 configured (see `DEPLOY.md`'s "Deploy token" section) or every push is
-refused `401`, and the target environment (`production` above) must already
-be registered there (`aart environment register production --trust-mode
-<mode>` — see below) or the push is refused with that exact remedy. The
-same `deployToRemoteHandler` backs the MCP `aart_deploy` tool too — your
-coding agent can push directly, same wire behavior either way.
+refused `401`. The same `deployToRemoteHandler` backs the MCP `aart_deploy`
+tool too — your coding agent can push directly, same wire behavior either
+way.
+
+**The target environment (`production` above) needs registering in TWO
+separate places, not one — the #1 real first-push confusion this section
+exists to head off (a fix-pass finding, D1, AMENDMENTS.md A57):**
+
+1. **On YOUR OWN (local, authoring-machine) store, before you ever run
+   `aart push`.** `aart push`/`aart_deploy` resolve the remote's OWN
+   configured environment (the `--environment production` you gave `aart
+   remote add`, NOT a flag `aart push` itself takes) against a `Deployment`
+   on **your own store** — the one `triggerConfig` that bundle ships with
+   is YOURS, not the remote's (`aart deploy greeting-workflow --target
+   production` first, or `aart environment register production
+   --trust-mode <mode>` if you just need the environment to exist with no
+   deployment yet). Skip this and `aart push` refuses locally, before any
+   network call, with `Environment "production" not found on THIS store` —
+   naming this exact local remedy AND explicitly saying it's separate from
+   the server-side step below, precisely because those two are easy to
+   conflate.
+2. **On the REMOTE server, before it will accept the push.** The bundle's
+   own `manifest.targetEnvironment` field (what `--environment` actually
+   embeds) has to resolve against a REAL, already-registered `Environment`
+   ON THE REMOTE — `ssh`'d in and run `aart environment register
+   production --trust-mode <mode>` directly against the remote's store, or
+   (network-only, no shell) the token-gated `POST /environments` (same
+   deploy token as the push itself — see `DEPLOY.md`'s "Environment
+   registration" section). Skip this and the PUSH itself (not `aart remote
+   add`) fails with a remedy naming this exact remote-side command.
+
+These are genuinely two different stores, two different registrations,
+enforced at two different points (`aart push` locally, before any network
+call; the remote's own ingest, over the network) — registering one does
+NOT register the other, and a fresh environment name typically needs both
+before a first push succeeds end to end.
 
 **The manual way — still fully supported**, for when you don't have (or
 don't want) network access from the authoring machine to the target: ship
