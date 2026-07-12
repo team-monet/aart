@@ -117,7 +117,7 @@ export type PreconditionResult = { ok: true } | { ok: false; error: string };
  * spending several minutes running a surprise build the caller never asked
  * for.
  *
- * Checks `<dashboardDistDir>/index.html` specifically, not merely
+ * Checks `<dashboardDistDir>/frontend/index.html` specifically, not merely
  * `dashboardDistDir` itself — verified directly (packages/dashboard/
  * frontend/vite.config.ts's own `build.outDir: '../dist/frontend'`) that
  * the real SPA entry point lands at `packages/dashboard/dist/frontend/
