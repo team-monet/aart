@@ -83,6 +83,13 @@ export async function decideApprovalTask(store: AartStore, engine: EngineBoundar
   if (!task) return { kind: "not_found" };
   if (!input.reviewer) return { kind: "missing_reviewer" };
 
+  // D2a fix pass (AMENDMENTS.md A60, FIX 6) — authenticatedAs is assigned
+  // UNCONDITIONALLY from input.authenticatedAs, INTENTIONALLY, not merged
+  // with/preserved from task.authenticatedAs: each decision is a fresh
+  // attribution, so a tokenless re-decision of a previously token-decided
+  // task correctly CLEARS this to undefined rather than keeping a stale
+  // attribution that no longer describes who made THIS decision. Do not
+  // "fix" this into `authenticatedAs: input.authenticatedAs ?? task.authenticatedAs`.
   const updated: ApprovalTask = { ...task, status: input.status, reviewer: input.reviewer, decision: input.decision, decidedAt: clock.nowIso(), authenticatedAs: input.authenticatedAs };
   await store.approvals.put(updated);
 
