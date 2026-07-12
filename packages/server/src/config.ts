@@ -78,6 +78,22 @@ export interface ServerConfig extends SharedRuntimeConfig, TickerConfig, PoisonG
   resolveGithubApprovalTarget?: (payload: unknown) => { runId: string; stepId: string } | undefined;
   /** AMENDMENTS.md A45 — restricts which `Deployment`-sourced trigger bindings (webhook/github/slack/poll ingress, both the HTTP layer and the ticker's poll loop) this server instance activates, by `Environment` id. Threaded straight into `loadTriggerBindingsFromDeployments`'s own `filter.environmentId` (triggers/registry.ts) everywhere this config loads bindings. Unset (the default) activates every deployment's trigger across every environment — a documented dev convenience, not a production isolation guarantee. `@aart/cli`'s `--environment <name>` (real-server-port.ts) resolves the human-readable name to this id before constructing this config. */
   environmentId?: string;
+  /**
+   * D1 "remotes + push" (AMENDMENTS.md A56) — the shared bearer token
+   * gating the deploy-surface mutation routes (`POST /bundles/ingest`,
+   * `POST /bundles/plan`, `POST /environments` — http/server.ts,
+   * deploy-token.ts's `checkDeployToken`). Resolved ONCE at startup by the
+   * caller (`@aart/cli`'s `resolveDeployToken`, secrets.ts) and threaded in
+   * here — this config never re-resolves it itself, matching how
+   * `secretResolver` above is already an injected value, not a
+   * self-resolving one. Unset (the default) leaves those three routes
+   * refusing every request unconditionally (fail-closed) — there is no
+   * "auth disabled, allow everything" state for this specific surface, only
+   * "not configured yet." The three `/webhooks/*` routes are entirely
+   * unaffected either way — they keep their own, separate per-binding HMAC
+   * verification (`secretResolver` above), never this token.
+   */
+  deployToken?: string;
 }
 
 export const DEFAULT_TICK_INTERVAL_MS = 5000;
