@@ -59,14 +59,18 @@ describe("createCliContext", () => {
     expect(result.status).toBe("completed");
   });
 
-  it("real ServerPort.produceBundle rejects an --environment name that doesn't exist (the environment-name -> Deployment bridge, A42)", async () => {
+  it("real ServerPort.produceBundle rejects an --environment name that doesn't exist (the environment-name -> Deployment bridge, A42; AMENDMENTS.md A56 — now the shared resolveAndProduceBundle bridge, @aart/mcp)", async () => {
     const root = await freshRoot();
     const cli = createCliContext({ root, trustMode: "governed" });
     const workflow = compileWorkflowInput(failingAssertWorkflow("wf-bundle-env-check"));
     await cli.aart.store.workflows.put(workflow);
     await expect(
       cli.serverPort.produceBundle({ workflowId: workflow.id, workflowVersion: workflow.version, environment: "does-not-exist" }),
-    ).rejects.toThrow(/environment "does-not-exist" not found/);
+    ).rejects.toThrow(/environment "does-not-exist" not found/i);
+    // AMENDMENTS.md A56: the remedy now points at ADR-2's real environment-creation surface.
+    await expect(
+      cli.serverPort.produceBundle({ workflowId: workflow.id, workflowVersion: workflow.version, environment: "does-not-exist" }),
+    ).rejects.toThrow(/aart environment register|POST \/environments/i);
   });
 
   it("real ServerPort.startServer rejects an --environment name that doesn't exist (AMENDMENTS.md A45 — same name -> Deployment bridge as produceBundle above)", async () => {

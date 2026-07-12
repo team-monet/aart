@@ -318,3 +318,71 @@ describe("runWorkflowHandler (aart run / aart_run_workflow) — real capability-
     expect(result.status).toBe("completed");
   });
 });
+
+// D1 "remotes + push" (AMENDMENTS.md A56) — createRealAartContext's
+// bundler/remotes ports genuinely wired end to end, not just type-checked
+// (same S9-integration discipline this whole file exists for).
+describe("createRealAartContext — ctx.bundler / ctx.remotes (AMENDMENTS.md A56)", () => {
+  it("ctx.bundler.produceBundle calls the REAL @aart/server produceBundle (full transitive closure), not a stub single-workflow bundle", async () => {
+    ctx = await setup();
+    await ctx.store.workflows.put({
+      id: "real-ctx-bundle-child",
+      name: "child",
+      version: "1",
+      inputs: [],
+      outputs: [],
+      execution: { type: "workflow", steps: [] },
+      approval: "approved",
+      gates: { validate: "passed", readiness: "passed", evals: "passed", riskReview: "passed", humanReview: "passed" },
+    });
+    await ctx.store.workflows.put({
+      id: "real-ctx-bundle-root",
+      name: "root",
+      version: "1",
+      inputs: [],
+      outputs: [],
+      execution: { type: "workflow", steps: [{ id: "nested", uses: "flow.subworkflow", with: { workflowId: "real-ctx-bundle-child", version: "1" } }] },
+      approval: "approved",
+      gates: { validate: "passed", readiness: "passed", evals: "passed", riskReview: "passed", humanReview: "passed" },
+    });
+
+    const bundle = await ctx.bundler.produceBundle({ workflowId: "real-ctx-bundle-root", workflowVersion: "1" });
+    // The REAL produceBundle walks the closure -- both root AND child land
+    // under definitions/; the stub bundler only ever writes the ONE
+    // requested workflow (stubs/deploy.ts's own documented simplification).
+    expect(bundle.files["definitions/real-ctx-bundle-root@1.json"]).toBeDefined();
+    expect(bundle.files["definitions/real-ctx-bundle-child@1.json"]).toBeDefined();
+    expect((bundle.manifest as { bundleHash: string }).bundleHash).toMatch(/^[0-9a-f]{64}$/); // a real sha256 content hash, not the stub's absence of one
+  });
+
+  it("ctx.bundler.produceBundle threads --environment into manifest.targetEnvironment and throws for an unregistered one", async () => {
+    ctx = await setup();
+    await ctx.store.workflows.put({
+      id: "real-ctx-bundle-env",
+      name: "n",
+      version: "1",
+      inputs: [],
+      outputs: [],
+      execution: { type: "workflow", steps: [] },
+      approval: "approved",
+      gates: { validate: "passed", readiness: "passed", evals: "passed", riskReview: "passed", humanReview: "passed" },
+    });
+    await ctx.store.environments.put({ id: "env_real_ctx", name: "staging", config: {} });
+
+    const bundle = await ctx.bundler.produceBundle({ workflowId: "real-ctx-bundle-env", workflowVersion: "1", environment: "staging" });
+    expect((bundle.manifest as { targetEnvironment?: string }).targetEnvironment).toBe("staging");
+
+    await expect(ctx.bundler.produceBundle({ workflowId: "real-ctx-bundle-env", workflowVersion: "1", environment: "no-such-env" })).rejects.toThrow(/not found/i);
+  });
+
+  it("ctx.remotes reads real remotes.json/secrets.json from the same root this context is rooted at", async () => {
+    ctx = await setup();
+    const { promises: fs } = await import("node:fs");
+    const { join } = await import("node:path");
+    await fs.writeFile(join(root!, "remotes.json"), JSON.stringify({ production: { url: "https://prod.example.com", environment: "production", tokenRef: "secrets.DEPLOY_TOKEN" } }), "utf8");
+    await fs.writeFile(join(root!, "secrets.json"), JSON.stringify({ DEPLOY_TOKEN: "real-resolved-token" }), "utf8");
+
+    await expect(ctx.remotes.get("production")).resolves.toEqual({ url: "https://prod.example.com", environment: "production", tokenRef: "secrets.DEPLOY_TOKEN" });
+    await expect(ctx.remotes.resolveToken("production")).resolves.toBe("real-resolved-token");
+  });
+});

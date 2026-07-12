@@ -274,4 +274,39 @@ export interface ServerPort {
   listFlaggedRuns(): Promise<RunRecord[]>;
 }
 
+// ---------------------------------------------------------------------------
+// BundlerPort / RemotesPort — D1 "remotes + push" (AMENDMENTS.md A56). NOT
+// CLI-only, unlike ServerPort above: `aart push` (CLI) AND the MCP
+// `aart_deploy` tool both need to (1) produce a bundle and (2) resolve a
+// named remote's URL/environment/token, so both ports live on AartContext
+// itself (part of the ordinary `ctx.*` surface every handler receives),
+// registered in BOTH createAartContext (stub) and
+// createRealAartContextWithEngine (real) — context.ts — exactly like every
+// other port on this interface. This is WHY these two ports exist at all
+// rather than just reaching for ServerPort: MCP stdio never receives a
+// ServerPort (real-context.ts's own header comment: "ServerPort is NOT
+// built in this file and never has been... CLI-only, architecture §13.3's
+// stated exception"), so `aart_deploy` has no other way to reach real
+// bundle-production/remote-resolution logic.
+// ---------------------------------------------------------------------------
+
+export interface BundlerPort {
+  /** Mirrors ServerPort.produceBundle's own signature exactly (same `environment?: string` NAME convention) — the real implementation (real-context.ts) shares its actual bridge logic with `@aart/cli`'s `real-server-port.ts` `ServerPort.produceBundle`, rather than the two independently re-deriving "resolve an environment name to a Deployment, then flatten the produced Bundle to files." */
+  produceBundle(params: { workflowId: string; workflowVersion: string; environment?: string }): Promise<BundleLike>;
+}
+
+/** `remotes.json`'s per-entry shape (`@aart/cli`'s `remote-config.ts`, D-4 of the design memo) — reproduced here (not imported — `@aart/mcp` cannot depend on `@aart/cli`, the dependency runs the other way) so this port can name it, same pattern as `PromotionRecordShape` above. */
+export interface RemoteEntry {
+  url: string;
+  environment: string;
+  tokenRef?: string;
+}
+
+export interface RemotesPort {
+  list(): Promise<Record<string, RemoteEntry>>;
+  get(name: string): Promise<RemoteEntry | undefined>;
+  /** Resolves a remote's `tokenRef` (if any) to its actual secret VALUE — `undefined` when the remote has no `tokenRef`, or the ref doesn't resolve to anything configured (never throws, matching `@aart/cli`'s `createRealSecretResolver`'s own established never-throw discipline). */
+  resolveToken(name: string): Promise<string | undefined>;
+}
+
 export type { ApprovalTask, Deployment };

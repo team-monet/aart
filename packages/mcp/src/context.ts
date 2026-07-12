@@ -12,12 +12,13 @@ import type { Engine } from "@aart/engine";
 import { createFsStore, type AartStore } from "@aart/store";
 import type { TrustMode } from "@aart/types";
 import { BUILTIN_BLOCK_CATALOG } from "./catalog.js";
-import { buildRealCatalog, createRealEnginePort, createRealEvidencePort, createRealGovernancePort, createRealRegistryPort, createRealEngine, type RealCatalogLlmOptions } from "./real-context.js";
+import { buildRealCatalog, createRealBundlerPort, createRealEnginePort, createRealEvidencePort, createRealGovernancePort, createRealRegistryPort, createRealRemotesPort, createRealEngine, type RealCatalogLlmOptions } from "./real-context.js";
+import { createStubBundlerPort, createStubRemotesPort } from "./stubs/deploy.js";
 import { createStubEngine } from "./stubs/engine.js";
 import { createStubEvidence } from "./stubs/evidence.js";
 import { createStubGovernance } from "./stubs/governance.js";
 import { createStubRegistry } from "./stubs/registry.js";
-import type { EnginePort, EvidencePort, GovernancePort, RegistryPort } from "./types.js";
+import type { BundlerPort, EnginePort, EvidencePort, GovernancePort, RegistryPort, RemotesPort } from "./types.js";
 
 export interface AartContext {
   store: AartStore;
@@ -25,6 +26,9 @@ export interface AartContext {
   governance: GovernancePort;
   evidence: EvidencePort;
   registry: RegistryPort;
+  /** D1 "remotes + push" (AMENDMENTS.md A56) — see types.ts's own BundlerPort/RemotesPort doc comment for why these two live directly on AartContext rather than being CLI-only like ServerPort. */
+  bundler: BundlerPort;
+  remotes: RemotesPort;
   trustMode: TrustMode;
   now: () => Date;
 }
@@ -37,6 +41,8 @@ export interface CreateAartContextOptions {
   governance?: GovernancePort;
   evidence?: EvidencePort;
   registry?: RegistryPort;
+  bundler?: BundlerPort;
+  remotes?: RemotesPort;
   trustMode?: TrustMode;
   now?: () => Date;
   /** `createRealAartContext` only (ignored by `createAartContext`, which never constructs a real `@aart/llm` pack) — passthrough to `buildRealCatalog`'s own `RealCatalogLlmOptions` (real-context.ts), for injecting a fake provider client/fetcher in tests that need the REAL llm.extract/llm.classify block dispatch without a real API key. */
@@ -75,13 +81,16 @@ export function resolveTrustModeFromEnv(env: NodeJS.ProcessEnv = process.env): T
  */
 export function createAartContext(options: CreateAartContextOptions = {}): AartContext {
   const now = options.now ?? (() => new Date());
-  const store = options.store ?? createFsStore(options.root ?? path.join(process.cwd(), ".aart"));
+  const resolvedRoot = options.root ?? path.join(process.cwd(), ".aart");
+  const store = options.store ?? createFsStore(resolvedRoot);
   const governance = options.governance ?? createStubGovernance();
   const engine = options.engine ?? createStubEngine(store, now);
   const evidence = options.evidence ?? createStubEvidence(store, engine);
   const registry = options.registry ?? createStubRegistry(BUILTIN_BLOCK_CATALOG);
+  const bundler = options.bundler ?? createStubBundlerPort(store);
+  const remotes = options.remotes ?? createStubRemotesPort(resolvedRoot);
   const trustMode = options.trustMode ?? resolveTrustModeFromEnv();
-  return { store, engine, governance, evidence, registry, trustMode, now };
+  return { store, engine, governance, evidence, registry, bundler, remotes, trustMode, now };
 }
 
 export interface RealAartContextResult {
@@ -122,7 +131,8 @@ export interface RealAartContextResult {
  */
 export function createRealAartContextWithEngine(options: CreateAartContextOptions = {}): RealAartContextResult {
   const now = options.now ?? (() => new Date());
-  const store = options.store ?? createFsStore(options.root ?? path.join(process.cwd(), ".aart"));
+  const resolvedRoot = options.root ?? path.join(process.cwd(), ".aart");
+  const store = options.store ?? createFsStore(resolvedRoot);
   const trustMode = options.trustMode ?? resolveTrustModeFromEnv();
 
   // Built once, shared by whichever of engine/governance/evidence/registry
@@ -144,7 +154,9 @@ export function createRealAartContextWithEngine(options: CreateAartContextOption
   const engine = options.engine ?? createRealEnginePort(realEngine!);
   const evidence = options.evidence ?? createRealEvidencePort(store, realEngine!);
   const registry = options.registry ?? createRealRegistryPort(catalog!.entries);
-  return { context: { store, engine, governance, evidence, registry, trustMode, now }, engine: realEngine };
+  const bundler = options.bundler ?? createRealBundlerPort(store);
+  const remotes = options.remotes ?? createRealRemotesPort(resolvedRoot);
+  return { context: { store, engine, governance, evidence, registry, bundler, remotes, trustMode, now }, engine: realEngine };
 }
 
 /** Convenience wrapper over `createRealAartContextWithEngine` for every caller that only needs the `AartContext` (unchanged signature/behavior from before that function existed). */
