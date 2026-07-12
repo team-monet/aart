@@ -1,30 +1,30 @@
 // Result-affordance envelope tests — architecture §10.2/§32.2c. DoD: "every
 // tool's result includes a correct next field for both success AND failure
-// paths" — tested here as a completeness sweep over all 26 tools (the
+// paths" — tested here as a completeness sweep over all 27 tools (the
 // original 21 + D1's aart_deploy, AMENDMENTS.md A56 + D2b's four
-// aart_remote_* read tools, AMENDMENTS.md, this session) x 2 outcomes (52
-// checks), plus the exact worked example architecture §10.2 itself cites
-// verbatim.
+// aart_remote_* read tools, AMENDMENTS.md A62 + Wave 2C's aart_remote_approve,
+// AMENDMENTS.md A64) x 2 outcomes (54 checks), plus the exact worked example
+// architecture §10.2 itself cites verbatim.
 import { describe, expect, it } from "vitest";
 import { computeNext, TOOL_NAMES, TOOL_TIERS, wrapResult } from "./response.js";
 
-describe("TOOL_NAMES / TOOL_TIERS — architecture §10.1's 21-tool catalog + D1's aart_deploy (AMENDMENTS.md A56) + D2b's four aart_remote_* tools (AMENDMENTS.md, this session)", () => {
-  it("has exactly 26 tools", () => {
-    expect(TOOL_NAMES).toHaveLength(26);
+describe("TOOL_NAMES / TOOL_TIERS — architecture §10.1's 21-tool catalog + D1's aart_deploy (AMENDMENTS.md A56) + D2b's four aart_remote_* tools (AMENDMENTS.md A62) + Wave 2C's aart_remote_approve (AMENDMENTS.md A64)", () => {
+  it("has exactly 27 tools", () => {
+    expect(TOOL_NAMES).toHaveLength(27);
   });
 
-  it("has exactly 10 core and 16 extended tools (spec Fix C's 10/11 split, +1 extended for D1's aart_deploy, +4 extended for D2b's aart_remote_* tools)", () => {
+  it("has exactly 10 core and 17 extended tools (spec Fix C's 10/11 split, +1 extended for D1's aart_deploy, +4 extended for D2b's aart_remote_* tools, +1 extended for Wave 2C's aart_remote_approve)", () => {
     const core = TOOL_NAMES.filter((t) => TOOL_TIERS[t] === "core");
     const extended = TOOL_NAMES.filter((t) => TOOL_TIERS[t] === "extended");
     expect(core).toHaveLength(10);
-    expect(extended).toHaveLength(16);
+    expect(extended).toHaveLength(17);
   });
 
   it("marks aart_approve as core", () => {
     expect(TOOL_TIERS.aart_approve).toBe("core");
   });
 
-  it("contains every tool name from architecture §34's flat list plus D1's aart_deploy plus D2b's four aart_remote_* tools, no more no less", () => {
+  it("contains every tool name from architecture §34's flat list plus D1's aart_deploy plus D2b's four aart_remote_* tools plus Wave 2C's aart_remote_approve, no more no less", () => {
     const expected = [
       "aart_find_blocks",
       "aart_get_block",
@@ -52,6 +52,7 @@ describe("TOOL_NAMES / TOOL_TIERS — architecture §10.1's 21-tool catalog + D1
       "aart_remote_why",
       "aart_remote_runs",
       "aart_remote_run",
+      "aart_remote_approve",
     ].sort();
     expect([...TOOL_NAMES].sort()).toEqual(expected);
   });
