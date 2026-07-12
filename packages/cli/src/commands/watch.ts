@@ -462,8 +462,21 @@ export async function watchCommand(tokens: Tokenized, cli: CliContext, options: 
   print(`[watch] all ready → open ${dashboardUrl}`);
   openBrowser(dashboardUrl);
 
+  // Distinguishes WHY the blocking wait ended: a normal SIGTERM/SIGINT
+  // (crashReason stays undefined) vs. a child crashing after we were
+  // already up and running (earlyExit's listeners are still armed —
+  // registered once, above, before readiness — so a post-ready crash is
+  // caught here too, not just a pre-ready one). Without this distinction
+  // the final HandlerResult would report `ok: true, "Watch stopped."` even
+  // when the real cause was a mid-run crash, which is misleading — the
+  // OPPOSITE of what commands/process.ts's own serverCommand/workerCommand
+  // do (their `ok: true` genuinely only means "stopped cleanly").
+  let crashReason: string | undefined;
   if (options.blocking ?? true) {
-    await Promise.race([waitForShutdownSignal(), earlyExit]);
+    crashReason = await Promise.race([
+      waitForShutdownSignal().then((): string | undefined => undefined),
+      earlyExit.then((result): string | undefined => (result.ok ? undefined : result.error)),
+    ]);
   }
 
   intentionalShutdown = true;
@@ -471,5 +484,8 @@ export async function watchCommand(tokens: Tokenized, cli: CliContext, options: 
   await shutdownChildren(labeled.map((c) => c.child), { graceMs: WATCH_SHUTDOWN_GRACE_MS });
   print("[watch] stopped.");
 
+  if (crashReason) {
+    return { ok: false, error: `aart watch: ${crashReason}` };
+  }
   return { ok: true, message: "Watch stopped.", ports: { server: config.serverPort, worker: config.workerHealthPort, dashboard: config.dashboardPort } };
 }
