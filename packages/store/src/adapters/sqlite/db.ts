@@ -150,3 +150,23 @@ export function toBool(value: boolean | undefined): number {
 export function fromBool(value: number | undefined): boolean {
   return value === 1;
 }
+
+/**
+ * Tri-state variant of `toBool`/`fromBool` above — for a column where
+ * `undefined` is a THIRD, distinct state from `true`/`false`, not just
+ * "falsy" (`fromBool`/`toBool` collapse `undefined` into `false`, which is
+ * wrong for a column like `deployments.promoted`, D1 "remotes + push"
+ * — AMENDMENTS.md A56 — where SQL `NULL` must read back as `undefined`,
+ * never as `false`; see that migration's own doc comment for why: a
+ * pre-migration row's `NULL` means "unset / always was active," not "made
+ * inactive by this upgrade"). `toBoolOrNull` stores `undefined` as SQL
+ * `NULL` rather than `0`, so this round-trips losslessly through
+ * `fromBoolOrNull` on the way back out.
+ */
+export function toBoolOrNull(value: boolean | undefined): number | null {
+  return value === undefined ? null : value ? 1 : 0;
+}
+
+export function fromBoolOrNull(value: number | null | undefined): boolean | undefined {
+  return value === null || value === undefined ? undefined : value === 1;
+}

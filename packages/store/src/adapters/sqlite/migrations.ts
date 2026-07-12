@@ -72,4 +72,34 @@ export function createSqliteInitMigration(db: DatabaseSync): Migration {
   };
 }
 
-export const ALL_SQLITE_MIGRATIONS = (db: DatabaseSync): Migration[] => [createSqliteInitMigration(db)];
+/**
+ * D1 "remotes + push" (AMENDMENTS.md A56) — this adapter's first migration
+ * PAST `0001_init`, i.e. the precedent proving `MigrationRunner`'s ordinal
+ * sequencing genuinely works against this adapter, not just a single
+ * hardcoded step. Adds `deployments.promoted` (nullable INTEGER, no
+ * DEFAULT — deliberately NOT added to `SQLITE_SCHEMA_STATEMENTS`'
+ * `deployments` DDL in schema.ts, which stays exactly as `0001_init` always
+ * created it; see that file's own note on the `deployments` table) so a
+ * pre-existing row's column reads back SQL `NULL`, which `fromBoolOrNull`
+ * (db.ts) maps to `undefined` — "unset, always was active" — never
+ * `false`/"newly made inactive." A fresh database (0001 then 0002 both run
+ * in sequence, watermark 0 -> 2) ends up with the identical final schema an
+ * upgraded pre-existing database does; there is exactly one `deployments`
+ * table shape reachable either way.
+ */
+export function createSqliteAddDeploymentPromotedMigration(db: DatabaseSync): Migration {
+  return {
+    id: "0002_deployment_promoted",
+    async up(): Promise<void> {
+      db.exec(`ALTER TABLE deployments ADD COLUMN promoted INTEGER`);
+    },
+    async down(): Promise<void> {
+      // Modern SQLite (3.35+, well below node:sqlite's bundled floor —
+      // AMENDMENTS.md A17) supports DROP COLUMN directly; no need for the
+      // legacy "rebuild the table" workaround older SQLite versions required.
+      db.exec(`ALTER TABLE deployments DROP COLUMN promoted`);
+    },
+  };
+}
+
+export const ALL_SQLITE_MIGRATIONS = (db: DatabaseSync): Migration[] => [createSqliteInitMigration(db), createSqliteAddDeploymentPromotedMigration(db)];

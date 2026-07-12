@@ -158,5 +158,5 @@ export async function createSqliteStore(path: string, options: CreateSqliteStore
 
 /** Applies this adapter's migration DDL directly against a connection, bypassing `MigrationRunner`/the watermark table entirely — exposed for the rare case a caller wants schema-only setup with no migration bookkeeping (e.g. a disposable test fixture). Prefer `openSqliteStore`'s default (`runMigrations: true`, watermark-tracked) for anything that behaves like a real deployment. */
 export { runMigrationDdl } from "./db.js";
-export { createSqliteInitMigration, ALL_SQLITE_MIGRATIONS } from "./migrations.js";
+export { createSqliteInitMigration, createSqliteAddDeploymentPromotedMigration, ALL_SQLITE_MIGRATIONS } from "./migrations.js";
 export { SqliteMigrationWatermarkStore } from "./watermark.js";

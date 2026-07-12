@@ -36,7 +36,7 @@ import type {
   SchemaRegistryStore,
   StandingApprovalStore,
 } from "../../../types.js";
-import { dbAll, dbGet, dbRun, fromBool, fromJson, toBool, toJson, type SqlExec } from "../db.js";
+import { dbAll, dbGet, dbRun, fromBool, fromBoolOrNull, fromJson, toBool, toBoolOrNull, toJson, type SqlExec } from "../db.js";
 
 // ---------------------------------------------------------------------------
 // approval_tasks
@@ -360,6 +360,12 @@ interface DeploymentRow {
   trigger_config_json: string;
   bundle_hash: string | null;
   created_at: string;
+  // D1 "remotes + push" (AMENDMENTS.md A56) — nullable, no DEFAULT (added by
+  // migration 0002_deployment_promoted, not the baseline DDL — see
+  // schema.ts). NULL (every row written before this migration ran, and any
+  // row this adapter itself never sets it on) must map to `undefined`, never
+  // `false` — fromBoolOrNull below, not fromBool, is load-bearing here.
+  promoted: number | null;
 }
 function rowToDeployment(row: DeploymentRow): Deployment {
   return {
@@ -370,6 +376,7 @@ function rowToDeployment(row: DeploymentRow): Deployment {
     triggerConfig: JSON.parse(row.trigger_config_json) as Record<string, unknown>,
     bundleHash: row.bundle_hash ?? undefined,
     createdAt: row.created_at,
+    promoted: fromBoolOrNull(row.promoted),
   };
 }
 
@@ -385,13 +392,13 @@ export class SqliteDeploymentStore implements DeploymentStore {
     await this.exec((db) =>
       dbRun(
         db,
-        `INSERT INTO deployments (id, workflow_id, workflow_version, environment_id, trigger_config_json, bundle_hash, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO deployments (id, workflow_id, workflow_version, environment_id, trigger_config_json, bundle_hash, created_at, promoted)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            workflow_id = excluded.workflow_id, workflow_version = excluded.workflow_version,
            environment_id = excluded.environment_id, trigger_config_json = excluded.trigger_config_json,
-           bundle_hash = excluded.bundle_hash, created_at = excluded.created_at`,
-        [deployment.id, deployment.workflowId, deployment.workflowVersion, deployment.environmentId, JSON.stringify(deployment.triggerConfig), deployment.bundleHash ?? null, deployment.createdAt],
+           bundle_hash = excluded.bundle_hash, created_at = excluded.created_at, promoted = excluded.promoted`,
+        [deployment.id, deployment.workflowId, deployment.workflowVersion, deployment.environmentId, JSON.stringify(deployment.triggerConfig), deployment.bundleHash ?? null, deployment.createdAt, toBoolOrNull(deployment.promoted)],
       ),
     );
   }
