@@ -458,6 +458,42 @@ describe("createHttpApiClient against a REAL @aart/server instance (AMENDMENTS.m
       }
     });
   });
+
+  // D2b "remote reads" (AMENDMENTS.md, this session) — GET /runs and GET
+  // /runs/:id (server.ts) are the first GET routes this codebase
+  // conditionally deploy-token-gates. Same shape as the write-method suite
+  // immediately above (positive round-trip with the token, negative 401
+  // without it), scoped to the two newly-gated READS instead of writes —
+  // proves getJson's new extraHeaders param (api-client.ts) is genuinely
+  // wired to listRuns/getRun, not just accepted and ignored.
+  describe("the two newly-gated READ methods (D2b, AMENDMENTS.md this session)", () => {
+    it("listRuns / getRun succeed against a TOKEN-GATED server when the client carries the token", async () => {
+      const store = await startRealServer("run-read-gate-token-1");
+      await store.runs.put(makeRun({ runId: "run-read-gated-1", workflowId: "wf-read-gated" }));
+      const client = createHttpApiClient(baseUrl, "run-read-gate-token-1");
+
+      const runs = await client.listRuns({ workflowId: "wf-read-gated" });
+      expect(runs.map((r) => r.runId)).toEqual(["run-read-gated-1"]);
+
+      const run = await client.getRun("run-read-gated-1");
+      expect(run?.runId).toBe("run-read-gated-1");
+    });
+
+    it("getRun's 404-means-undefined convention still holds against a token-gated server (a 404 isn't mistaken for the 401 case)", async () => {
+      await startRealServer("run-read-gate-token-2");
+      const client = createHttpApiClient(baseUrl, "run-read-gate-token-2");
+      await expect(client.getRun("no-such-run")).resolves.toBeUndefined();
+    });
+
+    it("WITHOUT a deployToken, listRuns / getRun both fail 401 against a token-gated real server — proves the gap D2b closes for reads, the same way D2a's own negative suite above proves it for writes", async () => {
+      const store = await startRealServer("run-read-gate-token-3");
+      await store.runs.put(makeRun({ runId: "run-read-gated-3" }));
+      const client = createHttpApiClient(baseUrl); // no deployToken given to the dashboard client
+
+      await expect(client.listRuns()).rejects.toThrow(/401/);
+      await expect(client.getRun("run-read-gated-3")).rejects.toThrow(/401/);
+    });
+  });
 });
 
 describe("createHttpApiClient (real fetch, against S2's documented route shapes)", () => {

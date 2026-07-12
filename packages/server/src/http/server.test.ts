@@ -1024,6 +1024,97 @@ describe("deploy token rotation — deployTokenNext without a primary (D2a fix p
   });
 });
 
+// D2b "remote reads" (AMENDMENTS.md, this session, John-ratified
+// 2026-07-12's "gate the run-read routes" fork) — GET /runs and GET
+// /runs/:id are the ONLY two GET routes on this server carrying an `auth`
+// option; every other GET route stays open (proven not to regress by the
+// pre-existing "GET routes stay completely open" test above, which asserts
+// `GET /environments` specifically, and by the pre-existing "GET /runs and
+// /runs/:id" test in the "read API surface" describe block above, which
+// never configures a `deployToken` at all and so exercises the
+// unconfigured-stays-open branch already).
+describe("GET /runs, GET /runs/:id — conditional deploy-token gating (D2b, AMENDMENTS.md, this session)", () => {
+  async function seedOneRun(store: TestFixture["store"], clock: TestFixture["clock"]): Promise<void> {
+    await store.runs.put({
+      runId: "run_read_gate_1",
+      workflowId: "wf_read_gate",
+      workflowVersion: "1",
+      status: "completed",
+      approved: true,
+      approvalMode: "dev",
+      trigger: { type: "manual", id: "t1", source: "cli", payload: null, receivedAt: clock.nowIso() },
+      inputs: {},
+      trace: [],
+      waits: [],
+      artifacts: [],
+      snapshot: { definitions: {}, resolvedVersions: {}, packHashes: {}, capturedAt: clock.nowIso() },
+      startedAt: clock.nowIso(),
+      updatedAt: clock.nowIso(),
+      schemaVersion: 1,
+    });
+  }
+
+  it("deployToken configured + no Authorization header -> 401 on both GET /runs and GET /runs/:id", async () => {
+    fx = await createTestFixture();
+    await seedOneRun(fx.store, fx.clock);
+    handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false, deployToken: "run-read-gate-token" });
+
+    const listRes = await fetch(`http://localhost:${handle.port}/runs`);
+    expect(listRes.status).toBe(401);
+    const listBody = (await json(listRes)) as { error: string };
+    expect(listBody.error).toMatch(/Provide a valid "Authorization: Bearer <token>" header/);
+    expect(listBody.error).toMatch(/read run data/);
+
+    const getRes = await fetch(`http://localhost:${handle.port}/runs/run_read_gate_1`);
+    expect(getRes.status).toBe(401);
+  });
+
+  it("deployToken configured + correct Bearer -> 200 on both routes, real data returned", async () => {
+    fx = await createTestFixture();
+    await seedOneRun(fx.store, fx.clock);
+    handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false, deployToken: "run-read-gate-token" });
+
+    const listRes = await fetch(`http://localhost:${handle.port}/runs`, { headers: { authorization: "Bearer run-read-gate-token" } });
+    expect(listRes.status).toBe(200);
+    const listBody = (await json(listRes)) as { runs: unknown[] };
+    expect(listBody.runs).toHaveLength(1);
+
+    const getRes = await fetch(`http://localhost:${handle.port}/runs/run_read_gate_1`, { headers: { authorization: "Bearer run-read-gate-token" } });
+    expect(getRes.status).toBe(200);
+  });
+
+  it("deployToken configured + wrong Bearer -> 401 on both routes", async () => {
+    fx = await createTestFixture();
+    await seedOneRun(fx.store, fx.clock);
+    handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false, deployToken: "run-read-gate-token" });
+
+    const listRes = await fetch(`http://localhost:${handle.port}/runs`, { headers: { authorization: "Bearer wrong-token" } });
+    expect(listRes.status).toBe(401);
+    const getRes = await fetch(`http://localhost:${handle.port}/runs/run_read_gate_1`, { headers: { authorization: "Bearer wrong-token" } });
+    expect(getRes.status).toBe(401);
+  });
+
+  it("deployToken UNCONFIGURED -> 200 on both routes with no Authorization header at all (unchanged pre-D2b behavior)", async () => {
+    fx = await createTestFixture();
+    await seedOneRun(fx.store, fx.clock);
+    handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false }); // no deployToken
+
+    const listRes = await fetch(`http://localhost:${handle.port}/runs`);
+    expect(listRes.status).toBe(200);
+    const getRes = await fetch(`http://localhost:${handle.port}/runs/run_read_gate_1`);
+    expect(getRes.status).toBe(200);
+  });
+
+  it("every OTHER GET route stays open even when deployToken is configured (the two run-read routes are the ONLY gated GETs)", async () => {
+    fx = await createTestFixture();
+    handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false, deployToken: "run-read-gate-token" });
+    for (const path of ["/health", "/waiting-runs", "/flagged-runs", "/workflows", "/environments", "/deployments", "/rejected-triggers", "/approvals", "/corrections", "/evals"]) {
+      const res = await fetch(`http://localhost:${handle.port}${path}`);
+      expect(res.status, `${path} should stay open with no Authorization header even though deployToken is configured`).not.toBe(401);
+    }
+  });
+});
+
 // D2a security hardening (AMENDMENTS.md A59) — the completeness test: the
 // single most important test in this sub-phase (per this session's own
 // brief). Converts "a future route silently ships open" (this repo's named
