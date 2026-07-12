@@ -6,6 +6,8 @@
 // test in the first describe block below asserts against `listTools()`'s
 // actual returned array — never merely that `callTool("aart_approve", ...)`
 // errors.
+import { promises as fs } from "node:fs";
+import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { TrustMode } from "@aart/types";
 import type { TestContext } from "../test-utils.js";
@@ -62,7 +64,29 @@ describe("aart_approve tool-list genuine absence (architecture §7.2's [DECISION
 });
 
 describe("core tools — always registered regardless of mode (architecture §32.2d: 9 of the 10 core tools are unconditional)", () => {
-  const CORE_MINUS_APPROVE = TOOL_NAMES.filter((n) => n !== "aart_approve" && !["aart_list_blocks", "aart_get_schema", "aart_propose_workflow", "aart_diff_workflow", "aart_create_eval_from_correction", "aart_run_eval", "aart_promote_workflow", "aart_deploy_workflow", "aart_trigger_workflow", "aart_list_waiting_runs", "aart_resume_run"].includes(n));
+  const CORE_MINUS_APPROVE = TOOL_NAMES.filter(
+    (n) =>
+      n !== "aart_approve" &&
+      ![
+        "aart_list_blocks",
+        "aart_get_schema",
+        "aart_propose_workflow",
+        "aart_diff_workflow",
+        "aart_create_eval_from_correction",
+        "aart_run_eval",
+        "aart_promote_workflow",
+        "aart_deploy_workflow",
+        "aart_trigger_workflow",
+        "aart_list_waiting_runs",
+        "aart_resume_run",
+        // D2b "remote reads" (AMENDMENTS.md, this session) — extended,
+        // REMOTE_GATED_TOOLS (tools/server.ts), not core.
+        "aart_remote_status",
+        "aart_remote_why",
+        "aart_remote_runs",
+        "aart_remote_run",
+      ].includes(n),
+  );
 
   it("all 9 non-gated core tools are present in every trust mode", async () => {
     for (const mode of ["dev", "governed", "strict", "production"] as const) {
@@ -150,6 +174,53 @@ describe("progressive disclosure — the 5 named extended tools gate on real dat
     const defs = await listRegisteredTools(tc.ctx);
     const core = defs.filter((d) => d.tier === "core");
     expect(core.length).toBeLessThanOrEqual(10);
+  });
+});
+
+// D2b "remote reads" (AMENDMENTS.md, this session) — a THIRD progressive-
+// disclosure precondition (REMOTE_GATED_TOOLS, tools/server.ts), the same
+// shape as the Environment/EvalSuite gates above but keyed on
+// ctx.remotes.list() instead of a store collection.
+describe("aart_remote_* tools — gated on >=1 configured remote existing (AMENDMENTS.md, D2b this session)", () => {
+  const REMOTE_TOOLS = ["aart_remote_status", "aart_remote_why", "aart_remote_runs", "aart_remote_run"] as const;
+
+  async function writeRemote(root: string): Promise<void> {
+    await fs.writeFile(join(root, "remotes.json"), JSON.stringify({ staging: { url: "http://localhost:1", environment: "staging" } }), "utf8");
+  }
+
+  it("all four are absent with zero configured remotes", async () => {
+    tc = await createTestContext();
+    await expect(tc.ctx.remotes.list()).resolves.toEqual({});
+    const names = (await listRegisteredTools(tc.ctx)).map((d) => d.name);
+    for (const tool of REMOTE_TOOLS) expect(names).not.toContain(tool);
+  });
+
+  it("all four appear once >=1 remote is configured", async () => {
+    tc = await createTestContext();
+    await writeRemote(tc.root);
+    const names = (await listRegisteredTools(tc.ctx)).map((d) => d.name);
+    for (const tool of REMOTE_TOOLS) expect(names).toContain(tool);
+  });
+
+  it("isToolRegistered agrees with listTools for every one of the four, both with and without a configured remote", async () => {
+    for (const withRemote of [false, true]) {
+      tc = await createTestContext();
+      if (withRemote) await writeRemote(tc.root);
+      for (const tool of REMOTE_TOOLS) {
+        const viaList = (await listRegisteredTools(tc.ctx)).some((d) => d.name === tool);
+        const viaCheck = await isToolRegistered(tc.ctx, tool);
+        expect(viaCheck, `${tool}, withRemote=${withRemote}`).toBe(withRemote);
+        expect(viaCheck).toBe(viaList);
+      }
+      await tc.cleanup();
+    }
+  });
+
+  it("aart_deploy stays present with ZERO remotes configured -- the deliberate exception (D1, AMENDMENTS.md A56), NOT added to REMOTE_GATED_TOOLS", async () => {
+    tc = await createTestContext();
+    await expect(tc.ctx.remotes.list()).resolves.toEqual({});
+    const names = (await listRegisteredTools(tc.ctx)).map((d) => d.name);
+    expect(names).toContain("aart_deploy");
   });
 });
 

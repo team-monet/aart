@@ -6,8 +6,10 @@ import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { compileWorkflowInput, requestApprovalHandler, runWorkflowHandler as mcpRunWorkflowHandler, type ServerPort } from "@aart/mcp";
+import { createFakeEngine, startServer, systemClock, type ServerHandle } from "@aart/server";
+import { createFsStore } from "@aart/store";
 import { afterEach, describe, expect, it } from "vitest";
-import { run } from "./cli.js";
+import { run, USAGE } from "./cli.js";
 import { createCliContext, type CliContext } from "./cli-context.js";
 import { approvalWaitWorkflowYaml, createTestCli, sampleWorkflowYaml, type TestCli } from "./test-utils.js";
 
@@ -539,6 +541,127 @@ describe("aart push", () => {
     const viaDirectHandler = await deployToRemoteHandler(tc.cli.aart, { remote: "staging", workflowId: "wf-cli-push-ref", workflowVersion: "0.1.0" });
     const viaCli = await run(["push", "staging", "wf-cli-push-ref"], { cliContext: tc.cli });
     expect((viaCli.result as { ok: boolean }).ok).toBe(viaDirectHandler.ok);
+  });
+});
+
+// D2b "remote reads" (AMENDMENTS.md, this session) — aart remote-status/
+// remote-why/remote-runs/remote-run. Unlike `startFakeRemoteServer` above
+// (a hand-rolled stub good enough for /bundles/ingest's single fixed
+// response), these four commands read SIX different real GET routes with
+// real response shapes their handlers actually parse — a REAL @aart/server
+// instance is used as the remote here too, same choice
+// remote-observability.test.ts (@aart/mcp) already made and the same
+// reasoning: a hand-mocked server covering all six routes would risk
+// silently drifting from what they actually return. Thin-wrapper smoke
+// coverage only (one happy path + one arg-parsing/error-path check per
+// command) — the handlers' own full behavioral coverage already lives in
+// that @aart/mcp test file; this suite only proves the CLI layer parses
+// args and dispatches to the right handler correctly.
+describe("aart remote-status / remote-why / remote-runs / remote-run (D2b, AMENDMENTS.md this session)", () => {
+  let remoteHandle: ServerHandle | undefined;
+  afterEach(async () => {
+    await remoteHandle?.close();
+    remoteHandle = undefined;
+  });
+
+  async function startRealRemote(): Promise<string> {
+    const remoteRoot = await mkdtemp(join(tmpdir(), "aart-cli-remote-"));
+    const store = createFsStore(remoteRoot);
+    const engine = createFakeEngine(store, systemClock);
+    remoteHandle = await startServer({ store, engine, clock: systemClock, port: 0, runTicker: false });
+    return `http://127.0.0.1:${remoteHandle.port}`;
+  }
+
+  it("aart remote-status <workflowId> --remote <name>: reports drift against the named remote", async () => {
+    tc = await createTestCli();
+    const path = join(tc.cwd, "wf.yaml");
+    await writeFile(path, sampleWorkflowYaml("wf-cli-remote-status"), "utf8");
+    await run(["register", path], { cliContext: tc.cli });
+    const remoteUrl = await startRealRemote();
+    await run(["remote", "add", "staging", remoteUrl, "--environment", "staging-env"], { cliContext: tc.cli });
+
+    const outcome = await run(["remote-status", "wf-cli-remote-status", "--remote", "staging"], { cliContext: tc.cli });
+    expect(outcome.ok).toBe(true);
+    const remotes = (outcome.result as { remotes: Array<{ remote: string; reachable: boolean }> }).remotes;
+    expect(remotes).toEqual([expect.objectContaining({ remote: "staging", reachable: true })]);
+  });
+
+  it("aart remote-status <workflowId> (no --remote): iterates every configured remote", async () => {
+    tc = await createTestCli();
+    const path = join(tc.cwd, "wf.yaml");
+    await writeFile(path, sampleWorkflowYaml("wf-cli-remote-status-all"), "utf8");
+    await run(["register", path], { cliContext: tc.cli });
+    const remoteUrl = await startRealRemote();
+    await run(["remote", "add", "staging", remoteUrl, "--environment", "staging-env"], { cliContext: tc.cli });
+
+    const outcome = await run(["remote-status", "wf-cli-remote-status-all"], { cliContext: tc.cli });
+    expect(outcome.ok).toBe(true);
+    expect((outcome.result as { remotes: unknown[] }).remotes).toHaveLength(1);
+  });
+
+  it("aart remote-why <remote> <workflowId>: live:false with a clear note when nothing's been pushed", async () => {
+    tc = await createTestCli();
+    const remoteUrl = await startRealRemote();
+    await run(["remote", "add", "staging", remoteUrl, "--environment", "staging-env"], { cliContext: tc.cli });
+
+    const outcome = await run(["remote-why", "staging", "wf-cli-remote-why"], { cliContext: tc.cli });
+    expect(outcome.ok).toBe(true);
+    expect((outcome.result as { live: boolean }).live).toBe(false);
+  });
+
+  it("aart remote-runs <remote> [--status <status>]: lists compact run summaries, filtered", async () => {
+    tc = await createTestCli();
+    const remoteUrl = await startRealRemote();
+    await run(["remote", "add", "staging", remoteUrl, "--environment", "staging-env"], { cliContext: tc.cli });
+
+    const outcome = await run(["remote-runs", "staging", "--status", "failed"], { cliContext: tc.cli });
+    expect(outcome.ok).toBe(true);
+    expect((outcome.result as { runs: unknown[] }).runs).toEqual([]);
+  });
+
+  it("aart remote-run <remote> <runId>: fails cleanly (not found) rather than throwing when the run doesn't exist", async () => {
+    tc = await createTestCli();
+    const remoteUrl = await startRealRemote();
+    await run(["remote", "add", "staging", remoteUrl, "--environment", "staging-env"], { cliContext: tc.cli });
+
+    const outcome = await run(["remote-run", "staging", "no-such-run"], { cliContext: tc.cli });
+    expect(outcome.ok).toBe(false);
+    expect((outcome.result as { error: string }).error).toMatch(/not found/i);
+  });
+
+  it("remote-why / remote-runs / remote-run fail cleanly with a remedy when the named remote isn't configured", async () => {
+    tc = await createTestCli();
+    const path = join(tc.cwd, "wf.yaml");
+    await writeFile(path, sampleWorkflowYaml("wf-cli-remote-noremote"), "utf8");
+    await run(["register", path], { cliContext: tc.cli });
+
+    for (const argv of [
+      ["remote-why", "no-such-remote", "wf-cli-remote-noremote"],
+      ["remote-runs", "no-such-remote"],
+      ["remote-run", "no-such-remote", "run-1"],
+    ]) {
+      const outcome = await run(argv, { cliContext: tc.cli });
+      expect(outcome.ok, argv.join(" ")).toBe(false);
+      expect((outcome.result as { error: string }).error, argv.join(" ")).toMatch(/aart remote add/i);
+    }
+  });
+
+  // remote-status is the deliberate exception: unlike the other three, an
+  // unconfigured remote is scoped to THAT remote's own row
+  // ({reachable:false, error}), not a whole-call failure — it supports
+  // iterating every configured remote at once, and one bad name shouldn't
+  // hide every other remote's real status (remote-observability.ts's own
+  // doc comment on statusForOneRemote).
+  it("remote-status reports an unconfigured remote as a reachable:false ROW, not a whole-call failure", async () => {
+    tc = await createTestCli();
+    const path = join(tc.cwd, "wf.yaml");
+    await writeFile(path, sampleWorkflowYaml("wf-cli-remote-status-noremote"), "utf8");
+    await run(["register", path], { cliContext: tc.cli });
+
+    const outcome = await run(["remote-status", "wf-cli-remote-status-noremote", "--remote", "no-such-remote"], { cliContext: tc.cli });
+    expect(outcome.ok).toBe(true);
+    const remotes = (outcome.result as { remotes: Array<{ reachable: boolean; error?: string }> }).remotes;
+    expect(remotes).toEqual([expect.objectContaining({ reachable: false, error: expect.stringMatching(/aart remote add/i) })]);
   });
 });
 
@@ -1179,5 +1302,27 @@ describe("unknown / missing command", () => {
     tc = await createTestCli();
     const outcome = await run(["frobnicate"], { cliContext: tc.cli });
     expect(outcome.ok).toBe(false);
+  });
+});
+
+// AMENDMENTS.md A63 FIX 7 (optional/low-priority, tester UX) — pre-fix,
+// "--help"/"-h"/"help" fell through to the exact same `default:` case as a
+// genuinely unknown command ("frobnicate", above): ok:false, exitCode 1,
+// and a misleading `error: 'Unknown command "--help".'` — even though
+// `usage` (the correct block) was already present in the result. This
+// describe block proves `run()` itself no longer misclassifies these three
+// as unknown commands. The real `aart` binary (bin.ts) additionally
+// short-circuits before ever calling `run()`, printing USAGE as plain
+// stdout text at exit 0 (mirroring bin.ts's own pre-existing zero-arg
+// special case) — not exercised here, since bin.ts is a top-level-await
+// process entry point with no exported function to call directly.
+describe("--help / -h / help (AMENDMENTS.md A63 FIX 7)", () => {
+  it.each(["--help", "-h", "help"])("%s returns ok:true with the USAGE block, not a false 'unknown command'", async (arg) => {
+    tc = await createTestCli();
+    const outcome = await run([arg], { cliContext: tc.cli });
+    expect(outcome.ok).toBe(true);
+    expect(outcome.exitCode).toBe(0);
+    expect((outcome.result as { usage: string }).usage).toBe(USAGE);
+    expect(JSON.stringify(outcome.result)).not.toMatch(/Unknown command/);
   });
 });

@@ -21,6 +21,7 @@ import type {
   EvalExample,
   EvalRun,
   EvalSuite,
+  EventLogEntry,
   PackManifest,
   PromptRegistryEntry,
   RejectedTrigger,
@@ -439,6 +440,145 @@ export function runAartStoreConformanceSuite(label: string, options: Conformance
       });
     });
 
+    describe("events (V1 event log foundation — AMENDMENTS.md A61)", () => {
+      it("append then list round-trips an EventLogEntry, including every optional correlation field", async () => {
+        const entry: EventLogEntry = {
+          id: uniqueId("evt"),
+          type: "deployment.promoted",
+          occurredAt: new Date().toISOString(),
+          summary: "invoice-scan@0.3.0 promoted to production",
+          workflowId: "invoice-scan",
+          workflowVersion: "0.3.0",
+          runId: uniqueId("run"),
+          deploymentId: uniqueId("dep"),
+          environmentId: uniqueId("env"),
+          approvalTaskId: uniqueId("at"),
+          actor: "deploy-token",
+        };
+        await store.events.append(entry);
+        await expect(store.events.list()).resolves.toEqual(expect.arrayContaining([entry]));
+      });
+
+      it("append then list round-trips an EventLogEntry with every correlation field omitted — never collapsed into an explicit undefined/null value", async () => {
+        const entry: EventLogEntry = { id: uniqueId("evt"), type: "eval.suite_created", occurredAt: new Date().toISOString(), summary: "eval suite created" };
+        await store.events.append(entry);
+        const [found] = (await store.events.list()).filter((e) => e.id === entry.id);
+        // toEqual treats {} and {workflowId: undefined} as equal, but NOT
+        // {} and {workflowId: "surprise"} — this is what actually proves no
+        // stray correlation field leaked a populated value on the round trip.
+        expect(found).toEqual(entry);
+      });
+
+      it("list returns newest-first (descending occurredAt), regardless of append order", async () => {
+        const base = Date.now();
+        const older: EventLogEntry = { id: uniqueId("evt"), type: "run.started", occurredAt: new Date(base - 60_000).toISOString(), summary: "older" };
+        const newer: EventLogEntry = { id: uniqueId("evt"), type: "run.started", occurredAt: new Date(base).toISOString(), summary: "newer" };
+        // Appended oldest-last, deliberately — proves list() sorts, doesn't just echo insertion order.
+        await store.events.append(newer);
+        await store.events.append(older);
+        const list = await store.events.list();
+        const olderIndex = list.findIndex((e) => e.id === older.id);
+        const newerIndex = list.findIndex((e) => e.id === newer.id);
+        expect(newerIndex).toBeLessThan(olderIndex);
+      });
+
+      it("list honors since (occurredAt >= since), excluding earlier entries", async () => {
+        const base = Date.now();
+        const before: EventLogEntry = { id: uniqueId("evt"), type: "run.started", occurredAt: new Date(base - 60_000).toISOString(), summary: "before" };
+        const at: EventLogEntry = { id: uniqueId("evt"), type: "run.started", occurredAt: new Date(base).toISOString(), summary: "at" };
+        const after: EventLogEntry = { id: uniqueId("evt"), type: "run.started", occurredAt: new Date(base + 60_000).toISOString(), summary: "after" };
+        await store.events.append(before);
+        await store.events.append(at);
+        await store.events.append(after);
+        const list = await store.events.list({ since: new Date(base).toISOString() });
+        const ids = list.map((e) => e.id);
+        expect(ids).toEqual(expect.arrayContaining([at.id, after.id]));
+        expect(ids).not.toContain(before.id);
+      });
+
+      it("list honors limit, taking the newest N", async () => {
+        const base = Date.now();
+        const entries: EventLogEntry[] = Array.from({ length: 5 }, (_, i) => ({
+          id: uniqueId("evt"),
+          type: "run.started",
+          occurredAt: new Date(base + i).toISOString(),
+          summary: `event ${i}`,
+        }));
+        for (const entry of entries) await store.events.append(entry);
+        const list = await store.events.list({ limit: 2 });
+        expect(list).toHaveLength(2);
+        // The newest two of the five (index 4 and 3, by construction above).
+        expect(list.map((e) => e.id)).toEqual([entries[4]!.id, entries[3]!.id]);
+      });
+
+      it("since and limit combine — limit applies AFTER the since filter, not before", async () => {
+        const base = Date.now();
+        const before: EventLogEntry = { id: uniqueId("evt"), type: "run.started", occurredAt: new Date(base - 60_000).toISOString(), summary: "before" };
+        const entries: EventLogEntry[] = Array.from({ length: 3 }, (_, i) => ({
+          id: uniqueId("evt"),
+          type: "run.started",
+          occurredAt: new Date(base + i).toISOString(),
+          summary: `event ${i}`,
+        }));
+        await store.events.append(before);
+        for (const entry of entries) await store.events.append(entry);
+        const list = await store.events.list({ since: new Date(base).toISOString(), limit: 1 });
+        expect(list).toHaveLength(1);
+        expect(list[0]?.id).toBe(entries[2]!.id); // the single newest entry at-or-after `since`
+      });
+
+      // D2b/V1 fix pass (AMENDMENTS.md A63, FIX 3) — pre-fix, the two
+      // adapters DIVERGED on a negative limit instead of just both handling
+      // it oddly: fs's `Array.prototype.slice(0, -1)` means "drop the last
+      // 1" (so 3 entries -> 2 returned); sqlite's `LIMIT -1` means
+      // "unlimited" (so 3 entries -> all 3 returned). Neither matches this
+      // fix's chosen contract (a negative limit is never valid input — treat
+      // it as "zero," the safe direction, identically on both adapters), so
+      // this case fails against BOTH pre-fix adapters, just with two
+      // different wrong lengths (2 and 3, never the fixed 0) — verified
+      // directly by stashing the two adapters' `list()` methods and
+      // re-running this suite before writing the fix.
+      it("a negative limit never diverges between adapters — treated as zero, never 'unlimited' nor slice()'s own 'drop the last N' meaning", async () => {
+        const base = Date.now();
+        const entries: EventLogEntry[] = Array.from({ length: 3 }, (_, i) => ({
+          id: uniqueId("evt"),
+          type: "run.started",
+          occurredAt: new Date(base + i).toISOString(),
+          summary: `event ${i}`,
+        }));
+        for (const entry of entries) await store.events.append(entry);
+        await expect(store.events.list({ limit: -1 })).resolves.toEqual([]);
+      });
+
+      // D2b/V1 fix pass (AMENDMENTS.md A63, FIX 4) — three events sharing the
+      // EXACT same occurredAt (a tight burst — aart_approve's own 3-event
+      // emission is the real-world shape this models) have no total order
+      // pre-fix: fs falls back to Array.prototype.sort's stability, i.e.
+      // whatever order readdir() returned the 3 files in; sqlite falls back
+      // to whatever order a plain `ORDER BY occurred_at DESC` scan happens to
+      // produce for tied rows. Fixed ids (not uniqueId()) so THIS test
+      // controls the expected DESC-by-id tiebreak directly, rather than
+      // depending on uniqueId()'s own seq counter (lexicographically
+      // fragile across a 9->10 boundary). Appended in a scrambled order
+      // deliberately, proving list() imposes its OWN deterministic tiebreak
+      // rather than echoing append/readdir order — verified directly by
+      // stashing the two adapters' `list()` methods and re-running this
+      // suite before writing the fix (both failed: fs returned append order
+      // [b, c, a], sqlite returned rowid/insertion order [b, c, a] — neither
+      // is the fixed [c, b, a]).
+      it("equal-occurredAt entries sort in one stable, adapter-identical order — tiebreak DESC on id, matching the (createdAt || id) discipline used elsewhere in this codebase", async () => {
+        const tiedAt = new Date().toISOString();
+        const a: EventLogEntry = { id: "evt_tie_a", type: "workflow.approved", occurredAt: tiedAt, summary: "a" };
+        const b: EventLogEntry = { id: "evt_tie_b", type: "workflow.approved", occurredAt: tiedAt, summary: "b" };
+        const c: EventLogEntry = { id: "evt_tie_c", type: "workflow.approved", occurredAt: tiedAt, summary: "c" };
+        await store.events.append(b);
+        await store.events.append(c);
+        await store.events.append(a);
+        const list = (await store.events.list()).filter((e) => e.occurredAt === tiedAt);
+        expect(list.map((e) => e.id)).toEqual(["evt_tie_c", "evt_tie_b", "evt_tie_a"]); // id DESC tiebreak
+      });
+    });
+
     describe("standingApprovals", () => {
       it("put then get round-trips, list includes it", async () => {
         const approval: StandingApproval = { id: uniqueId("sa"), maxRiskTier: "Low", capabilities: ["browser"], grantedBy: "jane", expiresAt: new Date().toISOString() };
@@ -448,7 +588,7 @@ export function runAartStoreConformanceSuite(label: string, options: Conformance
       });
     });
 
-    describe("jobQueue (store-internal plumbing, not one of the 16 members — architecture §5.3)", () => {
+    describe("jobQueue (store-internal plumbing, not one of the 17 members — architecture §5.3)", () => {
       it("enqueue then get returns an unclaimed entry with the given priority", async () => {
         const runId = uniqueId("run");
         await store.jobQueue.enqueue(runId, 5);

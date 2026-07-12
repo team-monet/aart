@@ -16,7 +16,9 @@
 // anywhere in either source document, so this is the simplest defensible
 // reading available, not a guess at a richer policy neither doc describes.
 import type { Deployment, Environment } from "@aart/types";
+import { recordEvent } from "@aart/store";
 import type { AartContext } from "../context.js";
+import { describeUnreachableRemote, fetchFromRemote, isRecord, remoteErrorMessage, remoteNotFoundError } from "../remote-client.js";
 import type { HandlerResult } from "../response.js";
 import { newId } from "../stubs/engine.js";
 import { runWorkflowHandler } from "./execution.js";
@@ -69,6 +71,14 @@ export async function deployWorkflowHandler(ctx: AartContext, input: DeployWorkf
     createdAt: ctx.now().toISOString(),
   };
   await ctx.store.deployments.put(deployment);
+  // V1 event log (AMENDMENTS.md A61) — local deploy only (this function).
+  // deployToRemoteHandler's own deployment.pushed is deferred to Wave 2,
+  // deliberately not added here (out of scope for this change).
+  await recordEvent(
+    ctx.store,
+    { type: "deployment.created", workflowId: input.workflowId, workflowVersion: input.workflowVersion, deploymentId: deployment.id, environmentId: environment.id, summary: `${input.workflowId}@${input.workflowVersion} deployed to ${environment.name}` },
+    ctx.now,
+  );
   return { ok: true, deployment, environment };
 }
 
@@ -192,10 +202,6 @@ export interface DeployToRemoteInput {
   plan?: boolean;
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 /**
  * D1 fix pass (AMENDMENTS.md A57) — `deployToRemoteHandler` below sends the
  * resolved deploy token as a plain `Authorization: Bearer <token>` header
@@ -233,7 +239,7 @@ export function cleartextTokenWarning(url: string): string | undefined {
 export async function deployToRemoteHandler(ctx: AartContext, input: DeployToRemoteInput): Promise<HandlerResult> {
   const remoteEntry = await ctx.remotes.get(input.remote);
   if (!remoteEntry) {
-    return { ok: false, error: `Remote "${input.remote}" not found. Add it first — "aart remote add ${input.remote} <url> --environment <envName>", then "aart remote list" to confirm.` };
+    return { ok: false, error: remoteNotFoundError(input.remote) };
   }
   // D1 fix pass (AMENDMENTS.md A57) — surfaced on the SUCCESS return only
   // (below); a failed push/plan already carries its own distinct, more
@@ -257,30 +263,24 @@ export async function deployToRemoteHandler(ctx: AartContext, input: DeployToRem
   const token = await ctx.remotes.resolveToken(input.remote);
   const path = input.plan ? "/bundles/plan" : "/bundles/ingest";
 
-  let response: Response;
-  try {
-    response = await fetch(new URL(path, remoteEntry.url), {
-      method: "POST",
-      headers: { "content-type": "application/json", ...(token ? { authorization: `Bearer ${token}` } : {}) },
-      body: JSON.stringify({ files: bundle.files }),
-    });
-  } catch (err) {
-    return { ok: false, error: `Could not reach remote "${input.remote}" (${remoteEntry.url}): ${err instanceof Error ? err.message : String(err)}. Check the URL ("aart remote list") and your network connection, then retry.` };
-  }
-
-  let responseBody: unknown;
-  try {
-    responseBody = await response.json();
-  } catch {
-    responseBody = undefined;
+  // D2b "remote reads" (AMENDMENTS.md, this session) — migrated onto the
+  // shared `fetchFromRemote` (remote-client.ts), generalized from this
+  // function's own pre-existing inline fetch so the four new `aart_remote_*`
+  // read tools (remote-observability.ts) reuse the identical "attach a
+  // resolved token, parse JSON, never throw on a network failure" shape
+  // rather than a second, independently-drifting copy of it. Byte-for-byte
+  // behavior preserved: same headers (content-type + conditional bearer
+  // token), same tolerance for a malformed/absent response body.
+  const response = await fetchFromRemote(remoteEntry, path, { method: "POST", body: { files: bundle.files }, token });
+  if (response.networkError !== undefined) {
+    return { ok: false, error: describeUnreachableRemote(input.remote, remoteEntry, response.networkError) };
   }
 
   if (!response.ok) {
-    const message = isRecord(responseBody) && typeof responseBody["error"] === "string" ? responseBody["error"] : `HTTP ${response.status}`;
-    return { ok: false, error: `Remote "${input.remote}" refused the ${input.plan ? "plan request" : "push"}: ${message}`, status: response.status };
+    return { ok: false, error: `Remote "${input.remote}" refused the ${input.plan ? "plan request" : "push"}: ${remoteErrorMessage(response.body, response.status)}`, status: response.status };
   }
 
-  // D1 fix pass (AMENDMENTS.md A57) — responseBody spread FIRST, our own
+  // D1 fix pass (AMENDMENTS.md A57) — response.body spread FIRST, our own
   // ok/remote/plan (and cleartextWarning's own `warning`, when present) set
   // AFTER: an untrusted remote's response body (e.g. a compromised or
   // malicious remote replying `{"ok":false,"remote":"evil"}`) must never be
@@ -290,5 +290,5 @@ export async function deployToRemoteHandler(ctx: AartContext, input: DeployToRem
   // already reached this line only after checking `response.ok` (the real
   // HTTP status) above; `ok: true` here is genuinely earned, not a value
   // the remote gets any say over.
-  return { ...(isRecord(responseBody) ? responseBody : {}), ok: true, remote: input.remote, plan: input.plan === true, ...(cleartextWarning ? { warning: cleartextWarning } : {}) };
+  return { ...(isRecord(response.body) ? response.body : {}), ok: true, remote: input.remote, plan: input.plan === true, ...(cleartextWarning ? { warning: cleartextWarning } : {}) };
 }

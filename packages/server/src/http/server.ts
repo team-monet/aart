@@ -13,7 +13,7 @@ import { type Bundle } from "../bundle/bundle.js";
 import { hydrateBundle, readBundleFromEnvelope } from "../bundle/load.js";
 import { planBundleIngest } from "../bundle/plan.js";
 import { systemClock, type Clock } from "../clock.js";
-import { DEFAULT_HTTP_HOST, DEFAULT_HTTP_PORT, MAX_BUNDLE_INGEST_BYTES, MAX_WEBHOOK_INGEST_BYTES, type ServerConfig } from "../config.js";
+import { DEFAULT_EVENTS_LIMIT, DEFAULT_HTTP_HOST, DEFAULT_HTTP_PORT, MAX_BUNDLE_INGEST_BYTES, MAX_EVENTS_LIMIT, MAX_WEBHOOK_INGEST_BYTES, type ServerConfig } from "../config.js";
 import { findCorrectionByKey } from "../corrections.js";
 import { checkAnyDeployToken, extractBearerToken } from "../deploy-token.js";
 import { registerEnvironment, type RegisterEnvironmentParams } from "../environments.js";
@@ -198,6 +198,31 @@ function requireDeployToken(config: ServerConfig, ctx: RouteContext): boolean {
  * so the fail-closed (deploy-surface routes) vs conditional (everything
  * else) semantics stay explicit in the code, not hidden behind a boolean.
  *
+ * D2b "remote reads" (AMENDMENTS.md, this session, John-ratified
+ * 2026-07-12) — this function now ALSO gates two GET routes (`GET /runs`,
+ * `GET /runs/:id`, below), not only POST/mutation routes as every doc
+ * comment above this point still frames it. Same conditional semantics,
+ * same reused mechanism — a run's full trace/inputs/outputs is exactly the
+ * kind of content D2b makes newly reachable to a REMOTE authoring agent
+ * (the new `aart_remote_run` MCP tool, `@aart/mcp`), so it gets the same
+ * "gated once a token is configured, open otherwise" treatment every other
+ * conditionally-sensitive route already has — see those two routes' own
+ * registration comment (below, "Read surface") for the full rationale.
+ *
+ * D2b/V1 fix pass (AMENDMENTS.md A63, FIX 1, John-ratified 2026-07-12) —
+ * widened again, from two gated GET routes to three: `GET /flagged-runs`
+ * (below) returns the SAME full `RunRecord[]` shape (trace/inputs/outputs)
+ * `GET /runs` does, just pre-filtered to failed+unresolved-flag runs —
+ * leaving it open after `GET /runs`/`GET /runs/:id` were gated defeated the
+ * gate's own purpose (an unauthenticated caller could still read every
+ * reclaim-exhausted/poison run's full trace through this one route alone).
+ * `GET /waiting-runs` was evaluated too and deliberately left OPEN:
+ * `WaitStore.list()` (`@aart/store`) returns only wait-condition metadata
+ * (`{runId, stepId, wait, createdAt}`) — `WaitCondition`'s own 7-member
+ * union (`@aart/types`' `wait.ts`) never carries trace/inputs/outputs, so
+ * there is no secret-adjacent content on that route for this gate to
+ * protect.
+
  * Token-derived attribution (D2a, AMENDMENTS.md A59, "mechanical half" —
  * named per-token labels are deferred) — on success via a PROVIDED,
  * MATCHING token (never the "unconfigured, proceed" branch, which has no
@@ -272,6 +297,35 @@ function requireValidTrustMode(ctx: RouteContext, trustMode: unknown): boolean {
   if (typeof trustMode === "string" && (VALID_TRUST_MODES as readonly string[]).includes(trustMode)) return true;
   sendJson(ctx.res, 400, { error: `trustMode must be one of: ${VALID_TRUST_MODES.join(", ")} (got ${JSON.stringify(trustMode)}).` });
   return false;
+}
+
+/**
+ * D2b/V1 fix pass (AMENDMENTS.md A63, FIX 3) — `GET /events`'s own
+ * `?limit=` parsing, extracted so its edge cases are independently testable
+ * rather than inlined into the route closure. Pre-this-fix this route used
+ * `Number.isFinite(Number(limitParam))`, which admits NEGATIVE and
+ * FRACTIONAL values through untouched (`Number("-5")` and `Number("1.5")`
+ * are both finite) — and had no default/max at all, so an absent `limit`
+ * meant "serialize the entire append-only log," unauthenticated (this route
+ * is deliberately open — see its own registration comment above). Every
+ * malformed case below (missing, non-integer, negative) is treated
+ * identically: fall back to `DEFAULT_EVENTS_LIMIT`, the same "ignore, don't
+ * 400" looseness this route family's other query params already have
+ * (`status`/`workflowId`'s own `?? undefined` idiom) — a 400 on a stray
+ * query value felt too strict for a metadata read endpoint the dashboard
+ * polls. A valid non-negative integer is honored up to `MAX_EVENTS_LIMIT`
+ * (including `0`, an explicit "give me zero events" — distinct from
+ * "absent," which means "give me the default page"). Adapters get their
+ * OWN independent negative-limit guard too (fs's `events.ts`/sqlite's
+ * `stores/events.ts`) — belt-and-braces for any caller of
+ * `EventLogStore.list` other than this route (this codebase's own store
+ * layer is never assumed to be reachable only through one HTTP route).
+ */
+function parseEventsLimit(raw: string | null): number {
+  if (raw === null) return DEFAULT_EVENTS_LIMIT;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 0) return DEFAULT_EVENTS_LIMIT;
+  return Math.min(n, MAX_EVENTS_LIMIT);
 }
 
 /**
@@ -730,22 +784,80 @@ export async function startServer(config: ServerConfig): Promise<ServerHandle> {
 
   // Read surface — the "API surface S8 will consume" (this session's DoD note).
   router.get("/health", (ctx) => sendJson(ctx.res, 200, { status: "ok" }));
-  router.get("/runs", async (ctx) => {
-    const status = ctx.query.get("status");
-    const workflowId = ctx.query.get("workflowId");
-    const runs = await config.store.runs.list({
-      status: (status as never) ?? undefined,
-      workflowId: workflowId ?? undefined,
-    });
-    sendJson(ctx.res, 200, { runs });
-  });
-  router.get("/runs/:id", async (ctx) => {
-    const run = await config.store.runs.get(ctx.params["id"]!);
-    if (!run) return sendJson(ctx.res, 404, { error: "not found" });
-    sendJson(ctx.res, 200, { run });
-  });
+  // D2b "remote reads" (AMENDMENTS.md, this session, John-ratified
+  // 2026-07-12's "gate the run-read routes" fork; widened by the D2b/V1 fix
+  // pass, AMENDMENTS.md A63 FIX 1) — GET /runs, GET /runs/:id, and GET
+  // /flagged-runs are now the ONLY three GET routes on this server that
+  // carry an `auth` option; every other GET route (workflows, deployments,
+  // environments, approvals, waiting-runs, ...) stays deliberately open,
+  // per this session's own narrow mandate. Reusing `requireDeployTokenIfConfigured`
+  // (this file, above) rather than a new mechanism — the SAME conditional
+  // semantics every other gated route already has: unconfigured
+  // `AART_DEPLOY_TOKEN` -> stays open (unchanged pre-D2b behavior, a
+  // tokenless local/dev/TEST-DRIVE deployment needs zero config change);
+  // configured -> requires the same valid Bearer the rest of the
+  // conditionally-gated tier does. Why THESE specifically, now that D2b
+  // makes a run's full trace/inputs/outputs agent-discoverable from a
+  // REMOTE caller too (the new aart_remote_run tool, @aart/mcp) — a run's
+  // trace can carry residual secret-adjacent content (tool call arguments,
+  // external-call metadata, ...) that was previously only reachable by
+  // someone who could already read this server's local disk or was
+  // deliberately handed a report; D2b's whole point is making that content
+  // reachable to an AUTHORING AGENT over the network, which raises the bar
+  // on "who can read it" the same way D2a's own uniform write-gating raised
+  // it for mutation. `Router.handle`'s own `auth` closure runs before
+  // `readBody` regardless of HTTP method (router.ts) — a GET carrying an
+  // `Authorization` header works the identical way a gated POST already
+  // does; `fetchFromRemote` (@aart/mcp's remote-client.ts) already attaches
+  // a resolved token on EVERY call it makes, GET included, so
+  // aart_remote_runs/aart_remote_run keep working against a gated server
+  // with zero changes on their own side. GET /flagged-runs joined this tier
+  // one fix pass later than the other two (AMENDMENTS.md A63 FIX 1) — see
+  // that route's own registration comment below for why it was missed the
+  // first time and why GET /waiting-runs, right next to it, was NOT gated.
+  router.get(
+    "/runs",
+    async (ctx) => {
+      const status = ctx.query.get("status");
+      const workflowId = ctx.query.get("workflowId");
+      const runs = await config.store.runs.list({
+        status: (status as never) ?? undefined,
+        workflowId: workflowId ?? undefined,
+      });
+      sendJson(ctx.res, 200, { runs });
+    },
+    { auth: (ctx) => requireDeployTokenIfConfigured(config, ctx, "read run data") },
+  );
+  router.get(
+    "/runs/:id",
+    async (ctx) => {
+      const run = await config.store.runs.get(ctx.params["id"]!);
+      if (!run) return sendJson(ctx.res, 404, { error: "not found" });
+      sendJson(ctx.res, 200, { run });
+    },
+    { auth: (ctx) => requireDeployTokenIfConfigured(config, ctx, "read run data") },
+  );
+  // AMENDMENTS.md A63 FIX 1 — evaluated for the SAME gating GET /runs, GET
+  // /runs/:id, and GET /flagged-runs (below) carry, and deliberately LEFT
+  // OPEN: WaitStore.list()'s own return shape (types.ts) is
+  // `{runId, stepId, wait, createdAt}[]` — WaitCondition's 7-member union
+  // (@aart/types' wait.ts) never carries trace/inputs/outputs, so there is
+  // no secret-adjacent content here for this gate to protect.
   router.get("/waiting-runs", async (ctx) => sendJson(ctx.res, 200, { waits: await config.store.waits.list() }));
-  router.get("/flagged-runs", async (ctx) => sendJson(ctx.res, 200, { runs: await listFlaggedRuns(config.store) }));
+  // AMENDMENTS.md A63 FIX 1 — gated, joining GET /runs/GET /runs/:id above
+  // (this session's own MAJOR verification finding): listFlaggedRuns
+  // (flags.ts) returns the SAME full RunRecord[] shape (trace/inputs/
+  // outputs) GET /runs does, just pre-filtered server-side to
+  // failed+unresolved-flag runs. Left open (as it originally shipped), this
+  // one route let an unauthenticated caller read the full trace of every
+  // reclaim-exhausted/poison run regardless of the other two routes being
+  // gated — defeating the gate's own purpose. Same conditional mechanism,
+  // same "read run data" remedy wording, as its two siblings above.
+  router.get(
+    "/flagged-runs",
+    async (ctx) => sendJson(ctx.res, 200, { runs: await listFlaggedRuns(config.store) }),
+    { auth: (ctx) => requireDeployTokenIfConfigured(config, ctx, "read run data") },
+  );
   router.get("/workflows", async (ctx) => sendJson(ctx.res, 200, { workflowIds: await config.store.workflows.listWorkflowIds() }));
   // Enriches the bare-ids list above with a per-workflow read (SEAMS.md
   // "@aart/server's HTTP API surface" — previously flagged, then
@@ -771,6 +883,25 @@ export async function startServer(config: ServerConfig): Promise<ServerHandle> {
   router.get("/environments", async (ctx) => sendJson(ctx.res, 200, { environments: await config.store.environments.list() }));
   router.get("/deployments", async (ctx) => sendJson(ctx.res, 200, { deployments: await config.store.deployments.list() }));
   router.get("/rejected-triggers", async (ctx) => sendJson(ctx.res, 200, { rejected: await config.store.rejectedTriggers.list() }));
+  // V1 event log foundation (AMENDMENTS.md A61) — the activity-feed +
+  // live-updates spine. Open, unauthenticated read (the default open-GET
+  // posture every OTHER GET route on this surface already follows — no
+  // `auth` option here, matching /deployments/ /approvals/ etc. above;
+  // D2b/A63's own auth gating targets /runs, /runs/:id, and /flagged-runs —
+  // different routes). Deliberately NOT gated (D2b/V1 fix pass,
+  // AMENDMENTS.md A63 FIX 2 — evaluated explicitly, not just left off by
+  // omission): an EventLogEntry (@aart/types' event-log.ts) carries only
+  // run-lifecycle METADATA — id/type/occurredAt/summary plus correlation
+  // ids (workflowId/runId/deploymentId/...) — never a step's trace/inputs/
+  // outputs, so it sits in the same open-always sensitivity tier as
+  // /deployments, not the gated tier /runs/GET /runs/:id/GET /flagged-runs
+  // occupy. Stateless, decoupled from the ticker — a plain store read.
+  router.get("/events", async (ctx) => {
+    const since = ctx.query.get("since") ?? undefined;
+    const limit = parseEventsLimit(ctx.query.get("limit"));
+    const events = await config.store.events.list({ since, limit });
+    sendJson(ctx.res, 200, { events });
+  });
 
   // AMENDMENTS.md A47 — the three remaining dashboard list pages that used
   // to read `store.approvals`/`store.corrections`/`store.evals` directly

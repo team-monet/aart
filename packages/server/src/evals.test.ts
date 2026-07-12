@@ -57,6 +57,16 @@ describe("createEvalSuite", () => {
       expect(await fx.store.evals.listExamples("suite-caller-supplied")).toEqual([example]);
     });
   });
+
+  // V1 event log foundation (AMENDMENTS.md A61)
+  it("emits an eval.suite_created event", async () => {
+    await withFixture(async (fx) => {
+      const suite = await createEvalSuite(fx.store, { name: "My Suite", scorer: { id: "s1", kind: "exact_match" } });
+      const events = await fx.store.events.list();
+      expect(events).toContainEqual(expect.objectContaining({ type: "eval.suite_created" }));
+      expect(events.find((e) => e.type === "eval.suite_created")?.summary).toContain(suite.name);
+    });
+  });
 });
 
 describe("runEvalSuiteForWorkflow", () => {
@@ -83,6 +93,17 @@ describe("runEvalSuiteForWorkflow", () => {
       expect(result.evalRun.workflowVersion).toBe("1.0.0");
 
       expect(await fx.store.evals.listRuns({ suiteId: suite.id })).toEqual([result.evalRun]);
+    });
+  });
+
+  // V1 event log foundation (AMENDMENTS.md A61)
+  it("emits an eval.run_completed event carrying workflowId/workflowVersion", async () => {
+    await withFixture(async (fx) => {
+      await fx.store.workflows.put(fixtureWorkflow());
+      const suite = await createEvalSuite(fx.store, { name: "Suite", scorer: { id: "s1", kind: "exact_match" }, examples: [{ id: "ex1", suiteId: "placeholder", input: 5, expected: 5 }] });
+      await runEvalSuiteForWorkflow(fx.store, suite.id, "wf_eval", "1.0.0");
+      const events = await fx.store.events.list();
+      expect(events).toContainEqual(expect.objectContaining({ type: "eval.run_completed", workflowId: "wf_eval", workflowVersion: "1.0.0" }));
     });
   });
 

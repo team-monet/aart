@@ -14,6 +14,21 @@ export { produceBundle, writeBundleToDisk, BundleManifestSchema, computeBundleHa
 // separately for callers that want the read/hydrate steps independently
 // (tests, or a future caller that already has a `Bundle` in memory). ---
 export { readBundleFromDisk, hydrateBundle, hydrateBundleFromDisk, verifyBundleHash, type HydrateBundleResult } from "./bundle/load.js";
+// D2b "remote reads" (AMENDMENTS.md, this session) — findCurrentVersion
+// (bundle/plan.ts, D1 "remotes + push," AMENDMENTS.md A56/A57) was already
+// exported from ITS OWN file, but never re-exported through this package's
+// public barrel, so a sibling package (@aart/mcp, already a real dependency
+// of this one) had no actual way to import it — this package's own
+// package.json `exports` map declares only `"."`, and `moduleResolution:
+// NodeNext` (tsconfig.base.json) enforces that strictly; a deep
+// `@aart/server/dist/bundle/plan.js` subpath import is rejected at both
+// typecheck and runtime, and no such deep import exists anywhere else in
+// this codebase as precedent. Minimal, purely-additive one-line fix so
+// @aart/mcp's new `aart_remote_why` (handlers/remote-observability.ts) can
+// call the REAL "which deployment is live" tie-break instead of an
+// independently-reasoned (and therefore drift-prone) local reimplementation
+// of the exact same heuristic.
+export { findCurrentVersion } from "./bundle/plan.js";
 
 // --- config ---
 export * from "./config.js";

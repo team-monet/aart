@@ -688,13 +688,89 @@ describe("read API surface (S8's dashboard consumes this)", () => {
     expect(missingRes.status).toBe(404);
   });
 
-  it("GET /waiting-runs, /flagged-runs, /workflows, /environments, /deployments, /rejected-triggers", async () => {
+  it("GET /waiting-runs, /flagged-runs, /workflows, /environments, /deployments, /rejected-triggers, /events", async () => {
     fx = await createTestFixture();
     handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false });
-    for (const path of ["/waiting-runs", "/flagged-runs", "/workflows", "/environments", "/deployments", "/rejected-triggers"]) {
+    for (const path of ["/waiting-runs", "/flagged-runs", "/workflows", "/environments", "/deployments", "/rejected-triggers", "/events"]) {
       const res = await fetch(`http://localhost:${handle.port}${path}`);
       expect(res.status, `GET ${path}`).toBe(200);
     }
+  });
+
+  // V1 event log foundation (AMENDMENTS.md A61) — the activity-feed +
+  // live-updates spine's own read route.
+  describe("GET /events", () => {
+    it("lists appended events newest-first, and is UNAUTHENTICATED (no token) — matching every other read route on this surface", async () => {
+      fx = await createTestFixture();
+      await fx.store.events.append({ id: "evt_1", type: "run.started", occurredAt: "2026-01-01T00:00:00.000Z", summary: "older" });
+      await fx.store.events.append({ id: "evt_2", type: "run.completed", occurredAt: "2026-01-01T00:01:00.000Z", summary: "newer" });
+      handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false, deployToken: "secret-token" }); // a configured deployToken must NOT gate this route
+      const res = await fetch(`http://localhost:${handle.port}/events`);
+      expect(res.status).toBe(200);
+      const body = (await json(res)) as { events: { id: string }[] };
+      expect(body.events.map((e) => e.id)).toEqual(["evt_2", "evt_1"]); // newest-first
+    });
+
+    it("honors ?since= and ?limit=", async () => {
+      fx = await createTestFixture();
+      await fx.store.events.append({ id: "evt_before", type: "run.started", occurredAt: "2026-01-01T00:00:00.000Z", summary: "before" });
+      await fx.store.events.append({ id: "evt_after_1", type: "run.started", occurredAt: "2026-01-01T00:02:00.000Z", summary: "after 1" });
+      await fx.store.events.append({ id: "evt_after_2", type: "run.started", occurredAt: "2026-01-01T00:03:00.000Z", summary: "after 2" });
+      handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false });
+
+      const sinceRes = await fetch(`http://localhost:${handle.port}/events?since=2026-01-01T00:01:00.000Z`);
+      const sinceBody = (await json(sinceRes)) as { events: { id: string }[] };
+      expect(sinceBody.events.map((e) => e.id)).toEqual(["evt_after_2", "evt_after_1"]);
+
+      const limitRes = await fetch(`http://localhost:${handle.port}/events?limit=1`);
+      const limitBody = (await json(limitRes)) as { events: { id: string }[] };
+      expect(limitBody.events).toHaveLength(1);
+      expect(limitBody.events[0]?.id).toBe("evt_after_2"); // newest overall
+    });
+
+    // D2b/V1 fix pass (AMENDMENTS.md A63, FIX 3) — pre-fix, an absent
+    // `?limit=` meant "no limit at all": `GET /events` with no query params
+    // serialized the ENTIRE append-only log, unauthenticated (this route is
+    // deliberately open — see its own registration comment above). Proven
+    // here the only way a black-box HTTP test CAN prove it: seed more than
+    // the chosen default (100) and confirm the response is actually capped,
+    // not just "happens to return everything because nothing was seeded
+    // past the default."
+    it("an absent ?limit= defaults to 100 (DEFAULT_EVENTS_LIMIT, config.ts), never 'unlimited' — the exact bug this fix closes", async () => {
+      fx = await createTestFixture();
+      const base = Date.now();
+      for (let i = 0; i < 105; i++) {
+        await fx.store.events.append({ id: `evt_${i}`, type: "run.started", occurredAt: new Date(base + i).toISOString(), summary: `event ${i}` });
+      }
+      handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false });
+      const res = await fetch(`http://localhost:${handle.port}/events`); // no ?limit= at all
+      const body = (await json(res)) as { events: { id: string }[] };
+      expect(body.events).toHaveLength(100);
+      expect(body.events[0]?.id).toBe("evt_104"); // still newest-first within the capped page
+    });
+
+    it("a malformed or negative ?limit= is ignored, falling back to the default — never a 400, never 'unlimited', never slice()/LIMIT's own confusing negative-number behavior", async () => {
+      fx = await createTestFixture();
+      await fx.store.events.append({ id: "evt_a", type: "run.started", occurredAt: "2026-01-01T00:00:00.000Z", summary: "a" });
+      await fx.store.events.append({ id: "evt_b", type: "run.started", occurredAt: "2026-01-01T00:00:01.000Z", summary: "b" });
+      handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false });
+      for (const badLimit of ["-5", "abc", "1.5", "NaN", "Infinity"]) {
+        const res = await fetch(`http://localhost:${handle.port}/events?limit=${encodeURIComponent(badLimit)}`);
+        expect(res.status, `?limit=${badLimit}`).toBe(200);
+        const body = (await json(res)) as { events: { id: string }[] };
+        expect(body.events, `?limit=${badLimit} should fall back to the default (2 seeded events, well under it)`).toHaveLength(2);
+      }
+    });
+
+    it("?limit=0 explicitly returns zero events — distinct from an absent limit, which returns the default page", async () => {
+      fx = await createTestFixture();
+      await fx.store.events.append({ id: "evt_zero_test", type: "run.started", occurredAt: "2026-01-01T00:00:00.000Z", summary: "x" });
+      handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false });
+      const res = await fetch(`http://localhost:${handle.port}/events?limit=0`);
+      expect(res.status).toBe(200);
+      const body = (await json(res)) as { events: unknown[] };
+      expect(body.events).toEqual([]);
+    });
   });
 
   it("GET /workflows/:id -> {workflow, versions}: latest by default, a specific version via ?version=, 404 with {error} when unknown (root AMENDMENTS.md A43 — closes the SEAMS.md-flagged 'enrich GET /workflows' gap)", async () => {
@@ -1021,6 +1097,196 @@ describe("deploy token rotation — deployTokenNext without a primary (D2a fix p
     const res = await fetch(`http://localhost:${handle.port}/runs/trigger`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({}) });
     expect(res.status, "deployTokenNext alone must not change this route's behavior at all").toBe(baselineStatus);
     await expect(res.json()).resolves.toEqual(baselineBody);
+  });
+});
+
+// D2b "remote reads" (AMENDMENTS.md, this session, John-ratified
+// 2026-07-12's "gate the run-read routes" fork) — GET /runs and GET
+// /runs/:id are the ONLY two GET routes on this server carrying an `auth`
+// option; every other GET route stays open (proven not to regress by the
+// pre-existing "GET routes stay completely open" test above, which asserts
+// `GET /environments` specifically, and by the pre-existing "GET /runs and
+// /runs/:id" test in the "read API surface" describe block above, which
+// never configures a `deployToken` at all and so exercises the
+// unconfigured-stays-open branch already).
+describe("GET /runs, GET /runs/:id — conditional deploy-token gating (D2b, AMENDMENTS.md, this session)", () => {
+  async function seedOneRun(store: TestFixture["store"], clock: TestFixture["clock"]): Promise<void> {
+    await store.runs.put({
+      runId: "run_read_gate_1",
+      workflowId: "wf_read_gate",
+      workflowVersion: "1",
+      status: "completed",
+      approved: true,
+      approvalMode: "dev",
+      trigger: { type: "manual", id: "t1", source: "cli", payload: null, receivedAt: clock.nowIso() },
+      inputs: {},
+      trace: [],
+      waits: [],
+      artifacts: [],
+      snapshot: { definitions: {}, resolvedVersions: {}, packHashes: {}, capturedAt: clock.nowIso() },
+      startedAt: clock.nowIso(),
+      updatedAt: clock.nowIso(),
+      schemaVersion: 1,
+    });
+  }
+
+  it("deployToken configured + no Authorization header -> 401 on both GET /runs and GET /runs/:id", async () => {
+    fx = await createTestFixture();
+    await seedOneRun(fx.store, fx.clock);
+    handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false, deployToken: "run-read-gate-token" });
+
+    const listRes = await fetch(`http://localhost:${handle.port}/runs`);
+    expect(listRes.status).toBe(401);
+    const listBody = (await json(listRes)) as { error: string };
+    expect(listBody.error).toMatch(/Provide a valid "Authorization: Bearer <token>" header/);
+    expect(listBody.error).toMatch(/read run data/);
+
+    const getRes = await fetch(`http://localhost:${handle.port}/runs/run_read_gate_1`);
+    expect(getRes.status).toBe(401);
+  });
+
+  it("deployToken configured + correct Bearer -> 200 on both routes, real data returned", async () => {
+    fx = await createTestFixture();
+    await seedOneRun(fx.store, fx.clock);
+    handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false, deployToken: "run-read-gate-token" });
+
+    const listRes = await fetch(`http://localhost:${handle.port}/runs`, { headers: { authorization: "Bearer run-read-gate-token" } });
+    expect(listRes.status).toBe(200);
+    const listBody = (await json(listRes)) as { runs: unknown[] };
+    expect(listBody.runs).toHaveLength(1);
+
+    const getRes = await fetch(`http://localhost:${handle.port}/runs/run_read_gate_1`, { headers: { authorization: "Bearer run-read-gate-token" } });
+    expect(getRes.status).toBe(200);
+  });
+
+  it("deployToken configured + wrong Bearer -> 401 on both routes", async () => {
+    fx = await createTestFixture();
+    await seedOneRun(fx.store, fx.clock);
+    handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false, deployToken: "run-read-gate-token" });
+
+    const listRes = await fetch(`http://localhost:${handle.port}/runs`, { headers: { authorization: "Bearer wrong-token" } });
+    expect(listRes.status).toBe(401);
+    const getRes = await fetch(`http://localhost:${handle.port}/runs/run_read_gate_1`, { headers: { authorization: "Bearer wrong-token" } });
+    expect(getRes.status).toBe(401);
+  });
+
+  it("deployToken UNCONFIGURED -> 200 on both routes with no Authorization header at all (unchanged pre-D2b behavior)", async () => {
+    fx = await createTestFixture();
+    await seedOneRun(fx.store, fx.clock);
+    handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false }); // no deployToken
+
+    const listRes = await fetch(`http://localhost:${handle.port}/runs`);
+    expect(listRes.status).toBe(200);
+    const getRes = await fetch(`http://localhost:${handle.port}/runs/run_read_gate_1`);
+    expect(getRes.status).toBe(200);
+  });
+
+  // AMENDMENTS.md A63 FIX 1 — /flagged-runs REMOVED from this list: it
+  // joined the gated tier in the same fix pass this test's own name still
+  // (correctly, as of this fix) calls "the ONLY gated GETs" alongside
+  // /runs/GET /runs/:id — see the dedicated "GET /flagged-runs" describe
+  // block below for its own positive/negative gating coverage.
+  it("every OTHER GET route stays open even when deployToken is configured (GET /runs, GET /runs/:id, and GET /flagged-runs are the ONLY gated GETs)", async () => {
+    fx = await createTestFixture();
+    handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false, deployToken: "run-read-gate-token" });
+    for (const path of ["/health", "/waiting-runs", "/workflows", "/environments", "/deployments", "/rejected-triggers", "/approvals", "/corrections", "/evals", "/events"]) {
+      const res = await fetch(`http://localhost:${handle.port}${path}`);
+      expect(res.status, `${path} should stay open with no Authorization header even though deployToken is configured`).not.toBe(401);
+    }
+  });
+});
+
+// D2b/V1 fix pass (AMENDMENTS.md A63, FIX 1 — the MAJOR verification
+// finding this fix pass exists to close). GET /flagged-runs
+// (packages/server/src/flags.ts's listFlaggedRuns) returns the SAME full
+// RunRecord[] shape (trace/inputs/outputs) GET /runs does, filtered
+// server-side to failed+unresolved-flag runs — it stayed OPEN when GET
+// /runs/GET /runs/:id were gated (D2b, above), defeating the gate's own
+// purpose: an unauthenticated caller could still read every reclaim-
+// exhausted/poison run's full trace through this one route alone. Mirrors
+// the "GET /runs, GET /runs/:id" describe block above exactly (same 4-case
+// shape: no header, correct Bearer, wrong Bearer, unconfigured).
+describe("GET /flagged-runs — conditional deploy-token gating (D2b/V1 fix pass, AMENDMENTS.md A63 FIX 1)", () => {
+  async function seedOneFlaggedRun(store: TestFixture["store"], clock: TestFixture["clock"]): Promise<void> {
+    await store.runs.put({
+      runId: "run_flagged_gate_1",
+      workflowId: "wf_flagged_gate",
+      workflowVersion: "1",
+      status: "failed",
+      approved: true,
+      approvalMode: "dev",
+      trigger: { type: "manual", id: "t1", source: "cli", payload: null, receivedAt: clock.nowIso() },
+      inputs: {},
+      trace: [],
+      waits: [],
+      artifacts: [],
+      flag: { kind: "poison", flaggedAt: clock.nowIso() },
+      snapshot: { definitions: {}, resolvedVersions: {}, packHashes: {}, capturedAt: clock.nowIso() },
+      startedAt: clock.nowIso(),
+      updatedAt: clock.nowIso(),
+      schemaVersion: 1,
+    });
+  }
+
+  it("deployToken configured + no Authorization header -> 401", async () => {
+    fx = await createTestFixture();
+    await seedOneFlaggedRun(fx.store, fx.clock);
+    handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false, deployToken: "flagged-read-gate-token" });
+
+    const res = await fetch(`http://localhost:${handle.port}/flagged-runs`);
+    expect(res.status).toBe(401);
+    const body = (await json(res)) as { error: string };
+    expect(body.error).toMatch(/Provide a valid "Authorization: Bearer <token>" header/);
+    expect(body.error).toMatch(/read run data/);
+  });
+
+  it("deployToken configured + correct Bearer -> 200, real (flagged, trace-bearing) data returned", async () => {
+    fx = await createTestFixture();
+    await seedOneFlaggedRun(fx.store, fx.clock);
+    handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false, deployToken: "flagged-read-gate-token" });
+
+    const res = await fetch(`http://localhost:${handle.port}/flagged-runs`, { headers: { authorization: "Bearer flagged-read-gate-token" } });
+    expect(res.status).toBe(200);
+    const body = (await json(res)) as { runs: { runId: string }[] };
+    expect(body.runs.map((r) => r.runId)).toEqual(["run_flagged_gate_1"]);
+  });
+
+  it("deployToken configured + wrong Bearer -> 401", async () => {
+    fx = await createTestFixture();
+    await seedOneFlaggedRun(fx.store, fx.clock);
+    handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false, deployToken: "flagged-read-gate-token" });
+
+    const res = await fetch(`http://localhost:${handle.port}/flagged-runs`, { headers: { authorization: "Bearer wrong-token" } });
+    expect(res.status).toBe(401);
+  });
+
+  it("deployToken UNCONFIGURED -> 200 with no Authorization header at all (unchanged pre-fix behavior)", async () => {
+    fx = await createTestFixture();
+    await seedOneFlaggedRun(fx.store, fx.clock);
+    handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false }); // no deployToken
+
+    const res = await fetch(`http://localhost:${handle.port}/flagged-runs`);
+    expect(res.status).toBe(200);
+  });
+});
+
+// D2b/V1 fix pass (AMENDMENTS.md A63, FIX 1) — GET /waiting-runs was
+// evaluated for the SAME gating and deliberately left OPEN: WaitStore.list()
+// (@aart/store) returns only wait-condition metadata
+// ({runId, stepId, wait, createdAt}), never a run's trace/inputs/outputs
+// (WaitCondition's 7-member union, @aart/types' wait.ts, has no such
+// field) — there is no secret-adjacent content on this route for the gate
+// to protect, unlike /runs/GET /runs/:id/GET /flagged-runs above.
+describe("GET /waiting-runs — evaluated for D2b/V1 fix pass gating, deliberately left open (AMENDMENTS.md A63 FIX 1)", () => {
+  it("stays open even when deployToken is configured, with no Authorization header at all", async () => {
+    fx = await createTestFixture();
+    await fx.store.waits.put("run_wait_1", "step_wait_1", { type: "manual", schemaVersion: 1 }, fx.clock.nowIso());
+    handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false, deployToken: "waiting-runs-not-gated-token" });
+
+    const res = await fetch(`http://localhost:${handle.port}/waiting-runs`);
+    expect(res.status).toBe(200);
+    const body = (await json(res)) as { waits: unknown[] };
+    expect(body.waits).toHaveLength(1);
   });
 });
 

@@ -34,7 +34,7 @@
 // narrow duplication of that module's identically-scoped constant, not a
 // divergent reimplementation of the underlying mechanism (both read the
 // same `GateName`s off the same governance-owned decode function).
-import type { AartStore } from "@aart/store";
+import { recordEvent, type AartStore } from "@aart/store";
 import type { ApprovalState, ApprovalTask, Gates, GateStatus, TrustMode } from "@aart/types";
 import { computeApprovalState, decodeWorkflowVersionApprovalSubject, REQUIRED_GATES_BY_MODE, type GateName } from "@aart/governance";
 import { systemClock, type Clock } from "./clock.js";
@@ -94,6 +94,20 @@ export async function decideApprovalTask(store: AartStore, engine: EngineBoundar
   await store.approvals.put(updated);
 
   const versionSubject = decodeWorkflowVersionApprovalSubject(task.runId, task.stepId);
+  // V1 event log (AMENDMENTS.md A61) — unconditional, colocated with the
+  // approvals.put write above (which always happens once reviewer is
+  // present, regardless of what task.runId/stepId decode to below).
+  await recordEvent(
+    store,
+    {
+      type: "approval.decided",
+      approvalTaskId: taskId,
+      ...(versionSubject ? { workflowId: versionSubject.workflowId, workflowVersion: versionSubject.workflowVersion } : { runId: task.runId }),
+      summary: `${taskId} decided ${input.status} by ${input.reviewer}`,
+    },
+    () => clock.now(),
+  );
+
   if (versionSubject) {
     if (!APPROVAL_TASK_GATES.includes(versionSubject.gate)) {
       return { kind: "invalid_gate", gate: versionSubject.gate };
@@ -105,6 +119,35 @@ export async function decideApprovalTask(store: AartStore, engine: EngineBoundar
     const requiredGates = REQUIRED_GATES_BY_MODE[input.trustMode ?? "governed"];
     const approval = computeApprovalState(gates, requiredGates);
     await store.workflows.put({ ...workflow, gates, approval });
+    // V1 event log (AMENDMENTS.md A61) — this package's OWN copy of
+    // applyGateResult's (packages/mcp/src/handlers/governance.ts) identical
+    // gate_passed/gate_failed write, required by package layering
+    // (@aart/server cannot import @aart/mcp) — see that function's own
+    // comment for the full reasoning. Skipped for "pending" (a
+    // needs_changes decision) — not a pass or a fail, no event type for it.
+    if (gateResult === "passed" || gateResult === "failed") {
+      await recordEvent(
+        store,
+        {
+          type: gateResult === "passed" ? "workflow.gate_passed" : "workflow.gate_failed",
+          workflowId: versionSubject.workflowId,
+          workflowVersion: versionSubject.workflowVersion,
+          summary: `${versionSubject.workflowId}@${versionSubject.workflowVersion} ${gateResult} ${versionSubject.gate}`,
+        },
+        () => clock.now(),
+      );
+    }
+    // V1 event log (AMENDMENTS.md A61) — this package's OWN copy of the
+    // identical gap fixed in applyGateResult (packages/mcp/src/handlers/
+    // governance.ts, see that function's own comment for the full
+    // reasoning): `approval` is recomputed and written UNCONDITIONALLY
+    // above — whichever gate this decision happens to satisfy can be the
+    // LAST one a mode requires, flipping the workflow to "approved" right
+    // here, as a side effect of THIS decision, with no separate call to
+    // approveOrDeprecateWorkflow ever happening.
+    if (approval !== workflow.approval && approval === "approved") {
+      await recordEvent(store, { type: "workflow.approved", workflowId: versionSubject.workflowId, workflowVersion: versionSubject.workflowVersion, summary: `${versionSubject.workflowId}@${versionSubject.workflowVersion} approved` }, () => clock.now());
+    }
     return { kind: "workflow_version", task: updated, workflowId: versionSubject.workflowId, workflowVersion: versionSubject.workflowVersion, gates, approval };
   }
 

@@ -14,6 +14,7 @@ import { approveCommand, correctionCommand, diffCommand, promoteCommand, request
 import { evalCommand } from "./commands/evals.js";
 import { bundleCommand, flagCommand, mcpCommand, serverCommand, workerCommand } from "./commands/process.js";
 import { remoteCommand } from "./commands/remote.js";
+import { remoteRunCommand, remoteRunsCommand, remoteStatusCommand, remoteWhyCommand } from "./commands/remote-observability.js";
 
 export const USAGE = `AART CLI — usage:
   aart run <workflowId> --input <json> [--version <v>]
@@ -44,6 +45,10 @@ export const USAGE = `AART CLI — usage:
   aart remote list
   aart remote remove <name>
   aart push <remote> <workflowId> [--version <v>] [--plan]
+  aart remote-status <workflowId> [--remote <name>]
+  aart remote-why <remote> <workflowId>
+  aart remote-runs <remote> [--status <status>]
+  aart remote-run <remote> <runId> [--format model|markdown]
   aart environment register <name> --trust-mode <dev|governed|strict|production>
   aart environment list
 
@@ -200,6 +205,14 @@ export async function run(argv: readonly string[], options: RunOptions = {}): Pr
         return asOutcome(await remoteCommand(tokens, cli));
       case "push":
         return asOutcome(await pushCommand(tokens, cli));
+      case "remote-status":
+        return asOutcome(await remoteStatusCommand(tokens, cli));
+      case "remote-why":
+        return asOutcome(await remoteWhyCommand(tokens, cli));
+      case "remote-runs":
+        return asOutcome(await remoteRunsCommand(tokens, cli));
+      case "remote-run":
+        return asOutcome(await remoteRunCommand(tokens, cli));
       case "environment":
         return asOutcome(await environmentCommand(tokens, cli));
       case "approve":
@@ -214,6 +227,22 @@ export async function run(argv: readonly string[], options: RunOptions = {}): Pr
         return asOutcome(await serverCommand(tokens, cli, { blocking: options.blocking }));
       case "mcp":
         return asOutcome(await mcpCommand(tokens, cli, { blocking: options.blocking }));
+      // AMENDMENTS.md A63 FIX 7 (optional/low-priority, tester UX) — `--help`/
+      // `-h`/`help` used to fall through to `default:` below, so `aart --help`
+      // printed the correct USAGE block (still embedded in the JSON `usage`
+      // field) wrapped in a false `{"ok":false,"error":"Unknown command
+      // \"--help\"."}` envelope, exit code 1 — misleading (not actually an
+      // unknown command) and a footgun for any script that checks the exit
+      // code. `bin.ts` (the real `aart` entry point) intercepts these three
+      // BEFORE ever calling this function, printing USAGE as plain stdout text
+      // with exit 0 (mirroring its own pre-existing zero-arg special case) —
+      // this case exists for defense in depth, so a caller of `run()` directly
+      // (this package's own tests, or any other embedder) gets a
+      // non-misleading `{ok:true}` outcome too, not just the real CLI binary.
+      case "--help":
+      case "-h":
+      case "help":
+        return asOutcome({ ok: true, usage: USAGE });
       case undefined:
         return asOutcome({ ok: false, error: "No command given.", usage: USAGE });
       default:

@@ -80,7 +80,7 @@ import { computeEvalsGateStatus, createReportRenderers, recordCorrection as evid
 import { computePackContentHash, findBlocks, type BlockCatalogEntry } from "@aart/registry";
 import { produceBundle as produceRealBundle, type Bundle } from "@aart/server";
 import { createLlmPack, type CreateLlmPackOptions } from "@aart/llm";
-import type { AartStore } from "@aart/store";
+import { recordRunTerminalEvent, type AartStore } from "@aart/store";
 import type { BlockImplementation, Deployment, Signal, TrustMode, Workflow } from "@aart/types";
 import type { BundleLike, BundlerPort, EnginePort, EvidencePort, GovernancePort, RegistryPort, RemotesPort, ResumeOutcome } from "./types.js";
 import { newId } from "./stubs/engine.js";
@@ -260,7 +260,29 @@ export function createComputePackHashes() {
 // The real Engine instance + its EnginePort adapter for @aart/mcp/@aart/cli.
 // ---------------------------------------------------------------------------
 
-/** @param trustMode Threaded straight into `createGetGrantedCapabilities` — see that function's doc comment for why this is a required, explicit parameter rather than a silently-defaulted one (AMENDMENTS.md, S15). */
+/**
+ * @param trustMode Threaded straight into `createGetGrantedCapabilities` — see that function's doc comment for why this is a required, explicit parameter rather than a silently-defaulted one (AMENDMENTS.md, S15).
+ *
+ * `onRunTerminal` (AMENDMENTS.md A61, V1 event log foundation, RISK 1):
+ * this is ONE of exactly two real `createEngine(...)` composition roots in
+ * this workspace (the other: `packages/familiarity-evals/src/
+ * real-checks.ts`'s `createRealRunSuccessFn`, verified directly by
+ * grepping every `createEngine(` call site) — CLI (`aart run`/`aart
+ * server`/`aart worker`), the MCP tool server, the real `@aart/server` HTTP
+ * server's trigger-fired runs, and the worker's claimed-run execution all
+ * share this SAME `Engine` instance (`createRealAartContextWithEngine` ->
+ * `createRealServerPort` -> `createRealEngineBoundary`, cli-context.ts/
+ * real-server-port.ts — a missed hook here would silently drop
+ * run.completed/failed/cancelled events for every one of those real entry
+ * points at once, the exact failure shape A48/A53/A57/A58 each hit before).
+ * `recordRunTerminalEvent` runs FIRST (not
+ * `onRunTerminal: (runId) => closeBrowserSession(runId)`'s original single
+ * line) so a `closeBrowserSession` failure — already caught and swallowed
+ * by `run-lifecycle.ts`'s own `runOnRunTerminal` wrapper regardless of
+ * ordering — can never suppress the event write by throwing before it runs;
+ * `recordRunTerminalEvent` itself never throws (its own internal
+ * try/catch), so this ordering costs `closeBrowserSession` nothing.
+ */
 export function createRealEngine(store: AartStore, blocks: BlockRegistry, trustMode: TrustMode): Engine {
   return createEngine({
     store,
@@ -269,7 +291,10 @@ export function createRealEngine(store: AartStore, blocks: BlockRegistry, trustM
     getGrantedCapabilities: createGetGrantedCapabilities(store, blocks, trustMode),
     blocks,
     computePackHashes: createComputePackHashes(),
-    onRunTerminal: (runId) => closeBrowserSession(runId),
+    onRunTerminal: async (runId) => {
+      await recordRunTerminalEvent(store, runId);
+      await closeBrowserSession(runId);
+    },
   });
 }
 

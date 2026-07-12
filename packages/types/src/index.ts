@@ -16,6 +16,7 @@ export * from "./run.js";
 export * from "./eval.js";
 export * from "./report.js";
 export * from "./store-records.js";
+export * from "./event-log.js";
 export * from "./errors.js";
 export * from "./json-schema.js";
 export * from "./dry-run.js";

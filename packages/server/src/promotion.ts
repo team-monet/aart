@@ -26,7 +26,7 @@
 // never a name or a computed-at timestamp — a `PromotionRecord` is
 // deliberately ephemeral, computed fresh on every call per governance's own
 // design, never independently persisted).
-import type { AartStore } from "@aart/store";
+import { recordEvent, type AartStore } from "@aart/store";
 import {
   computeApprovalState,
   computePromotionState,
@@ -153,5 +153,21 @@ export async function promoteWorkflowVersionToEnvironment(store: AartStore, para
         promoted: true,
       };
   await store.deployments.put(deployment);
+  // V1 event log (AMENDMENTS.md A61) — colocated with the write above;
+  // this is the ONLY branch that reaches a `deployments.put` call (both
+  // `not_promoted`/`blocked_by_promotion_block`/`workflow_not_found`/
+  // `environment_not_found` return earlier, before any write).
+  await recordEvent(
+    store,
+    {
+      type: "deployment.promoted",
+      workflowId: params.workflowId,
+      workflowVersion: params.workflowVersion,
+      deploymentId: deployment.id,
+      environmentId: params.environmentId,
+      summary: `${params.workflowId}@${params.workflowVersion} promoted to environment ${params.environmentId}`,
+    },
+    () => clock.now(),
+  );
   return { kind: "promoted", record, deployment };
 }

@@ -426,5 +426,14 @@ describe("mid-step worker-kill (architecture §4.7 reliability BLOCKER fix) — 
     expect(run?.flag?.kind).toBe("reclaim_exhausted");
     // No longer claimable at all — a human must clear the flag (architecture §6.2/§13.3).
     await expect(fx.store.jobQueue.get("run_forever_stuck")).resolves.toBeUndefined();
+
+    // V1 event log foundation (AMENDMENTS.md A61, RISK 1 point 3) — the
+    // 4th of this session's four real "a run reaches a terminal status"
+    // entry points (CLI aart run / MCP aart_run_workflow / trigger-fired
+    // via server all share @aart/engine's onRunTerminal hook; this one
+    // does NOT — runReclaimSweep writes store.runs.put directly, bypassing
+    // the engine entirely, so it needs its own explicit run.failed write).
+    const events = await fx.store.events.list();
+    expect(events).toContainEqual(expect.objectContaining({ type: "run.failed", workflowId: "wf", workflowVersion: "1", runId: "run_forever_stuck" }));
   }, 15000);
 });
