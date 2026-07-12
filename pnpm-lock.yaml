@@ -368,6 +368,9 @@ importers:
       '@aart/registry':
         specifier: workspace:*
         version: link:../registry
+      '@aart/server':
+        specifier: workspace:*
+        version: link:../server
       '@aart/store':
         specifier: workspace:*
         version: link:../store

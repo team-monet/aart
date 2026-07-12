@@ -38,26 +38,36 @@ import {
   type SchemaRegistryEntry,
   type Workflow,
 } from "@aart/types";
+import { normalizeEnvironmentTrustMode } from "@aart/governance";
 import { systemClock, type Clock } from "../clock.js";
 import { BundleManifestSchema, computeBundleHash, sanitizeFilename, type Bundle } from "./bundle.js";
 
 const TriggerConfigSchema = z.record(z.string(), z.unknown());
 
 /**
- * Every hydration-created `Deployment` lands under this one synthetic
- * `Environment`. A bundle's own manifest doesn't record which named
- * environment (if any) it was produced for — `BundleManifest` has no such
- * field, and `--environment` at PRODUCE time only selects which real
- * `Deployment`'s `triggerConfig` gets embedded into `triggers.json`
- * (bundle.ts's `resolveDeployment`-equivalent bridge lives in
- * `@aart/cli`'s `real-server-port.ts`, one layer up) — so there is no real
- * environment NAME to hydrate into here. This one stable, deterministic id
- * is created (idempotently — `put` is an upsert) the first time any bundle
- * is hydrated into a store, and reused by every later hydration into that
- * same store, rather than minting a fresh orphaned `Environment` row each
- * time.
+ * Every hydration-created `Deployment` for a bundle with NO
+ * `manifest.targetEnvironment` (every bundle produced before D1 "remotes +
+ * push", AMENDMENTS.md A56, plus any produced today without `--environment`)
+ * lands under this one synthetic `Environment` — the pre-D1, and still
+ * fully-supported, fallback. This one stable, deterministic id is created
+ * (idempotently — `put` is an upsert) the first time any such bundle is
+ * hydrated into a store, and reused by every later hydration into that same
+ * store, rather than minting a fresh orphaned `Environment` row each time.
+ *
+ * A bundle whose manifest DOES carry `targetEnvironment` (bundle.ts's own
+ * doc comment on that field) never touches this constant at all —
+ * `resolveHydrationTarget` below resolves it against a REAL, already-
+ * registered `Environment` instead, and `hydrateBundle` never auto-vivifies
+ * one (unlike this synthetic fallback, which is deliberately auto-created —
+ * see that function's own doc comment for why the two cases differ).
+ *
+ * Exported (not module-private) so `plan.ts`'s dry-run preview — same
+ * directory, D1 "remotes + push" — can compute a plan against the exact
+ * SAME fallback environment a real `hydrateBundle` call would use for an
+ * envelope with no `targetEnvironment`, rather than a second, potentially-
+ * drifting definition of "what does the legacy fallback look like."
  */
-const BUNDLE_ENVIRONMENT: Environment = { id: "env_bundle", name: "bundle", config: {} };
+export const BUNDLE_ENVIRONMENT: Environment = { id: "env_bundle", name: "bundle", config: {} };
 
 /**
  * Deterministic — deliberately NOT `generateId()` (server/src/ids.ts's
@@ -72,23 +82,133 @@ const BUNDLE_ENVIRONMENT: Environment = { id: "env_bundle", name: "bundle", conf
  * and namespace-distinct from every real deploy-time `Deployment` id — never
  * collides, and self-documents in a `GET /deployments` listing which rows
  * came from a hydrated bundle versus a real `aart deploy`.
+ *
+ * Legacy/fallback form — the synthetic `env_bundle` environment only (no
+ * environment suffix). See `bundleDeploymentIdForEnvironment` below for the
+ * D1 env-scoped form used whenever a bundle names a real
+ * `targetEnvironment`; the two are deliberately DIFFERENT key shapes so a
+ * bundle hydrated once under the legacy fallback and later re-hydrated with
+ * a real named environment lands as an independent new row rather than
+ * colliding with (or being mistaken for a redeploy of) the fallback one.
  */
 function bundleDeploymentId(workflowId: string, workflowVersion: string): string {
   return `bundle:${workflowId}@${workflowVersion}`;
 }
 
-async function readJsonFile(filePath: string, label: string): Promise<unknown> {
-  let raw: string;
-  try {
-    raw = await fs.readFile(filePath, "utf8");
-  } catch (err) {
-    throw new Error(`Bundle load: cannot read ${label} (${filePath}): ${err instanceof Error ? err.message : String(err)}`);
+/**
+ * D1 "remotes + push" (AMENDMENTS.md A56) — env-scoped form, keyed by the
+ * REAL target environment's resolved id (never its name — ids are stable
+ * under a rename, names aren't). The SAME workflow@version hydrated into
+ * two DIFFERENT real environments is, by this key shape, always two
+ * independent rows — never a conflict, matching the design memo's explicit
+ * "this is by design" framing (each environment's own `Deployment` most
+ * recently promoted into it typically carries a different `triggerConfig`,
+ * hence a different `bundleHash`, but even a coincidental match is fine:
+ * they're different rows regardless, keyed by environment).
+ */
+function bundleDeploymentIdForEnvironment(workflowId: string, workflowVersion: string, environmentId: string): string {
+  return `bundle:${workflowId}@${workflowVersion}:${environmentId}`;
+}
+
+export interface HydrationTarget {
+  /** The REAL, already-registered Environment this bundle names — never auto-vivified (see `resolveHydrationTarget`'s own doc comment). */
+  environment: Environment;
+  /** `true` iff this environment's own trust mode is `"dev"` — dev has no required gates (governance's `REQUIRED_GATES_BY_MODE.dev`, an empty array) and is meant for throwaway iteration, so a bundle ingested straight into one is immediately live, matching a human just running `aart deploy` there directly. Any OTHER trust mode leaves the resulting `Deployment.promoted` explicitly `false` — hydration recorded the evidence (defs are now in the store) but a separate promotion step (`aart promote`/`POST /workflows/:id/promote`) is still what flips a real trigger live. */
+  promoted: boolean;
+}
+
+/**
+ * Resolves `bundle.manifest.targetEnvironment` (if present) to the REAL
+ * `Environment` it names — `undefined` when the manifest carries no such
+ * field at all (the legacy/fallback case; `hydrateBundle` falls back to
+ * `BUNDLE_ENVIRONMENT` in that case, exactly as it always has).
+ *
+ * Deliberately fail-loud, NOT auto-vivifying, when a NAME is given but
+ * doesn't resolve — matching `real-server-port.ts`'s `resolveDeployment`/
+ * `resolveEnvironmentId` established discipline for the identical class of
+ * mistake (an operator typo, or a bundle produced against a different
+ * store's environment set than the one it's being hydrated into) elsewhere
+ * in this codebase: a missing environment should fail the whole hydration
+ * loudly, with an actionable remedy, never silently create a placeholder a
+ * human never asked for and might not notice.
+ *
+ * Exported so `plan.ts`'s dry-run preview (same directory, D1 "remotes +
+ * push") resolves a bundle's target through the IDENTICAL logic
+ * `hydrateBundle` itself uses — a plan that resolved differently from what
+ * a real ingest would do defeats the entire point of a preview.
+ */
+export async function resolveHydrationTarget(store: AartStore, targetEnvironmentName: string | undefined): Promise<HydrationTarget | undefined> {
+  if (!targetEnvironmentName) return undefined;
+  const environment = await store.environments.getByName(targetEnvironmentName);
+  if (!environment) {
+    throw new Error(
+      `Bundle load: target environment "${targetEnvironmentName}" is not registered on this store. ` +
+        `Register it first — "aart environment register ${targetEnvironmentName} --trust-mode <dev|governed|strict|production>" (CLI), ` +
+        `or POST /environments (HTTP) — then retry.`,
+    );
   }
-  try {
-    return JSON.parse(raw);
-  } catch (err) {
-    throw new Error(`Bundle load: ${label} (${filePath}) is not valid JSON: ${err instanceof Error ? err.message : String(err)}`);
-  }
+  const trustMode = normalizeEnvironmentTrustMode(environment.config["trustMode"]);
+  return { environment, promoted: trustMode === "dev" };
+}
+
+/**
+ * D1 "remotes + push" (AMENDMENTS.md A56) — the one abstraction
+ * `readBundleFromDisk` (a real directory on disk) and `readBundleFromEnvelope`
+ * (an in-memory `{files: Record<relPath, string>}` map — `POST
+ * /bundles/ingest`'s own envelope shape, exactly `bundleToBundleLike`'s
+ * `{manifest, files}` — `@aart/cli`'s `real-server-port.ts`) both implement,
+ * so `readBundleFromSource` below runs the IDENTICAL parsing / hash-
+ * verification / schema-validation pipeline over either — same failure
+ * modes, same error message shapes, one implementation maintained once, not
+ * two independently-drifting copies. `relPath` is always the bundle-
+ * relative, forward-slash path `writeBundleToDisk`/`bundleToBundleLike` both
+ * use (e.g. `"manifest.json"`, `"definitions/wf@1.json"`,
+ * `"registry/prompts/p@1.json"`) — never an absolute filesystem path, so
+ * both implementations key off exactly the same strings.
+ */
+interface BundleSource {
+  /** Reads and JSON.parses the file at bundle-relative `relPath`. Throws `Bundle load: cannot read ${label} (...): ...` on a missing/unreadable entry, or `Bundle load: ${label} (...) is not valid JSON: ...` on unparseable content — the same two failure shapes regardless of which source implementation is doing the reading. */
+  readJson(relPath: string, label: string): Promise<unknown>;
+  /** How this source describes itself in an error message that names the WHOLE bundle, not one file within it (e.g. the bundleHash-mismatch / schemaVersion messages below) — a directory path for disk, a fixed label for an envelope (which has no path of its own). */
+  describe(): string;
+}
+
+function diskSource(bundleDir: string): BundleSource {
+  return {
+    async readJson(relPath, label) {
+      const filePath = join(bundleDir, ...relPath.split("/"));
+      let raw: string;
+      try {
+        raw = await fs.readFile(filePath, "utf8");
+      } catch (err) {
+        throw new Error(`Bundle load: cannot read ${label} (${filePath}): ${err instanceof Error ? err.message : String(err)}`);
+      }
+      try {
+        return JSON.parse(raw);
+      } catch (err) {
+        throw new Error(`Bundle load: ${label} (${filePath}) is not valid JSON: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    },
+    describe: () => bundleDir,
+  };
+}
+
+/** `files` is exactly `bundleToBundleLike`'s (`@aart/cli`'s `real-server-port.ts`) / the `POST /bundles/ingest` envelope's `files: Record<relPath, string>` map — every value is the file's raw text content (not pre-parsed), matching `writeBundleFilesToDisk`'s (`packages/cli/src/bundle-files.ts`) own documented shape one layer up. */
+function envelopeSource(files: Readonly<Record<string, string>>): BundleSource {
+  return {
+    async readJson(relPath, label) {
+      const raw = files[relPath];
+      if (raw === undefined) {
+        throw new Error(`Bundle load: cannot read ${label} (${relPath}): missing from the bundle envelope.`);
+      }
+      try {
+        return JSON.parse(raw);
+      } catch (err) {
+        throw new Error(`Bundle load: ${label} (${relPath}) is not valid JSON: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    },
+    describe: () => "<bundle envelope>",
+  };
 }
 
 interface RawEntry {
@@ -97,12 +217,12 @@ interface RawEntry {
   raw: unknown;
 }
 
-/** Reads one raw (not yet Zod-validated) JSON file per `key`, at the exact path `writeBundleToDisk` would have written it to (same `sanitizeFilename`, bundle.ts). Fails fast (throws immediately) on a missing file or invalid JSON — unlike the schema-validation pass below, there's no useful "aggregate every missing file" story: a directory that doesn't match its own manifest is a structural problem, not a per-definition content problem. */
-async function readRawEntries(bundleDir: string, subpath: string, keys: readonly string[], label: string): Promise<RawEntry[]> {
+/** Reads one raw (not yet Zod-validated) JSON file per `key`, at the exact bundle-relative path `writeBundleToDisk`/`bundleToBundleLike` would have written/keyed it under (same `sanitizeFilename`, bundle.ts). Fails fast (throws immediately) on a missing entry or invalid JSON — unlike the schema-validation pass below, there's no useful "aggregate every missing file" story: a bundle that doesn't match its own manifest is a structural problem, not a per-definition content problem. */
+async function readRawEntries(source: BundleSource, subpath: string, keys: readonly string[], label: string): Promise<RawEntry[]> {
   const out: RawEntry[] = [];
   for (const key of keys) {
-    const filePath = join(bundleDir, subpath, `${sanitizeFilename(key)}.json`);
-    out.push({ key, filePath, raw: await readJsonFile(filePath, label) });
+    const relPath = `${subpath}/${sanitizeFilename(key)}.json`;
+    out.push({ key, filePath: relPath, raw: await source.readJson(relPath, label) });
   }
   return out;
 }
@@ -136,57 +256,62 @@ function validateRegistryEntries<T extends { name: string; version: string; cont
 }
 
 /**
- * Reads a bundle directory (architecture §0.3's layout) off disk into an
+ * Reads a bundle (architecture §0.3's layout) from `source` into an
  * in-memory `Bundle`, as strict as `produceBundle`'s own output: verifies
  * `bundleHash` (see this module's header for why that runs first) then
  * validates every workflow/pack/prompt/schema definition against the REAL
  * `@aart/types` Zod schemas, aggregating every failure into one error
  * rather than stopping at the first — a bundle with several bad files
  * should report all of them in one pass. Throws — never returns a
- * partially-valid `Bundle` — on any of: a missing/unreadable file, invalid
+ * partially-valid `Bundle` — on any of: a missing/unreadable entry, invalid
  * JSON, a manifest/definition that fails its Zod schema, a definition's own
  * identity (id/version, or name/version/contentHash for packs/prompts/
  * schemas) not matching its manifest entry, or a bundleHash mismatch.
+ *
+ * D1 "remotes + push" (AMENDMENTS.md A56) — the shared core both
+ * `readBundleFromDisk` and `readBundleFromEnvelope` below call; see
+ * `BundleSource`'s own doc comment for why this exists as one function over
+ * an abstraction rather than two independently-maintained copies.
  */
-export async function readBundleFromDisk(bundleDir: string): Promise<Bundle> {
-  const manifestRaw = await readJsonFile(join(bundleDir, "manifest.json"), "manifest.json");
+async function readBundleFromSource(source: BundleSource): Promise<Bundle> {
+  const manifestRaw = await source.readJson("manifest.json", "manifest.json");
   const manifestParsed = BundleManifestSchema.safeParse(manifestRaw);
   if (!manifestParsed.success) {
-    throw new Error(`Bundle load: manifest.json (${bundleDir}) failed schema validation:\n${manifestParsed.error.message}`);
+    throw new Error(`Bundle load: manifest.json (${source.describe()}) failed schema validation:\n${manifestParsed.error.message}`);
   }
   const manifest = manifestParsed.data;
   if (manifest.schemaVersion !== 1) {
-    throw new Error(`Bundle load: manifest.json (${bundleDir}) declares schemaVersion ${manifest.schemaVersion as number} — this build only understands schemaVersion 1. Refusing to load.`);
+    throw new Error(`Bundle load: manifest.json (${source.describe()}) declares schemaVersion ${manifest.schemaVersion as number} — this build only understands schemaVersion 1. Refusing to load.`);
   }
 
-  const triggersRaw = await readJsonFile(join(bundleDir, "triggers.json"), "triggers.json");
+  const triggersRaw = await source.readJson("triggers.json", "triggers.json");
   const triggersParsed = TriggerConfigSchema.safeParse(triggersRaw);
   if (!triggersParsed.success) {
-    throw new Error(`Bundle load: triggers.json (${bundleDir}) must be a JSON object (produceBundle always writes one, even when empty: "{}"). ${triggersParsed.error.message}`);
+    throw new Error(`Bundle load: triggers.json (${source.describe()}) must be a JSON object (produceBundle always writes one, even when empty: "{}"). ${triggersParsed.error.message}`);
   }
   const triggers = triggersParsed.data;
 
   const rawWorkflows = await readRawEntries(
-    bundleDir,
+    source,
     "definitions",
     manifest.workflows.map((w) => `${w.workflowId}@${w.version}`),
     "workflow definition",
   );
   const rawPacks = await readRawEntries(
-    bundleDir,
+    source,
     "packs",
     manifest.packs.map((p) => `${p.name}@${p.version}`),
     "pack manifest",
   );
   const rawPrompts = await readRawEntries(
-    bundleDir,
-    join("registry", "prompts"),
+    source,
+    "registry/prompts",
     manifest.prompts.map((p) => `${p.name}@${p.version}`),
     "prompt registry entry",
   );
   const rawSchemas = await readRawEntries(
-    bundleDir,
-    join("registry", "schemas"),
+    source,
+    "registry/schemas",
     manifest.schemas.map((s) => `${s.name}@${s.version}`),
     "schema registry entry",
   );
@@ -207,9 +332,9 @@ export async function readBundleFromDisk(bundleDir: string): Promise<Bundle> {
   });
   if (recomputedHash !== bundleHash) {
     throw new Error(
-      `Bundle load: bundleHash mismatch for "${manifest.workflowId}@${manifest.workflowVersion}" (${bundleDir}) — ` +
-        `manifest.json claims ${bundleHash}, recomputed ${recomputedHash} from the bundle's actual on-disk contents. ` +
-        `This bundle directory has been modified or corrupted since it was produced — refusing to load it.`,
+      `Bundle load: bundleHash mismatch for "${manifest.workflowId}@${manifest.workflowVersion}" (${source.describe()}) — ` +
+        `manifest.json claims ${bundleHash}, recomputed ${recomputedHash} from the bundle's actual contents. ` +
+        `This bundle has been modified or corrupted since it was produced — refusing to load it.`,
     );
   }
 
@@ -237,10 +362,30 @@ export async function readBundleFromDisk(bundleDir: string): Promise<Bundle> {
   const schemas = validateRegistryEntries<SchemaRegistryEntry>(rawSchemas, manifest.schemas, SchemaRegistryEntrySchema, errors);
 
   if (errors.length > 0) {
-    throw new Error(`Bundle load: ${errors.length} definition(s) in ${bundleDir} failed validation:\n${errors.join("\n")}`);
+    throw new Error(`Bundle load: ${errors.length} definition(s) in ${source.describe()} failed validation:\n${errors.join("\n")}`);
   }
 
   return { manifest, definitions, packs, registry: { prompts, schemas }, triggers };
+}
+
+/** Reads a bundle directory (architecture §0.3's layout) off disk into an in-memory `Bundle` — see `readBundleFromSource`'s own doc comment for the full validation contract this delegates to. */
+export async function readBundleFromDisk(bundleDir: string): Promise<Bundle> {
+  return readBundleFromSource(diskSource(bundleDir));
+}
+
+/**
+ * D1 "remotes + push" (AMENDMENTS.md A56) — reads a bundle from an in-memory
+ * envelope (`POST /bundles/ingest`/`POST /bundles/plan`'s own request body
+ * shape: `{ files: Record<relPath, string> }`, exactly what
+ * `bundleToBundleLike` (`@aart/cli`'s `real-server-port.ts`) already builds
+ * client-side — see D-1 of the design memo) into an in-memory `Bundle`.
+ * Mirrors EVERY `readBundleFromDisk` failure mode with the identical error
+ * shape (missing file, invalid JSON, hash mismatch, schema failure) — see
+ * `readBundleFromSource`'s own doc comment for why this is the same
+ * function under the hood, not a re-derived parallel implementation.
+ */
+export async function readBundleFromEnvelope(files: Readonly<Record<string, string>>): Promise<Bundle> {
+  return readBundleFromSource(envelopeSource(files));
 }
 
 /**
@@ -284,15 +429,19 @@ export type HydrateBundleResult =
  * prompt/schema already in `store` is left exactly as it was.
  *
  * Idempotent by design, keyed on the bundle's ROOT `workflowId@workflowVersion`
- * (`bundle.manifest.workflowId`/`.workflowVersion` — not every nested
- * workflow the closure carries): hydrating the exact same bundle (same
- * bundleHash) twice into the same store is a safe no-op the second time
- * (`kind: "already_hydrated"`), matching a redeploy of an unchanged
- * artifact. Hydrating a DIFFERENT bundle for the SAME workflow@version
- * throws rather than silently overwriting — two different sealed artifacts
- * claiming the same identity is a real conflict for a human to resolve
- * (redeploy under a fresh `--root` store, or confirm which one is actually
- * meant to win), not something safe to paper over.
+ * **plus the resolved target environment, when one is named** (D1 "remotes +
+ * push", AMENDMENTS.md A56 — `resolveHydrationTarget` above; not every
+ * nested workflow the closure carries): hydrating the exact same bundle
+ * (same bundleHash) twice into the same store+environment is a safe no-op
+ * the second time (`kind: "already_hydrated"`), matching a redeploy of an
+ * unchanged artifact. Hydrating a DIFFERENT bundle for the SAME
+ * workflow@version+environment throws rather than silently overwriting —
+ * two different sealed artifacts claiming the same identity is a real
+ * conflict for a human to resolve (redeploy under a fresh `--root` store, or
+ * confirm which one is actually meant to win), not something safe to paper
+ * over. The SAME workflow@version hydrated into a DIFFERENT environment is,
+ * by design, always an independent new row — see
+ * `bundleDeploymentIdForEnvironment`'s own doc comment.
  *
  * Governance is deliberately NOT re-run here: a bundle is produced from an
  * already-approved+deployed store state (bundle.ts's own header comment),
@@ -300,18 +449,23 @@ export type HydrateBundleResult =
  * `promotionBlocked` fields land exactly as bundled, verbatim — sealing the
  * bundle IS the governance decision; loading it is not a second one.
  *
- * All writes (workflows, packs, prompts, schemas, the synthetic environment
- * + deployment marker) land inside one `store.transact()` call — either the
- * whole hydration commits or none of it does, so a mid-hydration failure
- * (disk full, process killed) can never leave the idempotency marker
- * written without the definitions it's supposed to vouch for, or vice
- * versa.
+ * All writes (workflows, packs, prompts, schemas, the environment marker —
+ * only for the legacy fallback, never for a real named target — + deployment
+ * marker) land inside one `store.transact()` call — either the whole
+ * hydration commits or none of it does, so a mid-hydration failure (disk
+ * full, process killed) can never leave the idempotency marker written
+ * without the definitions it's supposed to vouch for, or vice versa.
  */
 export async function hydrateBundle(store: AartStore, bundle: Bundle, clock: Clock = systemClock): Promise<HydrateBundleResult> {
   verifyBundleHash(bundle);
 
-  const { workflowId, workflowVersion, bundleHash } = bundle.manifest;
-  const deploymentId = bundleDeploymentId(workflowId, workflowVersion);
+  const { workflowId, workflowVersion, bundleHash, targetEnvironment: targetEnvironmentName } = bundle.manifest;
+  // Resolved BEFORE anything else — fail loud on an unregistered named
+  // target before touching the store at all (resolveHydrationTarget's own
+  // doc comment on why this never auto-vivifies, unlike the legacy
+  // BUNDLE_ENVIRONMENT fallback below).
+  const target = await resolveHydrationTarget(store, targetEnvironmentName);
+  const deploymentId = target ? bundleDeploymentIdForEnvironment(workflowId, workflowVersion, target.environment.id) : bundleDeploymentId(workflowId, workflowVersion);
   const existing = await store.deployments.get(deploymentId);
 
   if (existing?.bundleHash === bundleHash) {
@@ -330,10 +484,16 @@ export async function hydrateBundle(store: AartStore, bundle: Bundle, clock: Clo
     id: deploymentId,
     workflowId,
     workflowVersion,
-    environmentId: BUNDLE_ENVIRONMENT.id,
+    environmentId: target ? target.environment.id : BUNDLE_ENVIRONMENT.id,
     triggerConfig,
     bundleHash,
     createdAt: clock.nowIso(),
+    // Legacy fallback path: `promoted` is left OFF the object entirely
+    // (undefined = active, today's implicit behavior, byte-identical to
+    // every pre-D1 hydration — see Deployment.promoted's own doc comment,
+    // store-records.ts). Real-target path: always explicitly stamped, per
+    // `resolveHydrationTarget`'s dev-trust-mode rule.
+    ...(target ? { promoted: target.promoted } : {}),
   };
 
   await store.transact(async (tx) => {
@@ -341,7 +501,13 @@ export async function hydrateBundle(store: AartStore, bundle: Bundle, clock: Clo
     for (const pack of Object.values(bundle.packs)) await tx.packManifests.put(pack);
     for (const prompt of Object.values(bundle.registry.prompts)) await tx.promptRegistry.put(prompt);
     for (const schema of Object.values(bundle.registry.schemas)) await tx.schemaRegistry.put(schema);
-    await tx.environments.put(BUNDLE_ENVIRONMENT);
+    // Only the legacy fallback auto-vivifies its own Environment row — a
+    // real named target was already proven to exist by
+    // resolveHydrationTarget above, and must never be silently re-written
+    // here (no auto-vivification for the real path, by design).
+    if (!target) {
+      await tx.environments.put(BUNDLE_ENVIRONMENT);
+    }
     await tx.deployments.put(deployment);
   });
 

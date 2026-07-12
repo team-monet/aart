@@ -11,7 +11,9 @@
 // (createFakeApiClient reading the same store, standing in for a live S2
 // process this worktree doesn't have).
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { createFakeApiClient } from "./api-client.js";
+import { createFakeEngine, startServer as startRealServer, type ServerHandle } from "@aart/server";
+import { createFakeApiClient, createHttpApiClient } from "./api-client.js";
+import { createFakeClock } from "./clock.js";
 import { startDashboard, type DashboardHandle } from "./server.js";
 import { createTestFixture, makeCorrection, makeEnvironment, makeRun, makeWorkflow, type TestFixture } from "./test-support/fixtures.js";
 import fs from "node:fs/promises";
@@ -704,5 +706,77 @@ describe("dashboard HTTP server — JSON REST API & SPA fallback routing", () =>
         expect(res.status).toBe(409);
       });
     });
+  });
+});
+
+// D1 fix pass (AMENDMENTS.md A58) — the tester's exact repro: promote a
+// workflow via the dashboard's own /api/workflows/:id/promote route when
+// the dashboard's ApiClient has NO deploy token, against a real aart server
+// that DOES have AART_DEPLOY_TOKEN configured — the upstream 401 used to
+// collapse into an HTML "500 Internal Server Error" page (Router.handle's
+// old generic catch, http/router.ts) instead of surfacing the real status,
+// and a JSON-only frontend was handed an HTML body it couldn't parse. Real
+// token-gated @aart/server + real startDashboard (NOT createFakeApiClient,
+// unlike every other describe block above in this file) — this is the one
+// scenario in this file that needs a genuine upstream HTTP hop with a real
+// non-2xx response for the error-mapping bug to even be reachable:
+// createFakeApiClient's writes call straight into @aart/server's own
+// functions in-process and never go through fetch()/HttpError at all (see
+// api-client.ts's own header comment on the two ApiClient implementations).
+describe("dashboard HTTP server — /api/* error mapping preserves upstream status (D1 fix pass, AMENDMENTS.md A58)", () => {
+  let serverHandle: ServerHandle | undefined;
+  let dashboardHandle: DashboardHandle | undefined;
+  let cleanupStore: (() => Promise<void>) | undefined;
+
+  afterEach(async () => {
+    await dashboardHandle?.close();
+    dashboardHandle = undefined;
+    await serverHandle?.close();
+    serverHandle = undefined;
+    await cleanupStore?.();
+    cleanupStore = undefined;
+  });
+
+  it("promote via the dashboard's own /api/workflows/:id/promote, against a token-gated real server with NO token configured on the dashboard's client, returns 401 JSON (not 500 HTML) — and the dashboard stays up for the next request", async () => {
+    const { store, cleanup } = await createTestFixture();
+    cleanupStore = cleanup;
+    await store.workflows.put(makeWorkflow({ id: "wf-promote-401", version: "1.0.0", approval: "approved" }));
+    await store.environments.put({ id: "env-promote-401", name: "gated", config: { trustMode: "dev" } });
+
+    const clock = createFakeClock();
+    const engine = createFakeEngine(store, { ...clock, setTimeout: () => ({ cancel() {} }) });
+    serverHandle = await startRealServer({
+      store,
+      engine,
+      clock: { ...clock, setTimeout: () => ({ cancel() {} }) },
+      port: 0,
+      runTicker: false,
+      deployToken: "server-side-secret-token", // configured server-side -> promote is conditionally gated (requireDeployTokenIfConfigured, @aart/server's http/server.ts)
+    });
+    const serverBaseUrl = `http://127.0.0.1:${serverHandle.port}`;
+
+    // The dashboard's OWN client is deliberately given NO token — exactly
+    // the tester's own repro ("promote via dashboard without token").
+    dashboardHandle = await startDashboard({ api: createHttpApiClient(serverBaseUrl), port: 0 });
+    const dashboardBaseUrl = `http://127.0.0.1:${dashboardHandle.port}`;
+
+    const res = await fetch(`${dashboardBaseUrl}/api/workflows/wf-promote-401/promote`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ version: "1.0.0", environmentId: "env-promote-401" }),
+    });
+
+    expect(res.status).toBe(401); // the REAL upstream status, not a collapsed 500
+    expect(res.headers.get("content-type")).toContain("application/json"); // never text/html — the pre-fix bug's own symptom
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toMatch(/401/); // the upstream's own differentiated remedy text, carried through verbatim, not swallowed
+
+    // "the dashboard stays up" — the tester's own explicit acceptance bar:
+    // a follow-up request through the SAME dashboard process still
+    // succeeds, proving the 401 didn't crash the process or leave the
+    // router/server in a broken state.
+    const health = await fetch(`${dashboardBaseUrl}/api/health`);
+    expect(health.status).toBe(200);
+    expect(await health.json()).toEqual({ status: "ok" });
   });
 });

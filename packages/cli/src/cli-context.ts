@@ -38,13 +38,28 @@ export interface CreateCliContextOptions extends CreateAartContextOptions {
 export interface CliContext {
   aart: AartContext;
   serverPort: ServerPort;
+  /**
+   * D1 "remotes + push" (AMENDMENTS.md A56) — the resolved `.aart` store
+   * root, exposed so CLI-only commands with no MCP-tool counterpart and no
+   * `AartContext` port of their own (`aart remote add/list/remove`,
+   * commands/remote.ts — the same "CRUD surface with nothing to route
+   * through a shared handler" class as `aart trigger add`,
+   * commands/deployment.ts) can find `<root>/remotes.json` without
+   * independently re-deriving the `--root`/`AART_ROOT`/default precedence
+   * `cli.ts`'s own `resolveCliContext` already resolved once to build this
+   * same context. Same value `real-server-port.ts`'s `secretResolver`
+   * fallback already reads from — see this function's own established
+   * `resolvedRoot` computation below (unchanged, just now also returned).
+   */
+  root: string;
 }
 
 export function createCliContext(options: CreateCliContextOptions = {}): CliContext {
+  const resolvedRoot = options.root ?? path.join(process.cwd(), ".aart");
   if (options.real === false) {
     const aart = createAartContext(options);
     const serverPort = createStubServerPort(aart.store);
-    return { aart, serverPort };
+    return { aart, serverPort, root: resolvedRoot };
   }
 
   const { context, engine } = createRealAartContextWithEngine(options);
@@ -64,7 +79,7 @@ export function createCliContext(options: CreateCliContextOptions = {}): CliCont
   }
   // AMENDMENTS.md A45: createRealServerPort's secretResolver (secrets.ts)
   // needs the resolved `.aart` store root for its secrets.json fallback —
-  // recomputed here with the exact same default `createAartContext`/
+  // computed once, above, with the exact same default `createAartContext`/
   // `createRealAartContextWithEngine` themselves use (context.ts:
   // `options.root ?? path.join(process.cwd(), ".aart")`) rather than having
   // either function hand it back out, since `options.store` (a caller-
@@ -75,7 +90,6 @@ export function createCliContext(options: CreateCliContextOptions = {}): CliCont
   // (sqlite at a custom path) still pass the matching `options.root`
   // alongside it (cli.ts's `resolveAartOptions`), so this line and that
   // store construction always agree on the same root.
-  const resolvedRoot = options.root ?? path.join(process.cwd(), ".aart");
   const serverPort = createRealServerPort(context.store, engine, resolvedRoot);
-  return { aart: context, serverPort };
+  return { aart: context, serverPort, root: resolvedRoot };
 }

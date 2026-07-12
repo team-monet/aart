@@ -8,7 +8,11 @@
 # scheduler ticker, etc.).
 #
 # Quick start:
-#   cp .env.example .env              # fill in AART_SECRET_* values
+#   cp .env.example .env              # fill in AART_SECRET_* values, and
+#                                      # AART_DEPLOY_TOKEN if you want to
+#                                      # `aart push`/`aart_deploy` at this
+#                                      # server remotely (D1, AMENDMENTS.md
+#                                      # A56 — see DEPLOY.md's "Deploy token")
 #   docker compose build              # builds the lean (no-browser) image;
 #                                      # see DEPLOY.md for --with-browser
 #   docker compose up -d
@@ -16,8 +20,11 @@
 #   curl http://localhost:8787/health
 #   open http://localhost:4000        # dashboard
 #
-# Store: sqlite (the multi-process-safe choice — see DEPLOY.md's store
-# guidance; fs is single-process-only and would race under server+worker
+# Store: sqlite (the multi-process-safe choice — see DEPLOY.md's "Store
+# choice: fs vs sqlite" section for the precise, post-AMENDMENTS.md-A58
+# statement of what "safe" means here, including the now-coordinated
+# concurrent-first-startup case this exact server+worker topology hits on a
+# fresh volume; fs is single-process-only and would race under server+worker
 # writing concurrently to the same store). One named volume, mounted
 # read-write into all three services, is what makes this "sharing a store
 # volume" — the same store, the same runs/workflows/deployments, seen from
@@ -26,8 +33,15 @@
 # Environment scoping: AART_ENVIRONMENT (server-only; worker/dashboard have
 # no environment-scoping flag of their own — see DEPLOY.md) restricts which
 # deployments' triggers this server activates (`--environment`/
-# AART_ENVIRONMENT, AMENDMENTS.md A45). Set it once you've run `aart deploy
-# <workflowId> --target production` and know that environment's real name.
+# AART_ENVIRONMENT, AMENDMENTS.md A45). Set it once a real named Environment
+# exists on this store — either `aart deploy <workflowId> --target
+# production` (auto-vivifies a minimal one on first deploy), or the more
+# deliberate `aart environment register production --trust-mode <mode>`
+# (ADR-2, D1, AMENDMENTS.md A56 — the one that actually lets you pick a
+# trust mode instead of silently defaulting to `governed`), run against
+# this same store/volume (`docker compose exec server aart environment
+# register ...` — or remotely, `aart push`'s own `POST /environments`, once
+# AART_DEPLOY_TOKEN above is set).
 
 services:
   server:
@@ -46,7 +60,7 @@ services:
       # AART_ENVIRONMENT: production   # uncomment once you have a real named Environment to scope to
       AART_TRUST_MODE: governed # spec §17.2's own local/CI default — explicit here rather than implicit
     env_file:
-      - .env # AART_SECRET_* values (webhook HMAC secrets, etc.) — see DEPLOY.md
+      - .env # AART_SECRET_* values (webhook HMAC secrets, etc.) + AART_DEPLOY_TOKEN (D1 remote push/registration gate, AMENDMENTS.md A56) — see DEPLOY.md
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
       interval: 10s
@@ -68,6 +82,19 @@ services:
       AART_TRUST_MODE: governed
     env_file:
       - .env
+    depends_on:
+      server:
+        condition: service_healthy
+      # AMENDMENTS.md A58: sqlite's concurrent-startup migration race is now
+      # coordinated (packages/store/src/adapters/sqlite/index.ts's
+      # runMigrationsCoordinated) so a genuinely concurrent server+worker
+      # start no longer crashes either process — this dependency isn't load-
+      # bearing for correctness anymore. Kept anyway (mirroring the
+      # `dashboard` service's own existing depends_on below) as the simpler,
+      # deterministic startup order: the server is the one process this
+      # compose file expects to apply this store's schema first in the
+      # common case, so waiting for its healthcheck avoids EVERY process
+      # racing to be first, not just avoiding a crash.
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8787/health"]
       interval: 10s
@@ -97,6 +124,8 @@ services:
       AART_STORE: sqlite
       AART_SERVER_URL: http://server:8080
       AART_WORKER_URLS: http://worker:8787
+    env_file:
+      - .env # AART_DEPLOY_TOKEN (D1 fix pass, AMENDMENTS.md A57) — this dashboard's server-side ApiClient attaches it as a Bearer header on POST /workflows/:id/promote, matching the `server` service's own AART_DEPLOY_TOKEN below (requireDeployTokenIfConfigured, http/server.ts) — without it, promoting a workflow from the dashboard 401s the moment AART_DEPLOY_TOKEN is set on `server`. AART_SECRET_* values are harmless-but-unused here (the dashboard never resolves a secretSource itself) — same file, no separate one needed.
     depends_on:
       server:
         condition: service_healthy
@@ -114,7 +143,10 @@ services:
     # still local mirrors, not yet wired to the real engine/evidence
     # packages. The dashboard has no built-in auth (DEPLOY.md's own "No
     # authentication" note) — scope its network exposure accordingly
-    # regardless of write-completeness.
+    # regardless of write-completeness. AART_DEPLOY_TOKEN (D1 fix pass,
+    # AMENDMENTS.md A57) authenticates only this dashboard's OWN promote
+    # hop to `server` — it does not add login/auth in front of the
+    # dashboard's own UI/API for a browsing operator.
 
 volumes:
   aart-store:

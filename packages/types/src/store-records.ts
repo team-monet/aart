@@ -21,6 +21,25 @@ export const DeploymentSchema = z.object({
   triggerConfig: z.record(z.string(), z.unknown()),
   bundleHash: z.string().optional(),
   createdAt: z.string(),
+  // D1 "remotes + push" (AMENDMENTS.md A56) — NOT the same concept as
+  // @aart/governance's PromotionRecord.promoted (a per-call, never-persisted
+  // ELIGIBILITY computation: "would this workflow version's approval+gates
+  // satisfy this environment"). This field lives on the Deployment ROW
+  // ITSELF and answers a different question: is this specific deployment
+  // ACTIVE (should its trigger — deploymentToBinding, @aart/server's
+  // triggers/registry.ts — actually fire). Optional and additive, purely
+  // for backward compatibility: `undefined` (every Deployment row written
+  // before this field existed) means "active", identical to `true` —
+  // nothing already live goes inactive on upgrade. `false` is the one new,
+  // reachable state: evidence recorded (bundle ingested into a real,
+  // registered Environment) but not yet cleared to receive live traffic —
+  // e.g. a bundle hydrated under a non-"dev"-trust-mode environment via
+  // `POST /bundles/ingest` (packages/server/src/http/*), pending a separate
+  // promotion step. `promoteWorkflowVersionToEnvironment` (server/src/
+  // promotion.ts) always stamps `true` explicitly (a LOCAL promotion is
+  // definitionally live); bundle hydration (server/src/bundle/load.ts)
+  // stamps `resolvedTrustMode === "dev"`.
+  promoted: z.boolean().optional(),
 });
 export type Deployment = z.infer<typeof DeploymentSchema>;
 

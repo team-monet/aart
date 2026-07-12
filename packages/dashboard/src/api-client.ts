@@ -51,6 +51,7 @@ import {
   type RecordCorrectionInput as EvidenceRecordCorrectionInput,
 } from "@aart/evidence";
 import { systemClock } from "./clock.js";
+import { HttpError } from "./http/router.js";
 import { generateId } from "./ids.js";
 import type {
   ApprovalTask,
@@ -160,25 +161,54 @@ export interface ApiClient {
 
 async function getJson<T>(url: string): Promise<T> {
   const res = await fetch(url);
-  if (!res.ok) throw new Error(`GET ${url} -> ${res.status}`);
+  if (!res.ok) throw new HttpError(res.status, `GET ${url} -> ${res.status}`);
   return (await res.json()) as T;
 }
 
-async function postJson<T>(url: string, body: unknown): Promise<{ status: number; body: T }> {
-  const res = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body ?? {}) });
+/** `extraHeaders` (D1 fix pass, AMENDMENTS.md A57) — merged in ON TOP OF the fixed `content-type` header, never replacing it; `undefined`/omitted is byte-identical to this function's pre-A57 behavior. */
+async function postJson<T>(url: string, body: unknown, extraHeaders?: Record<string, string>): Promise<{ status: number; body: T }> {
+  const res = await fetch(url, { method: "POST", headers: { "content-type": "application/json", ...extraHeaders }, body: JSON.stringify(body ?? {}) });
   const parsed = (await res.json()) as T;
   return { status: res.status, body: parsed };
 }
 
-async function postJsonOrThrow<T>(url: string, body: unknown): Promise<T> {
-  const { status, body: parsed } = await postJson<T & { error?: string }>(url, body);
-  if (status < 200 || status >= 300) throw new Error(`POST ${url} -> ${status}${parsed?.error ? `: ${parsed.error}` : ""}`);
+async function postJsonOrThrow<T>(url: string, body: unknown, extraHeaders?: Record<string, string>): Promise<T> {
+  const { status, body: parsed } = await postJson<T & { error?: string }>(url, body, extraHeaders);
+  // AMENDMENTS.md A58 — HttpError, not a bare Error: carries `status`
+  // through so a caller (this package's own Router.handle, http/router.ts)
+  // can preserve the REAL upstream status (a 401 from a token-gated real
+  // aart server, most notably — see promoteWorkflow below) on /api/* routes
+  // instead of every non-2xx response collapsing into a generic HTML 500.
+  if (status < 200 || status >= 300) throw new HttpError(status, `POST ${url} -> ${status}${parsed?.error ? `: ${parsed.error}` : ""}`);
   return parsed;
 }
 
-/** `baseUrl` should point at a live `aart server`'s HTTP API (default port 8080 per S2's `ServerConfig.port` default, documented in SEAMS.md — not hardcoded here, caller supplies it). */
-export function createHttpApiClient(baseUrl: string): ApiClient {
+/**
+ * `baseUrl` should point at a live `aart server`'s HTTP API (default port
+ * 8080 per S2's `ServerConfig.port` default, documented in SEAMS.md — not
+ * hardcoded here, caller supplies it).
+ *
+ * `deployToken` (D1 fix pass, AMENDMENTS.md A57) — this dashboard-server ->
+ * runtime-server hop's OWN deploy token, attached as `Authorization: Bearer
+ * <token>` ONLY on `promoteWorkflow`'s own POST below. The server's
+ * `requireDeployTokenIfConfigured` (`@aart/server`'s `http/server.ts`)
+ * conditionally requires this exact header on `POST
+ * /workflows/:id/promote` once `AART_DEPLOY_TOKEN` is configured
+ * server-side — an unauthenticated dashboard hop would 401 on every
+ * promote click the moment an operator sets that env var, unless this
+ * client attaches the identical token. Scoped to promote alone (not
+ * threaded into every `postJson*` call this client makes) because that is
+ * the ONE route the server conditionally gates today — see
+ * `requireDeployTokenIfConfigured`'s own doc comment for the full
+ * trust-boundary rationale. Resolved ONCE by this function's own caller
+ * (`deploy/serve-dashboard.mjs`) and passed in here — this client never
+ * re-resolves it itself, matching how `@aart/cli`'s `secretResolver`/
+ * `resolveDeployToken` are likewise resolved once by their own callers,
+ * not self-resolving.
+ */
+export function createHttpApiClient(baseUrl: string, deployToken?: string): ApiClient {
   const base = baseUrl.replace(/\/$/, "");
+  const promoteAuthHeaders: Record<string, string> | undefined = deployToken ? { authorization: `Bearer ${deployToken}` } : undefined;
   return {
     async listRuns(filter) {
       const params = new URLSearchParams();
@@ -191,7 +221,7 @@ export function createHttpApiClient(baseUrl: string): ApiClient {
     async getRun(id) {
       const res = await fetch(`${base}/runs/${encodeURIComponent(id)}`);
       if (res.status === 404) return undefined;
-      if (!res.ok) throw new Error(`GET /runs/${id} -> ${res.status}`);
+      if (!res.ok) throw new HttpError(res.status, `GET /runs/${id} -> ${res.status}`);
       const { run } = (await res.json()) as { run: RunRecord };
       return run;
     },
@@ -211,7 +241,7 @@ export function createHttpApiClient(baseUrl: string): ApiClient {
       const qs = version ? `?version=${encodeURIComponent(version)}` : "";
       const res = await fetch(`${base}/workflows/${encodeURIComponent(id)}${qs}`);
       if (res.status === 404) return undefined;
-      if (!res.ok) throw new Error(`GET /workflows/${id} -> ${res.status}`);
+      if (!res.ok) throw new HttpError(res.status, `GET /workflows/${id} -> ${res.status}`);
       return (await res.json()) as WorkflowDetail;
     },
     async listEnvironments() {
@@ -251,7 +281,7 @@ export function createHttpApiClient(baseUrl: string): ApiClient {
       return workflow;
     },
     async promoteWorkflow(workflowId, version, environmentId, triggerConfig) {
-      return postJsonOrThrow<PromoteToEnvironmentResult>(`${base}/workflows/${encodeURIComponent(workflowId)}/promote`, { version, environmentId, triggerConfig });
+      return postJsonOrThrow<PromoteToEnvironmentResult>(`${base}/workflows/${encodeURIComponent(workflowId)}/promote`, { version, environmentId, triggerConfig }, promoteAuthHeaders);
     },
     async blockPromotion(workflowId, version) {
       const { workflow } = await postJsonOrThrow<{ workflow: Workflow }>(`${base}/workflows/${encodeURIComponent(workflowId)}/block-promotion`, { version });
@@ -287,7 +317,7 @@ export function createHttpApiClient(baseUrl: string): ApiClient {
     async updateCorrectionRunOutput(key) {
       const res = await fetch(`${base}/corrections/${encodeURIComponent(key)}/update-run-output`, { method: "POST" });
       if (res.status === 404) return undefined;
-      if (!res.ok) throw new Error(`POST /corrections/${key}/update-run-output -> ${res.status}`);
+      if (!res.ok) throw new HttpError(res.status, `POST /corrections/${key}/update-run-output -> ${res.status}`);
       const { run } = (await res.json()) as { run: RunRecord };
       return run;
     },
@@ -298,14 +328,14 @@ export function createHttpApiClient(baseUrl: string): ApiClient {
         body: JSON.stringify({ suiteId }),
       });
       if (res.status === 404) return undefined;
-      if (!res.ok) throw new Error(`POST /corrections/${key}/create-eval-example -> ${res.status}`);
+      if (!res.ok) throw new HttpError(res.status, `POST /corrections/${key}/create-eval-example -> ${res.status}`);
       const { example } = (await res.json()) as { example: EvalExample };
       return example;
     },
     async createIssueForCorrection(key) {
       const res = await fetch(`${base}/corrections/${encodeURIComponent(key)}/create-issue`, { method: "POST" });
       if (res.status === 404) return undefined;
-      if (!res.ok) throw new Error(`POST /corrections/${key}/create-issue -> ${res.status}`);
+      if (!res.ok) throw new HttpError(res.status, `POST /corrections/${key}/create-issue -> ${res.status}`);
       return (await res.json()) as ImprovementBrief;
     },
     async listEvals() {
@@ -320,7 +350,7 @@ export function createHttpApiClient(baseUrl: string): ApiClient {
     },
     async clearRunFlag(runId, clearedBy) {
       const { status, body } = await postJson<ClearRunFlagResult>(`${base}/runs/${encodeURIComponent(runId)}/flag/clear`, { clearedBy });
-      if (status !== 200 && status !== 404 && status !== 409) throw new Error(`POST /runs/${runId}/flag/clear -> ${status}`);
+      if (status !== 200 && status !== 404 && status !== 409) throw new HttpError(status, `POST /runs/${runId}/flag/clear -> ${status}`);
       return body;
     },
   };

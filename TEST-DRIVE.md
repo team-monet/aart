@@ -304,6 +304,19 @@ Honest note on the dashboard specifically: `resumeApproval` (the run-continuatio
 
 Parts (b)–(e) all ran on ONE machine. This part is the actual deploy story: author/test on your laptop, ship just the finished artifact to wherever `aart server`/`aart worker` actually run. As of this session (`AMENDMENTS.md` A44), that artifact is a real, content-addressed **bundle** — `aart bundle` already produced one (part (f)/(g) below); this session built the other half: something that actually reads one back in.
 
+**There's now a one-command shortcut for the whole `scp`+`ssh` dance below**
+(D1 "remotes + push," `AMENDMENTS.md` A56): `aart remote add production
+<url> --environment production --token-ref secrets.TOKEN` once, then `aart
+push production smoke-data-pipeline` — bundles + ships it over HTTP in one
+call, no manual copy step. Needs the target server reachable over the
+network with `AART_DEPLOY_TOKEN` configured (`DEPLOY.md`'s "Deploy token"
+section) and the named environment already registered there (`aart
+environment register production --trust-mode governed`, ADR-2, same
+session). This walkthrough keeps documenting the manual `scp`/bare-process
+path below in full, since it's what you fall back to when you don't have
+(or don't want) network access from your laptop to the target — same
+underlying hydration mechanism either way.
+
 **On your laptop** (or wherever you're authoring/testing):
 
 ```bash
@@ -311,7 +324,7 @@ cd ~/aart-test-drive
 aart bundle smoke-data-pipeline --out ./prod-bundle
 ```
 
-(`--environment <name>` also works here if you've deployed to a real `Environment` first — part (g)'s note below — and pins the bundle's `triggers.json` to that deployment's real trigger config. Omitted, as above, it's a bare workflow-closure bundle: every definition, no live trigger — still exactly what a fresh server needs to start executing runs you kick off with `aart run`/`aart_run_workflow`.)
+(`--environment <name>` also works here if you've deployed to a real `Environment` first — part (g)'s note below — and pins the bundle's `triggers.json` to that deployment's real trigger config. As of D1 "remotes + push" (`AMENDMENTS.md` A56), it ALSO records that name in the bundle's own manifest (`targetEnvironment`), so hydrating this bundle lands in that REAL environment on the destination — provided it's registered there first (`aart environment register <name> --trust-mode <mode>`); otherwise hydration refuses loudly with that exact remedy, rather than silently falling back to the synthetic environment below. Omitted, as above, it's a bare workflow-closure bundle: every definition, no live trigger — still exactly what a fresh server needs to start executing runs you kick off with `aart run`/`aart_run_workflow`.)
 
 Copy **just the bundle directory** to wherever the server will run — it's small, self-contained, and every byte inside it is covered by its own `manifest.json`'s `bundleHash`:
 
@@ -345,6 +358,19 @@ aart server --port 8080 --environment production
 ```
 
 A webhook/github/slack/poll binding that belongs to a DIFFERENT environment's deployment 404s against this server (`unknown trigger binding`) even though the record exists in the same store — verified directly this session: two environments, two deployments of the same workflow, a server started with `--environment production` served `production`'s binding and 404'd on `staging`'s. An unregistered environment name fails loudly at startup (`environment "X" not found`) rather than silently falling back to "everything."
+
+**Don't confuse this `--environment` with `aart bundle --environment`'s
+`targetEnvironment` above (D1 "remotes + push," `AMENDMENTS.md` A56) — two
+genuinely different things that happen to share a flag name.** `aart
+server --environment <name>` (this section) scopes which ALREADY-HYDRATED
+deployments' triggers this RUNNING PROCESS activates — a runtime filter
+over whatever's already in the store. `aart bundle --environment <name>`
+(above) records which environment a bundle's contents should land IN once
+hydrated — a produce-time stamp baked into the bundle itself, consumed once
+by `hydrateBundle`. You'll typically use the SAME name for both (produce a
+bundle targeting `production`, then serve it with `--environment
+production`), but they're resolved by entirely separate code paths at
+entirely separate times.
 
 **`--store fs|sqlite` — which `@aart/store` adapter backs this invocation** (`AMENDMENTS.md` A45): `fs` (the default, unchanged) is one JSON file per record — simple, human-inspectable, fine for one process at a time. `sqlite` is a real `node:sqlite`-backed adapter (WAL mode, so `aart server` and `aart worker` can safely share ONE db file as two concurrent processes/connections — architecture §5.1's stated reason to reach for it) — its own conformance suite (the same shared test suite the `fs` adapter is held to) passes clean. The db file lives at `<root>/aart.db`:
 
@@ -428,6 +454,7 @@ That's the exact loop `AGENTS.md` (part (d)) describes: `aart_find_blocks` → d
 Other real things worth poking at:
 - **`aart_verify`** — the single-call "prove this URL/page actually works" tool (loads it, checks it, screenshots it if it's a browser target). No registration needed first.
 - **`aart bundle <id> --environment staging`** — produces a real, content-addressed deployment bundle (`manifest.json` + `definitions/` + `packs/` + `registry/` + `triggers.json`) once you've deployed to an environment (part (d)'s `aart deploy` step) — see part (f) above for what to do with it once you have it.
+- **`aart_deploy`** (D1 "remotes + push," `AMENDMENTS.md` A56) — your coding agent can push a workflow version straight to a remote `aart server` over HTTP in one tool call, same underlying mechanism as `aart push` (part (f) above). Ask it to preview first — `{"remote": "production", "workflowId": "...", "workflowVersion": "...", "plan": true}` — before actually pushing.
 - **`aart flag list`** / **`aart flag clear <runId> --by <name>`** — the one CLI/dashboard-only action deliberately not exposed over MCP (architecture §13.3: un-flagging a poison/reclaim-exhausted run stays a human judgment call).
 
 ---

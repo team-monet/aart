@@ -10,7 +10,7 @@ import { dirname, join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { MigrationRunner } from "../../migrations/index.js";
 import type { AartStore } from "../../types.js";
-import { AsyncMutex, createDirectExec, createLockedExec, openSqliteDb, type SqlExec } from "./db.js";
+import { AsyncMutex, createDirectExec, createLockedExec, openSqliteDb, withSqliteBusyRetry, type SqlExec } from "./db.js";
 import { ALL_SQLITE_MIGRATIONS } from "./migrations.js";
 import { SqliteArtifactStore } from "./stores/artifacts.js";
 import { SqliteRunStore } from "./stores/runs.js";
@@ -55,6 +55,73 @@ function defaultBlobsDir(path: string): string {
   return `${path}.blobs`;
 }
 
+/**
+ * Cross-process migration coordination (AMENDMENTS.md A58). `MigrationRunner
+ * .up()` itself (../../migrations/types.ts, S0-frozen/adapter-agnostic) does
+ * a plain "read watermark, apply each pending migration, write watermark"
+ * sequence with no locking of its own — correct for a single writer, but
+ * `aart server` and `aart worker` are DEPLOY.md's own documented concurrent-
+ * startup topology (two separate OS processes, each with its own
+ * `DatabaseSync` connection and its own in-process-only `AsyncMutex`, db.ts —
+ * that mutex serializes calls WITHIN one connection, it has no cross-process
+ * reach at all). Two processes opening the SAME fresh store at once can both
+ * read watermark 0 and both attempt migration 0002's non-idempotent `ALTER
+ * TABLE ADD COLUMN` (0001 is `CREATE TABLE IF NOT EXISTS`, so this race
+ * existed from the day this adapter shipped, just masked until a non-
+ * idempotent migration existed to expose it — see migrations.ts's own 0002
+ * doc comment). Reproduced directly before this fix (two concurrent
+ * `openSqliteStore` calls against the same fresh path, this fix's own
+ * verification, reverted-and-confirmed per this session's report): "duplicate
+ * column name: promoted" (the loser reads watermark 1 after the winner
+ * already advanced it, then re-runs 0002 anyway), and — once busy_timeout's
+ * retry window is exhausted under real contention — "database is locked".
+ *
+ * Fixed with real cross-process mutual exclusion instead: SQLite's `BEGIN
+ * IMMEDIATE` acquires the write lock immediately (rather than deferring it
+ * to the first write statement, `BEGIN DEFERRED`'s default) — a second
+ * process's own `BEGIN IMMEDIATE` against the SAME file blocks (retried by
+ * `openSqliteDb`'s `PRAGMA busy_timeout`) until the first commits. Wrapping
+ * the ENTIRE read-watermark -> apply-pending -> write-watermark sequence
+ * inside one such transaction turns `MigrationRunner.up()`'s own internal
+ * `watermark.read()` — the FIRST thing it does — into the "recheck inside
+ * the lock" half of double-checked locking: by the time a second process's
+ * `BEGIN IMMEDIATE` finally acquires the lock (after the first process's
+ * `COMMIT`), its own read inside THIS transaction sees the fully-applied,
+ * fully-committed watermark the first process just wrote, and `MigrationRunner
+ * .up()`'s own per-migration `if (ordinal <= current) continue;` check
+ * correctly skips everything already applied. No separate pre-lock check is
+ * needed on top — migrations are a startup-only, not-hot-path operation, so
+ * an extra `BEGIN IMMEDIATE`/`COMMIT` pair around an already-migrated store's
+ * single watermark read costs microseconds, not a measurable startup delay.
+ *
+ * `db.ts`'s `withSqliteBusyRetry` wraps the `BEGIN IMMEDIATE` acquire step
+ * itself as belt-and-braces on top of `busy_timeout` — see that function's
+ * own doc comment for why a bounded application-level retry is needed even
+ * with `busy_timeout` already configured (verified directly, not assumed:
+ * it does not cover every statement).
+ */
+async function runMigrationsCoordinated(db: DatabaseSync, topStore: AartStore): Promise<number> {
+  await withSqliteBusyRetry(() => db.exec("BEGIN IMMEDIATE"));
+  try {
+    const runner = new MigrationRunner(ALL_SQLITE_MIGRATIONS(db), new SqliteMigrationWatermarkStore(db), topStore);
+    const result = await runner.up();
+    db.exec("COMMIT");
+    return result;
+  } catch (err) {
+    try {
+      db.exec("ROLLBACK");
+    } catch {
+      // The connection may already have aborted the transaction on its own
+      // (e.g. the error came from SQLite itself) — same pattern/rationale as
+      // the identical rollback-may-itself-fail handling in this file's own
+      // topStore.transact() below; nothing further to roll back in that
+      // case, and the original `err` is what matters to the caller
+      // regardless, re-thrown here.
+    }
+    throw err;
+  }
+}
+
 function buildStore(exec: SqlExec, blobsDir: string, transact: AartStore["transact"]): AartStore {
   return {
     workflows: new SqliteWorkflowStore(exec),
@@ -92,7 +159,7 @@ function buildStore(exec: SqlExec, blobsDir: string, transact: AartStore["transa
  * `new MigrationRunner(...)` itself.
  */
 export async function openSqliteStore(path: string, options: CreateSqliteStoreOptions = {}): Promise<SqliteStoreHandle> {
-  const db = openSqliteDb(path);
+  const db = await openSqliteDb(path);
   const blobsDir = options.blobsDir ?? defaultBlobsDir(path);
   if (!existsSync(blobsDir)) {
     mkdirSync(blobsDir, { recursive: true });
@@ -139,8 +206,13 @@ export async function openSqliteStore(path: string, options: CreateSqliteStoreOp
   );
 
   if (options.runMigrations !== false) {
-    const runner = new MigrationRunner(ALL_SQLITE_MIGRATIONS(db), new SqliteMigrationWatermarkStore(db), topStore);
-    await runner.up();
+    // AMENDMENTS.md A58 — was a bare `new MigrationRunner(...).up()` call
+    // here, with no coordination against another OS process doing the exact
+    // same thing against the same fresh file at the same time (DEPLOY.md's
+    // own documented `aart server` + `aart worker` concurrent-startup
+    // topology). See runMigrationsCoordinated's own doc comment for the
+    // reproduced crash and the fix.
+    await runMigrationsCoordinated(db, topStore);
   }
 
   return {
@@ -158,5 +230,5 @@ export async function createSqliteStore(path: string, options: CreateSqliteStore
 
 /** Applies this adapter's migration DDL directly against a connection, bypassing `MigrationRunner`/the watermark table entirely — exposed for the rare case a caller wants schema-only setup with no migration bookkeeping (e.g. a disposable test fixture). Prefer `openSqliteStore`'s default (`runMigrations: true`, watermark-tracked) for anything that behaves like a real deployment. */
 export { runMigrationDdl } from "./db.js";
-export { createSqliteInitMigration, ALL_SQLITE_MIGRATIONS } from "./migrations.js";
+export { createSqliteInitMigration, createSqliteAddDeploymentPromotedMigration, ALL_SQLITE_MIGRATIONS } from "./migrations.js";
 export { SqliteMigrationWatermarkStore } from "./watermark.js";

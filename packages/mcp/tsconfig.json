@@ -14,6 +14,7 @@
     { "path": "../evidence" },
     { "path": "../governance" },
     { "path": "../llm" },
-    { "path": "../registry" }
+    { "path": "../registry" },
+    { "path": "../server" }
   ]
 }

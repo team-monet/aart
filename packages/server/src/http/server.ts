@@ -6,11 +6,17 @@
 import { createServer, type Server, type ServerResponse } from "node:http";
 import type { AartStore } from "@aart/store";
 import type { ApprovalTask, Scorer, Signal, Trigger, TrustMode, Workflow } from "@aart/types";
+import { TrustModeSchema } from "@aart/types";
 import { blockPromotion, clearNeedsReview, createEvalExampleFromCorrection, createIssueForAgent, markNeedsReview, recordCorrection, triggerImprovementProposal, unblockPromotion, updateRunOutput, type RecordCorrectionInput } from "@aart/evidence";
 import { decideApprovalTask } from "../approvals.js";
+import { type Bundle } from "../bundle/bundle.js";
+import { hydrateBundle, readBundleFromEnvelope } from "../bundle/load.js";
+import { planBundleIngest } from "../bundle/plan.js";
 import { systemClock, type Clock } from "../clock.js";
-import { DEFAULT_HTTP_PORT, type ServerConfig } from "../config.js";
+import { DEFAULT_HTTP_PORT, MAX_BUNDLE_INGEST_BYTES, type ServerConfig } from "../config.js";
 import { findCorrectionByKey } from "../corrections.js";
+import { checkDeployToken, extractBearerToken } from "../deploy-token.js";
+import { registerEnvironment, type RegisterEnvironmentParams } from "../environments.js";
 import { createEvalSuite, runEvalSuiteForWorkflow } from "../evals.js";
 import { clearRunFlag, listFlaggedRuns } from "../flags.js";
 import { generateId } from "../ids.js";
@@ -22,7 +28,7 @@ import { processTriggerIntake, recordRejectedTrigger } from "../triggers/intake.
 import { loadTriggerBindingsFromDeployments } from "../triggers/registry.js";
 import type { InboundDelivery, IntakeOutcome, TriggerBinding } from "../triggers/types.js";
 import { approveOrDeprecateWorkflow } from "../workflow-actions.js";
-import { sendJson, Router } from "./router.js";
+import { sendJson, Router, type RouteContext } from "./router.js";
 
 export interface ServerHandle {
   server: Server;
@@ -87,10 +93,146 @@ async function respondWorkflowFlagAction(
   }
 }
 
+/**
+ * D1 "remotes + push" (AMENDMENTS.md A56) — gates `POST /bundles/ingest`,
+ * `POST /bundles/plan`, `POST /environments` (the deploy-surface mutation
+ * routes this session adds). Deliberately NOT applied to the three
+ * `/webhooks/*` routes above — those keep their own, separate per-binding
+ * HMAC verification (`config.secretResolver`) completely untouched; this
+ * token plays no role there. Writes the 401 response itself and returns
+ * `false` when the caller must stop; `true` when the request may proceed.
+ * `config.deployToken` unset -> every request refused unconditionally
+ * (fail-closed, matching `checkDeployToken`'s own contract) — there is no
+ * "auth disabled" state for this specific surface, only "not configured
+ * yet," always surfaced with the exact remedy (set `AART_DEPLOY_TOKEN`).
+ */
+function requireDeployToken(config: ServerConfig, ctx: RouteContext): boolean {
+  const provided = extractBearerToken(ctx.req.headers.authorization);
+  if (checkDeployToken(config.deployToken, provided)) return true;
+  const remedy = config.deployToken
+    ? 'Provide a valid "Authorization: Bearer <token>" header.'
+    : 'This server has no AART_DEPLOY_TOKEN configured — set it (env var, or the "AART_DEPLOY_TOKEN" key in <root>/secrets.json) before this route will accept any request.';
+  sendJson(ctx.res, 401, { error: `Unauthorized. ${remedy}` });
+  return false;
+}
+
+/**
+ * D1 fix pass (AMENDMENTS.md A57, trust-boundary ruling) — the CONDITIONAL
+ * sibling of `requireDeployToken` above, for `POST /workflows/:id/promote`
+ * specifically. Rationale: promote is the switch that flips
+ * `Deployment.promoted` `false` -> `true` (A56's own push-without-activation
+ * story); D1 both tells operators it's reasonable to network-expose
+ * `aart server` and created that exact dormancy property, so an
+ * UNAUTHENTICATED promote would defeat D1's own guarantee that a pushed
+ * bundle stays inert until someone deliberately activates it.
+ *
+ * Unlike the three routes `requireDeployToken` guards (which have NEVER
+ * worked without a token, by design — "not configured yet" is the correct
+ * universal refusal for a brand-new surface), `POST /workflows/:id/promote`
+ * existed and was open long before `deployToken` did (AMENDMENTS.md A47) —
+ * tokenless local/dev/TEST-DRIVE dashboards must keep working unmodified.
+ * So this does NOT fail closed when unconfigured:
+ *   - `config.deployToken` unset -> proceeds exactly as pre-A56 (`true`),
+ *     never refuses — see `startServer`'s own one-time startup warning
+ *     below for the operator-facing signal instead of a per-request one.
+ *   - configured -> the SAME bearer check `requireDeployToken` uses
+ *     (`checkDeployToken`/`extractBearerToken`), reused rather than
+ *     reimplemented, just with a promote-specific 401 remedy — "set
+ *     AART_DEPLOY_TOKEN" would be the WRONG instruction here, since a
+ *     token already IS configured and simply wasn't supplied or matched.
+ *
+ * A distinct helper (not a parameter/flag on `requireDeployToken` itself)
+ * so the fail-closed (new deploy-surface routes) vs conditional (promote)
+ * semantics stay explicit in the code, not hidden behind a boolean.
+ */
+function requireDeployTokenIfConfigured(config: ServerConfig, ctx: RouteContext): boolean {
+  if (!config.deployToken) return true;
+  const provided = extractBearerToken(ctx.req.headers.authorization);
+  if (checkDeployToken(config.deployToken, provided)) return true;
+  sendJson(ctx.res, 401, { error: 'Unauthorized. Provide a valid "Authorization: Bearer <token>" header — this server has AART_DEPLOY_TOKEN configured and requires it to promote a workflow version.' });
+  return false;
+}
+
+/** Reads `body.files` and validates it's the `{ files: Record<relPath, string> }` envelope shape `POST /bundles/ingest`/`POST /bundles/plan` both require — same shape `bundleToBundleLike` (`@aart/cli`'s `real-server-port.ts`) already builds client-side. Writes the 400 response itself on a malformed body; returns `undefined` when the caller must stop. */
+function requireBundleEnvelope(ctx: RouteContext, body: unknown): Record<string, string> | undefined {
+  const files = (body as { files?: unknown } | undefined)?.files;
+  if (!files || typeof files !== "object" || Array.isArray(files)) {
+    sendJson(ctx.res, 400, { error: 'Request body must be { "files": { "<relPath>": "<content>", ... } } — the same envelope produceBundle/bundleToBundleLike builds client-side (aart push).' });
+    return undefined;
+  }
+  return files as Record<string, string>;
+}
+
+/**
+ * D1 fix pass (AMENDMENTS.md A57) — `POST /environments`'s `trustMode` was
+ * cast (`body as Partial<RegisterEnvironmentParams>`) and passed straight
+ * into `registerEnvironment` with no runtime check at all. A malformed/
+ * typo'd value (e.g. `"prod"` instead of `"production"`) would silently
+ * persist as-is into `Environment.config.trustMode`, and every REAL reader
+ * of that field (`requiredGatesForEnvironment`, promotion.ts;
+ * `normalizeEnvironmentTrustMode`, `@aart/governance`'s `capability.ts`)
+ * maps an unrecognized string to `"governed"` — a SILENT governance
+ * downgrade an operator would have no way to notice from this route's own
+ * `200` response, which echoes back exactly the bad string it was given
+ * (`server.test.ts`'s own upsert test already proves `config["trustMode"]`
+ * round-trips VERBATIM, typo and all). Mirrors the CLI sibling's own check
+ * (`commands/environment.ts`'s `isValidTrustMode`/`VALID_TRUST_MODES`)
+ * rather than inventing a new validation layer — this route's own siblings
+ * in this file (`requireBundleEnvelope` above) validate with a plain
+ * runtime check + a 400, not a Zod schema, so this does too; only the
+ * VALID-VALUES VOCABULARY is sourced from `@aart/types`' `TrustModeSchema`
+ * (the single canonical definition already used to derive `TrustMode`
+ * itself) rather than a third hand-typed copy of the same four strings —
+ * `normalizeEnvironmentTrustMode`'s own doc comment already flags
+ * hand-rolling this vocabulary twice as the exact cause of a past bug
+ * (root AMENDMENTS.md A42). Writes the 400 response itself; returns `false`
+ * when the caller must stop. `trustMode` omitted entirely is untouched —
+ * `registerEnvironment`'s own optional-field contract is unchanged.
+ */
+const VALID_TRUST_MODES = TrustModeSchema.options;
+
+function requireValidTrustMode(ctx: RouteContext, trustMode: unknown): boolean {
+  if (trustMode === undefined) return true;
+  if (typeof trustMode === "string" && (VALID_TRUST_MODES as readonly string[]).includes(trustMode)) return true;
+  sendJson(ctx.res, 400, { error: `trustMode must be one of: ${VALID_TRUST_MODES.join(", ")} (got ${JSON.stringify(trustMode)}).` });
+  return false;
+}
+
+/**
+ * Both `hydrateBundle` and `planBundleIngest` throw plain `Error`s for
+ * every failure mode (no typed error hierarchy anywhere in this bundle
+ * subsystem — bundle.ts/load.ts's own established convention). Classified
+ * here by matching the SAME fixed message substrings those two functions
+ * throw verbatim (`resolveHydrationTarget`'s "is not registered on this
+ * store", `hydrateBundle`'s own "already hydrated... DIFFERENT bundle"),
+ * mirroring how `outcomeStatus` above already switches on a fixed `reason`
+ * string elsewhere in this same file — not a new pattern for this codebase.
+ */
+function bundleErrorStatus(message: string): number {
+  if (message.includes("is not registered on this store")) return 404;
+  if (message.includes("already hydrated into this store from a DIFFERENT bundle")) return 409;
+  return 400; // malformed/tampered bundle content (readBundleFromEnvelope's own failure modes) — a client error either way
+}
+
 export async function startServer(config: ServerConfig): Promise<ServerHandle> {
   const clock: Clock = config.clock ?? systemClock;
   const logger: Logger = createServerLogger(config.logSink).child({ component: "http-server" });
   const router = new Router();
+
+  // D1 fix pass (AMENDMENTS.md A57) — requireDeployTokenIfConfigured's own
+  // conditional (not fail-closed) semantics for POST /workflows/:id/promote
+  // means an unconfigured deployToken has no per-request refusal to make
+  // the exposure visible the way requireDeployToken's 401 does for the
+  // three fail-closed routes. One loud warning at startup instead of a
+  // per-request log line (which would spam this at up to one entry per
+  // promote call, every process lifetime) — surfaced once, here, so an
+  // operator scanning startup logs sees it regardless of whether they ever
+  // trip the condition in a request.
+  if (!config.deployToken) {
+    logger.warn(
+      "POST /workflows/:id/promote is UNAUTHENTICATED — no AART_DEPLOY_TOKEN configured. Any caller that can reach this server's HTTP API can activate a pushed-but-dormant Deployment. Set AART_DEPLOY_TOKEN to require a bearer token on this route (D1 fix pass, AMENDMENTS.md A57).",
+    );
+  }
 
   const intakeDeps = () => ({ store: config.store, engine: config.engine, clock, logger, backpressure: config, poisonGuard: config });
 
@@ -227,7 +369,12 @@ export async function startServer(config: ServerConfig): Promise<ServerHandle> {
     return sendJson(ctx.res, 200, { workflow: result.workflow });
   });
 
+  // D1 fix pass (AMENDMENTS.md A57) — conditionally gated: see
+  // requireDeployTokenIfConfigured's own doc comment for the full
+  // trust-boundary rationale (promote is the switch that activates a
+  // pushed-but-dormant Deployment).
   router.post("/workflows/:id/promote", async (ctx, body) => {
+    if (!requireDeployTokenIfConfigured(config, ctx)) return;
     const { version, environmentId, triggerConfig } = body as { version?: string; environmentId?: string; triggerConfig?: Record<string, unknown> };
     if (!version || !environmentId) return sendJson(ctx.res, 400, { error: "version and environmentId are required" });
     const result = await promoteWorkflowVersionToEnvironment(config.store, { workflowId: ctx.params["id"]!, workflowVersion: version, environmentId, triggerConfig }, clock);
@@ -311,6 +458,73 @@ export async function startServer(config: ServerConfig): Promise<ServerHandle> {
     if (result.kind === "suite_not_found") return sendJson(ctx.res, 404, { error: `eval suite not found: ${suiteId}` });
     if (result.kind === "workflow_not_found") return sendJson(ctx.res, 404, { error: `workflow not found: ${workflowId}${workflowVersion ? `@${workflowVersion}` : ""}` });
     return sendJson(ctx.res, 200, { evalRun: result.evalRun, results: result.results });
+  });
+
+  // Deploy surface — D1 "remotes + push" (AMENDMENTS.md A56). `aart push`
+  // (and the MCP `aart_deploy` tool) POST a bundle envelope here instead of
+  // `scp`+bare-process re-hydrate; `POST /bundles/plan` is the same envelope
+  // run through a zero-write dry-run preview first. Both, plus `POST
+  // /environments` below (ADR-2), are gated by `requireDeployToken` — the
+  // three `/webhooks/*` routes above are NOT (separate, per-binding HMAC
+  // mechanism, untouched).
+  router.post(
+    "/bundles/ingest",
+    async (ctx, body) => {
+      if (!requireDeployToken(config, ctx)) return;
+      const files = requireBundleEnvelope(ctx, body);
+      if (!files) return;
+      let bundle: Bundle;
+      try {
+        bundle = await readBundleFromEnvelope(files);
+      } catch (err) {
+        return sendJson(ctx.res, 400, { error: err instanceof Error ? err.message : "invalid bundle envelope" });
+      }
+      try {
+        const result = await hydrateBundle(config.store, bundle, clock);
+        return sendJson(ctx.res, 200, result);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "hydration failed";
+        return sendJson(ctx.res, bundleErrorStatus(message), { error: message });
+      }
+    },
+    { maxBodyBytes: MAX_BUNDLE_INGEST_BYTES },
+  );
+
+  router.post(
+    "/bundles/plan",
+    async (ctx, body) => {
+      if (!requireDeployToken(config, ctx)) return;
+      const files = requireBundleEnvelope(ctx, body);
+      if (!files) return;
+      let bundle: Bundle;
+      try {
+        bundle = await readBundleFromEnvelope(files);
+      } catch (err) {
+        return sendJson(ctx.res, 400, { error: err instanceof Error ? err.message : "invalid bundle envelope" });
+      }
+      try {
+        const plan = await planBundleIngest(config.store, bundle);
+        return sendJson(ctx.res, 200, plan);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "plan failed";
+        return sendJson(ctx.res, bundleErrorStatus(message), { error: message });
+      }
+    },
+    { maxBodyBytes: MAX_BUNDLE_INGEST_BYTES },
+  );
+
+  // ADR-2: wires the previously-dead registerEnvironment (environments.ts)
+  // to a real mutation route — without this there was no legal way to
+  // create a production-trust Environment on a server at all (the only
+  // caller was aart_deploy_workflow's own auto-vivified, always-empty-config
+  // ensureEnvironment, packages/mcp/src/handlers/deployment.ts).
+  router.post("/environments", async (ctx, body) => {
+    if (!requireDeployToken(config, ctx)) return;
+    const { name, trustMode, config: envConfig, secretSource } = body as Partial<RegisterEnvironmentParams>;
+    if (!name) return sendJson(ctx.res, 400, { error: "name is required" });
+    if (!requireValidTrustMode(ctx, trustMode)) return;
+    const environment = await registerEnvironment(config.store, { name, trustMode, config: envConfig, secretSource });
+    return sendJson(ctx.res, 200, { environment });
   });
 
   // Read surface — the "API surface S8 will consume" (this session's DoD note).

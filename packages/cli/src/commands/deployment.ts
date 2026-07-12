@@ -1,4 +1,5 @@
-// aart deploy / aart trigger add — spec §33.
+// aart deploy / aart trigger add / aart push — spec §33 (deploy/trigger),
+// D1 "remotes + push" (AMENDMENTS.md A56, push).
 //
 // `aart deploy` calls the exact same `deployWorkflowHandler`
 // aart_deploy_workflow (MCP) calls. `aart trigger add` has no MCP-tool
@@ -10,9 +11,16 @@
 // Deployment row) is what S2's adapters pick up — so this command writes
 // directly into that field via the real (frozen) @aart/store, matching the
 // field names S2's own SEAMS.md TriggerBinding interface lists.
-import { deployWorkflowHandler, wrapResult, type HandlerResult } from "@aart/mcp";
+//
+// `aart push` calls the exact same `deployToRemoteHandler` MCP's
+// `aart_deploy` tool calls (three-clients precedent, same shape as `aart
+// deploy` above) — ADR-1's ruling (ratified): "push" is a NEW, distinct
+// verb for shipping a bundle to a REMOTE aart server over HTTP, not a
+// rename or replacement of the LOCAL environment-promotion `aart deploy
+// --target` immediately above, which stays completely untouched.
+import { deployToRemoteHandler, deployWorkflowHandler, wrapResult, type HandlerResult } from "@aart/mcp";
 import type { Tokenized } from "../args.js";
-import { flagString, requireFlagString, requirePositional } from "../args.js";
+import { flagBoolean, flagString, requireFlagString, requirePositional } from "../args.js";
 import type { CliContext } from "../cli-context.js";
 
 export async function deployCommand(tokens: Tokenized, cli: CliContext): Promise<HandlerResult & { next: string }> {
@@ -22,6 +30,17 @@ export async function deployCommand(tokens: Tokenized, cli: CliContext): Promise
   const target = requireFlagString(tokens.flags, "target");
   const result = await deployWorkflowHandler(cli.aart, { workflowId, workflowVersion, target });
   return wrapResult("aart_deploy_workflow", result);
+}
+
+/** `aart push <remote> <workflowId> [--version <v>] [--plan]` — resolves "latest" itself before calling the shared handler, matching `deployCommand`'s own established convention (the shared `deployToRemoteHandler` takes a required `workflowVersion`, same as `deployWorkflowHandler`). */
+export async function pushCommand(tokens: Tokenized, cli: CliContext): Promise<HandlerResult & { next: string }> {
+  const remote = requirePositional(tokens.positionals, 0, "remote");
+  const workflowId = requirePositional(tokens.positionals, 1, "workflowId");
+  const workflowVersion = flagString(tokens.flags, "version") ?? (await cli.aart.store.workflows.getLatest(workflowId))?.version;
+  if (!workflowVersion) return { ok: false, error: `No versions found for workflow "${workflowId}".`, next: "Call aart register first." };
+  const plan = flagBoolean(tokens.flags, "plan");
+  const result = await deployToRemoteHandler(cli.aart, { remote, workflowId, workflowVersion, plan });
+  return wrapResult("aart_deploy", result);
 }
 
 // S2 SEAMS.md's documented TriggerBinding fields this command may populate

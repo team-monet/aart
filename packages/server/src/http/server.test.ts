@@ -4,6 +4,7 @@
 // API surface for S8's dashboard.
 import { afterEach, describe, expect, it } from "vitest";
 import type { Workflow } from "@aart/types";
+import { produceBundle, sanitizeFilename, type Bundle } from "../bundle/bundle.js";
 import { computeHmacSignature } from "../triggers/hmac.js";
 import { createTestFixture, type TestFixture } from "../test-helpers.js";
 import { startServer, type ServerHandle } from "./server.js";
@@ -33,6 +34,24 @@ afterEach(async () => {
 
 async function json(res: Response): Promise<unknown> {
   return res.json();
+}
+
+/** D1 "remotes + push" (AMENDMENTS.md A56) — local mirror of `bundleToBundleLike`'s file-flattening (`@aart/cli`'s `real-server-port.ts`), same as `bundle/load.test.ts`'s own `bundleToFiles` — see that file's doc comment for why this package's own tests build this locally rather than importing across a package boundary. */
+function bundleToFiles(bundle: Bundle): Record<string, string> {
+  const files: Record<string, string> = {
+    "manifest.json": JSON.stringify(bundle.manifest, null, 2),
+    "triggers.json": JSON.stringify(bundle.triggers, null, 2),
+  };
+  for (const [key, workflow] of Object.entries(bundle.definitions)) files[`definitions/${sanitizeFilename(key)}.json`] = JSON.stringify(workflow, null, 2);
+  for (const [key, manifest] of Object.entries(bundle.packs)) files[`packs/${sanitizeFilename(key)}.json`] = JSON.stringify(manifest, null, 2);
+  for (const [key, entry] of Object.entries(bundle.registry.prompts)) files[`registry/prompts/${sanitizeFilename(key)}.json`] = JSON.stringify(entry, null, 2);
+  for (const [key, entry] of Object.entries(bundle.registry.schemas)) files[`registry/schemas/${sanitizeFilename(key)}.json`] = JSON.stringify(entry, null, 2);
+  return files;
+}
+
+function deployableWorkflow(id: string, overrides: Partial<Workflow> = {}): Workflow {
+  const approvedGates = { validate: "passed" as const, readiness: "passed" as const, evals: "passed" as const, riskReview: "passed" as const, humanReview: "passed" as const };
+  return { id, name: "n", version: "1", inputs: [], outputs: [], execution: { type: "workflow", steps: [] }, approval: "approved", gates: approvedGates, ...overrides };
 }
 
 describe("GET /health", () => {
@@ -734,5 +753,534 @@ describe("resume/signal endpoints", () => {
     expect(res.status).toBe(200);
     await expect(fx.store.runs.get("run_signal_1")).resolves.toMatchObject({ status: "running" });
     await expect(fx.store.signals.list()).resolves.toHaveLength(1);
+  });
+});
+
+// D1 "remotes + push" (AMENDMENTS.md A56) — the deploy surface: POST
+// /bundles/ingest, POST /bundles/plan, POST /environments. All three are
+// gated by requireDeployToken; the three /webhooks/* routes above are NOT
+// (a separate, per-binding HMAC mechanism, proven untouched by this suite
+// still passing unchanged above).
+describe("deploy surface — token gate (AMENDMENTS.md A56)", () => {
+  it("POST /bundles/ingest: no AART_DEPLOY_TOKEN configured -> 401 with a remedy naming AART_DEPLOY_TOKEN, no store write", async () => {
+    fx = await createTestFixture();
+    await fx.store.workflows.put(deployableWorkflow("wf_no_token"));
+    const bundle = await produceBundle(fx.store, { workflowId: "wf_no_token", workflowVersion: "1" });
+    handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false }); // no deployToken
+    const res = await fetch(`http://localhost:${handle.port}/bundles/ingest`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: "Bearer whatever" },
+      body: JSON.stringify({ files: bundleToFiles(bundle) }),
+    });
+    expect(res.status).toBe(401);
+    const body = (await json(res)) as { error: string };
+    expect(body.error).toMatch(/AART_DEPLOY_TOKEN/);
+    await expect(fx.store.deployments.list({ workflowId: "wf_no_token" })).resolves.toHaveLength(0);
+  });
+
+  it("POST /bundles/ingest: wrong token -> 401", async () => {
+    fx = await createTestFixture();
+    await fx.store.workflows.put(deployableWorkflow("wf_wrong_token"));
+    const bundle = await produceBundle(fx.store, { workflowId: "wf_wrong_token", workflowVersion: "1" });
+    handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false, deployToken: "real-token" });
+    const res = await fetch(`http://localhost:${handle.port}/bundles/ingest`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: "Bearer wrong-token" },
+      body: JSON.stringify({ files: bundleToFiles(bundle) }),
+    });
+    expect(res.status).toBe(401);
+  });
+
+  it("POST /bundles/ingest: missing Authorization header entirely -> 401", async () => {
+    fx = await createTestFixture();
+    await fx.store.workflows.put(deployableWorkflow("wf_no_header"));
+    const bundle = await produceBundle(fx.store, { workflowId: "wf_no_header", workflowVersion: "1" });
+    handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false, deployToken: "real-token" });
+    const res = await fetch(`http://localhost:${handle.port}/bundles/ingest`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ files: bundleToFiles(bundle) }),
+    });
+    expect(res.status).toBe(401);
+  });
+
+  it("POST /bundles/plan: also token-gated, same as ingest", async () => {
+    fx = await createTestFixture();
+    await fx.store.workflows.put(deployableWorkflow("wf_plan_no_token"));
+    const bundle = await produceBundle(fx.store, { workflowId: "wf_plan_no_token", workflowVersion: "1" });
+    handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false });
+    const res = await fetch(`http://localhost:${handle.port}/bundles/plan`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ files: bundleToFiles(bundle) }),
+    });
+    expect(res.status).toBe(401);
+  });
+
+  it("POST /environments: no token -> 401, environment not created", async () => {
+    fx = await createTestFixture();
+    handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false });
+    const res = await fetch(`http://localhost:${handle.port}/environments`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "production", trustMode: "production" }),
+    });
+    expect(res.status).toBe(401);
+    await expect(fx.store.environments.getByName("production")).resolves.toBeUndefined();
+  });
+
+  it("GET routes stay completely open — no token required, unaffected by deployToken being configured", async () => {
+    fx = await createTestFixture();
+    handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false, deployToken: "real-token" });
+    const res = await fetch(`http://localhost:${handle.port}/environments`); // GET, no Authorization header at all
+    expect(res.status).toBe(200);
+  });
+});
+
+// D1 fix pass (AMENDMENTS.md A57, trust-boundary ruling) — promote is
+// CONDITIONALLY gated (requireDeployTokenIfConfigured), unlike the three
+// FAIL-CLOSED routes above: unconfigured -> stays open (pre-A56 behavior,
+// tokenless local/dev dashboards keep working); configured -> requires the
+// same valid Bearer the other three routes do.
+describe("POST /workflows/:id/promote — conditional deploy-token gating (AMENDMENTS.md A57 fix pass)", () => {
+  async function promoteSetup(fixture: TestFixture) {
+    await fixture.store.workflows.put(fixtureWorkflow("1.0.0", { id: "wf_promote_gate", approval: "approved" }));
+    await fixture.store.environments.put({ id: "env_promote_gate", name: "gate-staging", config: { trustMode: "dev" } });
+  }
+  function promoteRequest(port: number, headers: Record<string, string>) {
+    return fetch(`http://localhost:${port}/workflows/wf_promote_gate/promote`, {
+      method: "POST",
+      headers: { "content-type": "application/json", ...headers },
+      body: JSON.stringify({ version: "1.0.0", environmentId: "env_promote_gate" }),
+    });
+  }
+
+  it("deployToken configured + correct Bearer -> 200, Deployment created", async () => {
+    fx = await createTestFixture();
+    await promoteSetup(fx);
+    handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false, deployToken: "promote-gate-token" });
+    const res = await promoteRequest(handle.port, { authorization: "Bearer promote-gate-token" });
+    expect(res.status).toBe(200);
+    await expect(fx.store.deployments.list({ workflowId: "wf_promote_gate" })).resolves.toHaveLength(1);
+  });
+
+  it("deployToken configured + wrong Bearer -> 401 with a remedy, no Deployment created", async () => {
+    fx = await createTestFixture();
+    await promoteSetup(fx);
+    handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false, deployToken: "promote-gate-token" });
+    const res = await promoteRequest(handle.port, { authorization: "Bearer wrong-token" });
+    expect(res.status).toBe(401);
+    const body = (await json(res)) as { error: string };
+    expect(body.error).toMatch(/Provide a valid "Authorization: Bearer <token>" header/);
+    await expect(fx.store.deployments.list({ workflowId: "wf_promote_gate" })).resolves.toHaveLength(0);
+  });
+
+  it("deployToken configured + no Authorization header at all -> 401, no Deployment created", async () => {
+    fx = await createTestFixture();
+    await promoteSetup(fx);
+    handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false, deployToken: "promote-gate-token" });
+    const res = await promoteRequest(handle.port, {});
+    expect(res.status).toBe(401);
+    await expect(fx.store.deployments.list({ workflowId: "wf_promote_gate" })).resolves.toHaveLength(0);
+  });
+
+  it("deployToken UNCONFIGURED -> 200 with no Authorization header at all (unchanged pre-A56 behavior, never fail-closed)", async () => {
+    fx = await createTestFixture();
+    await promoteSetup(fx);
+    handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false }); // no deployToken
+    const res = await promoteRequest(handle.port, {});
+    expect(res.status).toBe(200);
+    await expect(fx.store.deployments.list({ workflowId: "wf_promote_gate" })).resolves.toHaveLength(1);
+  });
+});
+
+describe("POST /bundles/ingest — real ingestion (AMENDMENTS.md A56)", () => {
+  const TOKEN = "ingest-test-token";
+
+  it("legacy path (no targetEnvironment): hydrates under the synthetic env_bundle environment, exactly as aart server --bundle already does", async () => {
+    fx = await createTestFixture();
+    await fx.store.workflows.put(deployableWorkflow("wf_ingest_legacy"));
+    const bundle = await produceBundle(fx.store, { workflowId: "wf_ingest_legacy", workflowVersion: "1" });
+    handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false, deployToken: TOKEN });
+
+    const res = await fetch(`http://localhost:${handle.port}/bundles/ingest`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${TOKEN}` },
+      body: JSON.stringify({ files: bundleToFiles(bundle) }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await json(res)) as { kind: string; deploymentId: string };
+    expect(body.kind).toBe("hydrated");
+    expect(body.deploymentId).toBe("bundle:wf_ingest_legacy@1");
+    await expect(fx.store.workflows.get("wf_ingest_legacy", "1")).resolves.toBeDefined();
+  });
+
+  it("real-environment path: hydrates into an already-registered Environment, env-scoped deploymentId", async () => {
+    fx = await createTestFixture();
+    await fx.store.environments.put({ id: "env_ingest_real", name: "staging", config: { trustMode: "dev" } });
+    await fx.store.workflows.put(deployableWorkflow("wf_ingest_real"));
+    const bundle = await produceBundle(fx.store, { workflowId: "wf_ingest_real", workflowVersion: "1", targetEnvironment: "staging" });
+    handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false, deployToken: TOKEN });
+
+    const res = await fetch(`http://localhost:${handle.port}/bundles/ingest`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${TOKEN}` },
+      body: JSON.stringify({ files: bundleToFiles(bundle) }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await json(res)) as { kind: string; deploymentId: string };
+    expect(body.kind).toBe("hydrated");
+    expect(body.deploymentId).toBe("bundle:wf_ingest_real@1:env_ingest_real");
+    const deployment = await fx.store.deployments.get(body.deploymentId);
+    expect(deployment?.promoted).toBe(true); // dev trust mode
+  });
+
+  it("an unregistered target environment -> 404 with an actionable remedy, no partial write on the DESTINATION store", async () => {
+    // Two independent stores — "source" produces the bundle (so it needs
+    // the workflow to build a closure from), "destination" is what the
+    // route actually ingests into and never registers "nonexistent" on.
+    const source = await createTestFixture();
+    await source.store.workflows.put(deployableWorkflow("wf_ingest_bad_env"));
+    const bundle = await produceBundle(source.store, { workflowId: "wf_ingest_bad_env", workflowVersion: "1", targetEnvironment: "nonexistent" });
+    await source.cleanup();
+
+    fx = await createTestFixture(); // the destination store
+    handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false, deployToken: TOKEN });
+
+    const res = await fetch(`http://localhost:${handle.port}/bundles/ingest`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${TOKEN}` },
+      body: JSON.stringify({ files: bundleToFiles(bundle) }),
+    });
+    expect(res.status).toBe(404);
+    const body = (await json(res)) as { error: string };
+    expect(body.error).toMatch(/aart environment register|POST \/environments/i);
+    // No partial write on the destination: neither the definitions nor a
+    // Deployment record landed, and "nonexistent" was never auto-vivified.
+    await expect(fx.store.workflows.get("wf_ingest_bad_env", "1")).resolves.toBeUndefined();
+    await expect(fx.store.deployments.list({ workflowId: "wf_ingest_bad_env" })).resolves.toHaveLength(0);
+    await expect(fx.store.environments.getByName("nonexistent")).resolves.toBeUndefined();
+  });
+
+  it("a malformed envelope (missing files key) -> 400", async () => {
+    fx = await createTestFixture();
+    handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false, deployToken: TOKEN });
+    const res = await fetch(`http://localhost:${handle.port}/bundles/ingest`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${TOKEN}` },
+      body: JSON.stringify({ notFiles: true }),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it("a tampered bundle (bundleHash mismatch) -> 400", async () => {
+    fx = await createTestFixture();
+    await fx.store.workflows.put(deployableWorkflow("wf_ingest_tampered"));
+    const bundle = await produceBundle(fx.store, { workflowId: "wf_ingest_tampered", workflowVersion: "1" });
+    const files = bundleToFiles(bundle);
+    const manifest = JSON.parse(files["manifest.json"]!) as { bundleHash: string };
+    files["manifest.json"] = JSON.stringify({ ...manifest, bundleHash: "0".repeat(64) });
+    handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false, deployToken: TOKEN });
+
+    const res = await fetch(`http://localhost:${handle.port}/bundles/ingest`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${TOKEN}` },
+      body: JSON.stringify({ files }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await json(res)) as { error: string };
+    expect(body.error).toMatch(/bundleHash mismatch/i);
+  });
+
+  it("idempotency: same tuple + same hash -> 200 already_hydrated, no error", async () => {
+    fx = await createTestFixture();
+    await fx.store.workflows.put(deployableWorkflow("wf_ingest_idem"));
+    const bundle = await produceBundle(fx.store, { workflowId: "wf_ingest_idem", workflowVersion: "1" });
+    handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false, deployToken: TOKEN });
+    const post = () =>
+      fetch(`http://localhost:${handle!.port}/bundles/ingest`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${TOKEN}` },
+        body: JSON.stringify({ files: bundleToFiles(bundle) }),
+      });
+
+    const first = await post();
+    expect(first.status).toBe(200);
+    expect(((await json(first)) as { kind: string }).kind).toBe("hydrated");
+
+    const second = await post();
+    expect(second.status).toBe(200);
+    expect(((await json(second)) as { kind: string }).kind).toBe("already_hydrated");
+  });
+
+  it("idempotency: same tuple + DIFFERENT hash -> 409 conflict, original content preserved", async () => {
+    fx = await createTestFixture();
+    await fx.store.workflows.put(deployableWorkflow("wf_ingest_conflict", { name: "version A" }));
+    const bundleA = await produceBundle(fx.store, { workflowId: "wf_ingest_conflict", workflowVersion: "1" });
+    await fx.store.workflows.put(deployableWorkflow("wf_ingest_conflict", { name: "version B (different content, same id@version)" }));
+    const bundleB = await produceBundle(fx.store, { workflowId: "wf_ingest_conflict", workflowVersion: "1" });
+    handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false, deployToken: TOKEN });
+
+    const firstRes = await fetch(`http://localhost:${handle.port}/bundles/ingest`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${TOKEN}` },
+      body: JSON.stringify({ files: bundleToFiles(bundleA) }),
+    });
+    expect(firstRes.status).toBe(200);
+
+    const secondRes = await fetch(`http://localhost:${handle.port}/bundles/ingest`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${TOKEN}` },
+      body: JSON.stringify({ files: bundleToFiles(bundleB) }),
+    });
+    expect(secondRes.status).toBe(409);
+    await expect(fx.store.workflows.get("wf_ingest_conflict", "1")).resolves.toMatchObject({ name: "version A" });
+  });
+
+  it("size cap: a body over MAX_BUNDLE_INGEST_BYTES is rejected 413 before hydration runs", async () => {
+    fx = await createTestFixture();
+    handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false, deployToken: TOKEN });
+    // A plain oversized body — 413 fires from the router's Content-Length
+    // pre-check before this handler's own JSON parsing / envelope
+    // validation ever runs, so the content doesn't need to be a real bundle.
+    const oversized = "x".repeat(11 * 1024 * 1024); // 11MB > the 10MB cap
+    const res = await fetch(`http://localhost:${handle.port}/bundles/ingest`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${TOKEN}` },
+      body: oversized,
+    });
+    expect(res.status).toBe(413);
+  });
+
+  it("a body under the size cap is unaffected by the cap", async () => {
+    fx = await createTestFixture();
+    await fx.store.workflows.put(deployableWorkflow("wf_ingest_under_cap"));
+    const bundle = await produceBundle(fx.store, { workflowId: "wf_ingest_under_cap", workflowVersion: "1" });
+    handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false, deployToken: TOKEN });
+    const res = await fetch(`http://localhost:${handle.port}/bundles/ingest`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${TOKEN}` },
+      body: JSON.stringify({ files: bundleToFiles(bundle) }),
+    });
+    expect(res.status).toBe(200);
+  });
+});
+
+describe("POST /bundles/plan — zero-write dry-run preview (AMENDMENTS.md A56)", () => {
+  const TOKEN = "plan-test-token";
+
+  it("performs ZERO writes — the store is byte-identical before and after", async () => {
+    fx = await createTestFixture();
+    await fx.store.environments.put({ id: "env_plan_staging", name: "staging", config: { trustMode: "governed" } });
+    await fx.store.workflows.put(deployableWorkflow("wf_plan_zero_write"));
+    const bundle = await produceBundle(fx.store, { workflowId: "wf_plan_zero_write", workflowVersion: "1", targetEnvironment: "staging" });
+    handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false, deployToken: TOKEN });
+
+    const res = await fetch(`http://localhost:${handle.port}/bundles/plan`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${TOKEN}` },
+      body: JSON.stringify({ files: bundleToFiles(bundle) }),
+    });
+    expect(res.status).toBe(200);
+    // No Deployment was created, no Environment was mutated, and the
+    // workflow itself is unaffected — this call read the store, never wrote.
+    await expect(fx.store.deployments.list({ workflowId: "wf_plan_zero_write" })).resolves.toHaveLength(0);
+    await expect(fx.store.environments.list()).resolves.toHaveLength(1); // still just the one this test set up
+  });
+
+  it("returns promotionEligible/unmetGates computed against the bundle's own sealed gates, and gateStatus passed through verbatim", async () => {
+    fx = await createTestFixture();
+    await fx.store.environments.put({ id: "env_plan_prod", name: "production", config: { trustMode: "production" } });
+    // Only validate+humanReview passed — production requires all five, so this is NOT eligible.
+    const partialGates = { validate: "passed" as const, readiness: "pending" as const, evals: "pending" as const, riskReview: "pending" as const, humanReview: "passed" as const };
+    await fx.store.workflows.put(deployableWorkflow("wf_plan_gates", { gates: partialGates }));
+    const bundle = await produceBundle(fx.store, { workflowId: "wf_plan_gates", workflowVersion: "1", targetEnvironment: "production" });
+    handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false, deployToken: TOKEN });
+
+    const res = await fetch(`http://localhost:${handle.port}/bundles/plan`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${TOKEN}` },
+      body: JSON.stringify({ files: bundleToFiles(bundle) }),
+    });
+    expect(res.status).toBe(200);
+    const plan = (await json(res)) as { promotionEligible: boolean; unmetGates: string[]; gateStatus: Record<string, string>; remedies: string[] };
+    expect(plan.promotionEligible).toBe(false);
+    expect(plan.unmetGates.sort()).toEqual(["evals", "readiness", "riskReview"]);
+    expect(plan.gateStatus).toEqual(partialGates);
+    expect(plan.remedies.length).toBeGreaterThan(0);
+  });
+
+  it("versionsChanging reports the root workflow as 'added' when it doesn't exist yet on the destination", async () => {
+    fx = await createTestFixture();
+    await fx.store.workflows.put(deployableWorkflow("wf_plan_versions"));
+    const bundle = await produceBundle(fx.store, { workflowId: "wf_plan_versions", workflowVersion: "1" });
+    // A second, independent store simulates "the destination has never seen this workflow before."
+    const destination = await createTestFixture();
+    handle = await startServer({ store: destination.store, engine: destination.engine, clock: destination.clock, port: 0, runTicker: false, deployToken: TOKEN });
+
+    const res = await fetch(`http://localhost:${handle.port}/bundles/plan`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${TOKEN}` },
+      body: JSON.stringify({ files: bundleToFiles(bundle) }),
+    });
+    const plan = (await json(res)) as { versionsChanging: { added: string[]; unchanged: string[] } };
+    expect(plan.versionsChanging.added).toEqual(["wf_plan_versions@1"]);
+    expect(plan.versionsChanging.unchanged).toEqual([]);
+    await destination.cleanup();
+  });
+
+  it("an unregistered target environment -> 404, same as ingest's own resolution", async () => {
+    fx = await createTestFixture();
+    await fx.store.workflows.put(deployableWorkflow("wf_plan_bad_env"));
+    const bundle = await produceBundle(fx.store, { workflowId: "wf_plan_bad_env", workflowVersion: "1", targetEnvironment: "does-not-exist" });
+    handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false, deployToken: TOKEN });
+
+    const res = await fetch(`http://localhost:${handle.port}/bundles/plan`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${TOKEN}` },
+      body: JSON.stringify({ files: bundleToFiles(bundle) }),
+    });
+    expect(res.status).toBe(404);
+  });
+
+  // D1 fix pass (AMENDMENTS.md A57) — integration-level companion to
+  // bundle/plan.test.ts's own dedicated, backend-independent regression
+  // suite for findCurrentVersion's id tie-break (see that file's own doc
+  // comment for why a real createFsStore-backed test CANNOT actually
+  // distinguish pre-fix from post-fix behavior — createFsStore's own
+  // deployments.list() happens to already return rows sorted alphabetically
+  // by id, which coincides with this fix's own tie-break output regardless
+  // of whether the fix exists). This test's own job is narrower and
+  // genuinely proven here: the real HTTP route surfaces a currentVersion at
+  // all when two Deployment rows collide on createdAt (rather than, say,
+  // throwing or returning undefined), and that value is stable across
+  // repeated requests against the same unchanged store.
+  it("currentVersion resolves to a real, stable value over the real HTTP route when two Deployment rows share the exact same createdAt", async () => {
+    fx = await createTestFixture();
+    await fx.store.environments.put({ id: "env_plan_tie", name: "tie-staging", config: { trustMode: "governed" } });
+    await fx.store.workflows.put(deployableWorkflow("wf_plan_tie", { version: "2" }));
+    const sameCreatedAt = "2026-07-01T00:00:00.000Z";
+    await fx.store.deployments.put({ id: "dep_zzz_last", workflowId: "wf_plan_tie", workflowVersion: "2", environmentId: "env_plan_tie", triggerConfig: {}, createdAt: sameCreatedAt, promoted: true });
+    await fx.store.deployments.put({ id: "dep_aaa_first", workflowId: "wf_plan_tie", workflowVersion: "1", environmentId: "env_plan_tie", triggerConfig: {}, createdAt: sameCreatedAt, promoted: true });
+
+    const bundle = await produceBundle(fx.store, { workflowId: "wf_plan_tie", workflowVersion: "2", targetEnvironment: "tie-staging" });
+    handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false, deployToken: TOKEN });
+
+    const res = await fetch(`http://localhost:${handle.port}/bundles/plan`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${TOKEN}` },
+      body: JSON.stringify({ files: bundleToFiles(bundle) }),
+    });
+    expect(res.status).toBe(200);
+    const plan = (await json(res)) as { currentVersion?: string };
+    expect(["1", "2"]).toContain(plan.currentVersion); // one of the two tied rows, never undefined/thrown
+
+    // Re-request against the SAME unchanged store — must resolve identically every time.
+    const res2 = await fetch(`http://localhost:${handle.port}/bundles/plan`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${TOKEN}` },
+      body: JSON.stringify({ files: bundleToFiles(bundle) }),
+    });
+    const plan2 = (await json(res2)) as { currentVersion?: string };
+    expect(plan2.currentVersion).toBe(plan.currentVersion);
+  });
+});
+
+describe("POST /environments — ADR-2 (AMENDMENTS.md A56)", () => {
+  const TOKEN = "environments-test-token";
+
+  it("registers a new Environment with the given trustMode, visible via GET /environments", async () => {
+    fx = await createTestFixture();
+    handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false, deployToken: TOKEN });
+
+    const res = await fetch(`http://localhost:${handle.port}/environments`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${TOKEN}` },
+      body: JSON.stringify({ name: "production", trustMode: "production" }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await json(res)) as { environment: { id: string; name: string; config: Record<string, unknown> } };
+    expect(body.environment.name).toBe("production");
+    expect(body.environment.config["trustMode"]).toBe("production");
+
+    const listRes = await fetch(`http://localhost:${handle.port}/environments`);
+    const listBody = (await json(listRes)) as { environments: Array<{ name: string }> };
+    expect(listBody.environments.map((e) => e.name)).toContain("production");
+  });
+
+  it("re-registering the same name updates it (upsert), not a duplicate row", async () => {
+    fx = await createTestFixture();
+    handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false, deployToken: TOKEN });
+    const post = (trustMode: string) =>
+      fetch(`http://localhost:${handle!.port}/environments`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${TOKEN}` },
+        body: JSON.stringify({ name: "staging", trustMode }),
+      });
+
+    await post("governed");
+    await post("strict");
+
+    const listRes = await fetch(`http://localhost:${handle.port}/environments`);
+    const listBody = (await json(listRes)) as { environments: Array<{ name: string; config: Record<string, unknown> }> };
+    const staging = listBody.environments.filter((e) => e.name === "staging");
+    expect(staging).toHaveLength(1);
+    expect(staging[0]?.config["trustMode"]).toBe("strict");
+  });
+
+  it("missing name -> 400", async () => {
+    fx = await createTestFixture();
+    handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false, deployToken: TOKEN });
+    const res = await fetch(`http://localhost:${handle.port}/environments`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${TOKEN}` },
+      body: JSON.stringify({ trustMode: "dev" }),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  // D1 fix pass (AMENDMENTS.md A57) — trustMode was cast, never validated;
+  // an invalid value (e.g. a typo'd "prod") silently persisted verbatim and
+  // every real reader (requiredGatesForEnvironment, normalizeEnvironmentTrustMode)
+  // downgrades an unrecognized string to "governed" with no signal anywhere.
+  it("invalid trustMode -> 400 naming the four valid values, environment NOT created", async () => {
+    fx = await createTestFixture();
+    handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false, deployToken: TOKEN });
+    const res = await fetch(`http://localhost:${handle.port}/environments`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${TOKEN}` },
+      body: JSON.stringify({ name: "prod-typo", trustMode: "prod" }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await json(res)) as { error: string };
+    for (const validMode of ["dev", "governed", "strict", "production"]) {
+      expect(body.error).toContain(validMode);
+    }
+    expect(body.error).toContain('"prod"'); // echoes back what was actually rejected
+    await expect(fx.store.environments.getByName("prod-typo")).resolves.toBeUndefined(); // never silently downgraded into existence as "governed"
+  });
+
+  it("every valid trustMode (dev/governed/strict/production) is accepted", async () => {
+    fx = await createTestFixture();
+    handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false, deployToken: TOKEN });
+    for (const validMode of ["dev", "governed", "strict", "production"]) {
+      const res = await fetch(`http://localhost:${handle.port}/environments`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${TOKEN}` },
+        body: JSON.stringify({ name: `env-${validMode}`, trustMode: validMode }),
+      });
+      expect(res.status).toBe(200);
+    }
+  });
+
+  it("omitting trustMode entirely is still accepted (registerEnvironment's own optional-field contract, unchanged)", async () => {
+    fx = await createTestFixture();
+    handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false, deployToken: TOKEN });
+    const res = await fetch(`http://localhost:${handle.port}/environments`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${TOKEN}` },
+      body: JSON.stringify({ name: "no-trust-mode-given" }),
+    });
+    expect(res.status).toBe(200);
   });
 });

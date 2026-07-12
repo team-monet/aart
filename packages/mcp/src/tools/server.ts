@@ -16,9 +16,13 @@
 // `aart_trigger_workflow` on >=1 Environment; `aart_create_eval_from_correction`/
 // `aart_run_eval`/`aart_promote_workflow` on >=1 EvalSuite) — "a soft
 // progressive-disclosure heuristic ... rather than a hard mode gate like
-// aart_approve's." The other 6 extended tools have no data-existence
-// precondition named anywhere in either source document, so they register
-// unconditionally alongside the 9 non-gated core tools.
+// aart_approve's." The other 7 extended tools (6 original + D1's
+// `aart_deploy`, AMENDMENTS.md A56 — deliberately NOT added to
+// ENVIRONMENT_GATED_TOOLS: a real LOCAL Environment existing has no bearing
+// on whether a REMOTE push is possible; server-side enforcement, the
+// remote's own AART_DEPLOY_TOKEN gate, is the actual chokepoint) have no
+// data-existence precondition, so they register unconditionally alongside
+// the 9 non-gated core tools.
 import type { AartContext } from "../context.js";
 import { HANDLERS } from "../handlers/index.js";
 import { TOOL_NAMES, wrapResult, type HandlerResult, type ToolName } from "../response.js";

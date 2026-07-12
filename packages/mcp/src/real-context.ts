@@ -18,6 +18,17 @@
 //     (core built-ins only - see the module doc comment on
 //     buildLocalCatalog below for the documented v1 gap on pack-delivered
 //     blocks).
+//   - BundlerPort/RemotesPort (D1 "remotes + push", AMENDMENTS.md A56) <-
+//     @aart/server's real produceBundle (the resolveAndProduceBundle bridge
+//     below — the SAME function @aart/cli's real-server-port.ts now also
+//     calls for its own ServerPort.produceBundle, one implementation, not
+//     two) and a small, real (not simulated) remotes.json/secrets.json
+//     reader (stubs/deploy.ts's createRemotesPort, exported here as
+//     createRealRemotesPort — see that module's own doc comment for why
+//     there's no meaningful stub-vs-real split for a plain JSON-file read).
+//     Unlike every port above, these two are NOT CLI-only (ServerPort's own
+//     documented exception) — see types.ts's BundlerPort/RemotesPort doc
+//     comment for why.
 //
 // ServerPort is NOT built in this file and never has been — it isn't part
 // of AartContext at all (CLI-only, architecture §13.3's stated exception;
@@ -67,11 +78,13 @@ import {
 } from "@aart/governance";
 import { computeEvalsGateStatus, createReportRenderers, recordCorrection as evidenceRecordCorrection, createEvalExampleFromCorrection as evidenceCreateEvalExampleFromCorrection, createScorerRegistry, runEvalSuite } from "@aart/evidence";
 import { computePackContentHash, findBlocks, type BlockCatalogEntry } from "@aart/registry";
+import { produceBundle as produceRealBundle, type Bundle } from "@aart/server";
 import { createLlmPack, type CreateLlmPackOptions } from "@aart/llm";
 import type { AartStore } from "@aart/store";
-import type { BlockImplementation, Signal, TrustMode, Workflow } from "@aart/types";
-import type { EnginePort, EvidencePort, GovernancePort, RegistryPort, ResumeOutcome } from "./types.js";
+import type { BlockImplementation, Deployment, Signal, TrustMode, Workflow } from "@aart/types";
+import type { BundleLike, BundlerPort, EnginePort, EvidencePort, GovernancePort, RegistryPort, RemotesPort, ResumeOutcome } from "./types.js";
 import { newId } from "./stubs/engine.js";
+import { createRemotesPort } from "./stubs/deploy.js";
 
 // ---------------------------------------------------------------------------
 // The real 56-block catalog: @aart/blocks-core's 51 core built-ins +
@@ -438,3 +451,98 @@ export function createRealRegistryPort(entries: readonly BlockCatalogEntry[]): R
     getBlock: (id) => entries.find((e) => e.manifest.id === id),
   };
 }
+
+// ---------------------------------------------------------------------------
+// BundlerPort / RemotesPort — D1 "remotes + push" (AMENDMENTS.md A56).
+// `resolveAndProduceBundle` is the resolveDeployment/bundleToBundleLike
+// bridge EXTRACTED from `@aart/cli`'s `real-server-port.ts` — that package's
+// own `ServerPort.produceBundle` now imports and calls this SAME function
+// (it already depends on `@aart/mcp`, architecture's three-clients
+// principle) instead of maintaining its own local copy, so `aart bundle`/
+// `aart push` (CLI) and `aart_deploy` (MCP) can never independently drift on
+// "how does a human-typed --environment name resolve to a Deployment" or
+// "how does a produced Bundle flatten to a files map."
+// ---------------------------------------------------------------------------
+
+function sanitizeBundleFilename(key: string): string {
+  return key.replace(/[/\\:*?"<>|]/g, "_");
+}
+
+/** Same on-disk layout as `@aart/server`'s own `writeBundleToDisk` (packages/server/src/bundle/bundle.ts) — see `resolveAndProduceBundle`'s own doc comment for why this package can't just call that function directly (it writes a real `Bundle` to disk; this returns `BundleLike`, an in-memory `{manifest, files}` map — both `ServerPort.produceBundle` and `BundlerPort.produceBundle` need the latter). */
+function bundleToBundleLike(bundle: Bundle): BundleLike {
+  const files: Record<string, string> = {
+    "manifest.json": JSON.stringify(bundle.manifest, null, 2),
+    "triggers.json": JSON.stringify(bundle.triggers, null, 2),
+  };
+  for (const [key, workflow] of Object.entries(bundle.definitions)) {
+    files[`definitions/${sanitizeBundleFilename(key)}.json`] = JSON.stringify(workflow, null, 2);
+  }
+  for (const [key, manifest] of Object.entries(bundle.packs)) {
+    files[`packs/${sanitizeBundleFilename(key)}.json`] = JSON.stringify(manifest, null, 2);
+  }
+  for (const [key, entry] of Object.entries(bundle.registry.prompts)) {
+    files[`registry/prompts/${sanitizeBundleFilename(key)}.json`] = JSON.stringify(entry, null, 2);
+  }
+  for (const [key, entry] of Object.entries(bundle.registry.schemas)) {
+    files[`registry/schemas/${sanitizeBundleFilename(key)}.json`] = JSON.stringify(entry, null, 2);
+  }
+  return { manifest: bundle.manifest as unknown as Record<string, unknown>, files };
+}
+
+/**
+ * Bridges a human-typed `--environment <name>` (`aart bundle`'s CLI flag,
+ * or `aart push`'s remotes.json-resolved environment) to the real
+ * `produceBundle`'s optional `Deployment` param. Throws only when the NAMED
+ * environment itself doesn't exist — a real environment with no deployment
+ * yet for this workflow/version is a legitimate "bare closure bundle"
+ * request (matches `produceBundle`'s own documented optionality), not an
+ * error.
+ *
+ * Remedy wording deliberately names BOTH the CLI and HTTP forms of ADR-2's
+ * new `aart environment register`/`POST /environments` (this session,
+ * AMENDMENTS.md A56) — this function is called from both CLI and MCP
+ * callers, so a caller-agnostic remedy is correct here, unlike (e.g.)
+ * `real-server-port.ts`'s own separate `resolveEnvironmentId` (a genuinely
+ * CLI-only concern — `aart server --environment`'s own resolution — left
+ * untouched, not part of this extraction).
+ *
+ * D1 fix pass (AMENDMENTS.md A57) — this SAME function backs `aart push`/
+ * `aart_deploy`'s own environment resolution (`resolveAndProduceBundle`
+ * below, called with `params.environment` set from the REMOTE's OWN
+ * configured environment, `deployToRemoteHandler`'s doc comment). That
+ * made this exact error a confusing, real first-push gotcha (tester
+ * finding): it checks the CALLER's OWN store — by design, since the
+ * caller's local `Deployment` for that environment is what carries the
+ * `triggerConfig` the bundle ships with — but a first-time user who only
+ * ever registered the environment on the REMOTE server (over SSH, or via
+ * `POST /environments` against the remote) reads a bare "not found" here
+ * with no hint that a SECOND, separate, LOCAL registration is what's
+ * actually missing. The message now says both things explicitly.
+ */
+async function resolveDeploymentForEnvironmentName(store: AartStore, workflowId: string, workflowVersion: string, environmentName: string | undefined): Promise<Deployment | undefined> {
+  if (!environmentName) return undefined;
+  const environment = await store.environments.getByName(environmentName);
+  if (!environment) {
+    throw new Error(
+      `Environment "${environmentName}" not found on THIS store (the one this command/tool is running against). Register it HERE first — "aart environment register ${environmentName} --trust-mode <dev|governed|strict|production>" (CLI), or POST /environments (HTTP) against this same store — then retry. This is a LOCAL requirement even for "aart push"/"aart_deploy": resolving "${environmentName}" here finds YOUR OWN Deployment for it, whose triggerConfig is what the bundle ships with — so it must exist on YOUR store, separately from (and in addition to) registering "${environmentName}" on the REMOTE server you may be pushing to, which is a different store entirely (see DEPLOY.md's "Environment registration" section).`,
+    );
+  }
+  const deployments = await store.deployments.list({ environmentId: environment.id, workflowId });
+  return deployments.find((d) => d.workflowVersion === workflowVersion);
+}
+
+/** The shared bridge itself — `BundlerPort.produceBundle`'s real implementation, and (imported into `@aart/cli`) `ServerPort.produceBundle`'s real implementation too. */
+export async function resolveAndProduceBundle(store: AartStore, params: { workflowId: string; workflowVersion: string; environment?: string }): Promise<BundleLike> {
+  const deployment = await resolveDeploymentForEnvironmentName(store, params.workflowId, params.workflowVersion, params.environment);
+  const bundle = await produceRealBundle(store, { workflowId: params.workflowId, workflowVersion: params.workflowVersion, deployment, targetEnvironment: params.environment });
+  return bundleToBundleLike(bundle);
+}
+
+export function createRealBundlerPort(store: AartStore): BundlerPort {
+  return {
+    produceBundle: (params) => resolveAndProduceBundle(store, params),
+  };
+}
+
+/** See stubs/deploy.ts's own doc comment for why this is the exact same function as `createStubRemotesPort` — a plain JSON-file read has no expensive/non-deterministic "real thing" to fake, unlike every other port in this file. */
+export const createRealRemotesPort: (root: string) => RemotesPort = createRemotesPort;

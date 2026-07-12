@@ -37,6 +37,7 @@ export const TOOL_NAMES = [
   "aart_run_eval",
   "aart_promote_workflow",
   "aart_deploy_workflow",
+  "aart_deploy",
   "aart_trigger_workflow",
   "aart_list_waiting_runs",
   "aart_resume_run",
@@ -65,6 +66,15 @@ export const TOOL_TIERS: Readonly<Record<ToolName, ToolTier>> = {
   aart_run_eval: "extended",
   aart_promote_workflow: "extended",
   aart_deploy_workflow: "extended",
+  // D1 "remotes + push" (AMENDMENTS.md A56) — registers unconditionally in
+  // every trust mode, same as the other 6 non-data-gated extended tools
+  // (tools/server.ts's own doc comment: "no data-existence precondition
+  // named anywhere in either source document"). Deliberately NOT added to
+  // ENVIRONMENT_GATED_TOOLS (tools/server.ts) — a real Environment existing
+  // LOCALLY has no bearing on whether a REMOTE push is possible; server-side
+  // enforcement (the remote's own AART_DEPLOY_TOKEN gate, deploy-token.ts)
+  // is the actual chokepoint, per this session's own ratified design.
+  aart_deploy: "extended",
   aart_trigger_workflow: "extended",
   aart_list_waiting_runs: "extended",
   aart_resume_run: "extended",
@@ -144,6 +154,10 @@ const NEXT_TABLE: Readonly<Record<ToolName, Readonly<Record<ToolOutcome, string>
   aart_deploy_workflow: {
     success: "Deployed. Call `aart_trigger_workflow` to run it, or use the CLI's `aart trigger add` to wire a real trigger.",
     failure: "Deployment refused — check promotion/gate status for this environment (`aart_diff_workflow` / `aart_promote_workflow`).",
+  },
+  aart_deploy: {
+    success: "Pushed. If this was a --plan preview, review it and call `aart_deploy` again without `plan` to actually ingest; otherwise call `aart_trigger_workflow` once the remote promotes it live.",
+    failure: "Push refused — check the remote is configured (`aart remote list`) and reachable, and that the remote's own error names what to fix.",
   },
   aart_trigger_workflow: {
     success: "Triggered. Call `aart_get_report` or `aart_list_waiting_runs` to follow the run.",

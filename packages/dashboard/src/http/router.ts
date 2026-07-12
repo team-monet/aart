@@ -15,6 +15,27 @@ export interface RouteContext {
 
 export type RouteHandler = (ctx: RouteContext, body: Record<string, unknown>) => Promise<void> | void;
 
+/**
+ * Thrown by the real `ApiClient` (api-client.ts) when a live `aart server`
+ * HTTP response comes back with a non-2xx status — carries that status
+ * through so `Router.handle`'s catch-all can preserve it on `/api/*` routes
+ * (AMENDMENTS.md A58) instead of collapsing every failure into a generic
+ * 500. Deliberately defined here, in this low-level/generic `http/` module,
+ * rather than in api-client.ts: `Router` (this file) has no business
+ * importing from a domain-specific module one layer up (the same "generic
+ * infra doesn't depend on business logic" direction every other dependency
+ * edge in this package already runs) — api-client.ts imports THIS instead.
+ */
+export class HttpError extends Error {
+  constructor(
+    public readonly status: number,
+    message: string,
+  ) {
+    super(message);
+    this.name = "HttpError";
+  }
+}
+
 interface Route {
   method: string;
   segments: string[];
@@ -81,7 +102,28 @@ export class Router {
       await matched.handler({ req, res, params: matched.params, query: url.searchParams }, body);
     } catch (err) {
       if (!res.headersSent) {
-        sendHtml(res, 500, `<h1>500 Internal Server Error</h1><pre>${err instanceof Error ? err.message : "unknown error"}</pre>`);
+        const message = err instanceof Error ? err.message : "unknown error";
+        // AMENDMENTS.md A58 — /api/* is this dashboard's JSON surface (every
+        // route buildDashboardRouter registers is /api/* or /health, per
+        // that file's own "API endpoints (JSON only)" section — post-A47
+        // there are no server-rendered HTML page routes on this Router at
+        // all). An unhandled error there — most commonly the real
+        // ApiClient's HttpError when a live aart server 401s a missing/
+        // wrong deploy token on promote — used to always collapse to a
+        // generic HTML 500 here, losing the real upstream status AND
+        // handing a JSON-only frontend an HTML body it can't res.json().
+        // Preserve the upstream status when we have one (HttpError); a
+        // genuinely unexpected error (no structured status — a bug, a
+        // network failure) still gets 500, just as JSON so this route
+        // family never mixes content types depending on WHICH error fired.
+        // Non-/api/* routes (the static-file/SPA-fallback path, server.ts)
+        // are unaffected — HTML is still correct there.
+        if (url.pathname.startsWith("/api/")) {
+          const status = err instanceof HttpError ? err.status : 500;
+          sendJson(res, status, { error: message });
+        } else {
+          sendHtml(res, 500, `<h1>500 Internal Server Error</h1><pre>${message}</pre>`);
+        }
       }
     }
   }

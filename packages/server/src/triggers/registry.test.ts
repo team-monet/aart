@@ -104,3 +104,71 @@ describe("deploymentToBinding — environmentId carried onto the binding (AMENDM
     expect(bindings[0]?.environmentId).toBe("env_production");
   });
 });
+
+// D1 "remotes + push" (AMENDMENTS.md A56) — the single chokepoint the
+// design memo names: deploymentToBinding must skip promoted:false, and only
+// promoted:false, regardless of caller (both loadTriggerBindingsFromDeployments'
+// two real call sites — webhook/github/slack HTTP ingress via
+// http/server.ts's findBinding, and the poll ticker via ticker/ticker.ts —
+// funnel through this exact function, so this store-level proof covers both
+// without needing a second, duplicated end-to-end test per ingress path).
+describe("deploymentToBinding — promoted:false is skipped (AMENDMENTS.md A56)", () => {
+  it("promoted:false: no binding produced — the deployment is entirely absent from the returned list", async () => {
+    const store = await freshStore();
+    await store.deployments.put({
+      id: "dep_not_promoted",
+      workflowId: "wf",
+      workflowVersion: "1",
+      environmentId: "env_staging",
+      triggerConfig: { type: "webhook", webhookPath: "/not-promoted" },
+      createdAt: new Date().toISOString(),
+      promoted: false,
+    });
+
+    const bindings = await loadTriggerBindingsFromDeployments(store);
+    expect(bindings).toEqual([]);
+  });
+
+  it("promoted:true: a binding is produced, same as any other active deployment", async () => {
+    const store = await freshStore();
+    await store.deployments.put({
+      id: "dep_promoted",
+      workflowId: "wf",
+      workflowVersion: "1",
+      environmentId: "env_staging",
+      triggerConfig: { type: "webhook", webhookPath: "/promoted" },
+      createdAt: new Date().toISOString(),
+      promoted: true,
+    });
+
+    const bindings = await loadTriggerBindingsFromDeployments(store);
+    expect(bindings.map((b) => b.id)).toEqual(["dep_promoted"]);
+  });
+
+  it("promoted:undefined (omitted — every pre-D1 row, and any row a caller never stamped) is UNAFFECTED — regression against every existing fixture that never sets this field", async () => {
+    const store = await freshStore();
+    await store.deployments.put({
+      id: "dep_legacy_no_promoted_field",
+      workflowId: "wf",
+      workflowVersion: "1",
+      environmentId: "env_staging",
+      triggerConfig: { type: "webhook", webhookPath: "/legacy" },
+      createdAt: new Date().toISOString(),
+      // no `promoted` key at all — the shape of every Deployment this
+      // codebase's own tests/fixtures wrote before D1.
+    });
+
+    const bindings = await loadTriggerBindingsFromDeployments(store);
+    expect(bindings.map((b) => b.id)).toEqual(["dep_legacy_no_promoted_field"]);
+  });
+
+  it("a mix of promoted/unpromoted/legacy deployments: only the non-false ones bind", async () => {
+    const store = await freshStore();
+    await store.deployments.put({ id: "dep_1", workflowId: "wf", workflowVersion: "1", environmentId: "env_a", triggerConfig: { type: "webhook", webhookPath: "/1" }, createdAt: new Date().toISOString(), promoted: false });
+    await store.deployments.put({ id: "dep_2", workflowId: "wf", workflowVersion: "1", environmentId: "env_b", triggerConfig: { type: "webhook", webhookPath: "/2" }, createdAt: new Date().toISOString(), promoted: true });
+    await store.deployments.put({ id: "dep_3", workflowId: "wf", workflowVersion: "1", environmentId: "env_c", triggerConfig: { type: "webhook", webhookPath: "/3" }, createdAt: new Date().toISOString() });
+
+    const bindings = await loadTriggerBindingsFromDeployments(store);
+    expect(bindings.map((b) => b.id).sort()).toEqual(["dep_2", "dep_3"]);
+  });
+});

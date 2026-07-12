@@ -339,6 +339,29 @@ export function runAartStoreConformanceSuite(label: string, options: Conformance
         await expect(store.deployments.get(deployment.id)).resolves.toEqual(deployment);
         await expect(store.deployments.list({ environmentId })).resolves.toEqual([deployment]);
       });
+
+      // D1 "remotes + push" (AMENDMENTS.md A56) — `promoted` is a tri-state
+      // field (undefined/true/false); every adapter must round-trip all
+      // three states losslessly, in particular never collapsing an omitted
+      // `promoted` into `false` on the way back out (sqlite's own migration
+      // test covers the NULL-column-on-a-pre-existing-row case specifically;
+      // this proves the ordinary put/get path on every adapter).
+      it("promoted round-trips undefined/true/false without collapsing undefined to false", async () => {
+        const environmentId = uniqueId("env");
+        const base = { workflowId: "wf", workflowVersion: "0.1.0", environmentId, triggerConfig: {}, createdAt: new Date().toISOString() };
+        const omitted: Deployment = { ...base, id: uniqueId("dep") };
+        const active: Deployment = { ...base, id: uniqueId("dep"), promoted: true };
+        const inactive: Deployment = { ...base, id: uniqueId("dep"), promoted: false };
+
+        await store.deployments.put(omitted);
+        await store.deployments.put(active);
+        await store.deployments.put(inactive);
+
+        await expect(store.deployments.get(omitted.id)).resolves.toEqual(omitted);
+        expect((await store.deployments.get(omitted.id))?.promoted).toBeUndefined();
+        await expect(store.deployments.get(active.id)).resolves.toEqual(active);
+        await expect(store.deployments.get(inactive.id)).resolves.toEqual(inactive);
+      });
     });
 
     describe("environments", () => {

@@ -23,6 +23,33 @@ describe("DeploymentSchema", () => {
     };
     expect(DeploymentSchema.parse(input)).toEqual(input);
   });
+
+  it("`promoted` is optional — a pre-D1 Deployment with no such field still parses (backward compatibility)", () => {
+    const input = {
+      id: "dep_legacy",
+      workflowId: "checkout-smoke",
+      workflowVersion: "0.2.0",
+      environmentId: "env_prod",
+      triggerConfig: {},
+      createdAt: "2026-07-10T00:00:00.000Z",
+    };
+    const parsed = DeploymentSchema.parse(input);
+    expect(parsed).toEqual(input);
+    expect(parsed.promoted).toBeUndefined();
+  });
+
+  it.each([true, false])("round-trips promoted=%s", (promoted) => {
+    const input = {
+      id: "dep_2",
+      workflowId: "checkout-smoke",
+      workflowVersion: "0.2.0",
+      environmentId: "env_prod",
+      triggerConfig: {},
+      createdAt: "2026-07-10T00:00:00.000Z",
+      promoted,
+    };
+    expect(DeploymentSchema.parse(input)).toEqual(input);
+  });
 });
 
 describe("EnvironmentSchema", () => {

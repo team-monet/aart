@@ -75,3 +75,41 @@ export function createRealSecretResolver(root: string): SecretResolver {
     }
   };
 }
+
+/**
+ * D1 "remotes + push" (AMENDMENTS.md A56) — resolves the shared deploy-
+ * surface bearer token (`ServerConfig.deployToken`, checked by
+ * `@aart/server`'s `checkDeployToken`, deploy-token.ts) exactly ONCE at
+ * process startup: `AART_DEPLOY_TOKEN` env var first, falling back to
+ * `<root>/secrets.json`'s own `"AART_DEPLOY_TOKEN"` key (the SAME file
+ * `createRealSecretResolver` above reads, same dev-convenience tradeoffs —
+ * no encryption, filesystem-level access control only).
+ *
+ * Deliberately a SEPARATE function, NOT `createRealSecretResolver(root)
+ * ("AART_DEPLOY_TOKEN")` — that resolver strips a leading `"secrets."`
+ * prefix then looks up `AART_SECRET_<name>`, so calling it with the bare
+ * string `"AART_DEPLOY_TOKEN"` would look for the env var
+ * `AART_SECRET_AART_DEPLOY_TOKEN` (double-prefixed) instead of the plain
+ * `AART_DEPLOY_TOKEN` this token actually needs. This is a genuinely
+ * different resolution convention — a single top-level credential for the
+ * deploy surface itself, not a `secrets.<NAME>`-referenced value a
+ * TriggerBinding names — so it gets its own small, direct implementation
+ * rather than being forced through a resolver built for a different shape.
+ * Returns `undefined` (never throws) when unconfigured — `checkDeployToken`
+ * already treats an unset configured token as an unconditional refusal
+ * (fail-closed), matching `createRealSecretResolver`'s own established
+ * never-throw discipline for the identical reason: a malformed/missing
+ * local file must not turn into a 500 on every deploy-surface request.
+ */
+export async function resolveDeployToken(root: string): Promise<string | undefined> {
+  const envValue = process.env["AART_DEPLOY_TOKEN"];
+  if (envValue !== undefined && envValue !== "") return envValue;
+  try {
+    const raw = await fs.readFile(secretsFilePath(root), "utf8");
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    const fileValue = parsed["AART_DEPLOY_TOKEN"];
+    return typeof fileValue === "string" ? fileValue : undefined;
+  } catch {
+    return undefined;
+  }
+}

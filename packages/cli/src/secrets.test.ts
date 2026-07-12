@@ -6,7 +6,7 @@ import { promises as fs } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { createRealSecretResolver } from "./secrets.js";
+import { createRealSecretResolver, resolveDeployToken } from "./secrets.js";
 
 let cleanupPaths: string[] = [];
 const envKeysToRestore: Array<[string, string | undefined]> = [];
@@ -77,5 +77,60 @@ describe("createRealSecretResolver", () => {
     await fs.writeFile(join(root, "secrets.json"), "{ not valid json", "utf8");
     const resolver = createRealSecretResolver(root);
     await expect(resolver("secrets.WEBHOOK_SECRET")).resolves.toBeUndefined();
+  });
+});
+
+// D1 "remotes + push" (AMENDMENTS.md A56) — a DELIBERATELY separate
+// resolution convention from createRealSecretResolver above (no
+// AART_SECRET_ prefix, no secrets.<NAME> ref stripping — see
+// resolveDeployToken's own doc comment for why reusing the other resolver
+// would double-prefix to AART_SECRET_AART_DEPLOY_TOKEN).
+describe("resolveDeployToken", () => {
+  it("resolves from the plain AART_DEPLOY_TOKEN env var — NOT AART_SECRET_AART_DEPLOY_TOKEN", async () => {
+    const root = await freshRoot();
+    setEnv("AART_DEPLOY_TOKEN", "env-token-123");
+    await expect(resolveDeployToken(root)).resolves.toBe("env-token-123");
+  });
+
+  it("setting AART_SECRET_AART_DEPLOY_TOKEN instead (the double-prefixed mistake) does NOT resolve", async () => {
+    const root = await freshRoot();
+    setEnv("AART_SECRET_AART_DEPLOY_TOKEN", "wrong-convention-value");
+    await expect(resolveDeployToken(root)).resolves.toBeUndefined();
+  });
+
+  it("falls back to <root>/secrets.json's own AART_DEPLOY_TOKEN key when the env var is unset", async () => {
+    const root = await freshRoot();
+    await fs.writeFile(join(root, "secrets.json"), JSON.stringify({ AART_DEPLOY_TOKEN: "file-token-789" }), "utf8");
+    await expect(resolveDeployToken(root)).resolves.toBe("file-token-789");
+  });
+
+  it("env var takes precedence over the secrets file when both are configured", async () => {
+    const root = await freshRoot();
+    await fs.writeFile(join(root, "secrets.json"), JSON.stringify({ AART_DEPLOY_TOKEN: "file-token" }), "utf8");
+    setEnv("AART_DEPLOY_TOKEN", "env-token-wins");
+    await expect(resolveDeployToken(root)).resolves.toBe("env-token-wins");
+  });
+
+  it("resolves to undefined (not a throw) when neither the env var nor the file configures it", async () => {
+    const root = await freshRoot();
+    await expect(resolveDeployToken(root)).resolves.toBeUndefined();
+  });
+
+  it("resolves to undefined (not a throw) when there's no secrets.json at all", async () => {
+    const root = await freshRoot();
+    await expect(resolveDeployToken(root)).resolves.toBeUndefined();
+  });
+
+  it("resolves to undefined (not a throw) when secrets.json exists but is malformed", async () => {
+    const root = await freshRoot();
+    await fs.writeFile(join(root, "secrets.json"), "{ not valid json", "utf8");
+    await expect(resolveDeployToken(root)).resolves.toBeUndefined();
+  });
+
+  it("sharing secrets.json with createRealSecretResolver's own webhook secrets does not cross-contaminate", async () => {
+    const root = await freshRoot();
+    await fs.writeFile(join(root, "secrets.json"), JSON.stringify({ AART_DEPLOY_TOKEN: "the-deploy-token", WEBHOOK_SECRET: "the-webhook-secret" }), "utf8");
+    await expect(resolveDeployToken(root)).resolves.toBe("the-deploy-token");
+    await expect(createRealSecretResolver(root)("secrets.WEBHOOK_SECRET")).resolves.toBe("the-webhook-secret");
   });
 });

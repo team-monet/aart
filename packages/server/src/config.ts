@@ -78,6 +78,22 @@ export interface ServerConfig extends SharedRuntimeConfig, TickerConfig, PoisonG
   resolveGithubApprovalTarget?: (payload: unknown) => { runId: string; stepId: string } | undefined;
   /** AMENDMENTS.md A45 — restricts which `Deployment`-sourced trigger bindings (webhook/github/slack/poll ingress, both the HTTP layer and the ticker's poll loop) this server instance activates, by `Environment` id. Threaded straight into `loadTriggerBindingsFromDeployments`'s own `filter.environmentId` (triggers/registry.ts) everywhere this config loads bindings. Unset (the default) activates every deployment's trigger across every environment — a documented dev convenience, not a production isolation guarantee. `@aart/cli`'s `--environment <name>` (real-server-port.ts) resolves the human-readable name to this id before constructing this config. */
   environmentId?: string;
+  /**
+   * D1 "remotes + push" (AMENDMENTS.md A56) — the shared bearer token
+   * gating the deploy-surface mutation routes (`POST /bundles/ingest`,
+   * `POST /bundles/plan`, `POST /environments` — http/server.ts,
+   * deploy-token.ts's `checkDeployToken`). Resolved ONCE at startup by the
+   * caller (`@aart/cli`'s `resolveDeployToken`, secrets.ts) and threaded in
+   * here — this config never re-resolves it itself, matching how
+   * `secretResolver` above is already an injected value, not a
+   * self-resolving one. Unset (the default) leaves those three routes
+   * refusing every request unconditionally (fail-closed) — there is no
+   * "auth disabled, allow everything" state for this specific surface, only
+   * "not configured yet." The three `/webhooks/*` routes are entirely
+   * unaffected either way — they keep their own, separate per-binding HMAC
+   * verification (`secretResolver` above), never this token.
+   */
+  deployToken?: string;
 }
 
 export const DEFAULT_TICK_INTERVAL_MS = 5000;
@@ -91,3 +107,5 @@ export const DEFAULT_POISON_WINDOW_MS = 10 * 60 * 1000;
 export const DEFAULT_MAX_PENDING_RUNS = 500;
 export const DEFAULT_HEALTH_PORT = 8787;
 export const DEFAULT_HTTP_PORT = 8080;
+/** D1 "remotes + push" (AMENDMENTS.md A56) — hard request-body cap for `POST /bundles/ingest` and `POST /bundles/plan` (http/server.ts, `Router.post`'s `maxBodyBytes` option). Bundles are 100% JSON text (bundle.ts's own doc comment) — 10MB is generous headroom for a real workflow closure while still bounding memory a single deploy-surface request can force this process to buffer. */
+export const MAX_BUNDLE_INGEST_BYTES = 10 * 1024 * 1024;

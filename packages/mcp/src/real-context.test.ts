@@ -318,3 +318,92 @@ describe("runWorkflowHandler (aart run / aart_run_workflow) — real capability-
     expect(result.status).toBe("completed");
   });
 });
+
+// D1 "remotes + push" (AMENDMENTS.md A56) — createRealAartContext's
+// bundler/remotes ports genuinely wired end to end, not just type-checked
+// (same S9-integration discipline this whole file exists for).
+describe("createRealAartContext — ctx.bundler / ctx.remotes (AMENDMENTS.md A56)", () => {
+  it("ctx.bundler.produceBundle calls the REAL @aart/server produceBundle (full transitive closure), not a stub single-workflow bundle", async () => {
+    ctx = await setup();
+    await ctx.store.workflows.put({
+      id: "real-ctx-bundle-child",
+      name: "child",
+      version: "1",
+      inputs: [],
+      outputs: [],
+      execution: { type: "workflow", steps: [] },
+      approval: "approved",
+      gates: { validate: "passed", readiness: "passed", evals: "passed", riskReview: "passed", humanReview: "passed" },
+    });
+    await ctx.store.workflows.put({
+      id: "real-ctx-bundle-root",
+      name: "root",
+      version: "1",
+      inputs: [],
+      outputs: [],
+      execution: { type: "workflow", steps: [{ id: "nested", uses: "flow.subworkflow", with: { workflowId: "real-ctx-bundle-child", version: "1" } }] },
+      approval: "approved",
+      gates: { validate: "passed", readiness: "passed", evals: "passed", riskReview: "passed", humanReview: "passed" },
+    });
+
+    const bundle = await ctx.bundler.produceBundle({ workflowId: "real-ctx-bundle-root", workflowVersion: "1" });
+    // The REAL produceBundle walks the closure -- both root AND child land
+    // under definitions/; the stub bundler only ever writes the ONE
+    // requested workflow (stubs/deploy.ts's own documented simplification).
+    expect(bundle.files["definitions/real-ctx-bundle-root@1.json"]).toBeDefined();
+    expect(bundle.files["definitions/real-ctx-bundle-child@1.json"]).toBeDefined();
+    expect((bundle.manifest as { bundleHash: string }).bundleHash).toMatch(/^[0-9a-f]{64}$/); // a real sha256 content hash, not the stub's absence of one
+  });
+
+  it("ctx.bundler.produceBundle threads --environment into manifest.targetEnvironment and throws for an unregistered one", async () => {
+    ctx = await setup();
+    await ctx.store.workflows.put({
+      id: "real-ctx-bundle-env",
+      name: "n",
+      version: "1",
+      inputs: [],
+      outputs: [],
+      execution: { type: "workflow", steps: [] },
+      approval: "approved",
+      gates: { validate: "passed", readiness: "passed", evals: "passed", riskReview: "passed", humanReview: "passed" },
+    });
+    await ctx.store.environments.put({ id: "env_real_ctx", name: "staging", config: {} });
+
+    const bundle = await ctx.bundler.produceBundle({ workflowId: "real-ctx-bundle-env", workflowVersion: "1", environment: "staging" });
+    expect((bundle.manifest as { targetEnvironment?: string }).targetEnvironment).toBe("staging");
+
+    await expect(ctx.bundler.produceBundle({ workflowId: "real-ctx-bundle-env", workflowVersion: "1", environment: "no-such-env" })).rejects.toThrow(/not found/i);
+  });
+
+  // D1 fix pass (AMENDMENTS.md A57, tester finding) — resolveDeploymentForEnvironmentName
+  // checks the CALLER's OWN store (by design: the caller's local Deployment
+  // for that environment carries the triggerConfig a bundle ships with),
+  // which confused first-time users who only ever registered the
+  // environment on a REMOTE server. The remedy now names the local CLI
+  // registration command AND explicitly distinguishes it from server-side
+  // registration, rather than a bare "not found."
+  it("an unregistered environment's error names the local registration command AND distinguishes it from server-side registration", async () => {
+    ctx = await setup();
+    let message = "";
+    try {
+      await ctx.bundler.produceBundle({ workflowId: "real-ctx-bundle-env-remedy", workflowVersion: "1", environment: "production" });
+    } catch (err) {
+      message = err instanceof Error ? err.message : String(err);
+    }
+    expect(message).toMatch(/not found on THIS store/i); // fact 1: this is a check against the CALLER's own store
+    expect(message).toContain('aart environment register production --trust-mode'); // the exact local remedy command, naming the actual environment
+    expect(message).toMatch(/POST \/environments/); // the HTTP form of the SAME local remedy
+    expect(message).toMatch(/separately from.*REMOTE server|REMOTE server.*separately from/is); // fact 2: explicitly distinguished from server-side registration
+  });
+
+  it("ctx.remotes reads real remotes.json/secrets.json from the same root this context is rooted at", async () => {
+    ctx = await setup();
+    const { promises: fs } = await import("node:fs");
+    const { join } = await import("node:path");
+    await fs.writeFile(join(root!, "remotes.json"), JSON.stringify({ production: { url: "https://prod.example.com", environment: "production", tokenRef: "secrets.DEPLOY_TOKEN" } }), "utf8");
+    await fs.writeFile(join(root!, "secrets.json"), JSON.stringify({ DEPLOY_TOKEN: "real-resolved-token" }), "utf8");
+
+    await expect(ctx.remotes.get("production")).resolves.toEqual({ url: "https://prod.example.com", environment: "production", tokenRef: "secrets.DEPLOY_TOKEN" });
+    await expect(ctx.remotes.resolveToken("production")).resolves.toBe("real-resolved-token");
+  });
+});

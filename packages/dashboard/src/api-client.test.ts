@@ -225,12 +225,13 @@ describe("createHttpApiClient against a REAL @aart/server instance (AMENDMENTS.m
   let baseUrl: string;
   let cleanupStore: () => Promise<void>;
 
-  async function startRealServer() {
+  /** `deployToken` (D1 fix pass, AMENDMENTS.md A57) — optional, omitted by every pre-existing caller below (byte-identical to this helper's pre-A57 behavior); the new promote-gating tests pass it explicitly to exercise a token-configured real server. */
+  async function startRealServer(deployToken?: string) {
     const { store, cleanup } = await createTestFixture(); // dashboard's own fixture — a real fs-backed store
     cleanupStore = cleanup;
     const clock = createFakeClock();
     const engine = createFakeEngine(store, { ...clock, setTimeout: () => ({ cancel() {} }) });
-    handle = await startServer({ store, engine, clock: { ...clock, setTimeout: () => ({ cancel() {} }) }, port: 0, runTicker: false });
+    handle = await startServer({ store, engine, clock: { ...clock, setTimeout: () => ({ cancel() {} }) }, port: 0, runTicker: false, deployToken });
     baseUrl = `http://127.0.0.1:${handle.port}`;
     return store;
   }
@@ -317,6 +318,29 @@ describe("createHttpApiClient against a REAL @aart/server instance (AMENDMENTS.m
 
     expect((await client.listApprovals()).map((t) => t.id)).toEqual(["at-1"]);
     expect((await client.listCorrections()).map((c) => c.runId)).toEqual(["run-x"]);
+  });
+
+  // D1 fix pass (AMENDMENTS.md A57) — the server's requireDeployTokenIfConfigured
+  // conditionally requires a Bearer token on POST /workflows/:id/promote once
+  // AART_DEPLOY_TOKEN is configured server-side; createHttpApiClient's own
+  // deployToken parameter is this dashboard hop's answer to that gate.
+  it("promoteWorkflow attaches the configured deployToken as a Bearer header and succeeds against a token-gated real server", async () => {
+    const store = await startRealServer("dashboard-promote-token");
+    await store.workflows.put(makeWorkflow({ id: "wf-http-gated", version: "1.0.0", gates: { validate: "passed", readiness: "pending", evals: "pending", riskReview: "pending", humanReview: "passed" }, approval: "approved" }));
+    await store.environments.put({ id: "env-http-gated", name: "gated", config: { trustMode: "dev" } });
+    const client = createHttpApiClient(baseUrl, "dashboard-promote-token");
+
+    const promoted = await client.promoteWorkflow("wf-http-gated", "1.0.0", "env-http-gated");
+    expect(promoted.kind).toBe("promoted");
+  });
+
+  it("promoteWorkflow WITHOUT a deployToken fails (throws) against a token-gated real server — proves the header is actually load-bearing, not a no-op", async () => {
+    const store = await startRealServer("dashboard-promote-token");
+    await store.workflows.put(makeWorkflow({ id: "wf-http-gated-2", version: "1.0.0", gates: { validate: "passed", readiness: "pending", evals: "pending", riskReview: "pending", humanReview: "passed" }, approval: "approved" }));
+    await store.environments.put({ id: "env-http-gated-2", name: "gated2", config: { trustMode: "dev" } });
+    const client = createHttpApiClient(baseUrl); // no deployToken given to the dashboard client
+
+    await expect(client.promoteWorkflow("wf-http-gated-2", "1.0.0", "env-http-gated-2")).rejects.toThrow(/401/);
   });
 });
 

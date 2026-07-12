@@ -2,6 +2,7 @@
 // documented additions: bundle/flag/approve/mcp — see commands/*.ts module
 // doc comments for the evidence behind each addition).
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { compileWorkflowInput, requestApprovalHandler, runWorkflowHandler as mcpRunWorkflowHandler } from "@aart/mcp";
@@ -11,9 +12,33 @@ import { createCliContext, type CliContext } from "./cli-context.js";
 import { approvalWaitWorkflowYaml, createTestCli, sampleWorkflowYaml, type TestCli } from "./test-utils.js";
 
 let tc: TestCli;
+let remoteServer: Server | undefined;
 afterEach(async () => {
   await tc?.cleanup();
+  if (remoteServer) await new Promise<void>((resolve) => remoteServer!.close(() => resolve()));
+  remoteServer = undefined;
 });
+
+/** D1 "remotes + push" (AMENDMENTS.md A56) — a fake HTTP server standing in for a real `aart server`'s /bundles/ingest+/bundles/plan routes, mirroring handlers/deployment.test.ts's own fixture. */
+function startFakeRemoteServer(): Promise<{ url: string; lastRequest: () => { path: string; authorization: string | undefined } | undefined }> {
+  let captured: { path: string; authorization: string | undefined } | undefined;
+  return new Promise((resolve, reject) => {
+    remoteServer = createServer((req, res) => {
+      req.on("data", () => {});
+      req.on("end", () => {
+        captured = { path: req.url ?? "", authorization: req.headers.authorization };
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ kind: "hydrated" }));
+      });
+    });
+    remoteServer.once("error", reject);
+    remoteServer.listen(0, () => {
+      const address = remoteServer!.address();
+      const port = typeof address === "object" && address ? address.port : 0;
+      resolve({ url: `http://localhost:${port}`, lastRequest: () => captured });
+    });
+  });
+}
 
 /** A trivial, fast, no-browser/no-LLM workflow (`data.stringify` only) — for `--root`/`--store` plumbing tests below that exercise `run()`'s real composition root directly (no `cliContext` override, so they go through the REAL engine) and only care about store/root wiring, not block-dispatch semantics. */
 function trivialWorkflowYaml(id: string): string {
@@ -376,6 +401,189 @@ describe("aart promote / aart deploy / aart trigger add", () => {
     const deployment = (triggerOutcome.result as { deployment: { triggerConfig: Record<string, unknown> } }).deployment;
     expect(deployment.triggerConfig.type).toBe("webhook");
     expect(deployment.triggerConfig.webhookPath).toBe("/hooks/wf");
+  });
+});
+
+// D1 "remotes + push" (AMENDMENTS.md A56).
+describe("aart remote add / list / remove", () => {
+  it("round-trips a remote through add -> list -> remove", async () => {
+    tc = await createTestCli();
+    const addOutcome = await run(["remote", "add", "production", "https://prod.example.com", "--environment", "production", "--token-ref", "secrets.PROD_TOKEN"], { cliContext: tc.cli });
+    expect(addOutcome.ok).toBe(true);
+    expect((addOutcome.result as { remote: { name: string; url: string; environment: string; tokenRef: string } }).remote).toEqual({
+      name: "production",
+      url: "https://prod.example.com",
+      environment: "production",
+      tokenRef: "secrets.PROD_TOKEN",
+    });
+
+    const listOutcome = await run(["remote", "list"], { cliContext: tc.cli });
+    expect(listOutcome.ok).toBe(true);
+    expect((listOutcome.result as { remotes: unknown[] }).remotes).toHaveLength(1);
+
+    const removeOutcome = await run(["remote", "remove", "production"], { cliContext: tc.cli });
+    expect(removeOutcome.ok).toBe(true);
+    const listAfterRemove = await run(["remote", "list"], { cliContext: tc.cli });
+    expect((listAfterRemove.result as { remotes: unknown[] }).remotes).toEqual([]);
+  });
+
+  it("tokenRef is optional — add without it round-trips fine", async () => {
+    tc = await createTestCli();
+    const addOutcome = await run(["remote", "add", "dev", "http://localhost:8080", "--environment", "dev"], { cliContext: tc.cli });
+    expect(addOutcome.ok).toBe(true);
+    expect((addOutcome.result as { remote: { tokenRef?: string } }).remote.tokenRef).toBeUndefined();
+  });
+
+  it("remove fails cleanly for an unknown remote name", async () => {
+    tc = await createTestCli();
+    const outcome = await run(["remote", "remove", "no-such-remote"], { cliContext: tc.cli });
+    expect(outcome.ok).toBe(false);
+  });
+
+  it("--environment is required for add", async () => {
+    tc = await createTestCli();
+    const outcome = await run(["remote", "add", "production", "https://prod.example.com"], { cliContext: tc.cli });
+    expect(outcome.ok).toBe(false);
+  });
+
+  // D1 fix pass (AMENDMENTS.md A57) — a plain http:// remote (anything
+  // but localhost/loopback) sends the deploy token cleartext; `aart remote
+  // add` never touches the network (it only writes remotes.json), making
+  // this the cheapest place to catch it, before any real push. Tested here
+  // (not through deployToRemoteHandler's own network path) because it
+  // needs zero network I/O to exercise both branches reliably.
+  it("warns about cleartext token exposure when the URL is http:// and not localhost/loopback", async () => {
+    tc = await createTestCli();
+    const outcome = await run(["remote", "add", "insecure", "http://deploy.example.com", "--environment", "prod"], { cliContext: tc.cli });
+    expect(outcome.ok).toBe(true);
+    const result = outcome.result as { warning?: string };
+    expect(result.warning).toMatch(/cleartext|unencrypted/i);
+    expect(result.warning).toContain("http://deploy.example.com");
+  });
+
+  it("no warning for https://, and no warning for http://localhost or http://127.0.0.1", async () => {
+    tc = await createTestCli();
+    const httpsOutcome = await run(["remote", "add", "secure", "https://deploy.example.com", "--environment", "prod"], { cliContext: tc.cli });
+    expect((httpsOutcome.result as { warning?: string }).warning).toBeUndefined();
+
+    const localhostOutcome = await run(["remote", "add", "local1", "http://localhost:9999", "--environment", "dev"], { cliContext: tc.cli });
+    expect((localhostOutcome.result as { warning?: string }).warning).toBeUndefined();
+
+    const loopbackOutcome = await run(["remote", "add", "local2", "http://127.0.0.1:9999", "--environment", "dev"], { cliContext: tc.cli });
+    expect((loopbackOutcome.result as { warning?: string }).warning).toBeUndefined();
+  });
+});
+
+describe("aart push", () => {
+  it("pushes a registered workflow version to the named remote", async () => {
+    tc = await createTestCli();
+    const path = join(tc.cwd, "wf.yaml");
+    await writeFile(path, sampleWorkflowYaml("wf-cli-push"), "utf8");
+    await run(["register", path], { cliContext: tc.cli });
+
+    const remote = await startFakeRemoteServer();
+    await run(["remote", "add", "staging", remote.url, "--environment", "staging-env"], { cliContext: tc.cli });
+
+    const pushOutcome = await run(["push", "staging", "wf-cli-push"], { cliContext: tc.cli });
+    expect(pushOutcome.ok).toBe(true);
+    expect(remote.lastRequest()?.path).toBe("/bundles/ingest");
+  });
+
+  it("--plan targets /bundles/plan instead of /bundles/ingest", async () => {
+    tc = await createTestCli();
+    const path = join(tc.cwd, "wf.yaml");
+    await writeFile(path, sampleWorkflowYaml("wf-cli-push-plan"), "utf8");
+    await run(["register", path], { cliContext: tc.cli });
+
+    const remote = await startFakeRemoteServer();
+    await run(["remote", "add", "staging", remote.url, "--environment", "staging-env"], { cliContext: tc.cli });
+
+    const pushOutcome = await run(["push", "staging", "wf-cli-push-plan", "--plan"], { cliContext: tc.cli });
+    expect(pushOutcome.ok).toBe(true);
+    expect(remote.lastRequest()?.path).toBe("/bundles/plan");
+  });
+
+  it("resolves --version to the latest registered version when omitted", async () => {
+    tc = await createTestCli();
+    const path = join(tc.cwd, "wf.yaml");
+    await writeFile(path, sampleWorkflowYaml("wf-cli-push-latest", "0.2.0"), "utf8");
+    await run(["register", path], { cliContext: tc.cli });
+
+    const remote = await startFakeRemoteServer();
+    await run(["remote", "add", "staging", remote.url, "--environment", "staging-env"], { cliContext: tc.cli });
+
+    const pushOutcome = await run(["push", "staging", "wf-cli-push-latest"], { cliContext: tc.cli });
+    expect(pushOutcome.ok).toBe(true);
+  });
+
+  it("fails cleanly with a remedy when the remote isn't configured", async () => {
+    tc = await createTestCli();
+    const path = join(tc.cwd, "wf.yaml");
+    await writeFile(path, sampleWorkflowYaml("wf-cli-push-noremote"), "utf8");
+    await run(["register", path], { cliContext: tc.cli });
+
+    const outcome = await run(["push", "no-such-remote", "wf-cli-push-noremote"], { cliContext: tc.cli });
+    expect(outcome.ok).toBe(false);
+    expect((outcome.result as { error: string }).error).toMatch(/aart remote add/i);
+  });
+
+  it("calls the exact same handler function MCP's aart_deploy tool calls (same-function-reference, not a reimplementation)", async () => {
+    tc = await createTestCli();
+    const path = join(tc.cwd, "wf.yaml");
+    await writeFile(path, sampleWorkflowYaml("wf-cli-push-ref"), "utf8");
+    await run(["register", path], { cliContext: tc.cli });
+    const remote = await startFakeRemoteServer();
+    await run(["remote", "add", "staging", remote.url, "--environment", "staging-env"], { cliContext: tc.cli });
+
+    const { deployToRemoteHandler } = await import("@aart/mcp");
+    const viaDirectHandler = await deployToRemoteHandler(tc.cli.aart, { remote: "staging", workflowId: "wf-cli-push-ref", workflowVersion: "0.1.0" });
+    const viaCli = await run(["push", "staging", "wf-cli-push-ref"], { cliContext: tc.cli });
+    expect((viaCli.result as { ok: boolean }).ok).toBe(viaDirectHandler.ok);
+  });
+});
+
+describe("aart environment register / list — ADR-2 (AMENDMENTS.md A56)", () => {
+  it("registers an environment with a trust mode, visible via list", async () => {
+    tc = await createTestCli();
+    const registerOutcome = await run(["environment", "register", "production", "--trust-mode", "production"], { cliContext: tc.cli });
+    expect(registerOutcome.ok).toBe(true);
+    expect((registerOutcome.result as { environment: { name: string; config: Record<string, unknown> } }).environment.config["trustMode"]).toBe("production");
+
+    const listOutcome = await run(["environment", "list"], { cliContext: tc.cli });
+    expect(listOutcome.ok).toBe(true);
+    const environments = (listOutcome.result as { environments: Array<{ name: string }> }).environments;
+    expect(environments.some((e) => e.name === "production")).toBe(true);
+  });
+
+  it("rejects an invalid --trust-mode with a clear error", async () => {
+    tc = await createTestCli();
+    const outcome = await run(["environment", "register", "staging", "--trust-mode", "not-a-real-mode"], { cliContext: tc.cli });
+    expect(outcome.ok).toBe(false);
+  });
+
+  it("re-registering the same name upserts (updates trustMode) rather than duplicating", async () => {
+    tc = await createTestCli();
+    await run(["environment", "register", "staging", "--trust-mode", "governed"], { cliContext: tc.cli });
+    await run(["environment", "register", "staging", "--trust-mode", "strict"], { cliContext: tc.cli });
+    const listOutcome = await run(["environment", "list"], { cliContext: tc.cli });
+    const environments = (listOutcome.result as { environments: Array<{ name: string; config: Record<string, unknown> }> }).environments;
+    const staging = environments.filter((e) => e.name === "staging");
+    expect(staging).toHaveLength(1);
+    expect(staging[0]?.config["trustMode"]).toBe("strict");
+  });
+
+  it("this is the REAL wiring for the previously-dead registerEnvironment — a workflow can actually be promoted into a freshly-registered environment", async () => {
+    tc = await createTestCli();
+    const path = join(tc.cwd, "wf.yaml");
+    await writeFile(path, sampleWorkflowYaml("wf-cli-env-promote"), "utf8");
+    await run(["register", path], { cliContext: tc.cli });
+    const wf = await tc.cli.aart.store.workflows.get("wf-cli-env-promote", "0.1.0");
+    await tc.cli.aart.store.workflows.put({ ...wf!, gates: { validate: "passed", readiness: "passed", evals: "passed", riskReview: "passed", humanReview: "passed" } });
+    await run(["promote", "wf-cli-env-promote"], { cliContext: tc.cli });
+
+    await run(["environment", "register", "staging-real", "--trust-mode", "governed"], { cliContext: tc.cli });
+    const deployOutcome = await run(["deploy", "wf-cli-env-promote", "--target", "staging-real"], { cliContext: tc.cli });
+    expect(deployOutcome.ok).toBe(true);
   });
 });
 

@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "AART MCP tool surface — 21 tools, core/extended mode-gated registration, result-affordance pattern, YAML uses/with compiler, init-agent, recipes (architecture §10, spec §32-34). Shared composition root also consumed by @aart/cli (architecture §10.3's 'shared by @aart/cli' note) so CLI and MCP never diverge into two implementations of the same action.",
+  "description": "AART MCP tool surface — 22 tools (21 + D1's aart_deploy, AMENDMENTS.md A56), core/extended mode-gated registration, result-affordance pattern, YAML uses/with compiler, init-agent, recipes (architecture §10, spec §32-34). Shared composition root also consumed by @aart/cli (architecture §10.3's 'shared by @aart/cli' note) so CLI and MCP never diverge into two implementations of the same action.",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
@@ -24,6 +24,7 @@
     "@aart/governance": "workspace:*",
     "@aart/llm": "workspace:*",
     "@aart/registry": "workspace:*",
+    "@aart/server": "workspace:*",
     "@aart/store": "workspace:*",
     "@aart/types": "workspace:*",
     "@modelcontextprotocol/sdk": "^1.29.0",

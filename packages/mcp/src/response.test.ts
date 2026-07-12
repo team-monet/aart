@@ -1,28 +1,29 @@
 // Result-affordance envelope tests — architecture §10.2/§32.2c. DoD: "every
 // tool's result includes a correct next field for both success AND failure
-// paths" — tested here as a completeness sweep over all 21 tools x 2
-// outcomes (42 checks), plus the exact worked example architecture §10.2
-// itself cites verbatim.
+// paths" — tested here as a completeness sweep over all 22 tools (the
+// original 21 + D1's aart_deploy, AMENDMENTS.md A56) x 2 outcomes (44
+// checks), plus the exact worked example architecture §10.2 itself cites
+// verbatim.
 import { describe, expect, it } from "vitest";
 import { computeNext, TOOL_NAMES, TOOL_TIERS, wrapResult } from "./response.js";
 
-describe("TOOL_NAMES / TOOL_TIERS — architecture §10.1's 21-tool catalog", () => {
-  it("has exactly 21 tools", () => {
-    expect(TOOL_NAMES).toHaveLength(21);
+describe("TOOL_NAMES / TOOL_TIERS — architecture §10.1's 21-tool catalog + D1's aart_deploy (AMENDMENTS.md A56)", () => {
+  it("has exactly 22 tools", () => {
+    expect(TOOL_NAMES).toHaveLength(22);
   });
 
-  it("has exactly 10 core and 11 extended tools (spec Fix C)", () => {
+  it("has exactly 10 core and 12 extended tools (spec Fix C's 10/11 split, +1 extended for D1's aart_deploy)", () => {
     const core = TOOL_NAMES.filter((t) => TOOL_TIERS[t] === "core");
     const extended = TOOL_NAMES.filter((t) => TOOL_TIERS[t] === "extended");
     expect(core).toHaveLength(10);
-    expect(extended).toHaveLength(11);
+    expect(extended).toHaveLength(12);
   });
 
   it("marks aart_approve as core", () => {
     expect(TOOL_TIERS.aart_approve).toBe("core");
   });
 
-  it("contains every tool name from architecture §34's flat list, no more no less", () => {
+  it("contains every tool name from architecture §34's flat list plus D1's aart_deploy, no more no less", () => {
     const expected = [
       "aart_find_blocks",
       "aart_get_block",
@@ -42,6 +43,7 @@ describe("TOOL_NAMES / TOOL_TIERS — architecture §10.1's 21-tool catalog", ()
       "aart_run_eval",
       "aart_promote_workflow",
       "aart_deploy_workflow",
+      "aart_deploy",
       "aart_trigger_workflow",
       "aart_list_waiting_runs",
       "aart_resume_run",

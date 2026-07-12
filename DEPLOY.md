@@ -23,6 +23,8 @@ the exact `scp`-the-bundle handoff into this document's Path A/B);
 - [Path B — bare process (systemd-style)](#path-b--bare-process-systemd-style)
 - [Store choice: fs vs sqlite](#store-choice-fs-vs-sqlite)
 - [Secret management](#secret-management)
+- [Deploy token](#deploy-token)
+- [Environment registration](#environment-registration)
 - [Backup & restore](#backup--restore)
 - [Upgrade procedure](#upgrade-procedure)
 - [Verifying a deployment](#verifying-a-deployment)
@@ -112,6 +114,11 @@ server instance only activates that environment's triggers, per
 `AART_ENVIRONMENT` in `docker-compose.yml`'s `server` service — note this is
 a **server-only** flag; `worker`/`dashboard` have no equivalent scoping
 option today (see [Ops limits](#ops-limits--read-this-before-you-rely-on-it)).
+That named `Environment` has to actually exist on this store first — either
+`aart environment register <name> --trust-mode <mode>` (D1 "remotes +
+push," AMENDMENTS.md A56 — see [Deploy token](#deploy-token) below) run
+against the same store/volume, or the auto-vivified one `aart deploy
+<workflowId> --target <name>` creates on first use.
 
 Swap `target: runtime` for `target: runtime-browser` on `server` and
 `worker` in `docker-compose.yml` if you need Chromium (see above) — `image:
@@ -142,7 +149,8 @@ docker run -d --name aart-dashboard \
   aart:latest dashboard
 
 # One-off CLI commands (register, validate, request-approval, approve,
-# promote, deploy, trigger add, bundle, ...) against the same store:
+# promote, deploy, trigger add, bundle, environment register, ...) against
+# the same store:
 docker run --rm -v aart-data:/data aart:latest register /dev/stdin --store sqlite < my-workflow.yaml
 ```
 
@@ -226,6 +234,17 @@ WantedBy=multi-user.target
 # /etc/systemd/system/aart-worker.service — same shape, ExecStart=/usr/bin/aart worker --store sqlite, no port
 ```
 
+With the `sqlite` store, a genuinely concurrent `aart server` + `aart worker`
+start on a fresh store is now coordinated and safe either order (AMENDMENTS.md
+A58 — see [Store choice: fs vs sqlite](#store-choice-fs-vs-sqlite) below), so
+this ordering is a startup-determinism nicety, not a correctness requirement.
+Still worth doing: add `After=aart-server.service` (and, if you want systemd
+to also refuse to start the worker unit at all without the server unit,
+`Requires=aart-server.service`) to `aart-worker.service`'s `[Unit]` section
+above, or otherwise stagger the two units' start — this makes the schema-
+applying process predictable (the server applies it first in the common case)
+instead of leaving it to whichever process happens to win the race.
+
 `aart server`/`aart worker` already handle `SIGTERM`/`SIGINT` cleanly
 (graceful shutdown, drains in-flight steps to their next checkpoint before
 exiting — architecture §4.7; verified directly against a real signal in
@@ -244,8 +263,28 @@ original hand-written `dashboard-dev.mjs` pattern — both call the exact same
 | | `fs` (default) | `sqlite` |
 |---|---|---|
 | Format | One JSON file per record, directory-per-collection (`architecture §5.2`) | One file, WAL mode (`architecture §5.1`) |
-| Safe with >1 process writing? | **No** — no cross-process locking; concurrent writers can race | **Yes** — this is what it's for |
+| Safe with >1 process writing? | **No** — no cross-process locking; concurrent writers can race | **Yes** — including a coordinated concurrent first startup (AMENDMENTS.md A58, see below) |
 | Use for | A single local `aart run`/authoring session | Any deployment running `server`+`worker` (or multiple workers) against the same store — which is every real deployment |
+
+**What "safe" means here, precisely (AMENDMENTS.md A58 — corrects this
+section's own prior, unqualified "Yes"):** `sqlite` is safe for the
+`server`+`worker`(+more workers) topology this deploy kit ships, INCLUDING
+the case that actually crashed before this fix — two processes racing to
+be the first to open and migrate a brand-new, empty store (e.g. `docker
+compose up` starting `server` and `worker` at the same moment against a
+fresh volume). That concurrent-startup race is now coordinated
+(`PRAGMA busy_timeout` set first on every connection, plus an exclusive
+`BEGIN IMMEDIATE` transaction around migration application —
+`packages/store/src/adapters/sqlite/index.ts`'s `runMigrationsCoordinated`)
+so neither process crashes or corrupts the schema. Beyond startup, `sqlite`
+is still single-writer-at-a-time at the SQLite level, same as any WAL-mode
+database (WAL: concurrent READERS, one writer at a time — concurrent writes
+serialize through the file lock, they don't fail or need to be avoided).
+`job_queue`'s own claim leasing (architecture ADR-05 — a conditional
+`UPDATE ... WHERE claimed_by IS NULL OR lease_expires_at <= ?`) is already
+built around exactly this constraint: multiple workers correctly contend
+for the same row without corrupting it; they just don't write in true
+parallel, which is what the leasing design already assumes.
 
 **Always pass `--store sqlite` for `server`/`worker`/`dashboard` in
 production.** `fs` is the CLI's own default (`aart run` with no flags — the
@@ -293,6 +332,137 @@ For a real deployment: prefer `AART_SECRET_*` env vars injected by whatever
 already manages secrets for your infrastructure (systemd's
 `EnvironmentFile=`, your container orchestrator's secret-injection
 mechanism, ...) over `secrets.json` — one less plaintext file on disk.
+
+## Deploy token
+
+D1 "remotes + push" (AMENDMENTS.md A56) added a REMOTE deploy surface —
+`aart push`/the MCP `aart_deploy` tool bundle a workflow version and POST
+it straight to a running `aart server` over HTTP, instead of `scp`-ing a
+bundle by hand (see `AUTHORING.md`'s "(e) Deploying to the server"). A
+SEPARATE bearer token, distinct from the webhook secrets above, gates this.
+
+**Gating matrix — read this before fronting `aart server` with a reverse
+proxy (D1 fix-pass ruling, AMENDMENTS.md A57).** Not every write route
+behaves the same way; know which tier a route you care about is in:
+
+| Tier | Routes | `AART_DEPLOY_TOKEN` unset | `AART_DEPLOY_TOKEN` set |
+| --- | --- | --- | --- |
+| **Fail-closed** | `POST /bundles/ingest`, `POST /bundles/plan`, `POST /environments` | Refuses **every** request, `401`, naming the env var as the remedy — no "auth disabled" state at all. | Requires a valid `Authorization: Bearer <token>`; wrong/missing -> `401`. |
+| **Conditionally gated** | `POST /workflows/:id/promote` | **Open** — unchanged pre-A56 behavior, so a tokenless local/dev/TEST-DRIVE dashboard keeps working. One loud warning is logged ONCE at server startup (not per-request) when this is the case. | Requires the SAME valid Bearer the fail-closed routes do; wrong/missing -> `401` (a differently-worded remedy — "provide a valid token," not "set `AART_DEPLOY_TOKEN`," since one already is). |
+| **Open, always** | Every GET route; the three `/webhooks/*` routes (separate, per-binding HMAC verification — [Secret management](#secret-management) above, completely untouched); every OTHER write route (`/runs/trigger`, `/workflows/:id/approve`, `/corrections`, `/evals/suites`, `/workflows/:id/block-promotion`, ...) | Unaffected either way — `AART_DEPLOY_TOKEN` plays no role here at all. | Unaffected either way. |
+
+Why promote is its own tier, not fail-closed like the other three: those
+three routes never worked without a token at all (a brand-new surface, "not
+configured yet" is a correct universal refusal); `POST
+/workflows/:id/promote` predates the deploy token by a full session
+(AMENDMENTS.md A47) and is the dashboard's own promote button — failing it
+closed by default would have broken every existing tokenless deployment on
+upgrade. The trust-boundary reasoning for gating it AT ALL: promote is the
+switch that flips a pushed-but-dormant `Deployment.promoted` from `false`
+to `true` (see [Environment registration](#environment-registration) and
+`AUTHORING.md`'s bundle/environment notes) — an unauthenticated promote
+would let anyone who can merely REACH this server's HTTP API activate
+evidence you deliberately pushed but hadn't yet promoted, which is exactly
+the guarantee D1's own "push now, promote later" design depends on. If you
+front this server with a reverse proxy and only intend to protect the
+fail-closed tier, you are still leaving promote (and every other write
+route) open unless you protect the whole API surface, or set
+`AART_DEPLOY_TOKEN` and forward the `Authorization` header through.
+
+**Server side** — set `AART_DEPLOY_TOKEN`, checked in the exact same two
+places/order as `AART_SECRET_*` above: the env var first, then
+`<root>/secrets.json`'s own `"AART_DEPLOY_TOKEN"` key.
+
+```bash
+# .env (docker compose) or your process manager's own secret injection:
+AART_DEPLOY_TOKEN=a-long-random-value-you-generate-yourself
+```
+
+**Client side (`aart push`/`aart_deploy`)** — `aart remote add <name> <url>
+--environment <envName> --token-ref secrets.<NAME>` records only the
+*reference*, never the value (same discipline as
+`--webhook-hmac-secret-ref`); `aart push`/`aart_deploy` resolve it at push
+time via the identical `AART_SECRET_<NAME>`-then-`secrets.json` mechanism
+and send it as `Authorization: Bearer <token>`. Skip `--token-ref` and no
+`Authorization` header is sent at all — fine only if the remote's own
+`AART_DEPLOY_TOKEN` happens to be unset too, which (see above) means the
+remote refuses the push regardless.
+
+**Client side (the dashboard's own promote button — D1 fix pass,
+AMENDMENTS.md A57)** — a SEPARATE resolution, env-var only: set
+`AART_DEPLOY_TOKEN` in the **dashboard container/process's own**
+environment (`docker-compose.yml`'s `dashboard` service reads it from the
+same `.env` the `server`/`worker` services do — see that file's own
+comments) and `@aart/dashboard`'s `createHttpApiClient` attaches it as a
+Bearer header on `POST /workflows/:id/promote` only (the one route the
+server conditionally gates — [Gating matrix](#deploy-token) above). Forget
+this on a server where `AART_DEPLOY_TOKEN` IS set, and every promote click
+from the dashboard UI will `401` — the CLI's `aart promote`/HTTP `POST
+/workflows/:id/promote` both still work fine with a correct token supplied
+directly.
+
+Comparison is constant-time (`sha256` of both sides, then
+`crypto.timingSafeEqual` — never a raw string compare, and never
+`timingSafeEqual` on the unhashed token, which throws on a length
+mismatch).
+
+## Environment registration
+
+ADR-2 (same session, AMENDMENTS.md A56): `aart environment register <name>
+--trust-mode <dev|governed|strict|production>` (or the token-gated `POST
+/environments` above, for the no-filesystem-access case) creates or updates
+a real `Environment` record with a real trust mode — the gap this closes:
+previously the only way an `Environment` came into existence was
+`aart_deploy_workflow`'s own auto-vivification on first deploy, which
+always creates an EMPTY config (silently defaulting to `governed`-tier
+required gates, `promotion.ts`'s own `requiredGatesForEnvironment`
+convention) — there was no documented way to get a real `dev`-, `strict`-,
+or `production`-trust environment onto a store at all. `aart environment
+list` shows every registered environment and its config. Re-registering an
+existing name updates it in place (upsert), never a duplicate row.
+
+A bundle's `--environment <name>` (`aart bundle`/`aart push`) needs the
+named environment to already be registered on the DESTINATION store before
+hydration — see `AUTHORING.md`'s "Environment-scoped hydration" note.
+
+**`aart trigger add` has no `--environment` selector — stated plainly, a
+known gap (a real `--environment` flag is backlog, not built here).**
+`aart trigger add <workflowId> --type <type> ...`
+(`packages/cli/src/commands/deployment.ts`'s `triggerAddCommand`) attaches
+the trigger config to whichever of that workflow's `Deployment` rows
+`store.deployments.list({ workflowId })` happens to return LAST — this is
+**not** reliably "the most recently created one": the `fs` adapter's own
+listing sorts alphabetically by the deployment's random `id` (unrelated to
+creation time — `KeyedJsonCollection.list()`,
+`packages/store/src/adapters/fs/json-file.ts`), and the `sqlite` adapter's
+query has no `ORDER BY` at all (`SqliteDeploymentStore.list()`,
+`packages/store/src/adapters/sqlite/stores/simple-stores.ts` — an
+unspecified row order). Compounding this: every `aart deploy <id> --target
+<env>` creates a BRAND NEW `Deployment` row (`deployWorkflowHandler`,
+`packages/mcp/src/handlers/deployment.ts`'s `id: newId("deploy")`) — it
+never updates an existing one, even for a re-deploy to the SAME
+environment — so a workflow deployed more than once (to one environment
+twice, or to several) accumulates multiple rows with no way for `trigger
+add` to say which one it means.
+
+**The only reliably deterministic case: a workflow's FIRST-EVER deployment,
+before any other exists for it.** `aart deploy <workflowId> --target <env>`
+immediately followed by `aart trigger add <workflowId> --type <type> ...`,
+before deploying that workflow anywhere else — with exactly one
+`Deployment` row in existence, there is nothing left to disambiguate.
+
+**For a second (or later) deployment of the same workflow — the normal
+shape once you have, say, `staging` AND `production` both — there is no
+reliable way to target the new one through `trigger add` today.**
+Verify which row actually changed after running it, don't assume:
+`curl http://<server>:8080/deployments` (or the dashboard's Deployments/
+trigger-configs view) lists every `Deployment` with its full
+`triggerConfig` — the row whose `triggerConfig` now matches what you just
+set (and whose `id` matches what `aart deploy`'s own JSON output printed
+when you created it) is the one that actually got updated. If it picked
+the wrong row, the only recourse today is re-running `trigger add` and
+re-checking — the ordering is unspecified, not a toggle reliably
+alternating between two rows.
 
 ## Backup & restore
 
@@ -402,23 +572,44 @@ Stated plainly, matching this repo's own "What doesn't work yet" convention
   replicas), not something to fake with multiple `server` instances today.
 - **No metrics/OTel EXPORTER ships today, despite the architecture
   describing one as optional.** The logging layer supports a pluggable
-  `LogSink` (`packages/store/src/logger.ts`) — a no-op by default, a JSON-
-  to-stdout `consoleJsonSink` available, and the type is shaped so a caller
-  COULD write an OTel-bridge sink — but no `@opentelemetry/*` package is a
-  dependency anywhere in this codebase (verified: zero matches across every
-  `package.json`) and no such bridge is implemented. "Metrics via OTel" is
-  an architectural placeholder for future work, not a flag you can flip
-  today. What you get out of the box: structured JSON logs to stdout (wire
-  `consoleJsonSink`), and the `/health`/`/runs`/`/deployments`/
+  `LogSink` (`packages/store/src/logger.ts`) — the LIBRARY's own default
+  (`createLogger()` with no `sink` given) is still a no-op, and the type is
+  shaped so a caller COULD write an OTel-bridge sink — but no
+  `@opentelemetry/*` package is a dependency anywhere in this codebase
+  (verified: zero matches across every `package.json`) and no such bridge is
+  implemented. "Metrics via OTel" is an architectural placeholder for future
+  work, not a flag you can flip today. **What you get out of the box, no
+  wiring required (AMENDMENTS.md A58):** `aart server` and `aart worker`
+  (both real composition roots, `packages/cli/src/real-server-port.ts`)
+  unconditionally wire `consoleJsonSink` — one JSON-stringified line per log
+  call, shaped `{level, msg, time, ...context}` (`service`/`component` and
+  request-scoped fields like `runId` where relevant) — `debug`/`info` lines
+  to stdout, `warn`/`error` lines to stderr. There is no flag to turn this
+  off and no level filter — every level is always emitted; redirect/collect
+  stdout+stderr with whatever your process manager or container runtime
+  already does. Plus the `/health`/`/runs`/`/deployments`/
   `/rejected-triggers` HTTP endpoints for polling-based monitoring.
-- **No authentication in front of the control-plane HTTP API or the
+- **No authentication in front of MOST of the control-plane HTTP API or the
   dashboard.** `GET /runs`, `GET /workflows`, the webhook endpoints (HMAC-
   verified, but that authenticates the SENDER, not a browsing operator),
   and the dashboard's own pages have no login, API key, or network-policy
   enforcement built in. Put a reverse proxy with real auth (or a private
   network / VPN-only exposure) in front of anything beyond localhost —
   this deploy kit's compose/systemd examples above bind to all interfaces
-  by default and assume you're adding that layer yourself.
+  by default and assume you're adding that layer yourself. **Two
+  exceptions, NOT the same shape** (D1 "remotes + push," AMENDMENTS.md A56;
+  the promote exception added by a D1 fix pass, AMENDMENTS.md A57 — see
+  [Deploy token](#deploy-token)'s own gating matrix for the full table):
+  `POST /bundles/ingest`, `POST /bundles/plan`, and `POST /environments`
+  are **fail-closed**, unconditionally, by the deploy token; `POST
+  /workflows/:id/promote` is **conditionally** gated by the SAME token —
+  only once it's actually configured, staying open otherwise so upgrading
+  onto this fix pass never silently breaks a tokenless deployment's
+  promote button. Every OTHER write route (triggering a run,
+  approving a workflow version, corrections, evals, block/mark-needs-review
+  flags, ...) remains exactly as open as this bullet describes, regardless
+  of whether `AART_DEPLOY_TOKEN` is set. Don't mistake "`AART_DEPLOY_TOKEN`
+  is configured" for "this server is authenticated."
 - **The dashboard is API-complete except two narrower gaps** (`@aart/dashboard`,
   AMENDMENTS.md A47 — owned by a different session than this deploy kit,
   which packages what exists rather than changing it). Every read AND
@@ -478,6 +669,16 @@ Stated plainly, matching this repo's own "What doesn't work yet" convention
   regardless of which environment triggered it; scoping which triggers
   ever CREATE a run in the first place is what `server`'s `--environment`
   actually controls.
+- **The dashboard has no "promoted" badge yet** (D1 "remotes + push,"
+  AMENDMENTS.md A56 — a flagged, explicitly out-of-scope residual, not an
+  oversight). `Deployment.promoted` (`false` = evidence recorded via a
+  bundle push, awaiting a real promotion before its trigger goes live) is
+  fully real in the store and API (`GET /deployments`), but
+  `@aart/dashboard`'s `ProductionPage.tsx` doesn't render it — an operator
+  checking deployment status there today can't visually distinguish a
+  promoted, live deployment from one still awaiting promotion. Use `GET
+  /deployments` directly, or `aart_deploy --plan`'s preview, until that
+  frontend work lands.
 
 ## Platform notes
 

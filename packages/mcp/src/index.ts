@@ -29,6 +29,7 @@ export type {
   BlockCatalogEntry,
   BlockSearchResult,
   BundleLike,
+  BundlerPort,
   ClearRunFlagResult,
   EnginePort,
   EvidencePort,
@@ -36,6 +37,8 @@ export type {
   GovernancePort,
   PromotionEvaluation,
   RegistryPort,
+  RemoteEntry,
+  RemotesPort,
   ResumeOutcome,
   SemanticRiskDiffShape,
   ServerHandleLike,
@@ -44,6 +47,12 @@ export type {
   ValidationResultShape,
   WorkerHandleLike,
 } from "./types.js";
+
+// D1 "remotes + push" (AMENDMENTS.md A56) — resolveAndProduceBundle is the
+// resolveDeployment/bundleToBundleLike bridge @aart/cli's real-server-port.ts
+// imports directly (this package already depends on @aart/mcp — architecture's
+// three-clients principle — one shared implementation, not two).
+export { resolveAndProduceBundle } from "./real-context.js";
 
 export {
   computeNext,

@@ -208,6 +208,14 @@ export const SQLITE_SCHEMA_STATEMENTS: readonly string[] = [
   `CREATE INDEX IF NOT EXISTS idx_eval_runs_suite ON eval_runs(suite_id)`,
   `CREATE INDEX IF NOT EXISTS idx_eval_runs_workflow ON eval_runs(workflow_id)`,
 
+  // `promoted` (D1 "remotes + push", AMENDMENTS.md A56) is deliberately NOT
+  // listed here — it's added by migration 0002_deployment_promoted
+  // (migrations.ts) via ALTER TABLE, not this baseline DDL, so that a
+  // pre-existing database upgrading through 0002 and a brand-new database
+  // running 0001 then 0002 in sequence both converge on the identical final
+  // `deployments` shape (see that migration's own doc comment for why this
+  // ordering matters: it's what makes an old row's column read back SQL
+  // NULL / TS `undefined`, not `false`).
   `CREATE TABLE IF NOT EXISTS deployments (
     id TEXT PRIMARY KEY,
     workflow_id TEXT NOT NULL,

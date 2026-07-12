@@ -39,6 +39,18 @@ export async function loadTriggerBindingsFromDeployments(store: AartStore, filte
 }
 
 function deploymentToBinding(deployment: Deployment): TriggerBinding | undefined {
+  // D1 "remotes + push" (AMENDMENTS.md A56) — the single chokepoint named
+  // in the design memo: `promoted === false` means "evidence recorded,
+  // awaiting promotion" (Deployment.promoted's own doc comment,
+  // store-records.ts) — this deployment's trigger must never fire yet.
+  // `undefined`/`true` (every pre-D1 row, plus any row explicitly promoted)
+  // is unaffected — falls through exactly as before this check existed.
+  // Both real trigger-ingress paths that read a `Deployment`'s config route
+  // through THIS function (never a second copy of this check): webhook/
+  // github/slack HTTP ingress and the poll ticker both call
+  // `loadTriggerBindingsFromDeployments` above, which calls this for every
+  // row — see registry.test.ts for the regression proving both.
+  if (deployment.promoted === false) return undefined;
   const cfg = deployment.triggerConfig as Partial<TriggerBinding> & { type?: TriggerBinding["type"] };
   if (!cfg?.type) return undefined;
   return {
