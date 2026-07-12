@@ -69,6 +69,20 @@ export interface WorkerConfig extends SharedRuntimeConfig, TickerConfig, Admissi
 
 export interface ServerHttpConfig {
   port?: number;
+  /**
+   * D2a security hardening, breaking-change bind default (AMENDMENTS.md
+   * A59) — which interface `aart server` binds. Unset -> `DEFAULT_HTTP_HOST`
+   * (`"127.0.0.1"`, loopback-only, this session's new default — see that
+   * constant's own doc comment for the full rationale). Set to `"0.0.0.0"`
+   * (or a specific routable IP) to accept connections from other hosts/
+   * containers — required for any deployment where a different process
+   * (a worker's Docker network alias, a dashboard container, a genuinely
+   * remote `aart push`) needs to reach this server. Threaded from
+   * `--host`/`AART_HOST` (`@aart/cli`'s `real-server-port.ts`/`commands/
+   * process.ts` — flag wins over env, mirroring `--environment`/
+   * `AART_ENVIRONMENT`'s established precedent).
+   */
+  host?: string;
 }
 
 export interface ServerConfig extends SharedRuntimeConfig, TickerConfig, PoisonGuardConfig, BackpressureConfig, ServerHttpConfig {
@@ -79,21 +93,43 @@ export interface ServerConfig extends SharedRuntimeConfig, TickerConfig, PoisonG
   /** AMENDMENTS.md A45 — restricts which `Deployment`-sourced trigger bindings (webhook/github/slack/poll ingress, both the HTTP layer and the ticker's poll loop) this server instance activates, by `Environment` id. Threaded straight into `loadTriggerBindingsFromDeployments`'s own `filter.environmentId` (triggers/registry.ts) everywhere this config loads bindings. Unset (the default) activates every deployment's trigger across every environment — a documented dev convenience, not a production isolation guarantee. `@aart/cli`'s `--environment <name>` (real-server-port.ts) resolves the human-readable name to this id before constructing this config. */
   environmentId?: string;
   /**
-   * D1 "remotes + push" (AMENDMENTS.md A56) — the shared bearer token
-   * gating the deploy-surface mutation routes (`POST /bundles/ingest`,
-   * `POST /bundles/plan`, `POST /environments` — http/server.ts,
-   * deploy-token.ts's `checkDeployToken`). Resolved ONCE at startup by the
-   * caller (`@aart/cli`'s `resolveDeployToken`, secrets.ts) and threaded in
-   * here — this config never re-resolves it itself, matching how
-   * `secretResolver` above is already an injected value, not a
-   * self-resolving one. Unset (the default) leaves those three routes
-   * refusing every request unconditionally (fail-closed) — there is no
-   * "auth disabled, allow everything" state for this specific surface, only
-   * "not configured yet." The three `/webhooks/*` routes are entirely
-   * unaffected either way — they keep their own, separate per-binding HMAC
-   * verification (`secretResolver` above), never this token.
+   * D1 "remotes + push" (AMENDMENTS.md A56); scope widened by D2a security
+   * hardening (AMENDMENTS.md A59) — the shared bearer token gating EVERY
+   * mutation route on this server EXCEPT the three `/webhooks/*` routes
+   * (separate, per-binding HMAC verification, `secretResolver` above,
+   * completely untouched). Two tiers, unchanged from D1/D1-fix-pass in
+   * shape, just applied uniformly now instead of to three routes alone
+   * (see `deploy-token.ts`'s `checkAnyDeployToken`, and http/server.ts's
+   * `requireDeployToken`/`requireDeployTokenIfConfigured`):
+   *   - fail-closed (`POST /bundles/ingest`, `POST /bundles/plan`, `POST
+   *     /environments`) — unset leaves these refusing every request
+   *     unconditionally; there is no "auth disabled" state for this tier.
+   *   - conditionally gated (every other mutation route, `POST
+   *     /workflows/:id/promote` included) — unset leaves these OPEN
+   *     (unchanged pre-D2a behavior, so a tokenless local/dev/TEST-DRIVE
+   *     deployment keeps working); set, they require the same valid Bearer
+   *     the fail-closed tier does.
+   * Resolved ONCE at startup by the caller (`@aart/cli`'s
+   * `resolveDeployToken`, secrets.ts) and threaded in here — this config
+   * never re-resolves it itself, matching how `secretResolver` above is
+   * already an injected value, not a self-resolving one.
    */
   deployToken?: string;
+  /**
+   * D2a security hardening, token rotation (AMENDMENTS.md A59) — a SECOND
+   * valid bearer token, checked alongside `deployToken` above by every
+   * gated route (`checkAnyDeployToken`, deploy-token.ts) so an operator can
+   * roll a compromised/expiring token without a hard cutover: publish the
+   * new value here as `deployTokenNext` (callers may start using it
+   * immediately, both tokens accepted), then once every caller has
+   * switched, promote it to `deployToken` proper and clear this field.
+   * Resolved the same way as `deployToken` (`@aart/cli`'s
+   * `resolveDeployTokenNext`, secrets.ts, reading `AART_DEPLOY_TOKEN_NEXT`)
+   * — unset (the default) changes nothing: `checkAnyDeployToken` with only
+   * one configured token behaves byte-identically to the pre-rotation
+   * `checkDeployToken` single-token check.
+   */
+  deployTokenNext?: string;
 }
 
 export const DEFAULT_TICK_INTERVAL_MS = 5000;
@@ -109,3 +145,36 @@ export const DEFAULT_HEALTH_PORT = 8787;
 export const DEFAULT_HTTP_PORT = 8080;
 /** D1 "remotes + push" (AMENDMENTS.md A56) — hard request-body cap for `POST /bundles/ingest` and `POST /bundles/plan` (http/server.ts, `Router.post`'s `maxBodyBytes` option). Bundles are 100% JSON text (bundle.ts's own doc comment) — 10MB is generous headroom for a real workflow closure while still bounding memory a single deploy-surface request can force this process to buffer. */
 export const MAX_BUNDLE_INGEST_BYTES = 10 * 1024 * 1024;
+/**
+ * D2a security hardening (AMENDMENTS.md A59) — the GLOBAL default body cap
+ * `Router.handle` (http/router.ts) now applies to every route that doesn't
+ * pass its own `maxBodyBytes` (previously: no cap at all, unless a route
+ * opted in — see `RouteOptions.maxBodyBytes`'s own doc comment history).
+ * Control-plane bodies (trigger inputs, approval decisions, correction
+ * records, eval suite definitions, ...) are small JSON payloads by
+ * construction; 1MB is generous headroom for any of them while still
+ * bounding the memory an unauthenticated-until-this-session, now
+ * conditionally-gated caller could force this process to buffer per
+ * request. The two bundle routes keep their own, much larger, explicit
+ * `MAX_BUNDLE_INGEST_BYTES` cap above — this default only applies where no
+ * explicit `maxBodyBytes` is given.
+ */
+export const DEFAULT_MAX_BODY_BYTES = 1_048_576;
+/**
+ * D2a security hardening, breaking-change bind default (AMENDMENTS.md A59,
+ * John-ratified 2026-07-12) — `aart server` now binds loopback-ONLY by
+ * default, not every interface. Rationale: with D2a's own auth middleware
+ * (this file's `deployToken`) closing the "every mutation route is
+ * unauthenticated" gap, the remaining honest default for a process nobody
+ * explicitly asked to expose is "reachable only from THIS machine," matching
+ * the "trusted local = localhost+tokenless" framing this ruling adopted —
+ * a tokenless local/dev/TEST-DRIVE server stays fully usable from
+ * `localhost`, and a genuinely remote/production deployment must now opt in
+ * explicitly via `--host`/`AART_HOST` (real-server-port.ts, commands/
+ * process.ts) — see DEPLOY.md's "Network binding" section for the full
+ * migration note (docker-compose.yml's `server` service, and any bare-
+ * process/systemd deployment, must add `--host 0.0.0.0` or a specific
+ * routable IP, or it silently becomes unreachable from any OTHER container/
+ * host on upgrade).
+ */
+export const DEFAULT_HTTP_HOST = "127.0.0.1";
