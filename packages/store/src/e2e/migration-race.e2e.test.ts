@@ -45,6 +45,8 @@ interface WorkerResult {
   hasPromotedColumn?: boolean;
   /** D2a security hardening (AMENDMENTS.md A59) — proves the THIRD migration (0003_approval_task_authenticated_as) is also correctly coordinated under this exact race, not just the one (0002) this mechanism was originally built for. */
   hasAuthenticatedAsColumn?: boolean;
+  /** V1 event log foundation (AMENDMENTS.md A61) — proves the FOURTH migration (0004_events_table) is also correctly coordinated under this exact race — the first of the four that adds a whole TABLE, not just a column. */
+  hasEventsTable?: boolean;
   error?: string;
 }
 
@@ -87,7 +89,7 @@ describe("sqlite adapter — concurrent-startup migration race (AMENDMENTS.md A5
   const ITERATIONS = 8;
 
   it(
-    `two genuinely separate OS processes opening the SAME fresh sqlite store at once, repeated ${ITERATIONS} times: both always come up cleanly, watermark 3, correct schema, no "duplicate column name" / "database is locked" crash`,
+    `two genuinely separate OS processes opening the SAME fresh sqlite store at once, repeated ${ITERATIONS} times: both always come up cleanly, watermark 4, correct schema, no "duplicate column name" / "database is locked" crash`,
     async () => {
       for (let i = 0; i < ITERATIONS; i++) {
         const dir = await mkdtemp(join(tmpdir(), "aart-sqlite-migration-race-"));
@@ -101,11 +103,13 @@ describe("sqlite adapter — concurrent-startup migration race (AMENDMENTS.md A5
           ["B", b],
         ] as const) {
           expect(result.ok, `worker ${label} (iteration ${i}) failed: ${result.error}`).toBe(true);
-          // D2a security hardening (AMENDMENTS.md A59) — was 2 (0001+0002)
-          // as of D1/A56; now 3 (0001+0002+0003_approval_task_authenticated_as).
-          expect(result.watermark, `worker ${label} (iteration ${i}) watermark`).toBe(3);
+          // V1 event log foundation (AMENDMENTS.md A61) — was 3
+          // (0001+0002+0003_approval_task_authenticated_as) as of D2a/A59;
+          // now 4 (+0004_events_table).
+          expect(result.watermark, `worker ${label} (iteration ${i}) watermark`).toBe(4);
           expect(result.hasPromotedColumn, `worker ${label} (iteration ${i}) deployments.promoted column`).toBe(true);
           expect(result.hasAuthenticatedAsColumn, `worker ${label} (iteration ${i}) approval_tasks.authenticated_as column`).toBe(true);
+          expect(result.hasEventsTable, `worker ${label} (iteration ${i}) events table`).toBe(true);
         }
       }
     },

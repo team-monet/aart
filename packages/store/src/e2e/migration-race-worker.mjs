@@ -63,6 +63,14 @@ async function main() {
     // migration correctly, not just the one it was originally built for.
     const approvalTaskColumns = handle.db.prepare("PRAGMA table_info(approval_tasks)").all();
     const hasAuthenticatedAsColumn = approvalTaskColumns.some((c) => c.name === "authenticated_as");
+    // V1 event log foundation (AMENDMENTS.md A61) — 0004_events_table is a
+    // FOURTH migration subject to this exact race, and the first that adds
+    // a whole TABLE rather than a column — `PRAGMA table_info` on a table
+    // that doesn't exist returns an EMPTY array (not an error) in sqlite,
+    // so a non-empty result here is a genuine, meaningful existence check,
+    // not just "the query didn't throw."
+    const eventsColumns = handle.db.prepare("PRAGMA table_info(events)").all();
+    const hasEventsTable = eventsColumns.length > 0;
     // A cheap real write through the fully-migrated schema — not just a
     // watermark-number check, but proof the schema this process's own
     // connection sees is genuinely usable end to end (the same store
@@ -77,7 +85,11 @@ async function main() {
       approval: "approved",
       gates: { validate: "passed", readiness: "passed", evals: "passed", riskReview: "passed", humanReview: "passed" },
     });
-    emit({ label, ok: true, watermark: watermarkRow?.version, hasPromotedColumn, hasAuthenticatedAsColumn });
+    // A cheap real write through the events table too — same "not just a
+    // schema-shape check" discipline the workflows.put call above already
+    // established.
+    await handle.store.events.append({ id: `race-check-event-${label}`, type: "run.started", occurredAt: new Date().toISOString(), summary: "race check" });
+    emit({ label, ok: true, watermark: watermarkRow?.version, hasPromotedColumn, hasAuthenticatedAsColumn, hasEventsTable });
   } finally {
     handle.close();
   }
