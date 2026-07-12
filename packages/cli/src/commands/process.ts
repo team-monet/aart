@@ -33,8 +33,8 @@ export interface ProcessCommandOptions {
   blocking?: boolean;
 }
 
-/** Resolves on SIGTERM or SIGINT — how workerCommand/serverCommand's "block until killed" wait ends cleanly instead of relying on Node's default (immediate, no-cleanup) signal behavior. Registers with `once` so repeated command invocations in one process (tests) never accumulate listeners. */
-function waitForShutdownSignal(): Promise<void> {
+/** Resolves on SIGTERM or SIGINT — how workerCommand/serverCommand/watchCommand's "block until killed" wait ends cleanly instead of relying on Node's default (immediate, no-cleanup) signal behavior. Registers with `once` so repeated command invocations in one process (tests) never accumulate listeners. Exported (Wave 2B, AMENDMENTS.md A64) so commands/watch.ts reuses this exact listener-registration discipline instead of a second, independently-drifting copy — `aart watch` is a third long-running "block until killed" command, the same shape as worker/server, just supervising three child processes instead of owning one handle directly. */
+export function waitForShutdownSignal(): Promise<void> {
   return new Promise<void>((resolve) => {
     process.once("SIGTERM", resolve);
     process.once("SIGINT", resolve);
