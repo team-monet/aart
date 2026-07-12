@@ -730,7 +730,7 @@ export class SqliteStandingApprovalStore implements StandingApprovalStore {
 }
 
 // ---------------------------------------------------------------------------
-// job_queue — architecture §5.3/§4.7. NOT one of AartStore's 16 members.
+// job_queue — architecture §5.3/§4.7. NOT one of AartStore's 17 members.
 // `setClaim` is a CONDITIONAL UPDATE (only succeeds if still unclaimed or
 // lease-expired) even though the interface signature returns `void` — see
 // this task's final report for why: the caller-side race-safe claim helper

@@ -7,6 +7,7 @@
 export * from "./types.js";
 export * from "./logger.js";
 export * from "./conformance.js";
+export * from "./event-log.js";
 
 export { createFsStore } from "./adapters/fs/index.js";
 export { FsMigrationWatermarkStore } from "./adapters/fs/watermark.js";

@@ -124,6 +124,84 @@ describe("decideApprovalTask — workflow-version decisions write the DECODED ga
   });
 });
 
+// V1 event log foundation (AMENDMENTS.md A61) — this package's own copy of
+// applyGateResult's (packages/mcp/src/handlers/governance.ts) event writes,
+// required by package layering (@aart/server cannot import @aart/mcp).
+describe("decideApprovalTask — V1 event log writes (AMENDMENTS.md A61)", () => {
+  it("emits approval.decided (with workflowId/workflowVersion) and workflow.gate_passed for a version-review approval", async () => {
+    await withFixture(async (fx) => {
+      await fx.store.workflows.put(fixtureWorkflow());
+      const subject = workflowVersionApprovalSubject("wf_review", "1.0.0", "riskReview");
+      await fx.store.approvals.put({ id: "task-events-1", ...subject, title: "t", description: "d", status: "pending", createdAt: fx.clock.nowIso() });
+
+      await decideApprovalTask(fx.store, fx.engine, "task-events-1", { status: "approved", reviewer: "alice" }, fx.clock);
+
+      const events = await fx.store.events.list();
+      expect(events).toContainEqual(expect.objectContaining({ type: "approval.decided", approvalTaskId: "task-events-1", workflowId: "wf_review", workflowVersion: "1.0.0" }));
+      expect(events).toContainEqual(expect.objectContaining({ type: "workflow.gate_passed", workflowId: "wf_review", workflowVersion: "1.0.0" }));
+    });
+  });
+
+  it("emits workflow.gate_failed (not gate_passed) for a rejection, and approval.decided with runId (not workflowId) for a genuine per-run wait", async () => {
+    await withFixture(async (fx) => {
+      await fx.store.workflows.put(fixtureWorkflow());
+      const subject = workflowVersionApprovalSubject("wf_review", "1.0.0", "riskReview");
+      await fx.store.approvals.put({ id: "task-events-2", ...subject, title: "t", description: "d", status: "pending", createdAt: fx.clock.nowIso() });
+      await decideApprovalTask(fx.store, fx.engine, "task-events-2", { status: "rejected", reviewer: "alice" }, fx.clock);
+
+      // status: "expired" — a non-resuming status (mirrors the "a
+      // non-terminal status... does not attempt a resume at all" test
+      // above) — this test only cares about the emitted event, not the
+      // resume outcome, so it deliberately avoids needing a real RunRecord
+      // for engine.resumeDirect to act on.
+      await fx.store.approvals.put({ id: "task-events-run", runId: "run-events-1", stepId: "step1", title: "t", description: "d", status: "pending", createdAt: fx.clock.nowIso() });
+      await decideApprovalTask(fx.store, fx.engine, "task-events-run", { status: "expired", reviewer: "bob" }, fx.clock);
+
+      const events = await fx.store.events.list();
+      expect(events).toContainEqual(expect.objectContaining({ type: "workflow.gate_failed", workflowId: "wf_review", workflowVersion: "1.0.0" }));
+      const runDecision = events.find((e) => e.approvalTaskId === "task-events-run");
+      expect(runDecision).toMatchObject({ type: "approval.decided", runId: "run-events-1" });
+      expect(runDecision).not.toHaveProperty("workflowId");
+    });
+  });
+
+  // The exact gap this session's own mcp-side test caught first (governance.ts's
+  // applyGateResult): `approval` is recomputed and written UNCONDITIONALLY on
+  // every decision — whichever gate happens to be the LAST one a mode
+  // requires flips the workflow to "approved" right here, with no separate
+  // approveOrDeprecateWorkflow call ever happening.
+  it("emits workflow.approved when this decision satisfies the LAST required gate — the same gap fixed in applyGateResult's mcp-side twin", async () => {
+    await withFixture(async (fx) => {
+      await fx.store.workflows.put(fixtureWorkflow({ gates: { validate: "passed", readiness: "pending", evals: "pending", riskReview: "pending", humanReview: "pending" } }));
+      const subject = workflowVersionApprovalSubject("wf_review", "1.0.0"); // default gate: humanReview
+      await fx.store.approvals.put({ id: "task-events-approved", ...subject, title: "t", description: "d", status: "pending", createdAt: fx.clock.nowIso() });
+
+      // governed default requires validate+humanReview; validate is already
+      // "passed" in the fixture, so this ONE decision completes approval.
+      await decideApprovalTask(fx.store, fx.engine, "task-events-approved", { status: "approved", reviewer: "alice" }, fx.clock);
+
+      const events = await fx.store.events.list();
+      expect(events.filter((e) => e.type === "workflow.approved")).toHaveLength(1);
+      expect(events).toContainEqual(expect.objectContaining({ type: "workflow.approved", workflowId: "wf_review", workflowVersion: "1.0.0" }));
+    });
+  });
+
+  it("does NOT emit workflow.approved when the decision is refused (invalid_gate) — no workflow write happens at all", async () => {
+    await withFixture(async (fx) => {
+      await fx.store.workflows.put(fixtureWorkflow());
+      const bogusSubject = { runId: "workflow-version:wf_review@1.0.0", stepId: "__gate:validate__" };
+      await fx.store.approvals.put({ id: "task-events-bogus", ...bogusSubject, title: "t", description: "d", status: "pending", createdAt: fx.clock.nowIso() });
+
+      await decideApprovalTask(fx.store, fx.engine, "task-events-bogus", { status: "approved", reviewer: "alice" }, fx.clock);
+
+      const events = await fx.store.events.list();
+      expect(events.some((e) => e.type === "workflow.approved" || e.type === "workflow.gate_passed")).toBe(false);
+      // The task's own decision is still recorded as approval.decided (mirrors the underlying approvals.put behavior).
+      expect(events).toContainEqual(expect.objectContaining({ type: "approval.decided", approvalTaskId: "task-events-bogus" }));
+    });
+  });
+});
+
 describe("decideApprovalTask — defense-in-depth: only humanReview/riskReview may be set by a human decision", () => {
   it("refuses a hand-crafted task whose stepId decodes to a non-approval-task gate (e.g. validate) — the task's OWN decision is still recorded", async () => {
     await withFixture(async (fx) => {

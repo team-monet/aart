@@ -5,7 +5,7 @@
 // scheduler ticker (ticker/ticker.ts) — architecture places this
 // integration explicitly ("the scheduler ticker... also sweeps job_queue
 // for claims past lease_expires_at"), not as a second, separate loop.
-import type { AartStore } from "@aart/store";
+import { recordEvent, type AartStore } from "@aart/store";
 import type { Clock } from "../clock.js";
 import { DEFAULT_MAX_RECLAIM_COUNT } from "../config.js";
 import type { Logger } from "../logger.js";
@@ -40,6 +40,17 @@ export async function runReclaimSweep(store: AartStore, clock: Clock, logger: Lo
           updatedAt: clock.nowIso(),
           endedAt: run.endedAt ?? clock.nowIso(),
         });
+        // V1 event log (AMENDMENTS.md A61, RISK 1 point 3) — this sweep
+        // writes store.runs.put directly, bypassing @aart/engine entirely
+        // (run-lifecycle.ts's finalizeTerminal/cancelRun, and therefore
+        // EngineConfig.onRunTerminal, are never reached from here) — so
+        // this needs its own explicit run.failed write; the engine's own
+        // onRunTerminal-hook fix (real-context.ts) cannot see this path.
+        await recordEvent(
+          store,
+          { type: "run.failed", workflowId: run.workflowId, workflowVersion: run.workflowVersion, runId: run.runId, summary: `${run.workflowId}@${run.workflowVersion} run failed (${run.runId}) — reclaim-exhausted after ${newCount} attempts` },
+          () => clock.now(),
+        );
       }
       // Removed entirely (not merely released) — a reclaim-exhausted run is
       // terminal and must never be claimable again, unlike an ordinary

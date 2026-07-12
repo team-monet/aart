@@ -771,6 +771,19 @@ export async function startServer(config: ServerConfig): Promise<ServerHandle> {
   router.get("/environments", async (ctx) => sendJson(ctx.res, 200, { environments: await config.store.environments.list() }));
   router.get("/deployments", async (ctx) => sendJson(ctx.res, 200, { deployments: await config.store.deployments.list() }));
   router.get("/rejected-triggers", async (ctx) => sendJson(ctx.res, 200, { rejected: await config.store.rejectedTriggers.list() }));
+  // V1 event log foundation (AMENDMENTS.md A61) — the activity-feed +
+  // live-updates spine. Open, unauthenticated read (the default open-GET
+  // posture every OTHER GET route on this surface already follows — no
+  // `auth` option here, matching /deployments/ /approvals/ etc. above;
+  // D2b's own auth gating targets only /runs + /runs/:id, different
+  // routes). Stateless, decoupled from the ticker — a plain store read.
+  router.get("/events", async (ctx) => {
+    const since = ctx.query.get("since") ?? undefined;
+    const limitParam = ctx.query.get("limit");
+    const limit = limitParam !== null && Number.isFinite(Number(limitParam)) ? Number(limitParam) : undefined;
+    const events = await config.store.events.list({ since, limit });
+    sendJson(ctx.res, 200, { events });
+  });
 
   // AMENDMENTS.md A47 — the three remaining dashboard list pages that used
   // to read `store.approvals`/`store.corrections`/`store.evals` directly

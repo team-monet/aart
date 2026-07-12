@@ -42,6 +42,16 @@ describe("runWorkflowHandler (aart_run_workflow)", () => {
     expect(result.error).toMatch(/not found/);
   });
 
+  // V1 event log foundation (AMENDMENTS.md A61) — the shared entry point
+  // CLI `aart run` and MCP `aart_run_workflow` both dispatch through.
+  it("emits a run.started event carrying workflowId/workflowVersion/runId", async () => {
+    tc = await createTestContext();
+    await registerWorkflowHandler(tc.ctx, { workflow: sampleWorkflowYaml("wf-run-event") });
+    const result = await runWorkflowHandler(tc.ctx, { workflowId: "wf-run-event", input: { url: "https://example.com" } });
+    const events = await tc.ctx.store.events.list();
+    expect(events).toContainEqual(expect.objectContaining({ type: "run.started", workflowId: "wf-run-event", workflowVersion: "0.1.0", runId: result.runId }));
+  });
+
   it("runs the latest version when workflowVersion is omitted", async () => {
     tc = await createTestContext();
     await registerWorkflowHandler(tc.ctx, { workflow: sampleWorkflowYaml("wf-run-latest", "0.1.0") });

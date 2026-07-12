@@ -15,7 +15,7 @@ import { closeBrowserSession, createBlockCatalog } from "@aart/blocks-core";
 import { alwaysAllowCapabilityCheck, createEngine, identityRedactFn, type BlockRegistry } from "@aart/engine";
 import { computeCapabilityClosure, validateWorkflow, type CapabilityClosureLookup, type CapabilityClosureNode } from "@aart/governance";
 import { createLlmPack } from "@aart/llm";
-import { createFsStore, type AartStore } from "@aart/store";
+import { createFsStore, recordRunTerminalEvent, type AartStore } from "@aart/store";
 import type { ValidateFn, RunSuccessFn } from "./types.js";
 
 // A fake Anthropic client (AnthropicClientLike, matching
@@ -113,6 +113,18 @@ export function createRealValidateFn(store: AartStore): ValidateFn {
  * task's run goes terminal (the shared Chromium PROCESS itself is a
  * separate, coarser resource — closed once, by ci-gate.ts's own final
  * closeAllBrowserSessions(), not per-run here).
+ *
+ * `recordRunTerminalEvent` (AMENDMENTS.md A61, V1 event log foundation,
+ * RISK 1) added alongside it — this is the SECOND of exactly two real
+ * `createEngine(...)` composition roots in the workspace (the other:
+ * packages/mcp/src/real-context.ts's `createRealEngine`, verified directly
+ * by grepping every `createEngine(` call site, per this session's own
+ * explicit instruction to check this package too) — a genuinely separate
+ * Engine instance over this package's own store, not reachable through the
+ * mcp/cli/server composition at all, so it needs its own copy of the hook
+ * rather than inheriting the other one's fix. Ordered first, same reasoning
+ * as real-context.ts's own createRealEngine: never-throwing, so
+ * closeBrowserSession still runs regardless.
  */
 export function createRealRunSuccessFn(store: AartStore): RunSuccessFn {
   const blocks = buildCatalog(store);
@@ -121,7 +133,10 @@ export function createRealRunSuccessFn(store: AartStore): RunSuccessFn {
     redact: identityRedactFn,
     capabilityCheck: alwaysAllowCapabilityCheck,
     blocks,
-    onRunTerminal: (runId) => closeBrowserSession(runId),
+    onRunTerminal: async (runId) => {
+      await recordRunTerminalEvent(store, runId);
+      await closeBrowserSession(runId);
+    },
   });
   void computeCapabilityClosure; // referenced for symmetry with createRealValidateFn's lookup construction - this function doesn't itself need a closure (capabilityCheck is unconditional here)
 

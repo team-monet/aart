@@ -11,6 +11,7 @@
 // node/command/connector/native/workflow is uniform, per S1's SEAMS.md Seam
 // 6), which is presumably the origin of the tool's name.
 import { WorkflowSchema } from "@aart/types";
+import { recordEvent } from "@aart/store";
 import type { AartContext } from "../context.js";
 import type { HandlerResult } from "../response.js";
 import { compileWorkflowInput, YamlCompileError } from "../yaml-compiler.js";
@@ -108,5 +109,10 @@ export async function registerWorkflowHandler(ctx: AartContext, input: RegisterW
   // §7.1) is what ever moves it past "draft", never registration itself.
   const draft = WorkflowSchema.parse({ ...compiled, approval: "draft", gates: DRAFT_GATES });
   await ctx.store.workflows.put(draft);
+  await recordEvent(
+    ctx.store,
+    { type: "workflow.version_registered", workflowId: draft.id, workflowVersion: draft.version, summary: `${draft.id}@${draft.version} registered` },
+    ctx.now,
+  );
   return { ok: true, workflowId: draft.id, workflowVersion: draft.version, approval: draft.approval };
 }

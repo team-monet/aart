@@ -688,13 +688,45 @@ describe("read API surface (S8's dashboard consumes this)", () => {
     expect(missingRes.status).toBe(404);
   });
 
-  it("GET /waiting-runs, /flagged-runs, /workflows, /environments, /deployments, /rejected-triggers", async () => {
+  it("GET /waiting-runs, /flagged-runs, /workflows, /environments, /deployments, /rejected-triggers, /events", async () => {
     fx = await createTestFixture();
     handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false });
-    for (const path of ["/waiting-runs", "/flagged-runs", "/workflows", "/environments", "/deployments", "/rejected-triggers"]) {
+    for (const path of ["/waiting-runs", "/flagged-runs", "/workflows", "/environments", "/deployments", "/rejected-triggers", "/events"]) {
       const res = await fetch(`http://localhost:${handle.port}${path}`);
       expect(res.status, `GET ${path}`).toBe(200);
     }
+  });
+
+  // V1 event log foundation (AMENDMENTS.md A61) — the activity-feed +
+  // live-updates spine's own read route.
+  describe("GET /events", () => {
+    it("lists appended events newest-first, and is UNAUTHENTICATED (no token) — matching every other read route on this surface", async () => {
+      fx = await createTestFixture();
+      await fx.store.events.append({ id: "evt_1", type: "run.started", occurredAt: "2026-01-01T00:00:00.000Z", summary: "older" });
+      await fx.store.events.append({ id: "evt_2", type: "run.completed", occurredAt: "2026-01-01T00:01:00.000Z", summary: "newer" });
+      handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false, deployToken: "secret-token" }); // a configured deployToken must NOT gate this route
+      const res = await fetch(`http://localhost:${handle.port}/events`);
+      expect(res.status).toBe(200);
+      const body = (await json(res)) as { events: { id: string }[] };
+      expect(body.events.map((e) => e.id)).toEqual(["evt_2", "evt_1"]); // newest-first
+    });
+
+    it("honors ?since= and ?limit=", async () => {
+      fx = await createTestFixture();
+      await fx.store.events.append({ id: "evt_before", type: "run.started", occurredAt: "2026-01-01T00:00:00.000Z", summary: "before" });
+      await fx.store.events.append({ id: "evt_after_1", type: "run.started", occurredAt: "2026-01-01T00:02:00.000Z", summary: "after 1" });
+      await fx.store.events.append({ id: "evt_after_2", type: "run.started", occurredAt: "2026-01-01T00:03:00.000Z", summary: "after 2" });
+      handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false });
+
+      const sinceRes = await fetch(`http://localhost:${handle.port}/events?since=2026-01-01T00:01:00.000Z`);
+      const sinceBody = (await json(sinceRes)) as { events: { id: string }[] };
+      expect(sinceBody.events.map((e) => e.id)).toEqual(["evt_after_2", "evt_after_1"]);
+
+      const limitRes = await fetch(`http://localhost:${handle.port}/events?limit=1`);
+      const limitBody = (await json(limitRes)) as { events: { id: string }[] };
+      expect(limitBody.events).toHaveLength(1);
+      expect(limitBody.events[0]?.id).toBe("evt_after_2"); // newest overall
+    });
   });
 
   it("GET /workflows/:id -> {workflow, versions}: latest by default, a specific version via ?version=, 404 with {error} when unknown (root AMENDMENTS.md A43 — closes the SEAMS.md-flagged 'enrich GET /workflows' gap)", async () => {

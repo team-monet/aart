@@ -27,6 +27,14 @@ describe("registerWorkflowHandler (aart_register_block)", () => {
     expect(stored?.execution.steps).toHaveLength(2);
   });
 
+  // V1 event log foundation (AMENDMENTS.md A61)
+  it("emits a workflow.version_registered event carrying workflowId/workflowVersion", async () => {
+    tc = await createTestContext();
+    await registerWorkflowHandler(tc.ctx, { workflow: sampleWorkflowYaml("wf-register-event") });
+    const events = await tc.ctx.store.events.list();
+    expect(events).toContainEqual(expect.objectContaining({ type: "workflow.version_registered", workflowId: "wf-register-event", workflowVersion: "0.1.0" }));
+  });
+
   it("forces approval to draft even if the input tried to set something else", async () => {
     tc = await createTestContext();
     const result = await registerWorkflowHandler(tc.ctx, {
@@ -95,6 +103,19 @@ describe("validateWorkflowHandler — the validate GATE writer (S14 'gate write 
     expect(stored?.approval).toBe("draft");
   });
 
+  // V1 event log foundation (AMENDMENTS.md A61) — applyGateResult's shared
+  // gate-write path emits BOTH workflow.validated (gate==="validate"
+  // specifically) and workflow.gate_passed (status==="passed", any gate).
+  it("emits BOTH workflow.validated and workflow.gate_passed events on a clean registered-version validation", async () => {
+    tc = await createTestContext({ trustMode: "governed" });
+    await registerWorkflowHandler(tc.ctx, { workflow: sampleWorkflowYaml("wf-validate-gate-events") });
+    await validateWorkflowHandler(tc.ctx, { workflowId: "wf-validate-gate-events", workflowVersion: "0.1.0" });
+    const events = await tc.ctx.store.events.list();
+    expect(events).toContainEqual(expect.objectContaining({ type: "workflow.validated", workflowId: "wf-validate-gate-events", workflowVersion: "0.1.0" }));
+    expect(events).toContainEqual(expect.objectContaining({ type: "workflow.gate_passed", workflowId: "wf-validate-gate-events", workflowVersion: "0.1.0" }));
+    expect(events.some((e) => e.type === "workflow.gate_failed")).toBe(false);
+  });
+
   it("a draft (in-memory, pre-registration) validation NEVER writes gates, even when it's valid — validate is a fact about a stored VERSION", async () => {
     tc = await createTestContext();
     await registerWorkflowHandler(tc.ctx, { workflow: sampleWorkflowYaml("wf-validate-gate-draft") });
@@ -146,5 +167,13 @@ describe("validateWorkflowHandler — validate gate against REAL governance (dis
 
     const stored = await ctx.store.workflows.get("wf-validate-gate-error", "0.1.0");
     expect(stored?.gates.validate).toBe("failed");
+
+    // V1 event log foundation (AMENDMENTS.md A61) — the failed-outcome
+    // sibling of the clean-pass test above: workflow.validated fires
+    // regardless of outcome, workflow.gate_failed fires instead of
+    // workflow.gate_passed.
+    const events = await ctx.store.events.list();
+    expect(events).toContainEqual(expect.objectContaining({ type: "workflow.validated", workflowId: "wf-validate-gate-error", workflowVersion: "0.1.0" }));
+    expect(events).toContainEqual(expect.objectContaining({ type: "workflow.gate_failed", workflowId: "wf-validate-gate-error", workflowVersion: "0.1.0" }));
   });
 });

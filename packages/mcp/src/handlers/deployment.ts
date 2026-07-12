@@ -16,6 +16,7 @@
 // anywhere in either source document, so this is the simplest defensible
 // reading available, not a guess at a richer policy neither doc describes.
 import type { Deployment, Environment } from "@aart/types";
+import { recordEvent } from "@aart/store";
 import type { AartContext } from "../context.js";
 import type { HandlerResult } from "../response.js";
 import { newId } from "../stubs/engine.js";
@@ -69,6 +70,14 @@ export async function deployWorkflowHandler(ctx: AartContext, input: DeployWorkf
     createdAt: ctx.now().toISOString(),
   };
   await ctx.store.deployments.put(deployment);
+  // V1 event log (AMENDMENTS.md A61) — local deploy only (this function).
+  // deployToRemoteHandler's own deployment.pushed is deferred to Wave 2,
+  // deliberately not added here (out of scope for this change).
+  await recordEvent(
+    ctx.store,
+    { type: "deployment.created", workflowId: input.workflowId, workflowVersion: input.workflowVersion, deploymentId: deployment.id, environmentId: environment.id, summary: `${input.workflowId}@${input.workflowVersion} deployed to ${environment.name}` },
+    ctx.now,
+  );
   return { ok: true, deployment, environment };
 }
 

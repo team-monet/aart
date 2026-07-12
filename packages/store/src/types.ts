@@ -1,6 +1,8 @@
-// AartStore — architecture §5 (§28.3-anchored). 16 members (spec §28.3's 8
-// run-data members + 8 architecture-introduced control-plane members) plus
-// the cross-cutting `transact()` unit-of-work method (architecture §5.8).
+// AartStore — architecture §5 (§28.3-anchored). 17 members (spec §28.3's 8
+// run-data members + 8 architecture-introduced control-plane members + a
+// 17th, `events`, added via the amendment protocol below — AMENDMENTS.md
+// A61, V1 event log foundation) plus the cross-cutting `transact()`
+// unit-of-work method (architecture §5.8).
 //
 // Neither spec nor architecture gives explicit method signatures for the
 // per-member sub-interfaces below (spec §28.3 gives one-line prose
@@ -23,6 +25,7 @@ import type {
   EvalExample,
   EvalRun,
   EvalSuite,
+  EventLogEntry,
   PackManifest,
   PromptRegistryEntry,
   RejectedTrigger,
@@ -190,7 +193,29 @@ export interface StandingApprovalStore {
 }
 
 // ---------------------------------------------------------------------------
-// job_queue — architecture §5.3/§4.7. Explicitly NOT one of AartStore's 16
+// events — the 17th AartStore member, added via the amendment protocol
+// (AMENDMENTS.md A61, V1 "event log foundation") rather than architecture
+// §5's original 16-member enumeration above — the activity-feed +
+// live-updates spine every real write site across CLI/MCP/dashboard appends
+// to. Append-only, same shape/precedent as SignalStore/RejectedTriggerStore
+// above (`append` + filtered `list`, no `get`/`put`-by-id — an event log
+// entry is never looked up individually or mutated after the fact).
+// Deliberately NOT staged by the fs adapter's `transact()` — see that
+// method's own doc comment below and adapters/fs/events.ts's module
+// comment; every real write site goes through packages/store/src/
+// event-log.ts's `recordEvent`, never `store.events.append` directly, so
+// the "a failed event-log write must never fail the primary operation it's
+// observing" contract is enforced in one place.
+// ---------------------------------------------------------------------------
+
+export interface EventLogStore {
+  append(entry: EventLogEntry): Promise<void>;
+  /** Newest-first (descending `occurredAt`). `since` and `limit` are independent, freely-combinable optional filters. */
+  list(filter?: { since?: string; limit?: number }): Promise<EventLogEntry[]>;
+}
+
+// ---------------------------------------------------------------------------
+// job_queue — architecture §5.3/§4.7. Explicitly NOT one of AartStore's 17
 // members ("engine/worker-internal plumbing... an implementation detail
 // behind @aart/store's claim/release methods", architecture §5.3). Its
 // SHAPE (including lease_expires_at/reclaim_count) is S0 scope per this
@@ -224,8 +249,8 @@ export interface JobQueueStore {
 // idempotency_ledger — architecture §4.2/§5.7. A dedicated table/collection,
 // deliberately not folded into step_traces (a resolved key must be
 // checkable before that attempt's StepTrace row exists). Also not one of
-// AartStore's 16 spec/architecture-enumerated members, for the same
-// "engine-owned mechanism, store-internal plumbing" reason as job_queue.
+// AartStore's 17 spec/architecture/amendment-enumerated members, for the
+// same "engine-owned mechanism, store-internal plumbing" reason as job_queue.
 // ---------------------------------------------------------------------------
 
 export interface IdempotencyLedgerEntry {
@@ -242,8 +267,9 @@ export interface IdempotencyLedgerStore {
 }
 
 // ---------------------------------------------------------------------------
-// AartStore — the full interface. 16 members (spec's 8 run-data + this
-// architecture's 8 control-plane), `transact()`, plus the two store-internal
+// AartStore — the full interface. 17 members (spec's 8 run-data + this
+// architecture's 8 control-plane + `events`, added via the amendment
+// protocol — AMENDMENTS.md A61), `transact()`, plus the two store-internal
 // (non-counted) plumbing members above.
 // ---------------------------------------------------------------------------
 
@@ -266,7 +292,9 @@ export interface AartStore {
   packManifests: PackManifestStore;
   rejectedTriggers: RejectedTriggerStore;
   standingApprovals: StandingApprovalStore;
-  // store-internal plumbing — not counted among the 16 (architecture §5.3/§5.7)
+  // 17th member — V1 event log, added via the amendment protocol (AMENDMENTS.md A61)
+  events: EventLogStore;
+  // store-internal plumbing — not counted among the 17 (architecture §5.3/§5.7)
   jobQueue: JobQueueStore;
   idempotencyLedger: IdempotencyLedgerStore;
   /**
@@ -287,6 +315,14 @@ export interface AartStore {
    * transaction ultimately commits. This is a deliberate, accepted gap for
    * local dev (fs adapter only), not an oversight — see the comment on
    * SignalStore.append/markConsumed above and adapters/fs/index.ts.
+   *
+   * `tx.events` (AMENDMENTS.md A61) follows the identical non-staged
+   * pattern, for an analogous reason: every real write site appends its
+   * event OUTSIDE of any `store.transact()` call (a best-effort, fire-
+   * and-forget audit line via event-log.ts's `recordEvent`, never
+   * expected to participate in the primary write's own atomicity), so
+   * there is no caller today relying on an event append rolling back
+   * alongside a failed transaction — see adapters/fs/events.ts.
    */
   transact<T>(fn: (tx: AartStore) => Promise<T>): Promise<T>;
 }

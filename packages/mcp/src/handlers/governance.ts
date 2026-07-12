@@ -48,6 +48,7 @@
 // names "approval decision" as a named redactRecord input path; a task's
 // free-form `decision` field can echo back arbitrary data).
 import type { Gates, GateStatus, Workflow } from "@aart/types";
+import { recordEvent } from "@aart/store";
 import type { AartContext } from "../context.js";
 import type { HandlerResult } from "../response.js";
 import type { GateName } from "../types.js";
@@ -78,6 +79,45 @@ export async function applyGateResult(
   const approval = ctx.governance.computeApprovalState(gates, requiredGates);
   const updated: Workflow = { ...workflow, gates, approval };
   await ctx.store.workflows.put(updated);
+
+  // V1 event log (AMENDMENTS.md A61) — this is the shared gate-write path
+  // every validate/readiness/evals writer (authoring.ts/execution.ts/
+  // evals.ts) AND the mcp aart_approve path (applyVersionReviewDecision
+  // below, for humanReview/riskReview) all route through, so one write site
+  // here covers every one of those gates. humanReview/riskReview decided
+  // via the SERVER's own HTTP decision route instead
+  // (packages/server/src/approvals.ts's decideApprovalTask) needs its OWN,
+  // independent copy of this same gate_passed/gate_failed write — required
+  // by package layering: @aart/server cannot import @aart/mcp.
+  if (gate === "validate") {
+    await recordEvent(ctx.store, { type: "workflow.validated", workflowId, workflowVersion, summary: `${workflowId}@${workflowVersion} ${status} validate` }, ctx.now);
+  }
+  if (status === "passed" || status === "failed") {
+    await recordEvent(
+      ctx.store,
+      { type: status === "passed" ? "workflow.gate_passed" : "workflow.gate_failed", workflowId, workflowVersion, summary: `${workflowId}@${workflowVersion} ${status} ${gate}` },
+      ctx.now,
+    );
+  }
+  // V1 event log (AMENDMENTS.md A61) — NOT in this session's own briefed
+  // write-site list (which names only promoteWorkflowHandler and
+  // approveOrDeprecateWorkflow for workflow.approved), but this function
+  // ALSO recomputes and writes `approval` on every call, unconditionally —
+  // whichever gate happens to be the LAST one a mode requires can flip a
+  // workflow from "draft" to "approved" right here, as a side effect of a
+  // human's decision (aart_approve/aart approve) or an evidence-based
+  // writer (validate/readiness/evals), with no separate call to
+  // promoteWorkflowHandler ever happening. Caught by this session's own
+  // test suite (governance.test.ts) before it shipped: a workflow-version
+  // review decision that satisfies the last required gate produced
+  // approval.decided + workflow.gate_passed but silently NO
+  // workflow.approved — exactly the missed-composition-root failure shape
+  // this session's standing imperative exists to catch, just for an event
+  // type rather than a config field.
+  if (approval !== workflow.approval && approval === "approved") {
+    await recordEvent(ctx.store, { type: "workflow.approved", workflowId, workflowVersion, summary: `${workflowId}@${workflowVersion} approved` }, ctx.now);
+  }
+
   return { ok: true, kind: "workflow_version", workflowId, workflowVersion, gates, approval };
 }
 
@@ -131,6 +171,19 @@ export async function requestApprovalHandler(ctx: AartContext, input: RequestApp
     status: "pending",
     createdAt: ctx.now().toISOString(),
   });
+  // V1 event log (AMENDMENTS.md A61) — workflowId/workflowVersion for the
+  // version-review shape (known directly from `input`, no need to decode
+  // task.runId/stepId back); runId for the genuine per-run wait shape.
+  await recordEvent(
+    ctx.store,
+    {
+      type: "approval.requested",
+      approvalTaskId: task.id,
+      ...(input.workflowId && input.workflowVersion ? { workflowId: input.workflowId, workflowVersion: input.workflowVersion } : { runId: task.runId }),
+      summary: `approval requested: ${task.title}`,
+    },
+    ctx.now,
+  );
   return { ok: true, taskId: task.id, runId: task.runId, stepId: task.stepId };
 }
 
@@ -166,7 +219,29 @@ export async function approveHandler(ctx: AartContext, input: ApproveInput): Pro
     decidedAt: ctx.now().toISOString(),
   });
 
+  // V1 event log (AMENDMENTS.md A61) — NOT in this session's own briefed
+  // write-site list (which names only server/approvals.ts's
+  // decideApprovalTask for approval.decided), but `approveHandler` is a
+  // SECOND, independently-reachable real entry point for the identical
+  // fact: CLI's `aart approve` (commands/governance.ts) and the MCP tool
+  // `aart_approve` both dispatch here directly, never through
+  // decideApprovalTask (that function backs the dashboard's separate `POST
+  // /approvals/:id/decision` HTTP route) — verified directly, not assumed.
+  // Omitting this would silently drop every CLI/MCP-decided approval from
+  // the event log, exactly the missed-composition-root failure shape this
+  // session's own standing imperative exists to catch.
   const versionReview = ctx.governance.decodeWorkflowVersionApprovalSubject(task.runId, task.stepId);
+  await recordEvent(
+    ctx.store,
+    {
+      type: "approval.decided",
+      approvalTaskId: decided.id,
+      ...(versionReview ? { workflowId: versionReview.workflowId, workflowVersion: versionReview.workflowVersion } : { runId: task.runId }),
+      summary: `${decided.id} decided ${input.decision} by ${input.reviewer}`,
+    },
+    ctx.now,
+  );
+
   if (versionReview) {
     return applyVersionReviewDecision(ctx, versionReview.workflowId, versionReview.workflowVersion, versionReview.gate, input.decision);
   }
@@ -192,6 +267,11 @@ export interface RecordCorrectionInput {
 
 export async function recordCorrectionHandler(ctx: AartContext, input: RecordCorrectionInput): Promise<HandlerResult> {
   const correction = await ctx.evidence.recordCorrection(input);
+  await recordEvent(
+    ctx.store,
+    { type: "correction.recorded", runId: input.runId, summary: `correction recorded for run ${input.runId} step ${input.stepId} (${input.fieldPath})` },
+    ctx.now,
+  );
   return { ok: true, correction };
 }
 
@@ -224,6 +304,14 @@ export async function promoteWorkflowHandler(ctx: AartContext, input: PromoteWor
   const approval = ctx.governance.computeApprovalState(workflow.gates, requiredGates);
   if (approval !== workflow.approval) {
     await ctx.store.workflows.put({ ...workflow, approval });
+    // V1 event log (AMENDMENTS.md A61) — only on a genuine transition,
+    // colocated with the write above; computeApprovalState's own contract
+    // never returns "deprecated" (approveOrDeprecateWorkflow's own doc
+    // comment, server/workflow-actions.ts), but this still guards on the
+    // resulting value rather than assuming "changed" implies "approved".
+    if (approval === "approved") {
+      await recordEvent(ctx.store, { type: "workflow.approved", workflowId: input.workflowId, workflowVersion: input.workflowVersion, summary: `${input.workflowId}@${input.workflowVersion} approved` }, ctx.now);
+    }
   }
   const unmetGates = requiredGates.filter((g) => workflow.gates[g] !== "passed" && workflow.gates[g] !== "waived");
   // gates (S14): the full current gate snapshot, already in scope — a

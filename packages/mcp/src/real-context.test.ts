@@ -8,8 +8,8 @@
 // createAartContext's DEFAULT stays stub-bound).
 import { afterEach, describe, expect, it } from "vitest";
 import type { Workflow } from "@aart/types";
-import { createRealAartContext, type AartContext } from "./context.js";
-import { buildRealCatalog } from "./real-context.js";
+import { createRealAartContext, createRealAartContextWithEngine, type AartContext } from "./context.js";
+import { buildRealCatalog, createRealEngine } from "./real-context.js";
 import { makeTempRoot, cleanupTempRoot } from "./test-utils.js";
 import { runWorkflowHandler } from "./handlers/execution.js";
 
@@ -405,5 +405,148 @@ describe("createRealAartContext — ctx.bundler / ctx.remotes (AMENDMENTS.md A56
 
     await expect(ctx.remotes.get("production")).resolves.toEqual({ url: "https://prod.example.com", environment: "production", tokenRef: "secrets.DEPLOY_TOKEN" });
     await expect(ctx.remotes.resolveToken("production")).resolves.toBe("real-resolved-token");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// V1 event log foundation (AMENDMENTS.md A61), RISK 1's MANDATORY TEST:
+// run.completed/failed/cancelled emitted through each real entry point —
+// mirroring the four-entry-point discipline A48 established.
+//
+// (1) CLI `aart run` + MCP `aart_run_workflow`: the SAME function
+//     (runWorkflowHandler) dispatched through createRealAartContext, per
+//     this file's own established "same function reference" precedent
+//     (see the "runWorkflowHandler (aart run / aart_run_workflow)" describe
+//     block above) — one test genuinely covers both entry points.
+// (2) trigger-fired via server + worker-claimed: @aart/server's
+//     createRealEngineBoundary wrapping the SAME createRealEngine this file
+//     already tests — the exact composition `@aart/cli`'s real-server-port.ts
+//     performs (createRealServerPort -> createRealEngineBoundary(store,
+//     engine), cli-context.ts's own module comment) — proving the fix
+//     reaches this entry point too, not just direct-run.
+// (3) worker-reclaimed: a fully independent, non-engine code path
+//     (packages/server/src/worker/reclaim.ts's runReclaimSweep) — covered
+//     separately in packages/server/src/worker/worker.test.ts (that
+//     package owns reclaim.ts; this file cannot reach it without a real
+//     circular @aart/server<->@aart/mcp dependency).
+// ---------------------------------------------------------------------------
+describe("createRealEngine — onRunTerminal emits run.completed/failed/cancelled (V1 event log foundation, AMENDMENTS.md A61, RISK 1)", () => {
+  it("a completed run emits run.completed — the entry point CLI `aart run` and MCP `aart_run_workflow` both dispatch through (runWorkflowHandler)", async () => {
+    const c = await setup();
+    const workflow = noopWorkflow("event-log-completed-1");
+    await c.store.workflows.put(workflow);
+    const result = await runWorkflowHandler(c, { workflowId: workflow.id, workflowVersion: workflow.version });
+    expect(result.status).toBe("completed");
+
+    const events = await c.store.events.list();
+    expect(events).toContainEqual(expect.objectContaining({ type: "run.completed", workflowId: workflow.id, workflowVersion: workflow.version, runId: result.runId }));
+  });
+
+  it("a failed run (flow.fail) emits run.failed, not run.completed", async () => {
+    const c = await setup();
+    const workflow: Workflow = {
+      id: "event-log-failed-1",
+      name: "Real engine failure smoke test",
+      version: "0.1.0",
+      inputs: [],
+      outputs: [],
+      execution: { type: "workflow", steps: [{ id: "s1", uses: "flow.fail", with: { message: "intentional failure for the event-log test" } }] },
+      approval: "approved",
+      gates: { validate: "passed", readiness: "passed", evals: "passed", riskReview: "passed", humanReview: "passed" },
+    };
+    await c.store.workflows.put(workflow);
+    const result = await runWorkflowHandler(c, { workflowId: workflow.id, workflowVersion: workflow.version });
+    expect(result.status).toBe("failed");
+
+    const events = await c.store.events.list();
+    expect(events).toContainEqual(expect.objectContaining({ type: "run.failed", workflowId: workflow.id, workflowVersion: workflow.version, runId: result.runId }));
+    expect(events.some((e) => e.type === "run.completed" && e.runId === result.runId)).toBe(false);
+  });
+
+  it("an explicitly cancelled run emits run.cancelled — proves cancelRun shares the SAME onRunTerminal hook as finalizeTerminal, not a separate uninstrumented path", async () => {
+    root = await makeTempRoot("aart-mcp-real-cancel-");
+    const { createFsStore } = await import("@aart/store");
+    const store = createFsStore(root);
+    const { blocks } = buildRealCatalog(store);
+    const { redactRecord } = await import("@aart/governance");
+    // Built via THIS package's own real-context.ts createRealEngine (not a
+    // hand-rolled createEngine call) — the actual production composition
+    // root this session's fix landed in, not a re-implemented approximation
+    // of it.
+    const engine = createRealEngine(store, blocks, "governed");
+    void redactRecord; // referenced only to confirm the real redactor module resolves in this test's own import graph
+
+    const workflow: Workflow = {
+      id: "event-log-cancelled-1",
+      name: "Real engine cancellation smoke test",
+      version: "0.1.0",
+      inputs: [],
+      outputs: [],
+      execution: { type: "workflow", steps: [{ id: "s1", uses: "flow.noop", with: { value: 1 } }] },
+      approval: "approved",
+      gates: { validate: "passed", readiness: "passed", evals: "passed", riskReview: "passed", humanReview: "passed" },
+    };
+    await store.workflows.put(workflow);
+    const created = await engine.triggerRun({ workflow, trigger: { id: "t1", type: "manual", source: "test", payload: null, receivedAt: new Date().toISOString() }, inputs: {} });
+    // Cancelled BEFORE executeRun ever runs it — still reaches finalizeTerminal's shared runOnRunTerminal path (run-lifecycle.ts's cancelRun, independent of the step-loop).
+    const cancelled = await engine.cancelRun(created.runId);
+    expect(cancelled.status).toBe("cancelled");
+
+    const events = await store.events.list();
+    expect(events).toContainEqual(expect.objectContaining({ type: "run.cancelled", workflowId: workflow.id, workflowVersion: workflow.version, runId: created.runId }));
+  });
+});
+
+describe("trigger-fired via server + worker-claimed — EngineBoundary shares the SAME event-log wiring (V1 event log foundation, AMENDMENTS.md A61, RISK 1)", () => {
+  it("a run started via EngineBoundary.startRun and finished via executeClaimedRun (the exact @aart/cli real-server-port.ts composition: createRealEngineBoundary(store, createRealEngine(...))) emits run.completed", async () => {
+    root = await makeTempRoot("aart-mcp-real-boundary-");
+    const { createFsStore } = await import("@aart/store");
+    const { createRealEngineBoundary } = await import("@aart/server");
+    const store = createFsStore(root);
+    const { blocks } = buildRealCatalog(store);
+    const engine = createRealEngine(store, blocks, "governed");
+    const boundary = createRealEngineBoundary(store, engine);
+
+    const workflow = noopWorkflow("event-log-boundary-1");
+    await store.workflows.put(workflow);
+
+    const started = await boundary.startRun({
+      workflowId: workflow.id,
+      trigger: { id: "t1", type: "webhook", source: "test", payload: null, receivedAt: new Date().toISOString() },
+      mappedInputs: {},
+    });
+    expect(started.kind).toBe("started");
+    const runId = (started as { runId: string }).runId;
+
+    // executeClaimedRun — "used by the worker claim loop... once admission
+    // control + the race-safe job_queue claim has already won the claim,"
+    // EngineBoundary's own doc comment (packages/server/src/engine/
+    // boundary.ts) — this is the worker-claimed half of this entry point.
+    await boundary.executeClaimedRun(runId, "worker-1");
+
+    const finished = await store.runs.get(runId);
+    expect(finished?.status).toBe("completed");
+
+    const events = await store.events.list();
+    expect(events).toContainEqual(expect.objectContaining({ type: "run.completed", workflowId: workflow.id, workflowVersion: workflow.version, runId }));
+  });
+});
+
+// Re-confirms createRealAartContextWithEngine (cli-context.ts's own
+// dependency, real-server-port.ts's engine source) is genuinely the SAME
+// createRealEngine instrumented above — not a second, divergent
+// construction this test suite's own direct createRealEngine calls could
+// miss.
+describe("createRealAartContextWithEngine — the raw Engine it hands back is the SAME instrumented createRealEngine (RISK 1 coverage sanity check)", () => {
+  it("a run executed via the returned raw Engine also emits run.completed", async () => {
+    root = await makeTempRoot("aart-mcp-real-withengine-");
+    const { context, engine } = createRealAartContextWithEngine({ root });
+    expect(engine).toBeDefined();
+    const workflow = noopWorkflow("event-log-withengine-1");
+    await context.store.workflows.put(workflow);
+    const created = await engine!.triggerRun({ workflow, trigger: { id: "t1", type: "manual", source: "test", payload: null, receivedAt: new Date().toISOString() }, inputs: {} });
+    await engine!.executeRun(created.runId);
+    const events = await context.store.events.list();
+    expect(events).toContainEqual(expect.objectContaining({ type: "run.completed", runId: created.runId }));
   });
 });

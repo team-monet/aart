@@ -20,8 +20,18 @@ import { afterEach, describe, expect, it } from "vitest";
 import { MigrationRunner } from "../../migrations/index.js";
 import { runMigrationDdl } from "./db.js";
 import { openSqliteStore, type SqliteStoreHandle } from "./index.js";
-import { ALL_SQLITE_MIGRATIONS, createSqliteAddApprovalTaskAuthenticatedAsMigration, createSqliteAddDeploymentPromotedMigration, createSqliteInitMigration } from "./migrations.js";
+import {
+  ALL_SQLITE_MIGRATIONS,
+  createSqliteAddApprovalTaskAuthenticatedAsMigration,
+  createSqliteAddDeploymentPromotedMigration,
+  createSqliteInitMigration,
+} from "./migrations.js";
 import { SqliteMigrationWatermarkStore } from "./watermark.js";
+
+/** [0001, 0002, 0003] only — NOT ALL_SQLITE_MIGRATIONS, which now (AMENDMENTS.md A61) also includes 0004_events_table. Every test below this point that's specifically about 0003's OWN behavior (not "whatever the latest migration happens to be") must scope its runner to exactly this list — see the "down() reverts 0003" test's own doc comment for the trap this closes. */
+function migrationsThrough0003(db: Parameters<typeof createSqliteInitMigration>[0]) {
+  return [createSqliteInitMigration(db), createSqliteAddDeploymentPromotedMigration(db), createSqliteAddApprovalTaskAuthenticatedAsMigration(db)];
+}
 
 let dir: string | undefined;
 let handle: SqliteStoreHandle | undefined;
@@ -183,8 +193,12 @@ describe("0003_approval_task_authenticated_as — pre-populated-db upgrade (D2a,
     );
 
     // The real upgrade path: MigrationRunner sees watermark 2, applies
-    // exactly 0003 (0001/0002 already accounted for), advances to 3.
-    const runner = new MigrationRunner(ALL_SQLITE_MIGRATIONS(handle.db), new SqliteMigrationWatermarkStore(handle.db), handle.store);
+    // exactly 0003 (0001/0002 already accounted for), advances to 3. Scoped
+    // to [0001, 0002, 0003] explicitly (NOT ALL_SQLITE_MIGRATIONS, which as
+    // of AMENDMENTS.md A61 also includes 0004_events_table) — this describe
+    // block is specifically about 0003's own behavior; 0004 gets its own,
+    // identically-shaped describe block below.
+    const runner = new MigrationRunner(migrationsThrough0003(handle.db), new SqliteMigrationWatermarkStore(handle.db), handle.store);
     expect(await runner.currentVersion()).toBe(2);
     await expect(runner.up()).resolves.toBe(3);
 
@@ -213,7 +227,7 @@ describe("0003_approval_task_authenticated_as — pre-populated-db upgrade (D2a,
     handle.db.exec(`ALTER TABLE approval_tasks ADD COLUMN authenticated_as TEXT`);
     await new SqliteMigrationWatermarkStore(handle.db).write(2);
 
-    const runner = new MigrationRunner(ALL_SQLITE_MIGRATIONS(handle.db), new SqliteMigrationWatermarkStore(handle.db), handle.store);
+    const runner = new MigrationRunner(migrationsThrough0003(handle.db), new SqliteMigrationWatermarkStore(handle.db), handle.store);
     expect(await runner.currentVersion()).toBe(2);
     // Without the tolerance, this throws "duplicate column name:
     // authenticated_as" instead of resolving.
@@ -236,9 +250,24 @@ describe("0003_approval_task_authenticated_as — pre-populated-db upgrade (D2a,
   it("down() reverts 0003 (drops the column) cleanly, and up() re-adds it", async () => {
     dir = await fs.mkdtemp(join(tmpdir(), "aart-sqlite-migration-test-"));
     const dbPath = join(dir, "aart.db");
-    handle = await openSqliteStore(dbPath); // default: runs 0001 + 0002 + 0003
+    // Deliberately NOT `openSqliteStore(dbPath)`'s default (which now runs
+    // every registered migration, including AMENDMENTS.md A61's later
+    // 0004_events_table) and NOT ALL_SQLITE_MIGRATIONS — this test is
+    // specifically about 0003's OWN down()/up() round-trip. `MigrationRunner
+    // .down()` only ever reverts the single migration currently AT the
+    // watermark (types.ts's own documented contract) — with 0004 in the
+    // mix, a runner built from ALL_SQLITE_MIGRATIONS sitting at watermark 4
+    // would have `down()` revert 0004 (drop the events TABLE), not 0003
+    // (drop the authenticated_as COLUMN this test actually means to
+    // exercise) — exactly the "down() reverts only the LAST migration" trap
+    // AMENDMENTS.md A58 first caught. Scoped to exactly [0001, 0002, 0003],
+    // mirroring the "down() reverts 0002" test above rather than depending
+    // on ALL_SQLITE_MIGRATIONS' current total.
+    handle = await openSqliteStore(dbPath, { runMigrations: false });
+    runMigrationDdl(handle.db);
 
-    const runner = new MigrationRunner(ALL_SQLITE_MIGRATIONS(handle.db), new SqliteMigrationWatermarkStore(handle.db), handle.store);
+    const runner = new MigrationRunner(migrationsThrough0003(handle.db), new SqliteMigrationWatermarkStore(handle.db), handle.store);
+    await expect(runner.up()).resolves.toBe(3);
     expect(await runner.currentVersion()).toBe(3);
 
     await expect(runner.down()).resolves.toBe(2);
@@ -249,5 +278,62 @@ describe("0003_approval_task_authenticated_as — pre-populated-db upgrade (D2a,
     // And re-applying up() restores it.
     await expect(runner.up()).resolves.toBe(3);
     expect(() => handle!.db.exec("SELECT authenticated_as FROM approval_tasks LIMIT 1")).not.toThrow();
+  });
+});
+
+// V1 event log foundation (AMENDMENTS.md A61) — the mandatory
+// pre-populated-db regression test, same discipline as 0002/0003's own
+// describe blocks above: a database that has only ever run
+// 0001_init + 0002_deployment_promoted + 0003_approval_task_authenticated_as
+// (i.e. no `events` table at all) must, after upgrading through 0004, gain
+// a fully working `events` table — proven through the real store surface,
+// not just a raw DDL check.
+describe("0004_events_table — pre-populated-db upgrade (V1, AMENDMENTS.md A61)", () => {
+  it("a database that has only ever run 0001-0003 gains a working events table after upgrading through 0004", async () => {
+    dir = await fs.mkdtemp(join(tmpdir(), "aart-sqlite-migration-test-"));
+    const dbPath = join(dir, "aart.db");
+
+    // Simulate a database that has only ever run 0001+0002+0003: open
+    // WITHOUT auto-running migrations, apply 0001's raw DDL by hand, run
+    // 0002+0003 explicitly (no `events` table at all), and set the
+    // watermark to 3 directly — bypassing ALL_SQLITE_MIGRATIONS entirely,
+    // which would otherwise also apply 0004 in the same call and defeat the
+    // point of this fixture.
+    handle = await openSqliteStore(dbPath, { runMigrations: false });
+    runMigrationDdl(handle.db);
+    await createSqliteAddDeploymentPromotedMigration(handle.db).up(handle.store);
+    await createSqliteAddApprovalTaskAuthenticatedAsMigration(handle.db).up(handle.store);
+    await new SqliteMigrationWatermarkStore(handle.db).write(3);
+
+    // The real upgrade path: MigrationRunner sees watermark 3, applies
+    // exactly 0004 (0001/0002/0003 already accounted for), advances to 4.
+    const runner = new MigrationRunner(ALL_SQLITE_MIGRATIONS(handle.db), new SqliteMigrationWatermarkStore(handle.db), handle.store);
+    expect(await runner.currentVersion()).toBe(3);
+    await expect(runner.up()).resolves.toBe(4);
+
+    // Proven through the REAL store surface (not a raw INSERT/SELECT) —
+    // append then list, exactly like any other real event-log write site.
+    const entry = { id: "evt_legacy_upgrade", type: "run.completed", occurredAt: "2026-01-01T00:00:00.000Z", summary: "post-upgrade smoke test" };
+    await handle.store.events.append(entry);
+    await expect(handle.store.events.list()).resolves.toEqual([entry]);
+  });
+
+  it("down() reverts 0004 (drops the events table) cleanly, and up() re-adds it", async () => {
+    dir = await fs.mkdtemp(join(tmpdir(), "aart-sqlite-migration-test-"));
+    const dbPath = join(dir, "aart.db");
+    handle = await openSqliteStore(dbPath); // default now runs 0001+0002+0003+0004 (AMENDMENTS.md A61)
+
+    const runner = new MigrationRunner(ALL_SQLITE_MIGRATIONS(handle.db), new SqliteMigrationWatermarkStore(handle.db), handle.store);
+    expect(await runner.currentVersion()).toBe(4);
+
+    await expect(runner.down()).resolves.toBe(3);
+    // The table is genuinely gone — asserted directly against the DDL, not
+    // inferred from the watermark alone.
+    expect(() => handle!.db.exec("SELECT * FROM events LIMIT 1")).toThrow();
+
+    // And re-applying up() restores it, fully usable again.
+    await expect(runner.up()).resolves.toBe(4);
+    expect(() => handle!.db.exec("SELECT * FROM events LIMIT 1")).not.toThrow();
+    await expect(handle.store.events.list()).resolves.toEqual([]);
   });
 });

@@ -33,6 +33,13 @@ export function waitsDir(root: string): string {
 export function signalsDir(root: string): string {
   return join(root, "signals");
 }
+// V1 event log foundation (AMENDMENTS.md A61) — not part of architecture
+// §5.2's original layout block (this member postdates it, added via the
+// amendment protocol); follows the same directory-per-collection
+// convention as every other member here.
+export function eventsDir(root: string): string {
+  return join(root, "events");
+}
 export function artifactsDir(root: string): string {
   return join(root, "artifacts");
 }
