@@ -452,6 +452,21 @@ secret VALUES are never persisted onto a run in the first place) — reading
 a remote run through this tool doesn't expose anything a real deployment
 wasn't already storing in its own run history.
 
+**`--format model` (the default) vs `--format markdown` — pick deliberately,
+they are not the same size (D2b/V1 fix pass, AMENDMENTS.md A63 FIX 6).**
+`aart remote-run <remote> <runId>` with no `--format` (equivalently,
+`aart_remote_run` with `format` omitted) returns the BOUNDED model-facing
+report — headline, gates, failures, artifact refs — never the run's full
+step trace or execution snapshot. `--format markdown` additionally embeds
+that run's ENTIRE step trace, verbatim as JSON, in a "Full trace"
+section — every step's real inputs/outputs, exactly what
+`aart_get_report --format markdown` renders for a local run. Reach for
+`--format model` first (find which step failed); reach for
+`--format markdown` once you need to see that step's actual inputs/
+outputs, not before — asking for markdown by default pulls more of a
+remote run's real data across the network than most debugging questions
+need.
+
 **`aart_remote_status`/`aart_remote_why` do NOT track who pushed or
 promoted a deployment** — `whoPushed`/`whoPromoted` always report `null`,
 explicitly, rather than guessing. Only human/token APPROVAL decisions carry
