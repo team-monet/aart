@@ -5,7 +5,7 @@ import { createFakeEngine, startServer, type ServerHandle } from "@aart/server";
 import { createFsStore } from "@aart/store";
 import { createFakeApiClient, createHttpApiClient } from "./api-client.js";
 import { createFakeClock } from "./clock.js";
-import { createTestFixture, makeRun, makeWorkflow } from "./test-support/fixtures.js";
+import { createTestFixture, makeEvent, makeRun, makeWorkflow } from "./test-support/fixtures.js";
 
 describe("createFakeApiClient (store-backed, local/embedded topology)", () => {
   it("reads runs, waiting runs, flagged runs, workflow ids, environments, deployments, and rejected triggers straight from the store", async () => {
@@ -28,6 +28,25 @@ describe("createFakeApiClient (store-backed, local/embedded topology)", () => {
       expect(await client.listDeployments()).toHaveLength(1);
       expect(await client.listRejectedTriggers()).toHaveLength(1);
       expect(await client.controlPlaneHealth()).toEqual({ status: "ok" });
+    } finally {
+      await cleanup();
+    }
+  });
+
+  // V2 Wave 2A (activity feed, AMENDMENTS.md A66) — a plain passthrough to
+  // store.events.list (this method's own doc comment on the ApiClient
+  // interface): newest-first, and since/limit forwarded unmodified.
+  it("listEvents reads straight from the store, newest-first, honoring since/limit", async () => {
+    const { store, cleanup } = await createTestFixture();
+    try {
+      await store.events.append(makeEvent({ id: "evt-1", occurredAt: "2026-07-10T00:00:00.000Z", summary: "first" }));
+      await store.events.append(makeEvent({ id: "evt-2", occurredAt: "2026-07-10T00:01:00.000Z", summary: "second" }));
+      await store.events.append(makeEvent({ id: "evt-3", occurredAt: "2026-07-10T00:02:00.000Z", summary: "third" }));
+      const client = createFakeApiClient(store);
+
+      expect((await client.listEvents()).map((e) => e.id)).toEqual(["evt-3", "evt-2", "evt-1"]);
+      expect((await client.listEvents(undefined, 1)).map((e) => e.id)).toEqual(["evt-3"]);
+      expect((await client.listEvents("2026-07-10T00:01:00.000Z")).map((e) => e.id)).toEqual(["evt-3", "evt-2"]); // since is inclusive (EventLogStore.list's own contract)
     } finally {
       await cleanup();
     }
@@ -318,6 +337,39 @@ describe("createHttpApiClient against a REAL @aart/server instance (AMENDMENTS.m
 
     expect((await client.listApprovals()).map((t) => t.id)).toEqual(["at-1"]);
     expect((await client.listCorrections()).map((c) => c.runId)).toEqual(["run-x"]);
+  });
+
+  // V2 Wave 2A (activity feed, AMENDMENTS.md A66) — GET /events (the real
+  // server's own route, open/unauthenticated per AMENDMENTS.md A63 FIX 2)
+  // round-tripped through this client's listEvents, unwrapping the real
+  // route's `{ events }` envelope (server.ts's own response shape) into a
+  // bare EventLogEntry[] — mirrors listRuns'/listApprovals' own "read
+  // through the real server" shape immediately above.
+  it("listEvents reads through the real server, newest-first, honoring since/limit", async () => {
+    const store = await startRealServer();
+    await store.events.append({ id: "evt-http-1", type: "run.started", occurredAt: "2026-07-10T00:00:00.000Z", summary: "run started" });
+    await store.events.append({ id: "evt-http-2", type: "run.completed", occurredAt: "2026-07-10T00:01:00.000Z", summary: "run completed" });
+    const client = createHttpApiClient(baseUrl);
+
+    const all = await client.listEvents();
+    expect(all.map((e) => e.id)).toEqual(["evt-http-2", "evt-http-1"]);
+
+    const limited = await client.listEvents(undefined, 1);
+    expect(limited.map((e) => e.id)).toEqual(["evt-http-2"]);
+  });
+
+  // GET /events is deliberately left OPEN even when a deploy token is
+  // configured server-side (AMENDMENTS.md A63 FIX 2 — metadata only, same
+  // tier as /deployments) — unlike the D2b/D2a-gated methods below,
+  // listEvents must keep working with NO token attached, proving this
+  // client didn't accidentally start requiring one it doesn't need.
+  it("listEvents succeeds against a token-gated real server even with NO deployToken configured on this client", async () => {
+    const store = await startRealServer("events-stay-open-token");
+    await store.events.append({ id: "evt-open", type: "run.completed", occurredAt: "2026-07-10T00:00:00.000Z", summary: "run completed" });
+    const client = createHttpApiClient(baseUrl); // no deployToken given
+
+    const events = await client.listEvents();
+    expect(events.map((e) => e.id)).toEqual(["evt-open"]);
   });
 
   // D1 fix pass (AMENDMENTS.md A57) — the server's requireDeployTokenIfConfigured

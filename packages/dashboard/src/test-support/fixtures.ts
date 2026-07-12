@@ -7,7 +7,7 @@ import { promises as fs } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createFsStore, type AartStore } from "@aart/store";
-import type { Correction, Environment, EvalExample, EvalSuite, RunRecord, Trigger, Workflow } from "@aart/types";
+import type { Correction, Environment, EvalExample, EvalSuite, EventLogEntry, RunRecord, Trigger, Workflow } from "@aart/types";
 import { createFakeClock, type Clock } from "../clock.js";
 import { createStubDeps } from "../stub-deps.js";
 import type { DashboardDeps } from "../deps.js";
@@ -91,6 +91,20 @@ export function makeCorrection(overrides: Partial<Correction> = {}): Correction 
     reason: overrides.reason ?? "off by one",
     reviewer: overrides.reviewer ?? "alice",
     createdAt: overrides.createdAt ?? "2026-07-10T00:00:00.000Z",
+  };
+}
+
+/** V2 Wave 2A (activity feed, AMENDMENTS.md A66) — mirrors the other
+ * make*() factories above; scoped to what this package's own server/
+ * api-client tests need (id/type/occurredAt/summary + whichever correlation
+ * id a given test exercises). */
+export function makeEvent(overrides: Partial<EventLogEntry> = {}): EventLogEntry {
+  return {
+    id: overrides.id ?? uniq("evt"),
+    type: overrides.type ?? "run.completed",
+    occurredAt: overrides.occurredAt ?? "2026-07-10T00:00:00.000Z",
+    summary: overrides.summary ?? "Something happened",
+    ...overrides,
   };
 }
 

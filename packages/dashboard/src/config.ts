@@ -39,6 +39,16 @@ export interface DashboardConfig {
   port?: number;
   /** Worker health-endpoint URLs (ADR-16) this dashboard polls per registered worker for the §35.3 worker-health page — e.g. `["http://worker-1:8787"]`. Empty by default (no workers registered). */
   workerUrls?: readonly string[];
+  /**
+   * V2 Wave 2A (activity feed live updates, AMENDMENTS.md A66) — how often
+   * `GET /api/events/stream` (server.ts) polls `api.listEvents()` for
+   * newly-appended events. Default `DEFAULT_EVENTS_STREAM_POLL_INTERVAL_MS`
+   * (1500ms, the ratified design's own specified interval). Overridable
+   * mainly so tests can observe a live update without a multi-second
+   * real-time wait — production callers should leave this at its default.
+   */
+  eventsStreamPollIntervalMs?: number;
 }
 
 export const DEFAULT_DASHBOARD_PORT = 4000;
+export const DEFAULT_EVENTS_STREAM_POLL_INTERVAL_MS = 1500;

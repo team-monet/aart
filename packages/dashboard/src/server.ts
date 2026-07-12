@@ -18,16 +18,17 @@ import { existsSync } from "node:fs";
 import fs from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { createFsStore, type AartStore } from "@aart/store";
+import { DEFAULT_EVENTS_LIMIT } from "@aart/server";
 import type { ApiClient } from "./api-client.js";
 import type { DashboardConfig } from "./config.js";
-import { DEFAULT_DASHBOARD_PORT } from "./config.js";
+import { DEFAULT_DASHBOARD_PORT, DEFAULT_EVENTS_STREAM_POLL_INTERVAL_MS } from "./config.js";
 import type { Clock } from "./clock.js";
 import { systemClock } from "./clock.js";
 import type { DashboardDeps } from "./deps.js";
 import { createStubDeps } from "./stub-deps.js";
 import { Router, sendJson } from "./http/router.js";
 import { getBlockManifest, listBlockManifests } from "./capability-catalog.js";
-import type { RunRecord, RunStatus } from "@aart/types";
+import type { EventLogEntry, RunRecord, RunStatus } from "@aart/types";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -143,7 +144,14 @@ function redactRuns(deps: DashboardDeps, runs: readonly RunRecord[]): RunRecord[
   return runs.map((run) => redactRun(deps, run));
 }
 
-export function buildDashboardRouter(store: AartStore, api: ApiClient, deps: DashboardDeps, clock: Clock, workerUrls: readonly string[]): Router {
+export function buildDashboardRouter(
+  store: AartStore,
+  api: ApiClient,
+  deps: DashboardDeps,
+  clock: Clock,
+  workerUrls: readonly string[],
+  eventsStreamPollIntervalMs: number = DEFAULT_EVENTS_STREAM_POLL_INTERVAL_MS,
+): Router {
   const router = new Router();
 
   // -- API endpoints (JSON only) -------------------------------------------
@@ -389,6 +397,114 @@ export function buildDashboardRouter(store: AartStore, api: ApiClient, deps: Das
     sendJson(ctx.res, 200, result);
   });
 
+  // -- V2 Wave 2A: activity feed + live updates (AMENDMENTS.md A66) -------
+  //
+  // Both routes below read the V1 event log (AMENDMENTS.md A61) through
+  // `api.listEvents` alone — same "every route goes through `api`" discipline
+  // as everything above (this file's own header comment) — never `store`
+  // directly. `GET /api/events` is the backfill/initial-load route the
+  // frontend's ActivityFeedPage calls once on mount; `GET /api/events/stream`
+  // is a read-only Server-Sent-Events broadcast of events NEW since the
+  // connection opened. No redaction wrapper (unlike redactRun/redactRuns
+  // above) — an EventLogEntry carries only run-lifecycle metadata (id/type/
+  // occurredAt/summary + correlation ids), never a step's trace/inputs/
+  // outputs (@aart/types' event-log.ts has no such field on the schema at
+  // all), the same reasoning AMENDMENTS.md A63 FIX 2 already applied to the
+  // real server's own GET /events (open, unauthenticated) — and the same
+  // "no redact() call" precedent every other non-RunRecord list route in
+  // this file already follows (listEnvironments/listDeployments/etc, above).
+
+  router.get("/api/events", async (ctx) => {
+    const since = ctx.query.get("since") ?? undefined;
+    const limitParam = ctx.query.get("limit");
+    const parsedLimit = limitParam === null || limitParam === "" ? undefined : Number(limitParam);
+    const limit = parsedLimit !== undefined && Number.isFinite(parsedLimit) ? parsedLimit : undefined;
+    const events = await api.listEvents(since, limit);
+    sendJson(ctx.res, 200, events);
+  });
+
+  router.get("/api/events/stream", async (ctx) => {
+    ctx.res.writeHead(200, {
+      "content-type": "text/event-stream",
+      "cache-control": "no-cache",
+      connection: "keep-alive",
+    });
+    ctx.res.flushHeaders?.();
+    ctx.res.write(":ok\n\n"); // opens the stream — some proxies/clients wait for the first byte before treating the connection as live
+
+    // Cursor mechanism: `cursor` starts at THIS connection's own open time
+    // (`clock.nowIso()`, captured SYNCHRONOUSLY here — no `await` between
+    // the `:ok` write above and this line, so no event loop turn can land
+    // between them) rather than being derived from an async `listEvents()`
+    // "seed" read. That matters: a seed read is itself asynchronous, so an
+    // event appended CONCURRENTLY with it (e.g. a client connecting at the
+    // exact moment a new event lands) could race the seed's own store read
+    // and — if the seed treated whatever it observed as "already sent" —
+    // be silently dropped forever. Anchoring the cursor to the connection's
+    // own synchronous open time instead makes that race impossible by
+    // construction: everything from here on is driven by `since: cursor`
+    // (inclusive) on the first tick, which naturally catches anything at or
+    // after this exact instant, however it interleaves.
+    //
+    // `EventLogStore.list`'s own `since` filter is INCLUSIVE
+    // (`occurredAt >= since` — @aart/store's adapters/fs/events.ts and
+    // adapters/sqlite/stores/events.ts both implement it this way), so
+    // `sentIdsAtCursor` tracks which ids AT that exact timestamp have
+    // already been sent — a same-millisecond tie (e.g. aart_approve's own
+    // 3-event emission, AMENDMENTS.md A63 FIX 4) would otherwise be
+    // silently dropped by a plain "occurredAt > cursor" comparison instead
+    // of correctly re-checked against what's already gone out. Starts
+    // empty: nothing has been sent yet at the connection's own open time.
+    let cursor: string = clock.nowIso();
+    let sentIdsAtCursor = new Set<string>();
+
+    function isNewEvent(event: EventLogEntry): boolean {
+      if (event.occurredAt > cursor) return true;
+      return event.occurredAt === cursor && !sentIdsAtCursor.has(event.id);
+    }
+
+    async function tick(): Promise<void> {
+      if (ctx.res.writableEnded) return; // client already disconnected; the close handler below already cleared the interval, but a tick can still be in flight when it fires
+      try {
+        const batch = await api.listEvents(cursor, DEFAULT_EVENTS_LIMIT);
+        // Oldest-of-the-new-batch first: each SSE frame is one sequential
+        // client-side "prepend to the top of the feed" (ActivityFeedPage.tsx)
+        // — writing newest-first would leave the OLDEST event of this
+        // tick's batch on top after every prepend applied, backwards from
+        // the intended newest-on-top order.
+        const fresh = batch.filter(isNewEvent).reverse();
+        for (const event of fresh) {
+          if (ctx.res.writableEnded) break;
+          ctx.res.write(`data: ${JSON.stringify(event)}\n\n`);
+        }
+        if (batch.length > 0) {
+          const newest = batch[0]!.occurredAt; // api.listEvents is newest-first
+          cursor = newest;
+          sentIdsAtCursor = new Set(batch.filter((e) => e.occurredAt === newest).map((e) => e.id));
+        }
+      } catch (err) {
+        // Never let a transient read failure kill the stream or crash the
+        // dashboard process (this route's own explicit contract) — log and
+        // keep the connection open; the next tick retries independently.
+        console.error("[dashboard] GET /api/events/stream: failed to read events:", err);
+      }
+    }
+
+    const interval = setInterval(() => {
+      void tick();
+    }, eventsStreamPollIntervalMs);
+
+    // Read-only broadcast: this stream never touches the real server's own
+    // ticker (single-instance constraint respected) — it only ever polls
+    // `api.listEvents`, the same read every `GET /api/events` backfill call
+    // makes. Each connection owns its own interval/cursor; closing one
+    // client's tab never affects any other open stream.
+    ctx.req.on("close", () => {
+      clearInterval(interval);
+      if (!ctx.res.writableEnded) ctx.res.end();
+    });
+  });
+
   return router;
 }
 
@@ -406,7 +522,7 @@ export async function startDashboard(config: DashboardConfig): Promise<Dashboard
   const clock = config.clock ?? systemClock;
   const store = config.store ?? placeholderStore();
   const deps = config.deps ?? createStubDeps(store, clock);
-  const router = buildDashboardRouter(store, config.api, deps, clock, config.workerUrls ?? []);
+  const router = buildDashboardRouter(store, config.api, deps, clock, config.workerUrls ?? [], config.eventsStreamPollIntervalMs ?? DEFAULT_EVENTS_STREAM_POLL_INTERVAL_MS);
   
   const frontendDir = getFrontendDir();
 
