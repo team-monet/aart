@@ -1,7 +1,7 @@
 // createEvalSuite / runEvalSuiteForWorkflow — the "Create suite" / "Run
 // eval" write actions (architecture §13.2's v2 writable-action list) the
 // dashboard's Evals page posts.
-import type { AartStore } from "@aart/store";
+import { recordEvent, type AartStore } from "@aart/store";
 import type { EvalExample, EvalRun, EvalSuite, Scorer } from "@aart/types";
 import { createScorerRegistry, runEvalSuite } from "@aart/evidence";
 import { generateId } from "./ids.js";
@@ -28,6 +28,7 @@ export async function createEvalSuite(store: AartStore, input: CreateEvalSuiteIn
   for (const example of suite.examples) {
     await store.evals.putExample(example);
   }
+  await recordEvent(store, { type: "eval.suite_created", summary: `eval suite "${suite.name}" created (${suite.examples.length} examples)` });
   return suite;
 }
 
@@ -93,5 +94,11 @@ export async function runEvalSuiteForWorkflow(store: AartStore, suiteId: string,
     reportArtifact: generateId("evalreport"),
   });
   await store.evals.putRun(result.evalRun);
+  await recordEvent(store, {
+    type: "eval.run_completed",
+    workflowId: workflow.id,
+    workflowVersion: workflow.version,
+    summary: `eval suite "${suite.name}" run against ${workflow.id}@${workflow.version}: ${result.evalRun.passed}/${result.evalRun.total} passed`,
+  });
   return { kind: "ok", evalRun: result.evalRun, results: result.results };
 }

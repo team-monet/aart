@@ -199,6 +199,32 @@ describe("promoteWorkflowVersionToEnvironment — staging vs production divergen
     await expect(promoteWorkflowVersionToEnvironment(fx.store, { workflowId: "no-such-wf", workflowVersion: "1", environmentId: "env_x" })).resolves.toEqual({ kind: "workflow_not_found" });
     await expect(promoteWorkflowVersionToEnvironment(fx.store, { workflowId: "checkout-smoke", workflowVersion: "0.3.0", environmentId: "no-such-env" })).resolves.toEqual({ kind: "environment_not_found" });
   });
+
+  // V1 event log foundation (AMENDMENTS.md A61)
+  describe("V1 event log writes (AMENDMENTS.md A61)", () => {
+    it("emits deployment.promoted carrying workflowId/workflowVersion/deploymentId/environmentId on a successful promotion", async () => {
+      fx = await createTestFixture();
+      await setUpWorkflow(fx);
+      await fx.store.environments.put({ id: "env_staging", name: "staging", config: { trustMode: "governed" } });
+      const result = await promoteWorkflowVersionToEnvironment(fx.store, { workflowId: "checkout-smoke", workflowVersion: "0.3.0", environmentId: "env_staging" });
+      expect(result.kind).toBe("promoted");
+      if (result.kind !== "promoted") throw new Error("unreachable");
+      const events = await fx.store.events.list();
+      expect(events).toContainEqual(
+        expect.objectContaining({ type: "deployment.promoted", workflowId: "checkout-smoke", workflowVersion: "0.3.0", deploymentId: result.deployment.id, environmentId: "env_staging" }),
+      );
+    });
+
+    it("does NOT emit deployment.promoted when not_promoted / blocked / not_found — no deployments.put happens on any of those paths", async () => {
+      fx = await createTestFixture();
+      await setUpWorkflow(fx);
+      await fx.store.environments.put({ id: "env_prod", name: "production", config: { trustMode: "production" } });
+      await promoteWorkflowVersionToEnvironment(fx.store, { workflowId: "checkout-smoke", workflowVersion: "0.3.0", environmentId: "env_prod" }); // not_promoted
+      await promoteWorkflowVersionToEnvironment(fx.store, { workflowId: "no-such-wf", workflowVersion: "1", environmentId: "env_x" }); // workflow_not_found
+      const events = await fx.store.events.list();
+      expect(events.some((e) => e.type === "deployment.promoted")).toBe(false);
+    });
+  });
 });
 
 describe("requiredGatesForEnvironment", () => {

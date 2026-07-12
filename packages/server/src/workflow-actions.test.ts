@@ -85,3 +85,41 @@ describe("approveOrDeprecateWorkflow", () => {
     });
   });
 });
+
+// V1 event log foundation (AMENDMENTS.md A61)
+describe("approveOrDeprecateWorkflow — V1 event log writes", () => {
+  it("emits workflow.approved when action: approve genuinely reaches 'approved'", async () => {
+    await withFixture(async (fx) => {
+      await fx.store.workflows.put(fixtureWorkflow({ gates: { validate: "passed", readiness: "pending", evals: "pending", riskReview: "pending", humanReview: "passed" } }));
+      await approveOrDeprecateWorkflow(fx.store, "wf_ad", "1.0.0", "approve", "governed");
+      const events = await fx.store.events.list();
+      expect(events).toContainEqual(expect.objectContaining({ type: "workflow.approved", workflowId: "wf_ad", workflowVersion: "1.0.0" }));
+    });
+  });
+
+  it("does NOT emit workflow.approved when action: approve doesn't reach 'approved' (gates unmet)", async () => {
+    await withFixture(async (fx) => {
+      await fx.store.workflows.put(fixtureWorkflow({ gates: { validate: "passed", readiness: "pending", evals: "pending", riskReview: "pending", humanReview: "pending" } }));
+      await approveOrDeprecateWorkflow(fx.store, "wf_ad", "1.0.0", "approve", "governed");
+      const events = await fx.store.events.list();
+      expect(events.some((e) => e.type === "workflow.approved")).toBe(false);
+    });
+  });
+
+  it("emits workflow.deprecated for action: deprecate", async () => {
+    await withFixture(async (fx) => {
+      await fx.store.workflows.put(fixtureWorkflow({ approval: "approved", gates: { validate: "passed", readiness: "passed", evals: "passed", riskReview: "passed", humanReview: "passed" } }));
+      await approveOrDeprecateWorkflow(fx.store, "wf_ad", "1.0.0", "deprecate", "governed");
+      const events = await fx.store.events.list();
+      expect(events).toContainEqual(expect.objectContaining({ type: "workflow.deprecated", workflowId: "wf_ad", workflowVersion: "1.0.0" }));
+    });
+  });
+
+  it("neither event fires for an unknown workflow/version (not_found, no write happens)", async () => {
+    await withFixture(async (fx) => {
+      await approveOrDeprecateWorkflow(fx.store, "no-such-workflow", "1.0.0", "approve", "governed");
+      const events = await fx.store.events.list();
+      expect(events).toEqual([]);
+    });
+  });
+});

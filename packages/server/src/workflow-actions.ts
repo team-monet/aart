@@ -9,7 +9,7 @@
 // of a dashboard-local mirror of it. The actual STORE PERSISTENCE here is
 // trivial glue (no policy logic of its own); the POLICY decision is made by
 // `computeApprovalState`, `@aart/governance`'s real, authoritative function.
-import type { AartStore } from "@aart/store";
+import { recordEvent, type AartStore } from "@aart/store";
 import type { TrustMode, Workflow } from "@aart/types";
 import { computeApprovalState, REQUIRED_GATES_BY_MODE } from "@aart/governance";
 
@@ -37,5 +37,16 @@ export async function approveOrDeprecateWorkflow(
   const approval = action === "deprecate" ? "deprecated" : computeApprovalState(workflow.gates, REQUIRED_GATES_BY_MODE[trustMode]);
   const updated: Workflow = { ...workflow, approval };
   await store.workflows.put(updated);
+  // V1 event log (AMENDMENTS.md A61) — colocated with the write above,
+  // same unconditional-write semantics: "approve" only actually reaches
+  // "approved" when computeApprovalState says so (an approve attempt
+  // against an unmet-gates workflow still writes, just not to "approved" —
+  // no workflow.approved event for that case); "deprecate" always reaches
+  // "deprecated" once the workflow is found, matching the ternary above.
+  if (action === "approve" && approval === "approved") {
+    await recordEvent(store, { type: "workflow.approved", workflowId, workflowVersion: version, summary: `${workflowId}@${version} approved` });
+  } else if (action === "deprecate") {
+    await recordEvent(store, { type: "workflow.deprecated", workflowId, workflowVersion: version, summary: `${workflowId}@${version} deprecated` });
+  }
   return { kind: "ok", workflow: updated };
 }
