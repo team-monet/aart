@@ -1142,6 +1142,48 @@ describe("POST /bundles/plan — zero-write dry-run preview (AMENDMENTS.md A56)"
     });
     expect(res.status).toBe(404);
   });
+
+  // D1 fix pass (AMENDMENTS.md A57) — integration-level companion to
+  // bundle/plan.test.ts's own dedicated, backend-independent regression
+  // suite for findCurrentVersion's id tie-break (see that file's own doc
+  // comment for why a real createFsStore-backed test CANNOT actually
+  // distinguish pre-fix from post-fix behavior — createFsStore's own
+  // deployments.list() happens to already return rows sorted alphabetically
+  // by id, which coincides with this fix's own tie-break output regardless
+  // of whether the fix exists). This test's own job is narrower and
+  // genuinely proven here: the real HTTP route surfaces a currentVersion at
+  // all when two Deployment rows collide on createdAt (rather than, say,
+  // throwing or returning undefined), and that value is stable across
+  // repeated requests against the same unchanged store.
+  it("currentVersion resolves to a real, stable value over the real HTTP route when two Deployment rows share the exact same createdAt", async () => {
+    fx = await createTestFixture();
+    await fx.store.environments.put({ id: "env_plan_tie", name: "tie-staging", config: { trustMode: "governed" } });
+    await fx.store.workflows.put(deployableWorkflow("wf_plan_tie", { version: "2" }));
+    const sameCreatedAt = "2026-07-01T00:00:00.000Z";
+    await fx.store.deployments.put({ id: "dep_zzz_last", workflowId: "wf_plan_tie", workflowVersion: "2", environmentId: "env_plan_tie", triggerConfig: {}, createdAt: sameCreatedAt, promoted: true });
+    await fx.store.deployments.put({ id: "dep_aaa_first", workflowId: "wf_plan_tie", workflowVersion: "1", environmentId: "env_plan_tie", triggerConfig: {}, createdAt: sameCreatedAt, promoted: true });
+
+    const bundle = await produceBundle(fx.store, { workflowId: "wf_plan_tie", workflowVersion: "2", targetEnvironment: "tie-staging" });
+    handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false, deployToken: TOKEN });
+
+    const res = await fetch(`http://localhost:${handle.port}/bundles/plan`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${TOKEN}` },
+      body: JSON.stringify({ files: bundleToFiles(bundle) }),
+    });
+    expect(res.status).toBe(200);
+    const plan = (await json(res)) as { currentVersion?: string };
+    expect(["1", "2"]).toContain(plan.currentVersion); // one of the two tied rows, never undefined/thrown
+
+    // Re-request against the SAME unchanged store — must resolve identically every time.
+    const res2 = await fetch(`http://localhost:${handle.port}/bundles/plan`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${TOKEN}` },
+      body: JSON.stringify({ files: bundleToFiles(bundle) }),
+    });
+    const plan2 = (await json(res2)) as { currentVersion?: string };
+    expect(plan2.currentVersion).toBe(plan.currentVersion);
+  });
 });
 
 describe("POST /environments — ADR-2 (AMENDMENTS.md A56)", () => {

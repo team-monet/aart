@@ -61,12 +61,50 @@ function findRootDefinition(bundle: Bundle) {
   return workflow;
 }
 
-/** The most-recently-created Deployment row for (workflowId, environmentId) whose `promoted` is not explicitly `false` — see `BundlePlanResult.currentVersion`'s own doc comment for why "most recent" is this function's tie-break heuristic rather than a hard single-row invariant. */
-async function findCurrentVersion(store: AartStore, workflowId: string, environmentId: string): Promise<string | undefined> {
+/**
+ * The most-recently-created Deployment row for (workflowId, environmentId)
+ * whose `promoted` is not explicitly `false` — see
+ * `BundlePlanResult.currentVersion`'s own doc comment for why "most recent"
+ * is this function's tie-break heuristic rather than a hard single-row
+ * invariant.
+ *
+ * D1 fix pass (AMENDMENTS.md A57) — secondary sort key on `id` when
+ * `createdAt` collides (millisecond-resolution ISO timestamps can
+ * genuinely tie under fast/concurrent ingestion, e.g. two bundles pushed
+ * in the same request-handling tick). Without this, the "winner" was
+ * whatever `Array.prototype.sort`'s OWN stability happened to preserve —
+ * i.e. whichever row `store.deployments.list` returned last among the
+ * tied group, an ordering `AartStore.deployments.list`'s own interface
+ * never promises and can legitimately differ across adapters (fs vs
+ * sqlite) or even across calls. `id` (`ids.ts`'s `generateId`, a random
+ * UUID) is guaranteed unique per row, so comparing it after `createdAt`
+ * fully resolves any tie in one step — deterministic across adapters, runs,
+ * and process restarts. Note this makes no claim to picking the row that
+ * was ACTUALLY created last in wall-clock time: once `createdAt` itself
+ * has collided, true recency is already unknowable from stored data alone;
+ * the only thing this tie-break can and does guarantee is that the SAME
+ * answer comes back every time, not an arbitrary one.
+ *
+ * Exported (D1 fix pass, AMENDMENTS.md A57) so this file's own test suite
+ * can prove the tie-break directly against a store double that returns
+ * `deployments.list()` in a deliberately-adversarial order — the same
+ * "exported for direct, backend-independent testing" precedent
+ * `resolveHydrationTarget` (`load.ts`) already established in this bundle
+ * subsystem. A real `createFsStore`, it turns out, already returns
+ * `deployments.list()` sorted alphabetically by id (`KeyedJsonCollection.list()`,
+ * `adapters/fs/json-file.ts`) — which would make an fs-store-backed
+ * end-to-end test pass identically whether or not this tie-break exists,
+ * since "whatever's last in the store's own (alphabetical) order" and
+ * "the alphabetically-largest id" happen to coincide on that one adapter.
+ * `AartStore.deployments.list`'s own interface promises no such order, so
+ * this function's correctness has to be provable independent of any one
+ * adapter's incidental behavior.
+ */
+export async function findCurrentVersion(store: AartStore, workflowId: string, environmentId: string): Promise<string | undefined> {
   const deployments = await store.deployments.list({ environmentId, workflowId });
   const active = deployments.filter((d) => d.promoted !== false);
   if (active.length === 0) return undefined;
-  const latest = [...active].sort((a, b) => a.createdAt.localeCompare(b.createdAt)).at(-1);
+  const latest = [...active].sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id)).at(-1);
   return latest?.workflowVersion;
 }
 
