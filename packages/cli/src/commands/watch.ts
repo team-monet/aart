@@ -433,12 +433,24 @@ export async function watchCommand(tokens: Tokenized, cli: CliContext, options: 
   // moments earlier in this same terminal (the crashed child's own
   // prefixed log lines), instead of `aart watch` hanging for the full
   // readiness timeout or forever waiting for a SIGTERM that will never come.
+  //
+  // Also listens for each child's own "error" event (spawn-level failure —
+  // e.g. ENOENT) alongside "exit": Node's EventEmitter throws on an
+  // unhandled "error" event, which would otherwise crash `aart watch`
+  // itself with a raw stack trace instead of the clean message every other
+  // failure path in this function produces. Mirrors the one other real
+  // precedent for handling this in this codebase (packages/blocks-core/src/
+  // lib/command-spawn.ts's own `child.on("error", ...)`).
   let intentionalShutdown = false;
   const earlyExit = new Promise<PollResult>((resolve) => {
     for (const { label, child } of labeled) {
       child.once("exit", (code, signal) => {
         if (intentionalShutdown) return;
         resolve({ ok: false, error: `${label} exited unexpectedly before "aart watch" finished starting up (code=${code ?? "null"}, signal=${signal ?? "null"}) — see its [${label}] log lines above.` });
+      });
+      child.once("error", (err) => {
+        if (intentionalShutdown) return;
+        resolve({ ok: false, error: `${label} failed to start: ${err.message}` });
       });
     }
   });
