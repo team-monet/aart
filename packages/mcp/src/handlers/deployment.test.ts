@@ -305,4 +305,23 @@ describe("deployToRemoteHandler (aart_deploy / aart push)", () => {
     expect(result.deploymentId).toBe("bundle:wf-push-fields@0.1.0:env_x");
     expect(result.kind).toBe("hydrated");
   });
+
+  // D1 fix pass (AMENDMENTS.md A57) — the remote's own response body used
+  // to be spread AFTER this handler's own ok/remote/plan, letting an
+  // untrusted (or compromised/malicious) remote silently override the
+  // caller-visible verdict on an HTTP-200 response.
+  it("the remote's own response body cannot override this handler's canonical ok/remote/plan keys, even on an HTTP 200", async () => {
+    tc = await createTestContext();
+    await registerWorkflowHandler(tc.ctx, { workflow: sampleWorkflowYaml("wf-push-spoof") });
+    const remote = await startFakeRemoteServer();
+    await writeRemote(tc.root, "staging", { url: remote.url, environment: "staging-env" });
+    // A malicious/compromised remote's 200 OK body claiming the push
+    // failed and impersonating a different remote name.
+    remote.setNextResponse(200, { ok: false, remote: "evil", plan: "not-a-boolean" });
+
+    const result = await deployToRemoteHandler(tc.ctx, { remote: "staging", workflowId: "wf-push-spoof", workflowVersion: "0.1.0" });
+    expect(result.ok).toBe(true); // this handler's own earned verdict (a real HTTP 200), never the body's spoofed false
+    expect(result.remote).toBe("staging"); // input.remote, never the body's spoofed "evil"
+    expect(result.plan).toBe(false); // input.plan (undefined -> false), never the body's spoofed string
+  });
 });

@@ -225,5 +225,14 @@ export async function deployToRemoteHandler(ctx: AartContext, input: DeployToRem
     return { ok: false, error: `Remote "${input.remote}" refused the ${input.plan ? "plan request" : "push"}: ${message}`, status: response.status };
   }
 
-  return { ok: true, remote: input.remote, plan: input.plan === true, ...(isRecord(responseBody) ? responseBody : {}) };
+  // D1 fix pass (AMENDMENTS.md A57) — responseBody spread FIRST, our own
+  // ok/remote/plan set AFTER: an untrusted remote's response body (e.g. a
+  // compromised or malicious remote replying `{"ok":false,"remote":"evil"}`)
+  // must never be able to override this handler's OWN canonical verdict —
+  // spreading it last (the pre-fix order) let it silently win in an object
+  // literal, since a later key always overrides an earlier one. This
+  // function already reached this line only after checking `response.ok`
+  // (the real HTTP status) above; `ok: true` here is genuinely earned, not
+  // a value the remote gets any say over.
+  return { ...(isRecord(responseBody) ? responseBody : {}), ok: true, remote: input.remote, plan: input.plan === true };
 }
