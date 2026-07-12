@@ -60,8 +60,14 @@ const TriggerConfigSchema = z.record(z.string(), z.unknown());
  * registered `Environment` instead, and `hydrateBundle` never auto-vivifies
  * one (unlike this synthetic fallback, which is deliberately auto-created —
  * see that function's own doc comment for why the two cases differ).
+ *
+ * Exported (not module-private) so `plan.ts`'s dry-run preview — same
+ * directory, D1 "remotes + push" — can compute a plan against the exact
+ * SAME fallback environment a real `hydrateBundle` call would use for an
+ * envelope with no `targetEnvironment`, rather than a second, potentially-
+ * drifting definition of "what does the legacy fallback look like."
  */
-const BUNDLE_ENVIRONMENT: Environment = { id: "env_bundle", name: "bundle", config: {} };
+export const BUNDLE_ENVIRONMENT: Environment = { id: "env_bundle", name: "bundle", config: {} };
 
 /**
  * Deterministic — deliberately NOT `generateId()` (server/src/ids.ts's
@@ -104,7 +110,7 @@ function bundleDeploymentIdForEnvironment(workflowId: string, workflowVersion: s
   return `bundle:${workflowId}@${workflowVersion}:${environmentId}`;
 }
 
-interface HydrationTarget {
+export interface HydrationTarget {
   /** The REAL, already-registered Environment this bundle names — never auto-vivified (see `resolveHydrationTarget`'s own doc comment). */
   environment: Environment;
   /** `true` iff this environment's own trust mode is `"dev"` — dev has no required gates (governance's `REQUIRED_GATES_BY_MODE.dev`, an empty array) and is meant for throwaway iteration, so a bundle ingested straight into one is immediately live, matching a human just running `aart deploy` there directly. Any OTHER trust mode leaves the resulting `Deployment.promoted` explicitly `false` — hydration recorded the evidence (defs are now in the store) but a separate promotion step (`aart promote`/`POST /workflows/:id/promote`) is still what flips a real trigger live. */
@@ -125,8 +131,13 @@ interface HydrationTarget {
  * in this codebase: a missing environment should fail the whole hydration
  * loudly, with an actionable remedy, never silently create a placeholder a
  * human never asked for and might not notice.
+ *
+ * Exported so `plan.ts`'s dry-run preview (same directory, D1 "remotes +
+ * push") resolves a bundle's target through the IDENTICAL logic
+ * `hydrateBundle` itself uses — a plan that resolved differently from what
+ * a real ingest would do defeats the entire point of a preview.
  */
-async function resolveHydrationTarget(store: AartStore, targetEnvironmentName: string | undefined): Promise<HydrationTarget | undefined> {
+export async function resolveHydrationTarget(store: AartStore, targetEnvironmentName: string | undefined): Promise<HydrationTarget | undefined> {
   if (!targetEnvironmentName) return undefined;
   const environment = await store.environments.getByName(targetEnvironmentName);
   if (!environment) {

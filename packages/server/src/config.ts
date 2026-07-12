@@ -107,3 +107,5 @@ export const DEFAULT_POISON_WINDOW_MS = 10 * 60 * 1000;
 export const DEFAULT_MAX_PENDING_RUNS = 500;
 export const DEFAULT_HEALTH_PORT = 8787;
 export const DEFAULT_HTTP_PORT = 8080;
+/** D1 "remotes + push" (AMENDMENTS.md A56) — hard request-body cap for `POST /bundles/ingest` and `POST /bundles/plan` (http/server.ts, `Router.post`'s `maxBodyBytes` option). Bundles are 100% JSON text (bundle.ts's own doc comment) — 10MB is generous headroom for a real workflow closure while still bounding memory a single deploy-surface request can force this process to buffer. */
+export const MAX_BUNDLE_INGEST_BYTES = 10 * 1024 * 1024;

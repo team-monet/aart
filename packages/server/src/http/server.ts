@@ -8,9 +8,14 @@ import type { AartStore } from "@aart/store";
 import type { ApprovalTask, Scorer, Signal, Trigger, TrustMode, Workflow } from "@aart/types";
 import { blockPromotion, clearNeedsReview, createEvalExampleFromCorrection, createIssueForAgent, markNeedsReview, recordCorrection, triggerImprovementProposal, unblockPromotion, updateRunOutput, type RecordCorrectionInput } from "@aart/evidence";
 import { decideApprovalTask } from "../approvals.js";
+import { type Bundle } from "../bundle/bundle.js";
+import { hydrateBundle, readBundleFromEnvelope } from "../bundle/load.js";
+import { planBundleIngest } from "../bundle/plan.js";
 import { systemClock, type Clock } from "../clock.js";
-import { DEFAULT_HTTP_PORT, type ServerConfig } from "../config.js";
+import { DEFAULT_HTTP_PORT, MAX_BUNDLE_INGEST_BYTES, type ServerConfig } from "../config.js";
 import { findCorrectionByKey } from "../corrections.js";
+import { checkDeployToken, extractBearerToken } from "../deploy-token.js";
+import { registerEnvironment, type RegisterEnvironmentParams } from "../environments.js";
 import { createEvalSuite, runEvalSuiteForWorkflow } from "../evals.js";
 import { clearRunFlag, listFlaggedRuns } from "../flags.js";
 import { generateId } from "../ids.js";
@@ -22,7 +27,7 @@ import { processTriggerIntake, recordRejectedTrigger } from "../triggers/intake.
 import { loadTriggerBindingsFromDeployments } from "../triggers/registry.js";
 import type { InboundDelivery, IntakeOutcome, TriggerBinding } from "../triggers/types.js";
 import { approveOrDeprecateWorkflow } from "../workflow-actions.js";
-import { sendJson, Router } from "./router.js";
+import { sendJson, Router, type RouteContext } from "./router.js";
 
 export interface ServerHandle {
   server: Server;
@@ -85,6 +90,55 @@ async function respondWorkflowFlagAction(
   } catch (err) {
     sendJson(res, 404, { error: err instanceof Error ? err.message : "not found" });
   }
+}
+
+/**
+ * D1 "remotes + push" (AMENDMENTS.md A56) — gates `POST /bundles/ingest`,
+ * `POST /bundles/plan`, `POST /environments` (the deploy-surface mutation
+ * routes this session adds). Deliberately NOT applied to the three
+ * `/webhooks/*` routes above — those keep their own, separate per-binding
+ * HMAC verification (`config.secretResolver`) completely untouched; this
+ * token plays no role there. Writes the 401 response itself and returns
+ * `false` when the caller must stop; `true` when the request may proceed.
+ * `config.deployToken` unset -> every request refused unconditionally
+ * (fail-closed, matching `checkDeployToken`'s own contract) — there is no
+ * "auth disabled" state for this specific surface, only "not configured
+ * yet," always surfaced with the exact remedy (set `AART_DEPLOY_TOKEN`).
+ */
+function requireDeployToken(config: ServerConfig, ctx: RouteContext): boolean {
+  const provided = extractBearerToken(ctx.req.headers.authorization);
+  if (checkDeployToken(config.deployToken, provided)) return true;
+  const remedy = config.deployToken
+    ? 'Provide a valid "Authorization: Bearer <token>" header.'
+    : 'This server has no AART_DEPLOY_TOKEN configured — set it (env var, or the "AART_DEPLOY_TOKEN" key in <root>/secrets.json) before this route will accept any request.';
+  sendJson(ctx.res, 401, { error: `Unauthorized. ${remedy}` });
+  return false;
+}
+
+/** Reads `body.files` and validates it's the `{ files: Record<relPath, string> }` envelope shape `POST /bundles/ingest`/`POST /bundles/plan` both require — same shape `bundleToBundleLike` (`@aart/cli`'s `real-server-port.ts`) already builds client-side. Writes the 400 response itself on a malformed body; returns `undefined` when the caller must stop. */
+function requireBundleEnvelope(ctx: RouteContext, body: unknown): Record<string, string> | undefined {
+  const files = (body as { files?: unknown } | undefined)?.files;
+  if (!files || typeof files !== "object" || Array.isArray(files)) {
+    sendJson(ctx.res, 400, { error: 'Request body must be { "files": { "<relPath>": "<content>", ... } } — the same envelope produceBundle/bundleToBundleLike builds client-side (aart push).' });
+    return undefined;
+  }
+  return files as Record<string, string>;
+}
+
+/**
+ * Both `hydrateBundle` and `planBundleIngest` throw plain `Error`s for
+ * every failure mode (no typed error hierarchy anywhere in this bundle
+ * subsystem — bundle.ts/load.ts's own established convention). Classified
+ * here by matching the SAME fixed message substrings those two functions
+ * throw verbatim (`resolveHydrationTarget`'s "is not registered on this
+ * store", `hydrateBundle`'s own "already hydrated... DIFFERENT bundle"),
+ * mirroring how `outcomeStatus` above already switches on a fixed `reason`
+ * string elsewhere in this same file — not a new pattern for this codebase.
+ */
+function bundleErrorStatus(message: string): number {
+  if (message.includes("is not registered on this store")) return 404;
+  if (message.includes("already hydrated into this store from a DIFFERENT bundle")) return 409;
+  return 400; // malformed/tampered bundle content (readBundleFromEnvelope's own failure modes) — a client error either way
 }
 
 export async function startServer(config: ServerConfig): Promise<ServerHandle> {
@@ -311,6 +365,72 @@ export async function startServer(config: ServerConfig): Promise<ServerHandle> {
     if (result.kind === "suite_not_found") return sendJson(ctx.res, 404, { error: `eval suite not found: ${suiteId}` });
     if (result.kind === "workflow_not_found") return sendJson(ctx.res, 404, { error: `workflow not found: ${workflowId}${workflowVersion ? `@${workflowVersion}` : ""}` });
     return sendJson(ctx.res, 200, { evalRun: result.evalRun, results: result.results });
+  });
+
+  // Deploy surface — D1 "remotes + push" (AMENDMENTS.md A56). `aart push`
+  // (and the MCP `aart_deploy` tool) POST a bundle envelope here instead of
+  // `scp`+bare-process re-hydrate; `POST /bundles/plan` is the same envelope
+  // run through a zero-write dry-run preview first. Both, plus `POST
+  // /environments` below (ADR-2), are gated by `requireDeployToken` — the
+  // three `/webhooks/*` routes above are NOT (separate, per-binding HMAC
+  // mechanism, untouched).
+  router.post(
+    "/bundles/ingest",
+    async (ctx, body) => {
+      if (!requireDeployToken(config, ctx)) return;
+      const files = requireBundleEnvelope(ctx, body);
+      if (!files) return;
+      let bundle: Bundle;
+      try {
+        bundle = await readBundleFromEnvelope(files);
+      } catch (err) {
+        return sendJson(ctx.res, 400, { error: err instanceof Error ? err.message : "invalid bundle envelope" });
+      }
+      try {
+        const result = await hydrateBundle(config.store, bundle, clock);
+        return sendJson(ctx.res, 200, result);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "hydration failed";
+        return sendJson(ctx.res, bundleErrorStatus(message), { error: message });
+      }
+    },
+    { maxBodyBytes: MAX_BUNDLE_INGEST_BYTES },
+  );
+
+  router.post(
+    "/bundles/plan",
+    async (ctx, body) => {
+      if (!requireDeployToken(config, ctx)) return;
+      const files = requireBundleEnvelope(ctx, body);
+      if (!files) return;
+      let bundle: Bundle;
+      try {
+        bundle = await readBundleFromEnvelope(files);
+      } catch (err) {
+        return sendJson(ctx.res, 400, { error: err instanceof Error ? err.message : "invalid bundle envelope" });
+      }
+      try {
+        const plan = await planBundleIngest(config.store, bundle);
+        return sendJson(ctx.res, 200, plan);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "plan failed";
+        return sendJson(ctx.res, bundleErrorStatus(message), { error: message });
+      }
+    },
+    { maxBodyBytes: MAX_BUNDLE_INGEST_BYTES },
+  );
+
+  // ADR-2: wires the previously-dead registerEnvironment (environments.ts)
+  // to a real mutation route — without this there was no legal way to
+  // create a production-trust Environment on a server at all (the only
+  // caller was aart_deploy_workflow's own auto-vivified, always-empty-config
+  // ensureEnvironment, packages/mcp/src/handlers/deployment.ts).
+  router.post("/environments", async (ctx, body) => {
+    if (!requireDeployToken(config, ctx)) return;
+    const { name, trustMode, config: envConfig, secretSource } = body as Partial<RegisterEnvironmentParams>;
+    if (!name) return sendJson(ctx.res, 400, { error: "name is required" });
+    const environment = await registerEnvironment(config.store, { name, trustMode, config: envConfig, secretSource });
+    return sendJson(ctx.res, 200, { environment });
   });
 
   // Read surface — the "API surface S8 will consume" (this session's DoD note).
