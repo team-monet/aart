@@ -164,21 +164,45 @@ async function getJson<T>(url: string): Promise<T> {
   return (await res.json()) as T;
 }
 
-async function postJson<T>(url: string, body: unknown): Promise<{ status: number; body: T }> {
-  const res = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body ?? {}) });
+/** `extraHeaders` (D1 fix pass, AMENDMENTS.md A57) — merged in ON TOP OF the fixed `content-type` header, never replacing it; `undefined`/omitted is byte-identical to this function's pre-A57 behavior. */
+async function postJson<T>(url: string, body: unknown, extraHeaders?: Record<string, string>): Promise<{ status: number; body: T }> {
+  const res = await fetch(url, { method: "POST", headers: { "content-type": "application/json", ...extraHeaders }, body: JSON.stringify(body ?? {}) });
   const parsed = (await res.json()) as T;
   return { status: res.status, body: parsed };
 }
 
-async function postJsonOrThrow<T>(url: string, body: unknown): Promise<T> {
-  const { status, body: parsed } = await postJson<T & { error?: string }>(url, body);
+async function postJsonOrThrow<T>(url: string, body: unknown, extraHeaders?: Record<string, string>): Promise<T> {
+  const { status, body: parsed } = await postJson<T & { error?: string }>(url, body, extraHeaders);
   if (status < 200 || status >= 300) throw new Error(`POST ${url} -> ${status}${parsed?.error ? `: ${parsed.error}` : ""}`);
   return parsed;
 }
 
-/** `baseUrl` should point at a live `aart server`'s HTTP API (default port 8080 per S2's `ServerConfig.port` default, documented in SEAMS.md — not hardcoded here, caller supplies it). */
-export function createHttpApiClient(baseUrl: string): ApiClient {
+/**
+ * `baseUrl` should point at a live `aart server`'s HTTP API (default port
+ * 8080 per S2's `ServerConfig.port` default, documented in SEAMS.md — not
+ * hardcoded here, caller supplies it).
+ *
+ * `deployToken` (D1 fix pass, AMENDMENTS.md A57) — this dashboard-server ->
+ * runtime-server hop's OWN deploy token, attached as `Authorization: Bearer
+ * <token>` ONLY on `promoteWorkflow`'s own POST below. The server's
+ * `requireDeployTokenIfConfigured` (`@aart/server`'s `http/server.ts`)
+ * conditionally requires this exact header on `POST
+ * /workflows/:id/promote` once `AART_DEPLOY_TOKEN` is configured
+ * server-side — an unauthenticated dashboard hop would 401 on every
+ * promote click the moment an operator sets that env var, unless this
+ * client attaches the identical token. Scoped to promote alone (not
+ * threaded into every `postJson*` call this client makes) because that is
+ * the ONE route the server conditionally gates today — see
+ * `requireDeployTokenIfConfigured`'s own doc comment for the full
+ * trust-boundary rationale. Resolved ONCE by this function's own caller
+ * (`deploy/serve-dashboard.mjs`) and passed in here — this client never
+ * re-resolves it itself, matching how `@aart/cli`'s `secretResolver`/
+ * `resolveDeployToken` are likewise resolved once by their own callers,
+ * not self-resolving.
+ */
+export function createHttpApiClient(baseUrl: string, deployToken?: string): ApiClient {
   const base = baseUrl.replace(/\/$/, "");
+  const promoteAuthHeaders: Record<string, string> | undefined = deployToken ? { authorization: `Bearer ${deployToken}` } : undefined;
   return {
     async listRuns(filter) {
       const params = new URLSearchParams();
@@ -251,7 +275,7 @@ export function createHttpApiClient(baseUrl: string): ApiClient {
       return workflow;
     },
     async promoteWorkflow(workflowId, version, environmentId, triggerConfig) {
-      return postJsonOrThrow<PromoteToEnvironmentResult>(`${base}/workflows/${encodeURIComponent(workflowId)}/promote`, { version, environmentId, triggerConfig });
+      return postJsonOrThrow<PromoteToEnvironmentResult>(`${base}/workflows/${encodeURIComponent(workflowId)}/promote`, { version, environmentId, triggerConfig }, promoteAuthHeaders);
     },
     async blockPromotion(workflowId, version) {
       const { workflow } = await postJsonOrThrow<{ workflow: Workflow }>(`${base}/workflows/${encodeURIComponent(workflowId)}/block-promotion`, { version });

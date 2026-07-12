@@ -837,6 +837,63 @@ describe("deploy surface — token gate (AMENDMENTS.md A56)", () => {
   });
 });
 
+// D1 fix pass (AMENDMENTS.md A57, trust-boundary ruling) — promote is
+// CONDITIONALLY gated (requireDeployTokenIfConfigured), unlike the three
+// FAIL-CLOSED routes above: unconfigured -> stays open (pre-A56 behavior,
+// tokenless local/dev dashboards keep working); configured -> requires the
+// same valid Bearer the other three routes do.
+describe("POST /workflows/:id/promote — conditional deploy-token gating (AMENDMENTS.md A57 fix pass)", () => {
+  async function promoteSetup(fixture: TestFixture) {
+    await fixture.store.workflows.put(fixtureWorkflow("1.0.0", { id: "wf_promote_gate", approval: "approved" }));
+    await fixture.store.environments.put({ id: "env_promote_gate", name: "gate-staging", config: { trustMode: "dev" } });
+  }
+  function promoteRequest(port: number, headers: Record<string, string>) {
+    return fetch(`http://localhost:${port}/workflows/wf_promote_gate/promote`, {
+      method: "POST",
+      headers: { "content-type": "application/json", ...headers },
+      body: JSON.stringify({ version: "1.0.0", environmentId: "env_promote_gate" }),
+    });
+  }
+
+  it("deployToken configured + correct Bearer -> 200, Deployment created", async () => {
+    fx = await createTestFixture();
+    await promoteSetup(fx);
+    handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false, deployToken: "promote-gate-token" });
+    const res = await promoteRequest(handle.port, { authorization: "Bearer promote-gate-token" });
+    expect(res.status).toBe(200);
+    await expect(fx.store.deployments.list({ workflowId: "wf_promote_gate" })).resolves.toHaveLength(1);
+  });
+
+  it("deployToken configured + wrong Bearer -> 401 with a remedy, no Deployment created", async () => {
+    fx = await createTestFixture();
+    await promoteSetup(fx);
+    handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false, deployToken: "promote-gate-token" });
+    const res = await promoteRequest(handle.port, { authorization: "Bearer wrong-token" });
+    expect(res.status).toBe(401);
+    const body = (await json(res)) as { error: string };
+    expect(body.error).toMatch(/Provide a valid "Authorization: Bearer <token>" header/);
+    await expect(fx.store.deployments.list({ workflowId: "wf_promote_gate" })).resolves.toHaveLength(0);
+  });
+
+  it("deployToken configured + no Authorization header at all -> 401, no Deployment created", async () => {
+    fx = await createTestFixture();
+    await promoteSetup(fx);
+    handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false, deployToken: "promote-gate-token" });
+    const res = await promoteRequest(handle.port, {});
+    expect(res.status).toBe(401);
+    await expect(fx.store.deployments.list({ workflowId: "wf_promote_gate" })).resolves.toHaveLength(0);
+  });
+
+  it("deployToken UNCONFIGURED -> 200 with no Authorization header at all (unchanged pre-A56 behavior, never fail-closed)", async () => {
+    fx = await createTestFixture();
+    await promoteSetup(fx);
+    handle = await startServer({ store: fx.store, engine: fx.engine, clock: fx.clock, port: 0, runTicker: false }); // no deployToken
+    const res = await promoteRequest(handle.port, {});
+    expect(res.status).toBe(200);
+    await expect(fx.store.deployments.list({ workflowId: "wf_promote_gate" })).resolves.toHaveLength(1);
+  });
+});
+
 describe("POST /bundles/ingest — real ingestion (AMENDMENTS.md A56)", () => {
   const TOKEN = "ingest-test-token";
 

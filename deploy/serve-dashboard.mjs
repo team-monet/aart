@@ -99,6 +99,21 @@ const root = process.env.AART_ROOT ?? "/data";
 const storeKind = process.env.AART_STORE ?? "fs";
 const port = process.env.AART_DASHBOARD_PORT ? Number(process.env.AART_DASHBOARD_PORT) : undefined;
 const apiUrl = process.env.AART_SERVER_URL ?? "http://localhost:8080";
+// D1 fix pass (AMENDMENTS.md A57) — the SAME env var name @aart/server's
+// own AART_DEPLOY_TOKEN reads (secrets.ts's resolveDeployToken), resolved
+// once here at startup, same as every other env var on this page. This
+// package (deploy/, not packages/dashboard) has no root/secrets.json
+// convention of its own — every OTHER config value on this page (AART_ROOT,
+// AART_STORE, AART_SERVER_URL, AART_WORKER_URLS) is env-var-only too, so
+// this matches rather than introduces a new resolution shape. Threaded into
+// createHttpApiClient below so this dashboard's server-side ApiClient can
+// attach it to POST /workflows/:id/promote — the one route the real server
+// conditionally gates on AART_DEPLOY_TOKEN (requireDeployTokenIfConfigured,
+// @aart/server's http/server.ts) — without it, promoting a workflow from
+// the dashboard would 401 the moment an operator sets AART_DEPLOY_TOKEN on
+// the server. Unset here -> undefined -> createHttpApiClient's own
+// documented no-header behavior, unchanged from before this fix.
+const deployToken = process.env.AART_DEPLOY_TOKEN;
 const workerUrls = (process.env.AART_WORKER_URLS ?? "http://localhost:8787")
   .split(",")
   .map((s) => s.trim())
@@ -117,7 +132,7 @@ const store = storeKind === "sqlite" ? await createSqliteStore(`${root}/aart.db`
 
 const handle = await startDashboard({
   store,
-  api: createHttpApiClient(apiUrl),
+  api: createHttpApiClient(apiUrl, deployToken),
   // createStubDeps(store)'s own default `redact` (identityRedact) overridden
   // with @aart/governance's real redactRecord — see this file's own header
   // comment (AMENDMENTS.md A51) for why, and what it does/doesn't change.
@@ -126,7 +141,7 @@ const handle = await startDashboard({
   ...(port !== undefined ? { port } : {}),
 });
 
-console.log(`[dashboard] listening on :${handle.port} — store=${storeKind}:${root}, api=${apiUrl}, workers=[${workerUrls.join(", ")}]`);
+console.log(`[dashboard] listening on :${handle.port} — store=${storeKind}:${root}, api=${apiUrl}, workers=[${workerUrls.join(", ")}], deployToken=${deployToken ? "configured" : "unconfigured (promote requests will be sent unauthenticated)"}`);
 
 let stopping = false;
 async function stop() {

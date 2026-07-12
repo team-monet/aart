@@ -108,6 +108,8 @@ services:
       AART_STORE: sqlite
       AART_SERVER_URL: http://server:8080
       AART_WORKER_URLS: http://worker:8787
+    env_file:
+      - .env # AART_DEPLOY_TOKEN (D1 fix pass, AMENDMENTS.md A57) — this dashboard's server-side ApiClient attaches it as a Bearer header on POST /workflows/:id/promote, matching the `server` service's own AART_DEPLOY_TOKEN below (requireDeployTokenIfConfigured, http/server.ts) — without it, promoting a workflow from the dashboard 401s the moment AART_DEPLOY_TOKEN is set on `server`. AART_SECRET_* values are harmless-but-unused here (the dashboard never resolves a secretSource itself) — same file, no separate one needed.
     depends_on:
       server:
         condition: service_healthy
@@ -125,7 +127,10 @@ services:
     # still local mirrors, not yet wired to the real engine/evidence
     # packages. The dashboard has no built-in auth (DEPLOY.md's own "No
     # authentication" note) — scope its network exposure accordingly
-    # regardless of write-completeness.
+    # regardless of write-completeness. AART_DEPLOY_TOKEN (D1 fix pass,
+    # AMENDMENTS.md A57) authenticates only this dashboard's OWN promote
+    # hop to `server` — it does not add login/auth in front of the
+    # dashboard's own UI/API for a browsing operator.
 
 volumes:
   aart-store:

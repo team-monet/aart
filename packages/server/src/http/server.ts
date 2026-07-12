@@ -116,6 +116,43 @@ function requireDeployToken(config: ServerConfig, ctx: RouteContext): boolean {
   return false;
 }
 
+/**
+ * D1 fix pass (AMENDMENTS.md A57, trust-boundary ruling) — the CONDITIONAL
+ * sibling of `requireDeployToken` above, for `POST /workflows/:id/promote`
+ * specifically. Rationale: promote is the switch that flips
+ * `Deployment.promoted` `false` -> `true` (A56's own push-without-activation
+ * story); D1 both tells operators it's reasonable to network-expose
+ * `aart server` and created that exact dormancy property, so an
+ * UNAUTHENTICATED promote would defeat D1's own guarantee that a pushed
+ * bundle stays inert until someone deliberately activates it.
+ *
+ * Unlike the three routes `requireDeployToken` guards (which have NEVER
+ * worked without a token, by design — "not configured yet" is the correct
+ * universal refusal for a brand-new surface), `POST /workflows/:id/promote`
+ * existed and was open long before `deployToken` did (AMENDMENTS.md A47) —
+ * tokenless local/dev/TEST-DRIVE dashboards must keep working unmodified.
+ * So this does NOT fail closed when unconfigured:
+ *   - `config.deployToken` unset -> proceeds exactly as pre-A56 (`true`),
+ *     never refuses — see `startServer`'s own one-time startup warning
+ *     below for the operator-facing signal instead of a per-request one.
+ *   - configured -> the SAME bearer check `requireDeployToken` uses
+ *     (`checkDeployToken`/`extractBearerToken`), reused rather than
+ *     reimplemented, just with a promote-specific 401 remedy — "set
+ *     AART_DEPLOY_TOKEN" would be the WRONG instruction here, since a
+ *     token already IS configured and simply wasn't supplied or matched.
+ *
+ * A distinct helper (not a parameter/flag on `requireDeployToken` itself)
+ * so the fail-closed (new deploy-surface routes) vs conditional (promote)
+ * semantics stay explicit in the code, not hidden behind a boolean.
+ */
+function requireDeployTokenIfConfigured(config: ServerConfig, ctx: RouteContext): boolean {
+  if (!config.deployToken) return true;
+  const provided = extractBearerToken(ctx.req.headers.authorization);
+  if (checkDeployToken(config.deployToken, provided)) return true;
+  sendJson(ctx.res, 401, { error: 'Unauthorized. Provide a valid "Authorization: Bearer <token>" header — this server has AART_DEPLOY_TOKEN configured and requires it to promote a workflow version.' });
+  return false;
+}
+
 /** Reads `body.files` and validates it's the `{ files: Record<relPath, string> }` envelope shape `POST /bundles/ingest`/`POST /bundles/plan` both require — same shape `bundleToBundleLike` (`@aart/cli`'s `real-server-port.ts`) already builds client-side. Writes the 400 response itself on a malformed body; returns `undefined` when the caller must stop. */
 function requireBundleEnvelope(ctx: RouteContext, body: unknown): Record<string, string> | undefined {
   const files = (body as { files?: unknown } | undefined)?.files;
@@ -181,6 +218,21 @@ export async function startServer(config: ServerConfig): Promise<ServerHandle> {
   const clock: Clock = config.clock ?? systemClock;
   const logger: Logger = createServerLogger(config.logSink).child({ component: "http-server" });
   const router = new Router();
+
+  // D1 fix pass (AMENDMENTS.md A57) — requireDeployTokenIfConfigured's own
+  // conditional (not fail-closed) semantics for POST /workflows/:id/promote
+  // means an unconfigured deployToken has no per-request refusal to make
+  // the exposure visible the way requireDeployToken's 401 does for the
+  // three fail-closed routes. One loud warning at startup instead of a
+  // per-request log line (which would spam this at up to one entry per
+  // promote call, every process lifetime) — surfaced once, here, so an
+  // operator scanning startup logs sees it regardless of whether they ever
+  // trip the condition in a request.
+  if (!config.deployToken) {
+    logger.warn(
+      "POST /workflows/:id/promote is UNAUTHENTICATED — no AART_DEPLOY_TOKEN configured. Any caller that can reach this server's HTTP API can activate a pushed-but-dormant Deployment. Set AART_DEPLOY_TOKEN to require a bearer token on this route (D1 fix pass, AMENDMENTS.md A57).",
+    );
+  }
 
   const intakeDeps = () => ({ store: config.store, engine: config.engine, clock, logger, backpressure: config, poisonGuard: config });
 
@@ -317,7 +369,12 @@ export async function startServer(config: ServerConfig): Promise<ServerHandle> {
     return sendJson(ctx.res, 200, { workflow: result.workflow });
   });
 
+  // D1 fix pass (AMENDMENTS.md A57) — conditionally gated: see
+  // requireDeployTokenIfConfigured's own doc comment for the full
+  // trust-boundary rationale (promote is the switch that activates a
+  // pushed-but-dormant Deployment).
   router.post("/workflows/:id/promote", async (ctx, body) => {
+    if (!requireDeployTokenIfConfigured(config, ctx)) return;
     const { version, environmentId, triggerConfig } = body as { version?: string; environmentId?: string; triggerConfig?: Record<string, unknown> };
     if (!version || !environmentId) return sendJson(ctx.res, 400, { error: "version and environmentId are required" });
     const result = await promoteWorkflowVersionToEnvironment(config.store, { workflowId: ctx.params["id"]!, workflowVersion: version, environmentId, triggerConfig }, clock);
