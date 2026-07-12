@@ -72,6 +72,38 @@ describe("core tools — always registered regardless of mode (architecture §32
   });
 });
 
+// D1 "remotes + push" (AMENDMENTS.md A56) — "registers unconditionally, all
+// trust modes; server-side enforcement is the chokepoint" (the ratified
+// design memo's own words): dev/governed/strict/production must ALL see
+// aart_deploy in listTools(), with no Environment/EvalSuite precondition
+// either (unlike aart_deploy_workflow/aart_trigger_workflow just above).
+describe("aart_deploy — registers unconditionally in every trust mode (AMENDMENTS.md A56)", () => {
+  it("dev/governed/strict/production: aart_deploy is present in the tool list", async () => {
+    for (const mode of ["dev", "governed", "strict", "production"] as const) {
+      const names = await toolNames(mode);
+      expect(names, `trust mode ${mode}`).toContain("aart_deploy");
+    }
+  });
+
+  it("present with ZERO Environment records and ZERO EvalSuites — no progressive-disclosure precondition, unlike aart_deploy_workflow", async () => {
+    tc = await createTestContext();
+    await expect(tc.ctx.store.environments.list()).resolves.toEqual([]);
+    await expect(tc.ctx.store.evals.listSuites()).resolves.toEqual([]);
+    const names = (await listRegisteredTools(tc.ctx)).map((d) => d.name);
+    expect(names).toContain("aart_deploy");
+  });
+
+  it("isToolRegistered agrees with listTools for every mode (single source of truth)", async () => {
+    for (const mode of ["dev", "governed", "strict", "production"] as const) {
+      tc = await createTestContext({ trustMode: mode });
+      const viaList = (await listRegisteredTools(tc.ctx)).some((d) => d.name === "aart_deploy");
+      const viaCheck = await isToolRegistered(tc.ctx, "aart_deploy");
+      expect(viaCheck).toBe(true);
+      expect(viaCheck).toBe(viaList);
+    }
+  });
+});
+
 describe("progressive disclosure — the 5 named extended tools gate on real data existing (architecture §10.1's [DECISION])", () => {
   it("aart_deploy_workflow / aart_trigger_workflow are absent with zero Environment records", async () => {
     tc = await createTestContext();
@@ -105,10 +137,10 @@ describe("progressive disclosure — the 5 named extended tools gate on real dat
     expect(names).toContain("aart_promote_workflow");
   });
 
-  it("the other 6 extended tools have no data-existence precondition — always present", async () => {
+  it("the other 7 extended tools (6 original + D1's aart_deploy, AMENDMENTS.md A56) have no data-existence precondition — always present", async () => {
     tc = await createTestContext();
     const names = (await listRegisteredTools(tc.ctx)).map((d) => d.name);
-    for (const tool of ["aart_list_blocks", "aart_get_schema", "aart_propose_workflow", "aart_diff_workflow", "aart_list_waiting_runs", "aart_resume_run"]) {
+    for (const tool of ["aart_list_blocks", "aart_get_schema", "aart_propose_workflow", "aart_diff_workflow", "aart_list_waiting_runs", "aart_resume_run", "aart_deploy"]) {
       expect(names).toContain(tool);
     }
   });

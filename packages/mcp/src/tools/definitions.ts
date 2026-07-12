@@ -53,6 +53,8 @@ const DESCRIPTIONS: Record<ToolName, string> = {
     "Recompute and, if every required gate has passed or been waived, advance a workflow version's approval to 'approved'. Refuses (and tells you which gates are unmet) rather than approving partially — there is no partial promotion.",
   aart_deploy_workflow:
     "Deploy an approved workflow version to a named environment, creating the Deployment record a trigger can bind against. Refuses if the version isn't promoted for that environment's required gates — deploying is not a way around promotion.",
+  aart_deploy:
+    "Push a workflow version to a REMOTE aart server over HTTP — the one-command alternative to producing a bundle and copying it by hand. Bundles the version, sends it to the named remote's own configured environment (aart remote add sets this — it's a property of the remote, not something you choose per call), and ingests it there. Pass plan:true first to preview what would happen (gate status, whether triggers would go live) with zero writes on the remote before committing for real. Distinct from aart_deploy_workflow, which promotes a version into a LOCAL environment record — this ships bytes to a different, possibly remote, aart server entirely.",
   aart_trigger_workflow:
     "Trigger a run of a workflow that's actually deployed, or deliver a signal to resume a run waiting on one. Use aart_run_workflow instead for ad hoc/local runs of a workflow that isn't deployed anywhere yet.",
   aart_list_waiting_runs:
@@ -104,6 +106,13 @@ const inputSchemas: Record<ToolName, z.ZodType> = {
   aart_run_eval: z.object({ suiteId: z.string(), workflowId: z.string(), workflowVersion: z.string().optional() }),
   aart_promote_workflow: z.object({ workflowId: z.string(), workflowVersion: z.string() }),
   aart_deploy_workflow: z.object({ workflowId: z.string(), workflowVersion: z.string(), target: z.string() }),
+  // D1 "remotes + push" (AMENDMENTS.md A56). workflowVersion is REQUIRED
+  // (not defaulted to "latest") — matching aart_deploy_workflow's own
+  // established convention above: the shared handler (deployToRemoteHandler)
+  // takes a required version; CLI's `aart push` resolves "latest" itself
+  // before calling it (mirroring deployCommand's own established pattern),
+  // an MCP caller must know/pass the version explicitly.
+  aart_deploy: z.object({ remote: z.string(), workflowId: z.string(), workflowVersion: z.string(), plan: z.boolean().optional() }),
   aart_trigger_workflow: z.object({
     workflowId: z.string(),
     input: z.record(z.string(), z.unknown()).optional(),
