@@ -17,7 +17,7 @@ built in rather than bolted on.
 ## Where to go next
 
 - **Want your coding agent to wire itself up?** [`with-aart/`](./with-aart) — paste one line into the agent you already use; it installs and verifies AART for you. See [`AUTHORING.md`](./AUTHORING.md) part (c) for what it does under the hood.
-- **Setting up a second machine to author workflows with a coding agent and ship them to a running server?** [`AUTHORING.md`](./AUTHORING.md)
+- **Setting up a second machine to author workflows with a coding agent and ship them to a running server?** [`AUTHORING.md`](./AUTHORING.md) — including `aart remote add` + `aart push`, the one-command git-remote-style deploy (part (e)).
 - **Running AART for real, outside a dev laptop?** [`DEPLOY.md`](./DEPLOY.md) — Docker/compose and bare-process paths, secrets, backup/upgrade.
 - **Trying AART locally for the first time?** [`TEST-DRIVE.md`](./TEST-DRIVE.md) — install, author a workflow, watch a governed pause get approved, wire it into Claude Code.
 - **License:** [Apache License 2.0](./LICENSE).

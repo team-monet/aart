@@ -23,6 +23,8 @@ the exact `scp`-the-bundle handoff into this document's Path A/B);
 - [Path B — bare process (systemd-style)](#path-b--bare-process-systemd-style)
 - [Store choice: fs vs sqlite](#store-choice-fs-vs-sqlite)
 - [Secret management](#secret-management)
+- [Deploy token](#deploy-token)
+- [Environment registration](#environment-registration)
 - [Backup & restore](#backup--restore)
 - [Upgrade procedure](#upgrade-procedure)
 - [Verifying a deployment](#verifying-a-deployment)
@@ -112,6 +114,11 @@ server instance only activates that environment's triggers, per
 `AART_ENVIRONMENT` in `docker-compose.yml`'s `server` service — note this is
 a **server-only** flag; `worker`/`dashboard` have no equivalent scoping
 option today (see [Ops limits](#ops-limits--read-this-before-you-rely-on-it)).
+That named `Environment` has to actually exist on this store first — either
+`aart environment register <name> --trust-mode <mode>` (D1 "remotes +
+push," AMENDMENTS.md A56 — see [Deploy token](#deploy-token) below) run
+against the same store/volume, or the auto-vivified one `aart deploy
+<workflowId> --target <name>` creates on first use.
 
 Swap `target: runtime` for `target: runtime-browser` on `server` and
 `worker` in `docker-compose.yml` if you need Chromium (see above) — `image:
@@ -142,7 +149,8 @@ docker run -d --name aart-dashboard \
   aart:latest dashboard
 
 # One-off CLI commands (register, validate, request-approval, approve,
-# promote, deploy, trigger add, bundle, ...) against the same store:
+# promote, deploy, trigger add, bundle, environment register, ...) against
+# the same store:
 docker run --rm -v aart-data:/data aart:latest register /dev/stdin --store sqlite < my-workflow.yaml
 ```
 
@@ -294,6 +302,72 @@ already manages secrets for your infrastructure (systemd's
 `EnvironmentFile=`, your container orchestrator's secret-injection
 mechanism, ...) over `secrets.json` — one less plaintext file on disk.
 
+## Deploy token
+
+D1 "remotes + push" (AMENDMENTS.md A56) added a REMOTE deploy surface —
+`aart push`/the MCP `aart_deploy` tool bundle a workflow version and POST
+it straight to a running `aart server` over HTTP, instead of `scp`-ing a
+bundle by hand (see `AUTHORING.md`'s "(e) Deploying to the server"). A
+SEPARATE bearer token, distinct from the webhook secrets above, gates this:
+
+- **`POST /bundles/ingest`** — ingests a pushed bundle for real.
+- **`POST /bundles/plan`** — a zero-write dry-run preview of the same.
+- **`POST /environments`** — registers a new `Environment` over HTTP (the
+  network-only counterpart to the `aart environment register` CLI command —
+  see [Environment registration](#environment-registration) below).
+
+Every GET route, and the three `/webhooks/*` routes (which keep their own,
+separate per-binding HMAC verification — [Secret management](#secret-management)
+above — completely untouched), are **not** gated by this token.
+
+**Server side** — set `AART_DEPLOY_TOKEN`, checked in the exact same two
+places/order as `AART_SECRET_*` above: the env var first, then
+`<root>/secrets.json`'s own `"AART_DEPLOY_TOKEN"` key. **Unconditionally
+fail-closed**: with `AART_DEPLOY_TOKEN` unset, all three routes above
+refuse every request — including a genuinely correct one — with `401` and
+a remedy naming the env var. There is no "auth disabled, allow anything"
+state for this surface, unlike the rest of this HTTP API (which, per
+[Ops limits](#ops-limits--read-this-before-you-rely-on-it) below, has none
+at all by default).
+
+```bash
+# .env (docker compose) or your process manager's own secret injection:
+AART_DEPLOY_TOKEN=a-long-random-value-you-generate-yourself
+```
+
+**Client side** — `aart remote add <name> <url> --environment <envName>
+--token-ref secrets.<NAME>` records only the *reference*, never the value
+(same discipline as `--webhook-hmac-secret-ref`); `aart push`/`aart_deploy`
+resolve it at push time via the identical `AART_SECRET_<NAME>`-then-
+`secrets.json` mechanism and send it as `Authorization: Bearer <token>`.
+Skip `--token-ref` and no `Authorization` header is sent at all — fine only
+if the remote's own `AART_DEPLOY_TOKEN` happens to be unset too, which (see
+above) means the remote refuses the push regardless.
+
+Comparison is constant-time (`sha256` of both sides, then
+`crypto.timingSafeEqual` — never a raw string compare, and never
+`timingSafeEqual` on the unhashed token, which throws on a length
+mismatch).
+
+## Environment registration
+
+ADR-2 (same session, AMENDMENTS.md A56): `aart environment register <name>
+--trust-mode <dev|governed|strict|production>` (or the token-gated `POST
+/environments` above, for the no-filesystem-access case) creates or updates
+a real `Environment` record with a real trust mode — the gap this closes:
+previously the only way an `Environment` came into existence was
+`aart_deploy_workflow`'s own auto-vivification on first deploy, which
+always creates an EMPTY config (silently defaulting to `governed`-tier
+required gates, `promotion.ts`'s own `requiredGatesForEnvironment`
+convention) — there was no documented way to get a real `dev`-, `strict`-,
+or `production`-trust environment onto a store at all. `aart environment
+list` shows every registered environment and its config. Re-registering an
+existing name updates it in place (upsert), never a duplicate row.
+
+A bundle's `--environment <name>` (`aart bundle`/`aart push`) needs the
+named environment to already be registered on the DESTINATION store before
+hydration — see `AUTHORING.md`'s "Environment-scoped hydration" note.
+
 ## Backup & restore
 
 **What to copy** depends on your store choice:
@@ -411,14 +485,21 @@ Stated plainly, matching this repo's own "What doesn't work yet" convention
   today. What you get out of the box: structured JSON logs to stdout (wire
   `consoleJsonSink`), and the `/health`/`/runs`/`/deployments`/
   `/rejected-triggers` HTTP endpoints for polling-based monitoring.
-- **No authentication in front of the control-plane HTTP API or the
+- **No authentication in front of MOST of the control-plane HTTP API or the
   dashboard.** `GET /runs`, `GET /workflows`, the webhook endpoints (HMAC-
   verified, but that authenticates the SENDER, not a browsing operator),
   and the dashboard's own pages have no login, API key, or network-policy
   enforcement built in. Put a reverse proxy with real auth (or a private
   network / VPN-only exposure) in front of anything beyond localhost —
   this deploy kit's compose/systemd examples above bind to all interfaces
-  by default and assume you're adding that layer yourself.
+  by default and assume you're adding that layer yourself. **The one
+  exception** (D1 "remotes + push," AMENDMENTS.md A56): `POST
+  /bundles/ingest`, `POST /bundles/plan`, and `POST /environments` ARE
+  gated, by the [deploy token](#deploy-token) above — but that's the ONLY
+  part of this API a bearer token protects; every other route (triggering a
+  run, approving/promoting a workflow version, reading run history, ...)
+  remains exactly as open as this bullet describes. Don't mistake
+  "`AART_DEPLOY_TOKEN` is configured" for "this server is authenticated."
 - **The dashboard is API-complete except two narrower gaps** (`@aart/dashboard`,
   AMENDMENTS.md A47 — owned by a different session than this deploy kit,
   which packages what exists rather than changing it). Every read AND
@@ -478,6 +559,16 @@ Stated plainly, matching this repo's own "What doesn't work yet" convention
   regardless of which environment triggered it; scoping which triggers
   ever CREATE a run in the first place is what `server`'s `--environment`
   actually controls.
+- **The dashboard has no "promoted" badge yet** (D1 "remotes + push,"
+  AMENDMENTS.md A56 — a flagged, explicitly out-of-scope residual, not an
+  oversight). `Deployment.promoted` (`false` = evidence recorded via a
+  bundle push, awaiting a real promotion before its trigger goes live) is
+  fully real in the store and API (`GET /deployments`), but
+  `@aart/dashboard`'s `ProductionPage.tsx` doesn't render it — an operator
+  checking deployment status there today can't visually distinguish a
+  promoted, live deployment from one still awaiting promotion. Use `GET
+  /deployments` directly, or `aart_deploy --plan`'s preview, until that
+  frontend work lands.
 
 ## Platform notes
 

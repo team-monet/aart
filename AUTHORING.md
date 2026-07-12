@@ -263,7 +263,32 @@ design.
 
 ## (e) Deploying to the server
 
-Ship **just the bundle directory** — small, self-contained, every byte
+**The one-command way (D1 "remotes + push," AMENDMENTS.md A56) — no `scp`/
+`ssh` needed at all**, once the target server exposes its HTTP API and you
+have a deploy token for it:
+
+```bash
+aart remote add production https://your-server:8080 --environment production --token-ref secrets.PROD_DEPLOY_TOKEN
+aart push production greeting-workflow --plan     # dry-run preview first — zero writes on the remote
+aart push production greeting-workflow             # bundles + POSTs it for real (POST /bundles/ingest)
+```
+
+`aart remote add` records the remote's URL/target-environment/token
+reference in `<root>/remotes.json` (never the token's actual value — that's
+resolved at push time the same way webhook secrets already are:
+`AART_SECRET_<NAME>` env var, then `<root>/secrets.json`). `aart push`
+bundles the named workflow version and ships it straight to the remote's
+`POST /bundles/ingest` — the remote server must have `AART_DEPLOY_TOKEN`
+configured (see `DEPLOY.md`'s "Deploy token" section) or every push is
+refused `401`, and the target environment (`production` above) must already
+be registered there (`aart environment register production --trust-mode
+<mode>` — see below) or the push is refused with that exact remedy. The
+same `deployToRemoteHandler` backs the MCP `aart_deploy` tool too — your
+coding agent can push directly, same wire behavior either way.
+
+**The manual way — still fully supported**, for when you don't have (or
+don't want) network access from the authoring machine to the target: ship
+**just the bundle directory** by hand — small, self-contained, every byte
 covered by its own `manifest.json`'s `bundleHash` (a tampered or corrupted
 copy is refused on load, not silently accepted):
 
@@ -278,7 +303,8 @@ bundle you authored elsewhere instead of a store you built up locally):
 
 ```bash
 ssh you@your-server
-aart server --port 8080 --bundle /path/to/incoming-bundle --root /var/lib/aart-prod --store sqlite   # add --environment, see the note below
+aart environment register production --trust-mode governed --root /var/lib/aart-prod --store sqlite   # once, if not already registered — see the note below
+aart server --port 8080 --bundle /path/to/incoming-bundle --environment production --root /var/lib/aart-prod --store sqlite
 aart worker --bundle /path/to/incoming-bundle --root /var/lib/aart-prod --store sqlite                # second process, same store
 ```
 
@@ -296,21 +322,23 @@ extrapolation of `DEPLOY.md`'s own established Path A pattern applied to
 `--bundle`, not something this session re-verified against a live compose
 stack — if it doesn't behave as described, that's the gap to report.
 
-**A real gotcha this session found, not documented anywhere before now:**
-hydrating a bundle always creates (or reuses) one synthetic `Environment`
-named literally **`"bundle"`** — never the name you passed to `aart bundle
---environment <name>` when you produced it. A bundle's own manifest doesn't
-record that name at all (by design — `packages/server/src/bundle/load.ts`'s
-own doc comment: `aart bundle --environment production` only selects
-*which deployment's `triggerConfig`* gets embedded, not a name to restore
-later). Concretely: **on a store that's never been hydrated before, `aart
-server --bundle <dir> --environment production ...` fails** —
-`environment "production" not found` — because hydration hasn't run yet
-when that flag is checked, and once it does run it creates `"bundle"`, not
-`"production"`. Either omit `--environment` entirely (simplest — correct
-for the common case of one bundle, one environment in play) or pass
-`--environment bundle` explicitly if you want the scoping. Don't reach for
-the original deploy-time name; it isn't preserved.
+**Environment-scoped hydration (fixed this session — previously the #1
+documented gotcha here; D1 "remotes + push," AMENDMENTS.md A56):** a bundle
+produced with `--environment <name>` now records that name in its own
+manifest (`targetEnvironment`), and hydrating it — via `aart push`,
+`aart server --bundle`, or `aart worker --bundle` — lands the resulting
+`Deployment` in that REAL environment, keyed to it specifically (so the
+same workflow version can be independently pushed to two different
+environments without one clobbering the other). **This requires the named
+environment to already be registered on the destination store** —
+`aart environment register <name> --trust-mode <dev|governed|strict|production>`
+(ADR-2, same session) — hydration refuses loudly, naming that exact command
+as the remedy, if it isn't. Omit `--environment` at `aart bundle` time (or
+hydrate a manifest produced by a pre-D1 build) and you get the OLD,
+still-fully-supported fallback: that hydration lands under one synthetic
+`Environment` named literally `"bundle"` — pass `--environment bundle` if
+you want that scoping, never the original name you produced under (a
+legacy-format bundle never recorded one).
 
 **The webhook/secrets handshake — the most likely real confusion, stated
 plainly:** `aart trigger add ... --webhook-hmac-secret-ref secrets.DEMO_SECRET`
@@ -327,9 +355,12 @@ the server-side env var is actually set.
 Verify the handoff worked the same way `DEPLOY.md`'s own "Verifying a
 deployment" section does: `GET /health` on both processes, `GET /workflows`
 shows your bundle's workflow, and a correctly-signed webhook POST to
-`/webhooks/<deploymentId>` (bare-process form: `bundle:<workflowId>@<version>`
-— printed by the hydration result, or `GET /deployments`) returns `{"kind":
-"started", "runId": "..."}`.
+`/webhooks/<deploymentId>` — printed by the hydration result, or `GET
+/deployments` (bare-process form, no `--environment`: `bundle:<workflowId>
+@<version>`; a bundle carrying a real `--environment <name>`, D1 "remotes +
+push": `bundle:<workflowId>@<version>:<environmentId>`, env-scoped so the
+same version can be independently hydrated into more than one environment)
+— returns `{"kind": "started", "runId": "..."}`.
 
 ## (f) Updating the authoring install
 
@@ -384,12 +415,13 @@ Stated plainly, matching this repo's own convention (`TEST-DRIVE.md`'s
   authored, `aart server --port 8080` locally and hit its `/workflows`/
   `/runs` JSON endpoints, or read `aart_get_report` through your coding
   agent.
-- **A bundle doesn't carry an environment name** (part (e)'s gotcha) —
-  every hydration lands under the same synthetic `"bundle"` environment
-  regardless of what you named it at `aart bundle --environment <name>`
-  time. Fine for the common one-bundle-one-environment case; don't expect
-  `--environment <your-original-name>` to resolve against a freshly
-  hydrated store.
+- **A bundle carrying `--environment <name>` needs that environment
+  pre-registered on the destination, or hydration refuses** (part (e), D1
+  "remotes + push," AMENDMENTS.md A56 — fixed this session; previously a
+  bundle's environment name was silently discarded on every hydration, not
+  just unregistered ones). `aart environment register <name> --trust-mode
+  <mode>` first. Omitting `--environment` entirely still works exactly as
+  before — the synthetic `"bundle"` environment fallback.
 - **Pack-delivered blocks aren't real yet.** Only the 56 core built-ins
   (`@aart/blocks-core` + `@aart/llm`) are dispatchable on a fresh store —
   same limit `TEST-DRIVE.md`/`DEPLOY.md` already document.

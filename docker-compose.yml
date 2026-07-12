@@ -8,7 +8,11 @@
 # scheduler ticker, etc.).
 #
 # Quick start:
-#   cp .env.example .env              # fill in AART_SECRET_* values
+#   cp .env.example .env              # fill in AART_SECRET_* values, and
+#                                      # AART_DEPLOY_TOKEN if you want to
+#                                      # `aart push`/`aart_deploy` at this
+#                                      # server remotely (D1, AMENDMENTS.md
+#                                      # A56 — see DEPLOY.md's "Deploy token")
 #   docker compose build              # builds the lean (no-browser) image;
 #                                      # see DEPLOY.md for --with-browser
 #   docker compose up -d
@@ -26,8 +30,15 @@
 # Environment scoping: AART_ENVIRONMENT (server-only; worker/dashboard have
 # no environment-scoping flag of their own — see DEPLOY.md) restricts which
 # deployments' triggers this server activates (`--environment`/
-# AART_ENVIRONMENT, AMENDMENTS.md A45). Set it once you've run `aart deploy
-# <workflowId> --target production` and know that environment's real name.
+# AART_ENVIRONMENT, AMENDMENTS.md A45). Set it once a real named Environment
+# exists on this store — either `aart deploy <workflowId> --target
+# production` (auto-vivifies a minimal one on first deploy), or the more
+# deliberate `aart environment register production --trust-mode <mode>`
+# (ADR-2, D1, AMENDMENTS.md A56 — the one that actually lets you pick a
+# trust mode instead of silently defaulting to `governed`), run against
+# this same store/volume (`docker compose exec server aart environment
+# register ...` — or remotely, `aart push`'s own `POST /environments`, once
+# AART_DEPLOY_TOKEN above is set).
 
 services:
   server:
@@ -46,7 +57,7 @@ services:
       # AART_ENVIRONMENT: production   # uncomment once you have a real named Environment to scope to
       AART_TRUST_MODE: governed # spec §17.2's own local/CI default — explicit here rather than implicit
     env_file:
-      - .env # AART_SECRET_* values (webhook HMAC secrets, etc.) — see DEPLOY.md
+      - .env # AART_SECRET_* values (webhook HMAC secrets, etc.) + AART_DEPLOY_TOKEN (D1 remote push/registration gate, AMENDMENTS.md A56) — see DEPLOY.md
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
       interval: 10s
