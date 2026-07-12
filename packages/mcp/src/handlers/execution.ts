@@ -7,6 +7,7 @@
 // "execution" itself is the documented simulation described in
 // stubs/engine.ts's module comment, not genuine block dispatch.
 import type { RunRecord, Trigger, Workflow } from "@aart/types";
+import { recordEvent } from "@aart/store";
 import type { AartContext } from "../context.js";
 import type { HandlerResult } from "../response.js";
 import { newId } from "../stubs/engine.js";
@@ -47,6 +48,14 @@ export async function runWorkflowHandler(ctx: AartContext, input: RunWorkflowInp
     approved: workflow.approval === "approved",
     approvalMode: ctx.trustMode,
   });
+  // V1 event log (AMENDMENTS.md A61) — the shared entry point CLI `aart
+  // run` and MCP `aart_run_workflow` both dispatch through (same function
+  // reference, three-clients principle) — one write site covers both.
+  // run.completed/failed/cancelled are instrumented separately, at the
+  // engine's own onRunTerminal composition-root hook (RISK 1) — NOT here —
+  // since a run can reach a terminal status asynchronously, long after this
+  // handler call returns (e.g. resumed from a wait in a later call).
+  await recordEvent(ctx.store, { type: "run.started", workflowId: workflow.id, workflowVersion: workflow.version, runId: created.runId, summary: `${workflow.id}@${workflow.version} run started (${created.runId})` }, ctx.now);
   const finished = await ctx.engine.executeRun(created.runId);
 
   // Readiness gate (S14 "gate write paths"): a genuinely-completed, non-dry

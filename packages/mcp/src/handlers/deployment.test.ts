@@ -78,6 +78,21 @@ describe("deployWorkflowHandler (aart_deploy_workflow)", () => {
     expect(environments.some((e) => e.name === "staging")).toBe(true);
   });
 
+  // V1 event log foundation (AMENDMENTS.md A61) — local deploy only
+  // (deployToRemoteHandler's own deployment.pushed is deferred to Wave 2).
+  it("emits a deployment.created event carrying workflowId/workflowVersion/deploymentId/environmentId", async () => {
+    tc = await createTestContext({ trustMode: "governed" });
+    await registerWorkflowHandler(tc.ctx, { workflow: sampleWorkflowYaml("wf-deploy-event") });
+    await approveAllGates(tc.ctx.store, "wf-deploy-event", "0.1.0");
+    const result = await deployWorkflowHandler(tc.ctx, { workflowId: "wf-deploy-event", workflowVersion: "0.1.0", target: "staging-event" });
+    const deployment = result.deployment as { id: string };
+    const environment = result.environment as { id: string };
+    const events = await tc.ctx.store.events.list();
+    expect(events).toContainEqual(
+      expect.objectContaining({ type: "deployment.created", workflowId: "wf-deploy-event", workflowVersion: "0.1.0", deploymentId: deployment.id, environmentId: environment.id }),
+    );
+  });
+
   it("reuses an existing environment by name rather than creating a duplicate", async () => {
     tc = await createTestContext({ trustMode: "governed" });
     await registerWorkflowHandler(tc.ctx, { workflow: sampleWorkflowYaml("wf-deploy-3a") });

@@ -21,6 +21,24 @@ describe("requestApprovalHandler (aart_request_approval)", () => {
     expect(task?.status).toBe("pending");
   });
 
+  // V1 event log foundation (AMENDMENTS.md A61)
+  it("emits an approval.requested event carrying runId for a genuine per-run request", async () => {
+    tc = await createTestContext();
+    await registerWorkflowHandler(tc.ctx, { workflow: approvalWaitWorkflowYaml("wf-req-approval-event") });
+    const run = await runWorkflowHandler(tc.ctx, { workflowId: "wf-req-approval-event" });
+    const result = await requestApprovalHandler(tc.ctx, { runId: run.runId as string, stepId: "approve" });
+    const events = await tc.ctx.store.events.list();
+    expect(events).toContainEqual(expect.objectContaining({ type: "approval.requested", approvalTaskId: result.taskId, runId: run.runId }));
+  });
+
+  it("emits an approval.requested event carrying workflowId/workflowVersion (not runId) for a workflow-version-level request", async () => {
+    tc = await createTestContext();
+    const result = await requestApprovalHandler(tc.ctx, { workflowId: "wf-req-approval-version-event", workflowVersion: "1.0.0" });
+    const events = await tc.ctx.store.events.list();
+    expect(events).toContainEqual(expect.objectContaining({ type: "approval.requested", approvalTaskId: result.taskId, workflowId: "wf-req-approval-version-event", workflowVersion: "1.0.0" }));
+    expect(events.find((e) => e.type === "approval.requested")).not.toHaveProperty("runId");
+  });
+
   // S9 integration (reconciliation ledger item 1): the sentinel format is
   // now @aart/governance's real workflowVersionApprovalSubject convention
   // ("workflow-version:<id>@<version>" / "__gate:humanReview__"), not this
@@ -79,6 +97,46 @@ describe("approveHandler (aart_approve) — mode-agnostic at the handler level (
     const updated = await tc.ctx.store.workflows.get("wf-approve-version", "0.1.0");
     expect(updated?.gates.humanReview).toBe("passed");
     expect(updated?.approval).toBe("approved");
+  });
+
+  // V1 event log foundation (AMENDMENTS.md A61) — approveHandler is a
+  // SECOND real entry point for approval.decided (CLI `aart approve` / MCP
+  // `aart_approve`), independent of server/approvals.ts's decideApprovalTask
+  // (the dashboard's HTTP path) — see approveHandler's own comment for why
+  // both are needed. This also proves the version-review path emits
+  // workflow.gate_passed (humanReview) AND workflow.approved once every
+  // required gate is met, all from the SAME decision.
+  it("emits approval.decided, workflow.gate_passed, and workflow.approved for a workflow-version review decision that completes approval", async () => {
+    tc = await createTestContext({ trustMode: "governed" });
+    await registerWorkflowHandler(tc.ctx, { workflow: sampleWorkflowYaml("wf-approve-version-events") });
+    const wf = await tc.ctx.store.workflows.get("wf-approve-version-events", "0.1.0");
+    await tc.ctx.store.workflows.put({ ...wf!, gates: { ...wf!.gates, validate: "passed" } });
+
+    const request = await requestApprovalHandler(tc.ctx, { workflowId: "wf-approve-version-events", workflowVersion: "0.1.0" });
+    await approveHandler(tc.ctx, { taskId: request.taskId as string, decision: "approved", reviewer: "alice" });
+
+    const events = await tc.ctx.store.events.list();
+    expect(events).toContainEqual(expect.objectContaining({ type: "approval.decided", approvalTaskId: request.taskId, workflowId: "wf-approve-version-events", workflowVersion: "0.1.0" }));
+    expect(events).toContainEqual(expect.objectContaining({ type: "workflow.gate_passed", workflowId: "wf-approve-version-events", workflowVersion: "0.1.0" }));
+    expect(events).toContainEqual(expect.objectContaining({ type: "workflow.approved", workflowId: "wf-approve-version-events", workflowVersion: "0.1.0" }));
+  });
+
+  // A genuine per-run wait decision: approval.decided fires with runId, and
+  // NO workflow.gate_passed/workflow.approved (this decision isn't a
+  // workflow-version review at all — decodeWorkflowVersionApprovalSubject
+  // returns undefined for it).
+  it("emits approval.decided with runId (not workflowId) for a genuine per-run wait decision, with no workflow gate/approval events", async () => {
+    tc = await createTestContext();
+    await registerWorkflowHandler(tc.ctx, { workflow: approvalWaitWorkflowYaml("wf-approve-run-event") });
+    const run = await runWorkflowHandler(tc.ctx, { workflowId: "wf-approve-run-event" });
+    const request = await requestApprovalHandler(tc.ctx, { runId: run.runId as string, stepId: "approve" });
+    await approveHandler(tc.ctx, { taskId: request.taskId as string, decision: "approved", reviewer: "alice" });
+
+    const events = await tc.ctx.store.events.list();
+    const decided = events.find((e) => e.type === "approval.decided");
+    expect(decided).toMatchObject({ approvalTaskId: request.taskId, runId: run.runId });
+    expect(decided).not.toHaveProperty("workflowId");
+    expect(events.some((e) => e.type === "workflow.gate_passed" || e.type === "workflow.approved")).toBe(false);
   });
 
   it("fails cleanly for an unknown taskId", async () => {
@@ -162,6 +220,22 @@ describe("recordCorrectionHandler (aart_record_correction)", () => {
     expect(stored).toHaveLength(1);
     expect(stored[0]?.reviewer).toBe("alice");
   });
+
+  // V1 event log foundation (AMENDMENTS.md A61)
+  it("emits a correction.recorded event carrying runId", async () => {
+    tc = await createTestContext();
+    await recordCorrectionHandler(tc.ctx, {
+      runId: "run_event_1",
+      stepId: "extract",
+      fieldPath: "outputs.nmi",
+      observed: "a",
+      corrected: "b",
+      reason: "OCR",
+      reviewer: "alice",
+    });
+    const events = await tc.ctx.store.events.list();
+    expect(events).toContainEqual(expect.objectContaining({ type: "correction.recorded", runId: "run_event_1" }));
+  });
 });
 
 describe("diffWorkflowHandler (aart_diff_workflow)", () => {
@@ -229,5 +303,25 @@ describe("promoteWorkflowHandler (aart_promote_workflow)", () => {
     const result = await promoteWorkflowHandler(tc.ctx, { workflowId: "wf-promote-dev", workflowVersion: "0.1.0" });
     expect(result.ok).toBe(false);
     expect(result.approval).toBe("draft");
+  });
+
+  // V1 event log foundation (AMENDMENTS.md A61)
+  it("emits a workflow.approved event only on a genuine transition to approved, never on refusal or a no-op re-promote", async () => {
+    tc = await createTestContext({ trustMode: "governed" });
+    await registerWorkflowHandler(tc.ctx, { workflow: sampleWorkflowYaml("wf-promote-event") });
+    // Refused (gates unmet) — no event yet.
+    await promoteWorkflowHandler(tc.ctx, { workflowId: "wf-promote-event", workflowVersion: "0.1.0" });
+    expect((await tc.ctx.store.events.list()).some((e) => e.type === "workflow.approved")).toBe(false);
+
+    const wf = await tc.ctx.store.workflows.get("wf-promote-event", "0.1.0");
+    await tc.ctx.store.workflows.put({ ...wf!, gates: { ...wf!.gates, validate: "passed", humanReview: "passed" } });
+    await promoteWorkflowHandler(tc.ctx, { workflowId: "wf-promote-event", workflowVersion: "0.1.0" });
+    const afterApprove = await tc.ctx.store.events.list();
+    expect(afterApprove.filter((e) => e.type === "workflow.approved")).toHaveLength(1);
+
+    // Idempotent re-promote of an ALREADY-approved workflow — no write happens (approval unchanged), so no second event.
+    await promoteWorkflowHandler(tc.ctx, { workflowId: "wf-promote-event", workflowVersion: "0.1.0" });
+    const afterRePromote = await tc.ctx.store.events.list();
+    expect(afterRePromote.filter((e) => e.type === "workflow.approved")).toHaveLength(1);
   });
 });
