@@ -8,10 +8,12 @@ import { createSqliteStore } from "@aart/store/sqlite";
 import { flagString, tokenize, type Tokenized } from "./args.js";
 import { createCliContext, type CliContext, type CreateCliContextOptions } from "./cli-context.js";
 import { initAgentCommand, initCommand, listCommand, registerCommand, runCommand, validateCommand } from "./commands/authoring.js";
-import { deployCommand, triggerCommand } from "./commands/deployment.js";
+import { deployCommand, pushCommand, triggerCommand } from "./commands/deployment.js";
+import { environmentCommand } from "./commands/environment.js";
 import { approveCommand, correctionCommand, diffCommand, promoteCommand, requestApprovalCommand } from "./commands/governance.js";
 import { evalCommand } from "./commands/evals.js";
 import { bundleCommand, flagCommand, mcpCommand, serverCommand, workerCommand } from "./commands/process.js";
+import { remoteCommand } from "./commands/remote.js";
 
 export const USAGE = `AART CLI — usage:
   aart run <workflowId> --input <json> [--version <v>]
@@ -38,6 +40,12 @@ export const USAGE = `AART CLI — usage:
   aart worker [--bundle <dir>] [--store fs|sqlite] [--root <dir>]
   aart server [--port <n>] [--bundle <dir>] [--environment <name>] [--store fs|sqlite] [--root <dir>]
   aart mcp [--store fs|sqlite] [--root <dir>]
+  aart remote add <name> <url> --environment <envName> [--token-ref <name>]
+  aart remote list
+  aart remote remove <name>
+  aart push <remote> <workflowId> [--version <v>] [--plan]
+  aart environment register <name> --trust-mode <dev|governed|strict|production>
+  aart environment list
 
   --root <dir>    (or AART_ROOT) the .aart store directory. Precedence: flag > env > ./.aart. Also honored by every command above, not only the ones listed.
   --store <kind>  fs (default) or sqlite — which @aart/store adapter backs this invocation. sqlite's db file lives at <root>/aart.db.
@@ -188,6 +196,12 @@ export async function run(argv: readonly string[], options: RunOptions = {}): Pr
         return asOutcome(await deployCommand(tokens, cli));
       case "trigger":
         return asOutcome(await triggerCommand(tokens, cli));
+      case "remote":
+        return asOutcome(await remoteCommand(tokens, cli));
+      case "push":
+        return asOutcome(await pushCommand(tokens, cli));
+      case "environment":
+        return asOutcome(await environmentCommand(tokens, cli));
       case "approve":
         return asOutcome(await approveCommand(tokens, cli));
       case "flag":

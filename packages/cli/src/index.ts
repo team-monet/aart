@@ -13,6 +13,7 @@ export { createStubServerPort } from "./stubs/server.js";
 // separately and hoping the two happen to line up.
 export {
   approveHandler,
+  deployToRemoteHandler,
   deployWorkflowHandler,
   diffWorkflowHandler,
   promoteWorkflowHandler,
