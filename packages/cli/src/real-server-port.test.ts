@@ -381,3 +381,61 @@ describe("createRealServerPort — host binding (D2a security hardening, AMENDME
     expect(boundAddress(handle)).toBe("0.0.0.0");
   });
 });
+
+// D2a fix pass (AMENDMENTS.md A60, FIX 3) — `aart server` had no
+// "listening" log line at all: the bind was mechanically silent, so an
+// operator couldn't tell a loopback-only bind from an all-interfaces one at
+// the moment it mattered — only discoverable later, via a failed remote
+// connection attempt. Mirrors the A58 logSink-wiring describe block above
+// exactly: spies on the real console.log global (consoleJsonSink routes
+// info-level lines there, @aart/store's logger.ts) through the SAME real
+// composition root (cli.serverPort.startServer) — there is still no public
+// config seam to inject a substitute sink through ServerPort's own
+// {port?, environment?, host?} surface, so this remains the only place a
+// break in the wiring would be observable.
+describe("createRealServerPort — startup listening log line (D2a fix pass, AMENDMENTS.md A60, FIX 3)", () => {
+  function findListeningLine(logSpy: ReturnType<typeof vi.spyOn>): { level: string; msg: string; host?: string; port?: number; service?: string; component?: string } | undefined {
+    const raw = logSpy.mock.calls.map(([entry]) => entry as string).find((entry) => {
+      try {
+        const parsed = JSON.parse(entry) as { level?: string; msg?: string };
+        return parsed.level === "info" && parsed.msg === "aart server listening";
+      } catch {
+        return false;
+      }
+    });
+    return raw ? (JSON.parse(raw) as { level: string; msg: string; host?: string; port?: number; service?: string; component?: string }) : undefined;
+  }
+
+  it("logs a structured 'aart server listening' line with the resolved (default loopback) host and the real bound port, after server.listen's callback fires", async () => {
+    const cli = await freshCli();
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const handle = await cli.serverPort.startServer({ port: 0 });
+      handleClose = () => handle.close();
+
+      const parsed = findListeningLine(logSpy);
+      expect(parsed, `expected an info-level JSON line with msg "aart server listening" on console.log; saw: ${JSON.stringify(logSpy.mock.calls)}`).toBeDefined();
+      expect(parsed!.host).toBe("127.0.0.1"); // default loopback bind (AMENDMENTS.md A59) — not the port-0-request, the ACTUAL resolved host
+      expect(parsed!.port).toBe(handle.port); // the REAL bound port, not the port:0 request that asked for "any free port"
+      expect(parsed!.service).toBe("@aart/server");
+      expect(parsed!.component).toBe("http-server");
+    } finally {
+      logSpy.mockRestore();
+    }
+  });
+
+  it("an explicit host is reflected in the listening log line too", async () => {
+    const cli = await freshCli();
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const handle = await cli.serverPort.startServer({ port: 0, host: "0.0.0.0" });
+      handleClose = () => handle.close();
+
+      const parsed = findListeningLine(logSpy);
+      expect(parsed).toBeDefined();
+      expect(parsed!.host).toBe("0.0.0.0");
+    } finally {
+      logSpy.mockRestore();
+    }
+  });
+});

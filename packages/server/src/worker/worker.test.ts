@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
+import type { LogLine } from "@aart/store";
 import { tryClaimNextRun } from "./claim.js";
 import { runReclaimSweep } from "./reclaim.js";
 import { startWorker, type WorkerHandle } from "./worker.js";
@@ -72,6 +73,32 @@ describe("GET /health (architecture ADR-16/§16) — the worker's own endpoint, 
     workers.push(worker);
     const res = await fetch(`http://localhost:${worker.healthPort}/not-health`);
     expect(res.status).toBe(404);
+  });
+
+  // D2a fix pass (AMENDMENTS.md A60, FIX 3) — this listener had no startup
+  // log line at all, mirroring @aart/server's own control-plane startServer
+  // fix (http/server.ts, same session). Proven directly against the real
+  // `startWorker` (not a CLI/composition-root spy, unlike the sibling
+  // server-side test in real-server-port.test.ts): `ServerPort.startWorker`'s
+  // public interface deliberately exposes no `healthPort` override
+  // (AMENDMENTS.md A58's own documented deviation), so going through the
+  // full CLI composition root here would bind the real default health port
+  // (8787) — the exact flakiness risk A58 already flagged and avoided for
+  // this same subsystem. @aart/server's own `logSink` config IS directly
+  // pluggable at this layer (unlike the CLI's ServerPort surface, which has
+  // no such seam at all — the actual reason A58 needed console-spying in
+  // the first place), so a captured-lines sink is both a more precise
+  // assertion and lower-risk than reproducing that technique here.
+  it("logs a structured 'aart worker health listening' line with the resolved host and port", async () => {
+    const clock = createFakeClock();
+    fx = await createTestFixture(clock);
+    const lines: LogLine[] = [];
+    const worker = await startWorker({ store: fx.store, engine: fx.engine, clock, installSignalHandler: false, healthPort: 0, logSink: (line) => lines.push(line) });
+    workers.push(worker);
+    const line = lines.find((l) => l.level === "info" && l.msg === "aart worker health listening");
+    expect(line, `expected an info-level "aart worker health listening" line; saw: ${JSON.stringify(lines)}`).toBeDefined();
+    expect(line!["port"]).toBe(worker.healthPort);
+    expect(typeof line!["host"]).toBe("string");
   });
 });
 

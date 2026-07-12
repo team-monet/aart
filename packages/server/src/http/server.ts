@@ -815,6 +815,15 @@ export async function startServer(config: ServerConfig): Promise<ServerHandle> {
       resolve(typeof address === "object" && address ? address.port : port);
     });
   });
+  // D2a fix pass (AMENDMENTS.md A60, FIX 3) — the bind itself was
+  // mechanically silent until this fix: nothing logged whether this process
+  // bound loopback-only or every interface, so an operator could only
+  // discover a host mismatch via a later failed remote connection, not at
+  // the moment it actually mattered — a real gap given A59's own
+  // breaking-change loopback-default bind. One line, AFTER server.listen's
+  // callback has genuinely fired (boundPort only resolves once it has), via
+  // the same wired logger every other line in this function already uses.
+  logger.info("aart server listening", { host, port: boundPort });
 
   let ticker: TickerHandle | undefined;
   if (config.runTicker !== false) {
