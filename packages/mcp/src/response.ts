@@ -41,14 +41,20 @@ export const TOOL_NAMES = [
   "aart_trigger_workflow",
   "aart_list_waiting_runs",
   "aart_resume_run",
-  // D2b "remote reads" (AMENDMENTS.md, this session) — the READ half of
-  // letting an authoring agent SEE a deployed server (D1's "remotes +
-  // push," AMENDMENTS.md A56, shipped the WRITE half). The write-against-
-  // remote half (aart_remote_approve) is deferred to Wave 2, not built here.
+  // D2b "remote reads" (AMENDMENTS.md A62) — the READ half of letting an
+  // authoring agent SEE a deployed server (D1's "remotes + push,"
+  // AMENDMENTS.md A56, shipped the WRITE half). The write-against-remote
+  // half (aart_remote_approve) was deferred to Wave 2 there — it follows
+  // directly below, now built.
   "aart_remote_status",
   "aart_remote_why",
   "aart_remote_runs",
   "aart_remote_run",
+  // Wave 2C (AMENDMENTS.md A65, John-ratified 2026-07-12/13) — the
+  // WRITE-against-remote tool D2b (A62) explicitly deferred: approve a
+  // paused run / workflow-version gate on a REMOTE aart server, the same
+  // decision aart_approve records locally.
+  "aart_remote_approve",
 ] as const;
 
 export type ToolName = (typeof TOOL_NAMES)[number];
@@ -96,6 +102,11 @@ export const TOOL_TIERS: Readonly<Record<ToolName, ToolTier>> = {
   aart_remote_why: "extended",
   aart_remote_runs: "extended",
   aart_remote_run: "extended",
+  // Wave 2C (AMENDMENTS.md A65) — extended, same tier as every other
+  // remote/deploy-adjacent tool; gated on BOTH aart_approve's own trust-mode
+  // precondition AND REMOTE_GATED_TOOLS' "≥1 configured remote" precondition
+  // (tools/server.ts's isToolRegistered — the first tool needing both).
+  aart_remote_approve: "extended",
 };
 
 export type ToolOutcome = "success" | "failure";
@@ -204,6 +215,10 @@ const NEXT_TABLE: Readonly<Record<ToolName, Readonly<Record<ToolOutcome, string>
   aart_remote_run: {
     success: "Report retrieved. If the run failed, fix the workflow locally, `aart_validate`/`aart_run_workflow` to confirm the fix, then push a corrected version.",
     failure: "Run not found on that remote — call `aart_remote_runs` to see what's actually there.",
+  },
+  aart_remote_approve: {
+    success: "Decision recorded on the remote. Call `aart_remote_why` to confirm the remote's gate/approval state now reflects it, or `aart_remote_status` for the full local-vs-remote picture.",
+    failure: "Decision could not be recorded on the remote — check the `taskId`, that the remote is configured (`aart remote list`), and that your token is valid.",
   },
 };
 

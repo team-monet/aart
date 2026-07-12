@@ -1,5 +1,5 @@
 // aart diff / aart correction add|list / aart promote / aart approve /
-// aart request-approval.
+// aart approve-remote / aart request-approval.
 //
 // `aart approve` (spec §33 does not literally list this command) is this
 // session's own deliberate, documented addition: spec §17.5's authority
@@ -10,6 +10,14 @@
 // anything this session builds. Calls the exact same `approveHandler`
 // aart_approve (MCP) calls — see packages/mcp/src/handlers/governance.ts's
 // own module doc comment for the full resolved-ambiguity note this shares.
+//
+// `aart approve-remote` (Wave 2C, AMENDMENTS.md A65): the REMOTE
+// counterpart of `aart approve` — same CLI-is-always-a-valid-surface
+// reasoning, now for a decision against a named remote's own
+// POST /approvals/:id/decision instead of the local store. Calls the exact
+// same `remoteApproveHandler` the MCP `aart_remote_approve` tool calls —
+// see packages/mcp/src/handlers/remote-governance.ts's own module doc
+// comment for the full design.
 //
 // `aart request-approval` (AMENDMENTS.md A45): the CLI-side gap A44 found
 // and explicitly left open — `aart approve` could DECIDE on an existing
@@ -25,6 +33,7 @@ import {
   diffWorkflowHandler,
   promoteWorkflowHandler,
   recordCorrectionHandler,
+  remoteApproveHandler,
   requestApprovalHandler,
   wrapResult,
   type HandlerResult,
@@ -101,4 +110,26 @@ export async function approveCommand(tokens: Tokenized, cli: CliContext): Promis
   }
   const result = await approveHandler(cli.aart, { taskId, decision, reviewer: requireFlagString(tokens.flags, "reviewer") });
   return wrapResult("aart_approve", result);
+}
+
+/**
+ * `aart approve-remote <remote> <taskId> --decision <approved|rejected|needs_changes> --reviewer <name>`
+ * — Wave 2C (AMENDMENTS.md A65). The REMOTE counterpart of `approveCommand`
+ * above: identical `--decision` validation (same three values, same early
+ * fail-fast-on-malformed-input discipline), one extra leading positional
+ * (`remote`, matching `remoteWhyCommand`/`remoteRunCommand`'s own
+ * `<remote> <id>` positional ordering, commands/remote-observability.ts) —
+ * routes through the exact same `remoteApproveHandler` the MCP
+ * `aart_remote_approve` tool calls (three-clients precedent, the same
+ * shape `approveCommand` above already establishes for the local case).
+ */
+export async function approveRemoteCommand(tokens: Tokenized, cli: CliContext): Promise<HandlerResult & { next: string }> {
+  const remote = requirePositional(tokens.positionals, 0, "remote");
+  const taskId = requirePositional(tokens.positionals, 1, "taskId");
+  const decision = requireFlagString(tokens.flags, "decision");
+  if (decision !== "approved" && decision !== "rejected" && decision !== "needs_changes") {
+    return { ok: false, error: '--decision must be one of: approved, rejected, needs_changes', next: "Retry with a valid --decision." };
+  }
+  const result = await remoteApproveHandler(cli.aart, { remote, taskId, decision, reviewer: requireFlagString(tokens.flags, "reviewer") });
+  return wrapResult("aart_remote_approve", result);
 }

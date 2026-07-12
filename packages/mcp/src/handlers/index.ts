@@ -1,8 +1,9 @@
-// The 26-tool handler registry (21 + D1's aart_deploy, AMENDMENTS.md A56 +
-// D2b's four aart_remote_* read tools, AMENDMENTS.md, this session) — one
-// real function per MCP tool name, shared verbatim with @aart/cli's commands
-// (architecture's three-clients principle: CLI and MCP calling the same
-// thing for the same thing).
+// The 27-tool handler registry (21 + D1's aart_deploy, AMENDMENTS.md A56 +
+// D2b's four aart_remote_* read tools, AMENDMENTS.md A62 + Wave 2C's
+// aart_remote_approve, AMENDMENTS.md A65) — one real function per MCP tool
+// name, shared verbatim with @aart/cli's commands (architecture's
+// three-clients principle: CLI and MCP calling the same thing for the same
+// thing).
 import type { AartContext } from "../context.js";
 import type { HandlerResult, ToolName } from "../response.js";
 import { validateWorkflowHandler, registerWorkflowHandler } from "./authoring.js";
@@ -12,6 +13,7 @@ import { createEvalFromCorrectionHandler, runEvalHandler } from "./evals.js";
 import { getReportHandler, runWorkflowHandler, verifyHandler } from "./execution.js";
 import { approveHandler, diffWorkflowHandler, promoteWorkflowHandler, recordCorrectionHandler, requestApprovalHandler } from "./governance.js";
 import { remoteRunHandler, remoteRunsHandler, remoteStatusHandler, remoteWhyHandler } from "./remote-observability.js";
+import { remoteApproveHandler } from "./remote-governance.js";
 
 export * from "./authoring.js";
 export * from "./deployment.js";
@@ -20,6 +22,7 @@ export * from "./evals.js";
 export * from "./execution.js";
 export * from "./governance.js";
 export * from "./remote-observability.js";
+export * from "./remote-governance.js";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export type ToolHandler = (ctx: AartContext, input: any) => Promise<HandlerResult>;
@@ -52,4 +55,5 @@ export const HANDLERS: Readonly<Record<ToolName, ToolHandler>> = {
   aart_remote_why: remoteWhyHandler,
   aart_remote_runs: remoteRunsHandler,
   aart_remote_run: remoteRunHandler,
+  aart_remote_approve: remoteApproveHandler,
 };

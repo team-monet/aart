@@ -27,6 +27,11 @@ async function toolNames(trustMode: TrustMode): Promise<string[]> {
   return defs.map((d) => d.name);
 }
 
+/** Configures one throwaway remote (unreachable URL — these tests only ever check registration/gating, never make a real network call) — shared by the `aart_remote_*` read-tools describe block and Wave 2C's `aart_remote_approve` describe block below (hoisted to module scope, formerly local to the read-tools block alone, so both can use it without a divergent second copy). */
+async function writeRemote(root: string): Promise<void> {
+  await fs.writeFile(join(root, "remotes.json"), JSON.stringify({ staging: { url: "http://localhost:1", environment: "staging" } }), "utf8");
+}
+
 describe("aart_approve tool-list genuine absence (architecture §7.2's [DECISION], spec §17.5)", () => {
   it("dev mode: aart_approve IS present in the tool list", async () => {
     expect(await toolNames("dev")).toContain("aart_approve");
@@ -79,12 +84,15 @@ describe("core tools — always registered regardless of mode (architecture §32
         "aart_trigger_workflow",
         "aart_list_waiting_runs",
         "aart_resume_run",
-        // D2b "remote reads" (AMENDMENTS.md, this session) — extended,
+        // D2b "remote reads" (AMENDMENTS.md A62) — extended,
         // REMOTE_GATED_TOOLS (tools/server.ts), not core.
         "aart_remote_status",
         "aart_remote_why",
         "aart_remote_runs",
         "aart_remote_run",
+        // Wave 2C (AMENDMENTS.md A65) — extended, gated on trust mode AND
+        // REMOTE_GATED_TOOLS, not core/unconditional.
+        "aart_remote_approve",
       ].includes(n),
   );
 
@@ -177,16 +185,12 @@ describe("progressive disclosure — the 5 named extended tools gate on real dat
   });
 });
 
-// D2b "remote reads" (AMENDMENTS.md, this session) — a THIRD progressive-
-// disclosure precondition (REMOTE_GATED_TOOLS, tools/server.ts), the same
-// shape as the Environment/EvalSuite gates above but keyed on
-// ctx.remotes.list() instead of a store collection.
-describe("aart_remote_* tools — gated on >=1 configured remote existing (AMENDMENTS.md, D2b this session)", () => {
+// D2b "remote reads" (AMENDMENTS.md A62) — a THIRD progressive-disclosure
+// precondition (REMOTE_GATED_TOOLS, tools/server.ts), the same shape as the
+// Environment/EvalSuite gates above but keyed on ctx.remotes.list() instead
+// of a store collection.
+describe("aart_remote_* tools — gated on >=1 configured remote existing (AMENDMENTS.md A62)", () => {
   const REMOTE_TOOLS = ["aart_remote_status", "aart_remote_why", "aart_remote_runs", "aart_remote_run"] as const;
-
-  async function writeRemote(root: string): Promise<void> {
-    await fs.writeFile(join(root, "remotes.json"), JSON.stringify({ staging: { url: "http://localhost:1", environment: "staging" } }), "utf8");
-  }
 
   it("all four are absent with zero configured remotes", async () => {
     tc = await createTestContext();
@@ -221,6 +225,78 @@ describe("aart_remote_* tools — gated on >=1 configured remote existing (AMEND
     await expect(tc.ctx.remotes.list()).resolves.toEqual({});
     const names = (await listRegisteredTools(tc.ctx)).map((d) => d.name);
     expect(names).toContain("aart_deploy");
+  });
+});
+
+// Wave 2C (AMENDMENTS.md A65) — aart_remote_approve is the FIRST tool in
+// this codebase needing TWO independent preconditions, not one: combines
+// aart_approve's own trust-mode gate (isAartApproveRegisteredForMode) with
+// REMOTE_GATED_TOOLS' own "≥1 configured remote" precondition above — a
+// caller denied LOCAL approval in strict/production must not gain a remote
+// escape hatch around that restriction. Every assertion here goes through
+// listRegisteredTools directly, matching this file's own load-bearing DoD
+// note at the top (a mode-gated tool's absence is proven in the tool LIST,
+// not just at call time).
+describe("aart_remote_approve — TWO independent preconditions: trust mode AND >=1 configured remote (AMENDMENTS.md A65, Wave 2C)", () => {
+  it("absent with zero configured remotes, even in dev mode (where aart_approve itself IS registered)", async () => {
+    tc = await createTestContext({ trustMode: "dev" });
+    await expect(tc.ctx.remotes.list()).resolves.toEqual({});
+    const names = (await listRegisteredTools(tc.ctx)).map((d) => d.name);
+    expect(names).not.toContain("aart_remote_approve");
+  });
+
+  it("absent in strict mode even with a remote configured", async () => {
+    tc = await createTestContext({ trustMode: "strict" });
+    await writeRemote(tc.root);
+    const names = (await listRegisteredTools(tc.ctx)).map((d) => d.name);
+    expect(names).not.toContain("aart_remote_approve");
+  });
+
+  it("absent in production mode even with a remote configured", async () => {
+    tc = await createTestContext({ trustMode: "production" });
+    await writeRemote(tc.root);
+    const names = (await listRegisteredTools(tc.ctx)).map((d) => d.name);
+    expect(names).not.toContain("aart_remote_approve");
+  });
+
+  it("present only once BOTH preconditions hold: dev/governed mode AND >=1 configured remote", async () => {
+    for (const mode of ["dev", "governed"] as const) {
+      tc = await createTestContext({ trustMode: mode });
+      await writeRemote(tc.root);
+      const names = (await listRegisteredTools(tc.ctx)).map((d) => d.name);
+      expect(names, `trust mode ${mode}`).toContain("aart_remote_approve");
+      await tc.cleanup();
+    }
+  });
+
+  it("isToolRegistered agrees with listTools across the full mode x remote-configured matrix", async () => {
+    for (const mode of ["dev", "governed", "strict", "production"] as const) {
+      for (const withRemote of [false, true]) {
+        tc = await createTestContext({ trustMode: mode });
+        if (withRemote) await writeRemote(tc.root);
+        const expected = (mode === "dev" || mode === "governed") && withRemote;
+        const viaList = (await listRegisteredTools(tc.ctx)).some((d) => d.name === "aart_remote_approve");
+        const viaCheck = await isToolRegistered(tc.ctx, "aart_remote_approve");
+        expect(viaCheck, `mode=${mode}, withRemote=${withRemote}`).toBe(expected);
+        expect(viaCheck).toBe(viaList);
+        await tc.cleanup();
+      }
+    }
+  });
+
+  it("in strict mode with a remote configured, callTool also refuses aart_remote_approve (belt-and-suspenders, but listTools is the load-bearing check)", async () => {
+    tc = await createTestContext({ trustMode: "strict" });
+    await writeRemote(tc.root);
+    const server = createMcpServer(tc.ctx);
+    const result = await server.callTool("aart_remote_approve", { remote: "staging", taskId: "x", decision: "approved", reviewer: "alice" });
+    expect(result.ok).toBe(false);
+  });
+
+  it("in dev mode with zero remotes configured, callTool also refuses aart_remote_approve (belt-and-suspenders, but listTools is the load-bearing check)", async () => {
+    tc = await createTestContext({ trustMode: "dev" });
+    const server = createMcpServer(tc.ctx);
+    const result = await server.callTool("aart_remote_approve", { remote: "staging", taskId: "x", decision: "approved", reviewer: "alice" });
+    expect(result.ok).toBe(false);
   });
 });
 

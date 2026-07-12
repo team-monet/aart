@@ -10,7 +10,7 @@ import { createCliContext, type CliContext, type CreateCliContextOptions } from 
 import { initAgentCommand, initCommand, listCommand, registerCommand, runCommand, validateCommand } from "./commands/authoring.js";
 import { deployCommand, pushCommand, triggerCommand } from "./commands/deployment.js";
 import { environmentCommand } from "./commands/environment.js";
-import { approveCommand, correctionCommand, diffCommand, promoteCommand, requestApprovalCommand } from "./commands/governance.js";
+import { approveCommand, approveRemoteCommand, correctionCommand, diffCommand, promoteCommand, requestApprovalCommand } from "./commands/governance.js";
 import { evalCommand } from "./commands/evals.js";
 import { bundleCommand, flagCommand, mcpCommand, serverCommand, workerCommand } from "./commands/process.js";
 import { remoteCommand } from "./commands/remote.js";
@@ -36,6 +36,7 @@ export const USAGE = `AART CLI — usage:
   aart deploy <workflowId> --target <target> [--version <v>]
   aart trigger add <workflowId> --type <type>
   aart approve <taskId> --decision <approved|rejected|needs_changes> --reviewer <name>
+  aart approve-remote <remote> <taskId> --decision <approved|rejected|needs_changes> --reviewer <name>
   aart flag clear <runId> --by <name>
   aart flag list
   aart bundle <workflowId> [--version <v>] [--out <dir>] [--environment <name>]
@@ -219,6 +220,8 @@ export async function run(argv: readonly string[], options: RunOptions = {}): Pr
         return asOutcome(await environmentCommand(tokens, cli));
       case "approve":
         return asOutcome(await approveCommand(tokens, cli));
+      case "approve-remote":
+        return asOutcome(await approveRemoteCommand(tokens, cli));
       case "flag":
         return asOutcome(await flagCommand(tokens, cli));
       case "bundle":

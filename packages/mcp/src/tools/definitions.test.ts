@@ -4,7 +4,7 @@ import { getToolDefinition, TOOL_DEFINITIONS } from "./definitions.js";
 
 describe("TOOL_DEFINITIONS", () => {
   it("has exactly one definition per tool name, no more no less", () => {
-    expect(TOOL_DEFINITIONS).toHaveLength(26); // 21 + D1's aart_deploy (AMENDMENTS.md A56) + D2b's four aart_remote_* read tools (AMENDMENTS.md, this session)
+    expect(TOOL_DEFINITIONS).toHaveLength(27); // 21 + D1's aart_deploy (AMENDMENTS.md A56) + D2b's four aart_remote_* read tools (AMENDMENTS.md A62) + Wave 2C's aart_remote_approve (AMENDMENTS.md A65)
     expect([...TOOL_DEFINITIONS.map((d) => d.name)].sort()).toEqual([...TOOL_NAMES].sort());
   });
 
