@@ -51,6 +51,7 @@ import {
   type RecordCorrectionInput as EvidenceRecordCorrectionInput,
 } from "@aart/evidence";
 import { systemClock } from "./clock.js";
+import { HttpError } from "./http/router.js";
 import { generateId } from "./ids.js";
 import type {
   ApprovalTask,
@@ -160,7 +161,7 @@ export interface ApiClient {
 
 async function getJson<T>(url: string): Promise<T> {
   const res = await fetch(url);
-  if (!res.ok) throw new Error(`GET ${url} -> ${res.status}`);
+  if (!res.ok) throw new HttpError(res.status, `GET ${url} -> ${res.status}`);
   return (await res.json()) as T;
 }
 
@@ -173,7 +174,12 @@ async function postJson<T>(url: string, body: unknown, extraHeaders?: Record<str
 
 async function postJsonOrThrow<T>(url: string, body: unknown, extraHeaders?: Record<string, string>): Promise<T> {
   const { status, body: parsed } = await postJson<T & { error?: string }>(url, body, extraHeaders);
-  if (status < 200 || status >= 300) throw new Error(`POST ${url} -> ${status}${parsed?.error ? `: ${parsed.error}` : ""}`);
+  // AMENDMENTS.md A58 — HttpError, not a bare Error: carries `status`
+  // through so a caller (this package's own Router.handle, http/router.ts)
+  // can preserve the REAL upstream status (a 401 from a token-gated real
+  // aart server, most notably — see promoteWorkflow below) on /api/* routes
+  // instead of every non-2xx response collapsing into a generic HTML 500.
+  if (status < 200 || status >= 300) throw new HttpError(status, `POST ${url} -> ${status}${parsed?.error ? `: ${parsed.error}` : ""}`);
   return parsed;
 }
 
@@ -215,7 +221,7 @@ export function createHttpApiClient(baseUrl: string, deployToken?: string): ApiC
     async getRun(id) {
       const res = await fetch(`${base}/runs/${encodeURIComponent(id)}`);
       if (res.status === 404) return undefined;
-      if (!res.ok) throw new Error(`GET /runs/${id} -> ${res.status}`);
+      if (!res.ok) throw new HttpError(res.status, `GET /runs/${id} -> ${res.status}`);
       const { run } = (await res.json()) as { run: RunRecord };
       return run;
     },
@@ -235,7 +241,7 @@ export function createHttpApiClient(baseUrl: string, deployToken?: string): ApiC
       const qs = version ? `?version=${encodeURIComponent(version)}` : "";
       const res = await fetch(`${base}/workflows/${encodeURIComponent(id)}${qs}`);
       if (res.status === 404) return undefined;
-      if (!res.ok) throw new Error(`GET /workflows/${id} -> ${res.status}`);
+      if (!res.ok) throw new HttpError(res.status, `GET /workflows/${id} -> ${res.status}`);
       return (await res.json()) as WorkflowDetail;
     },
     async listEnvironments() {
@@ -311,7 +317,7 @@ export function createHttpApiClient(baseUrl: string, deployToken?: string): ApiC
     async updateCorrectionRunOutput(key) {
       const res = await fetch(`${base}/corrections/${encodeURIComponent(key)}/update-run-output`, { method: "POST" });
       if (res.status === 404) return undefined;
-      if (!res.ok) throw new Error(`POST /corrections/${key}/update-run-output -> ${res.status}`);
+      if (!res.ok) throw new HttpError(res.status, `POST /corrections/${key}/update-run-output -> ${res.status}`);
       const { run } = (await res.json()) as { run: RunRecord };
       return run;
     },
@@ -322,14 +328,14 @@ export function createHttpApiClient(baseUrl: string, deployToken?: string): ApiC
         body: JSON.stringify({ suiteId }),
       });
       if (res.status === 404) return undefined;
-      if (!res.ok) throw new Error(`POST /corrections/${key}/create-eval-example -> ${res.status}`);
+      if (!res.ok) throw new HttpError(res.status, `POST /corrections/${key}/create-eval-example -> ${res.status}`);
       const { example } = (await res.json()) as { example: EvalExample };
       return example;
     },
     async createIssueForCorrection(key) {
       const res = await fetch(`${base}/corrections/${encodeURIComponent(key)}/create-issue`, { method: "POST" });
       if (res.status === 404) return undefined;
-      if (!res.ok) throw new Error(`POST /corrections/${key}/create-issue -> ${res.status}`);
+      if (!res.ok) throw new HttpError(res.status, `POST /corrections/${key}/create-issue -> ${res.status}`);
       return (await res.json()) as ImprovementBrief;
     },
     async listEvals() {
@@ -344,7 +350,7 @@ export function createHttpApiClient(baseUrl: string, deployToken?: string): ApiC
     },
     async clearRunFlag(runId, clearedBy) {
       const { status, body } = await postJson<ClearRunFlagResult>(`${base}/runs/${encodeURIComponent(runId)}/flag/clear`, { clearedBy });
-      if (status !== 200 && status !== 404 && status !== 409) throw new Error(`POST /runs/${runId}/flag/clear -> ${status}`);
+      if (status !== 200 && status !== 404 && status !== 409) throw new HttpError(status, `POST /runs/${runId}/flag/clear -> ${status}`);
       return body;
     },
   };
