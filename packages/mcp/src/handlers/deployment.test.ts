@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { TestContext } from "../test-utils.js";
 import { approvalWaitWorkflowYaml, createTestContext, sampleWorkflowYaml } from "../test-utils.js";
 import { registerWorkflowHandler } from "./authoring.js";
-import { deployToRemoteHandler, deployWorkflowHandler, listWaitingRunsHandler, resumeRunHandler, triggerWorkflowHandler } from "./deployment.js";
+import { cleartextTokenWarning, deployToRemoteHandler, deployWorkflowHandler, listWaitingRunsHandler, resumeRunHandler, triggerWorkflowHandler } from "./deployment.js";
 import { runWorkflowHandler } from "./execution.js";
 
 let tc: TestContext;
@@ -200,6 +200,44 @@ steps:
   });
 });
 
+// D1 fix pass (AMENDMENTS.md A57) — direct, backend/network-independent
+// coverage of both branches. deployToRemoteHandler's OWN success-path
+// wiring is exercised separately below via startFakeRemoteServer, which
+// always binds to "localhost" — the exempt branch — so this function's
+// OTHER branch (a genuinely non-localhost http:// URL) can only be proven
+// here, calling the pure function directly, without needing a real
+// non-loopback network endpoint (which would be slow/flaky/environment-
+// dependent to stand up in a unit test).
+describe("cleartextTokenWarning (AMENDMENTS.md A57 fix pass)", () => {
+  it("warns for a plain http:// URL that is NOT localhost/loopback", () => {
+    const warning = cleartextTokenWarning("http://deploy.example.com:8080");
+    expect(warning).toBeDefined();
+    expect(warning).toMatch(/cleartext|unencrypted/i);
+    expect(warning).toContain("http://deploy.example.com:8080");
+  });
+
+  it("no warning for https://, even non-localhost", () => {
+    expect(cleartextTokenWarning("https://deploy.example.com")).toBeUndefined();
+  });
+
+  it("no warning for http://localhost (any port)", () => {
+    expect(cleartextTokenWarning("http://localhost:9999")).toBeUndefined();
+  });
+
+  it("no warning for http://127.0.0.1 (any port)", () => {
+    expect(cleartextTokenWarning("http://127.0.0.1:9999")).toBeUndefined();
+  });
+
+  it("no warning for the http://[::1] IPv6 loopback literal", () => {
+    expect(cleartextTokenWarning("http://[::1]:9999")).toBeUndefined();
+  });
+
+  it("an unparseable URL returns undefined rather than throwing — not this function's problem to diagnose", () => {
+    expect(() => cleartextTokenWarning("not a url at all")).not.toThrow();
+    expect(cleartextTokenWarning("not a url at all")).toBeUndefined();
+  });
+});
+
 // D1 "remotes + push" (AMENDMENTS.md A56) — the ONE shared handler both
 // `aart push` (CLI) and MCP `aart_deploy` route through directly.
 describe("deployToRemoteHandler (aart_deploy / aart push)", () => {
@@ -218,6 +256,7 @@ describe("deployToRemoteHandler (aart_deploy / aart push)", () => {
 
     const result = await deployToRemoteHandler(tc.ctx, { remote: "staging", workflowId: "wf-push-1", workflowVersion: "0.1.0" });
     expect(result.ok).toBe(true);
+    expect(result.warning).toBeUndefined(); // D1 fix pass (A57): startFakeRemoteServer's URL is always localhost -- exempt from cleartextTokenWarning, proving the wiring doesn't spuriously fire for the common local/test case
     expect(remote.lastRequest()?.path).toBe("/bundles/ingest");
     const sentFiles = (remote.lastRequest()?.body as { files: Record<string, string> }).files;
     const manifest = JSON.parse(sentFiles["manifest.json"]!) as { targetEnvironment?: string };

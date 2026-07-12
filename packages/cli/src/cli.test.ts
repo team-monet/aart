@@ -445,6 +445,33 @@ describe("aart remote add / list / remove", () => {
     const outcome = await run(["remote", "add", "production", "https://prod.example.com"], { cliContext: tc.cli });
     expect(outcome.ok).toBe(false);
   });
+
+  // D1 fix pass (AMENDMENTS.md A57) — a plain http:// remote (anything
+  // but localhost/loopback) sends the deploy token cleartext; `aart remote
+  // add` never touches the network (it only writes remotes.json), making
+  // this the cheapest place to catch it, before any real push. Tested here
+  // (not through deployToRemoteHandler's own network path) because it
+  // needs zero network I/O to exercise both branches reliably.
+  it("warns about cleartext token exposure when the URL is http:// and not localhost/loopback", async () => {
+    tc = await createTestCli();
+    const outcome = await run(["remote", "add", "insecure", "http://deploy.example.com", "--environment", "prod"], { cliContext: tc.cli });
+    expect(outcome.ok).toBe(true);
+    const result = outcome.result as { warning?: string };
+    expect(result.warning).toMatch(/cleartext|unencrypted/i);
+    expect(result.warning).toContain("http://deploy.example.com");
+  });
+
+  it("no warning for https://, and no warning for http://localhost or http://127.0.0.1", async () => {
+    tc = await createTestCli();
+    const httpsOutcome = await run(["remote", "add", "secure", "https://deploy.example.com", "--environment", "prod"], { cliContext: tc.cli });
+    expect((httpsOutcome.result as { warning?: string }).warning).toBeUndefined();
+
+    const localhostOutcome = await run(["remote", "add", "local1", "http://localhost:9999", "--environment", "dev"], { cliContext: tc.cli });
+    expect((localhostOutcome.result as { warning?: string }).warning).toBeUndefined();
+
+    const loopbackOutcome = await run(["remote", "add", "local2", "http://127.0.0.1:9999", "--environment", "dev"], { cliContext: tc.cli });
+    expect((loopbackOutcome.result as { warning?: string }).warning).toBeUndefined();
+  });
 });
 
 describe("aart push", () => {

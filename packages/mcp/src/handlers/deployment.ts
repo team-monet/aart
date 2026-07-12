@@ -182,11 +182,52 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+/**
+ * D1 fix pass (AMENDMENTS.md A57) — `deployToRemoteHandler` below sends the
+ * resolved deploy token as a plain `Authorization: Bearer <token>` header
+ * (this file's own module doc comment); over `http://` — anything OTHER
+ * than localhost/loopback, the legitimate local-dev/TEST-DRIVE case — that
+ * token, and every bundle byte, crosses the network UNENCRYPTED. Returns a
+ * warning string, never a refusal: an operator running a private-network
+ * or VPN-only http deployment is a real, legitimate topology (this
+ * codebase's own `DEPLOY.md` "Ops limits" section already puts the onus
+ * for that exposure decision on the operator, not on this function to
+ * unilaterally forbid). `undefined` for `https://` or an unparseable URL
+ * (a malformed remote URL is a different problem, not this function's to
+ * diagnose — `fetch` itself will fail loudly downstream).
+ *
+ * Exported and shared by BOTH `aart remote add` (CLI-only,
+ * `commands/remote.ts` — checked at registration time, before any network
+ * call) and this handler's own push path below (checked against the SAME
+ * `remoteEntry.url` a real push/plan request is about to use, covering
+ * both `aart push` and `aart_deploy` in one place, three-clients
+ * precedent) — one implementation, so the two surfaces can never
+ * independently drift on what counts as "safe."
+ */
+export function cleartextTokenWarning(url: string): string | undefined {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return undefined;
+  }
+  if (parsed.protocol !== "http:") return undefined;
+  if (parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1" || parsed.hostname === "[::1]") return undefined;
+  return `Warning: "${url}" is plain http:// — the deploy token and every bundle byte will cross the network UNENCRYPTED. Prefer https:// for anything beyond localhost or a private network you trust.`;
+}
+
 export async function deployToRemoteHandler(ctx: AartContext, input: DeployToRemoteInput): Promise<HandlerResult> {
   const remoteEntry = await ctx.remotes.get(input.remote);
   if (!remoteEntry) {
     return { ok: false, error: `Remote "${input.remote}" not found. Add it first — "aart remote add ${input.remote} <url> --environment <envName>", then "aart remote list" to confirm.` };
   }
+  // D1 fix pass (AMENDMENTS.md A57) — surfaced on the SUCCESS return only
+  // (below); a failed push/plan already carries its own distinct, more
+  // actionable error (network failure, remote refusal, ...) that this
+  // warning would only clutter, and the success path is the common,
+  // actively-watched outcome an operator iterating on `aart push` sees
+  // most often.
+  const cleartextWarning = cleartextTokenWarning(remoteEntry.url);
 
   let bundle: Awaited<ReturnType<typeof ctx.bundler.produceBundle>>;
   try {
@@ -226,13 +267,14 @@ export async function deployToRemoteHandler(ctx: AartContext, input: DeployToRem
   }
 
   // D1 fix pass (AMENDMENTS.md A57) — responseBody spread FIRST, our own
-  // ok/remote/plan set AFTER: an untrusted remote's response body (e.g. a
-  // compromised or malicious remote replying `{"ok":false,"remote":"evil"}`)
-  // must never be able to override this handler's OWN canonical verdict —
-  // spreading it last (the pre-fix order) let it silently win in an object
-  // literal, since a later key always overrides an earlier one. This
-  // function already reached this line only after checking `response.ok`
-  // (the real HTTP status) above; `ok: true` here is genuinely earned, not
-  // a value the remote gets any say over.
-  return { ...(isRecord(responseBody) ? responseBody : {}), ok: true, remote: input.remote, plan: input.plan === true };
+  // ok/remote/plan (and cleartextWarning's own `warning`, when present) set
+  // AFTER: an untrusted remote's response body (e.g. a compromised or
+  // malicious remote replying `{"ok":false,"remote":"evil"}`) must never be
+  // able to override this handler's OWN canonical verdict — spreading it
+  // last (the pre-fix order) let it silently win in an object literal,
+  // since a later key always overrides an earlier one. This function
+  // already reached this line only after checking `response.ok` (the real
+  // HTTP status) above; `ok: true` here is genuinely earned, not a value
+  // the remote gets any say over.
+  return { ...(isRecord(responseBody) ? responseBody : {}), ok: true, remote: input.remote, plan: input.plan === true, ...(cleartextWarning ? { warning: cleartextWarning } : {}) };
 }

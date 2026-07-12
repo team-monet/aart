@@ -10,7 +10,7 @@ import { readRemotes, writeRemotes, type RemoteEntry } from "../remote-config.js
 import type { Tokenized } from "../args.js";
 import { flagString, requireFlagString, requirePositional } from "../args.js";
 import type { CliContext } from "../cli-context.js";
-import type { HandlerResult } from "@aart/mcp";
+import { cleartextTokenWarning, type HandlerResult } from "@aart/mcp";
 
 export async function remoteAddCommand(tokens: Tokenized, cli: CliContext): Promise<HandlerResult> {
   const name = requirePositional(tokens.positionals, 0, "name");
@@ -22,7 +22,18 @@ export async function remoteAddCommand(tokens: Tokenized, cli: CliContext): Prom
   const entry: RemoteEntry = { url, environment, ...(tokenRef ? { tokenRef } : {}) };
   remotes[name] = entry;
   await writeRemotes(cli.root, remotes);
-  return { ok: true, remote: { name, ...entry } };
+  // D1 fix pass (AMENDMENTS.md A57) — no network call happens here (this
+  // command only writes remotes.json), so this is the cheapest possible
+  // place to catch a plain http:// remote before a real push ever sends
+  // the token cleartext. This CLI command has no stdout-printing
+  // convention of its own (bin.ts just JSON.stringifies whatever
+  // HandlerResult a command returns) — a `warning` field is how this
+  // codebase's CLI layer surfaces a non-fatal notice, matching the "return
+  // structured data, never console.*" discipline every other command in
+  // this package already follows (verified: zero console.* calls anywhere
+  // under packages/cli/src).
+  const warning = cleartextTokenWarning(url);
+  return { ok: true, remote: { name, ...entry }, ...(warning ? { warning } : {}) };
 }
 
 export async function remoteListCommand(cli: CliContext): Promise<HandlerResult> {
