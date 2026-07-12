@@ -62,7 +62,29 @@ describe("aart_approve tool-list genuine absence (architecture §7.2's [DECISION
 });
 
 describe("core tools — always registered regardless of mode (architecture §32.2d: 9 of the 10 core tools are unconditional)", () => {
-  const CORE_MINUS_APPROVE = TOOL_NAMES.filter((n) => n !== "aart_approve" && !["aart_list_blocks", "aart_get_schema", "aart_propose_workflow", "aart_diff_workflow", "aart_create_eval_from_correction", "aart_run_eval", "aart_promote_workflow", "aart_deploy_workflow", "aart_trigger_workflow", "aart_list_waiting_runs", "aart_resume_run"].includes(n));
+  const CORE_MINUS_APPROVE = TOOL_NAMES.filter(
+    (n) =>
+      n !== "aart_approve" &&
+      ![
+        "aart_list_blocks",
+        "aart_get_schema",
+        "aart_propose_workflow",
+        "aart_diff_workflow",
+        "aart_create_eval_from_correction",
+        "aart_run_eval",
+        "aart_promote_workflow",
+        "aart_deploy_workflow",
+        "aart_trigger_workflow",
+        "aart_list_waiting_runs",
+        "aart_resume_run",
+        // D2b "remote reads" (AMENDMENTS.md, this session) — extended,
+        // REMOTE_GATED_TOOLS (tools/server.ts), not core.
+        "aart_remote_status",
+        "aart_remote_why",
+        "aart_remote_runs",
+        "aart_remote_run",
+      ].includes(n),
+  );
 
   it("all 9 non-gated core tools are present in every trust mode", async () => {
     for (const mode of ["dev", "governed", "strict", "production"] as const) {
