@@ -2,6 +2,7 @@ import { RouterProvider, useRouter, parseRoute, Link } from "./router";
 import { RunsPage } from "./pages/RunsPage";
 import { RunDetailPage } from "./pages/RunDetailPage";
 import { WorkflowsPage } from "./pages/WorkflowsPage";
+import { ActivityFeedPage } from "./pages/ActivityFeedPage";
 import { WaitingRunsPage } from "./pages/WaitingRunsPage";
 import { FlaggedRunsPage } from "./pages/FlaggedRunsPage";
 import { ApprovalsPage } from "./pages/ApprovalsPage";
@@ -16,6 +17,7 @@ import {
   CheckSquare,
   FileEdit,
   Activity,
+  Rss,
   Server,
   Terminal,
   ShieldCheck
@@ -26,6 +28,12 @@ function Sidebar() {
   const activeRoute = parseRoute(path).name;
 
   const links = [
+    // V2 Wave 2A (AMENDMENTS.md A64) — placed first: the activity feed is
+    // the cross-entity "what's happening right now" view (every lifecycle
+    // event, live), the visible payoff of the VISIBILITY SYMMETRY vision
+    // this slice ships. Rss (not Activity — that icon is already this
+    // sidebar's own Evaluation Suites entry, below).
+    { name: "activity", label: "Activity Feed", path: "/activity", icon: Rss },
     { name: "runs", label: "Workflow Runs", path: "/runs", icon: Play },
     { name: "workflows", label: "Workflows Spec", path: "/workflows", icon: GitBranch },
     { name: "waiting-runs", label: "Waiting Runs", path: "/waiting-runs", icon: Clock },
@@ -87,6 +95,8 @@ function MainContent() {
 
   const renderPage = () => {
     switch (route.name) {
+      case "activity":
+        return <ActivityFeedPage />;
       case "runs":
       case "runs-trigger":
         return <RunsPage />;
