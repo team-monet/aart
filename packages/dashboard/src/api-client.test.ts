@@ -342,6 +342,122 @@ describe("createHttpApiClient against a REAL @aart/server instance (AMENDMENTS.m
 
     await expect(client.promoteWorkflow("wf-http-gated-2", "1.0.0", "env-http-gated-2")).rejects.toThrow(/401/);
   });
+
+  // D2a security hardening (AMENDMENTS.md A59) — the SAME three "round trip
+  // over real HTTP" tests above (lines 244-311), reused verbatim in shape,
+  // but against a TOKEN-GATED server with a client carrying the SAME
+  // token — proving every one of these newly-gated write methods (not just
+  // promoteWorkflow, A57's own original scope) actually attaches and needs
+  // the header now, the same way the two promote-specific tests immediately
+  // above already proved for promote alone.
+  describe("every newly-gated write method (D2a, AMENDMENTS.md A59)", () => {
+    it("triggerRun / approveOrDeprecateWorkflow / promoteWorkflow / block-unblock-mark-clear flags / triggerImprovementProposal all succeed against a TOKEN-GATED server when the client carries the token", async () => {
+      const store = await startRealServer("uniform-gate-token-1");
+      await store.workflows.put(makeWorkflow({ id: "wf-http-gated-uniform", version: "1.0.0", gates: { validate: "passed", readiness: "pending", evals: "pending", riskReview: "pending", humanReview: "passed" }, approval: "approved" }));
+      await store.environments.put({ id: "env-http-gated-uniform", name: "staging", config: { trustMode: "dev" } });
+      const client = createHttpApiClient(baseUrl, "uniform-gate-token-1");
+
+      const run = await client.triggerRun({ workflowId: "wf-http-gated-uniform", workflowVersion: "1.0.0", inputs: {} });
+      expect(run.workflowId).toBe("wf-http-gated-uniform");
+
+      const approved = await client.approveOrDeprecateWorkflow("wf-http-gated-uniform", "1.0.0", "approve", "governed");
+      expect(approved.approval).toBe("approved");
+
+      const promoted = await client.promoteWorkflow("wf-http-gated-uniform", "1.0.0", "env-http-gated-uniform");
+      expect(promoted.kind).toBe("promoted");
+
+      await client.blockPromotion("wf-http-gated-uniform", "1.0.0");
+      expect((await store.workflows.get("wf-http-gated-uniform", "1.0.0"))?.promotionBlocked).toBe(true);
+      await client.unblockPromotion("wf-http-gated-uniform", "1.0.0");
+      expect((await store.workflows.get("wf-http-gated-uniform", "1.0.0"))?.promotionBlocked).toBe(false);
+      await client.markNeedsReview("wf-http-gated-uniform", "1.0.0");
+      expect((await store.workflows.get("wf-http-gated-uniform", "1.0.0"))?.needsReview).toBe(true);
+      await client.clearNeedsReview("wf-http-gated-uniform", "1.0.0");
+      expect((await store.workflows.get("wf-http-gated-uniform", "1.0.0"))?.needsReview).toBe(false);
+
+      const brief = await client.triggerImprovementProposal("wf-http-gated-uniform", "1.0.0");
+      expect(brief.workflowId).toBe("wf-http-gated-uniform");
+    });
+
+    it("decideApproval succeeds against a TOKEN-GATED server when the client carries the token", async () => {
+      const store = await startRealServer("uniform-gate-token-2");
+      await store.workflows.put(makeWorkflow({ id: "wf-gates-gated", version: "1.0.0", gates: { validate: "passed", readiness: "passed", evals: "passed", riskReview: "pending", humanReview: "pending" } }));
+      await store.approvals.put({ id: "task-h-gated", runId: "workflow-version:wf-gates-gated@1.0.0", stepId: "__gate:humanReview__", title: "t", description: "d", status: "pending", createdAt: "2026-07-10T00:00:00.000Z" });
+      const client = createHttpApiClient(baseUrl, "uniform-gate-token-2");
+
+      const result = await client.decideApproval("task-h-gated", { status: "approved", reviewer: "alice", trustMode: "governed" });
+      expect(result.kind).toBe("workflow_version");
+    });
+
+    it("recordCorrection / updateCorrectionRunOutput / createEvalSuite / runEvalSuite / createEvalExampleFromCorrection / createIssueForCorrection / clearRunFlag all succeed against a TOKEN-GATED server when the client carries the token (includes the 3 raw-fetch methods, not just the postJson* ones)", async () => {
+      const store = await startRealServer("uniform-gate-token-3");
+      await store.runs.put(
+        makeRun({
+          runId: "run-http-gated",
+          workflowId: "wf-http-corr-gated",
+          workflowVersion: "1.0.0",
+          status: "failed",
+          flag: { kind: "poison", flaggedAt: "2026-07-09T00:00:00.000Z" },
+          trace: [{ seq: 0, stepId: "step1", block: "http.get", status: "completed", inputs: {}, outputs: { total: 1 }, startedAt: "t" }],
+        }),
+      );
+      await store.workflows.put(makeWorkflow({ id: "wf-http-eval-gated", version: "1.0.0" }));
+      const client = createHttpApiClient(baseUrl, "uniform-gate-token-3");
+
+      const correction = await client.recordCorrection({ runId: "run-http-gated", stepId: "step1", fieldPath: "outputs.total", observed: 1, corrected: 42, reason: "off by one", reviewer: "alice" });
+      expect(correction.runId).toBe("run-http-gated");
+      const key = "run-http-gated:step1:outputs.total";
+      const updatedRun = await client.updateCorrectionRunOutput(key);
+      expect(updatedRun?.trace[0]?.outputs).toEqual({ total: 42 });
+
+      const suite = await client.createEvalSuite({ name: "HTTP Suite Gated", scorer: { id: "s1", kind: "exact_match" } });
+      const evalResult = await client.runEvalSuite(suite.id, "wf-http-eval-gated", "1.0.0");
+      expect(evalResult.evalRun.suiteId).toBe(suite.id);
+
+      const example = await client.createEvalExampleFromCorrection(key, suite.id);
+      expect(example?.suiteId).toBe(suite.id);
+
+      const issueBrief = await client.createIssueForCorrection(key);
+      expect(issueBrief?.workflowId).toBe("wf-http-corr-gated");
+
+      const clearResult = await client.clearRunFlag("run-http-gated", "ops");
+      expect(clearResult.kind).toBe("cleared");
+    });
+
+    // The negative side — compact and data-driven rather than one describe
+    // block per method, mirroring server.test.ts's own table-driven
+    // uniform-gate suite. Every call below uses a nonexistent/placeholder
+    // id — auth runs BEFORE the server ever looks at params/body (Part 1's
+    // own ordering fix), so a 401 fires regardless of whether the target
+    // actually exists.
+    it("WITHOUT a deployToken, every one of the 15 newly-gated write methods fails 401 against a token-gated real server — proves the gap D2a closes, not just promoteWorkflow", async () => {
+      await startRealServer("uniform-gate-token-4");
+      const client = createHttpApiClient(baseUrl); // no deployToken given to the dashboard client
+
+      const calls: Array<[string, () => Promise<unknown>]> = [
+        ["triggerRun", () => client.triggerRun({ workflowId: "no-such-workflow", inputs: {} })],
+        ["decideApproval", () => client.decideApproval("no-such-task", { status: "approved", reviewer: "alice" })],
+        ["approveOrDeprecateWorkflow", () => client.approveOrDeprecateWorkflow("no-such-workflow", "1.0.0", "approve", "governed")],
+        ["blockPromotion", () => client.blockPromotion("no-such-workflow", "1.0.0")],
+        ["unblockPromotion", () => client.unblockPromotion("no-such-workflow", "1.0.0")],
+        ["markNeedsReview", () => client.markNeedsReview("no-such-workflow", "1.0.0")],
+        ["clearNeedsReview", () => client.clearNeedsReview("no-such-workflow", "1.0.0")],
+        ["triggerImprovementProposal", () => client.triggerImprovementProposal("no-such-workflow", "1.0.0")],
+        ["recordCorrection", () => client.recordCorrection({ runId: "r", stepId: "s", fieldPath: "f", observed: 1, corrected: 2, reason: "r", reviewer: "alice" })],
+        ["updateCorrectionRunOutput", () => client.updateCorrectionRunOutput("no:such:key")],
+        ["createEvalExampleFromCorrection", () => client.createEvalExampleFromCorrection("no:such:key", "suite-1")],
+        ["createIssueForCorrection", () => client.createIssueForCorrection("no:such:key")],
+        ["createEvalSuite", () => client.createEvalSuite({ name: "n", scorer: { id: "s1", kind: "exact_match" } })],
+        ["runEvalSuite", () => client.runEvalSuite("no-such-suite", "no-such-workflow", "1.0.0")],
+        ["clearRunFlag", () => client.clearRunFlag("no-such-run", "ops")],
+      ];
+      expect(calls).toHaveLength(15);
+
+      for (const [name, call] of calls) {
+        await expect(call(), `${name} should reject with a 401 when the client has no deployToken against a token-gated server`).rejects.toThrow(/401/);
+      }
+    });
+  });
 });
 
 describe("createHttpApiClient (real fetch, against S2's documented route shapes)", () => {
