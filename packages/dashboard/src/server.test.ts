@@ -11,8 +11,9 @@
 // (createFakeApiClient reading the same store, standing in for a live S2
 // process this worktree doesn't have).
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { createFakeEngine, startServer as startRealServer, type ServerHandle } from "@aart/server";
+import { createFakeEngine, startServer as startRealServer, DEFAULT_EVENTS_LIMIT, type ServerHandle } from "@aart/server";
 import { createFakeApiClient, createHttpApiClient } from "./api-client.js";
+import type { ApiClient } from "./api-client.js";
 import { createFakeClock } from "./clock.js";
 import { startDashboard, type DashboardHandle } from "./server.js";
 import { createTestFixture, makeCorrection, makeEnvironment, makeEvent, makeRun, makeWorkflow, type TestFixture } from "./test-support/fixtures.js";
@@ -941,6 +942,113 @@ describe("GET /api/events + GET /api/events/stream — against a REAL @aart/serv
     // connection itself never destabilize the rest of the process.
     const health = await fetch(`${dashboardBaseUrl}/api/health`);
     expect(health.status).toBe(200);
+  });
+
+  // Wave 2 fix pass (AMENDMENTS.md A67 FIX 1, cold-auditor finding): a
+  // single-page tick only ever reads the NEWEST DEFAULT_EVENTS_LIMIT (100)
+  // events since cursor (EventLogStore.list's own contract — newest-first,
+  // LIMIT applied after the ORDER BY), then unconditionally advanced the
+  // cursor to the newest of THAT batch — so a burst of more than 100 new
+  // events landing inside one poll window permanently excluded everything
+  // strictly between "newest" and "the 100th newest": every later tick's
+  // own `occurredAt >= cursor` filter skips right over them, forever. This
+  // test seeds a burst larger than DEFAULT_EVENTS_LIMIT and asserts EVERY
+  // one of them is eventually delivered on the stream, none dropped — it
+  // fails against the pre-fix single-page tick (verified directly before
+  // landing the fix; see the developer's own return for the exact
+  // command/output).
+  it("delivers ALL events from a burst larger than DEFAULT_EVENTS_LIMIT — none silently dropped", async () => {
+    const { store, cleanup } = await createTestFixture();
+    cleanupStore = cleanup;
+    const clock = createFakeClock();
+    const engine = createFakeEngine(store, { ...clock, setTimeout: () => ({ cancel() {} }) });
+    serverHandle = await startRealServer({ store, engine, clock: { ...clock, setTimeout: () => ({ cancel() {} }) }, port: 0, runTicker: false });
+
+    // The WHOLE burst is fully persisted BEFORE the stream ever opens —
+    // deliberately, not seeded-after-open the way the existing "evt-live"
+    // test does. Seeding one-at-a-time (or even via Promise.all) AFTER
+    // opening the stream lets the 30ms poll interval interleave with the
+    // still-in-progress seeding and drain it incrementally, a few events
+    // per tick — which never actually exercises the single-page-tick bug
+    // this test exists to catch (confirmed directly: an earlier draft of
+    // this test seeding after-open passed even against the PRE-FIX
+    // single-page tick, for exactly this reason — the "burst" was never
+    // actually landing inside one poll window). Timestamped strictly in
+    // the future relative to real "now" (well past the stream's own
+    // connection-open cursor, `clock.nowIso()` a few lines below) so the
+    // ENTIRE pre-seeded burst is still "new" the moment the stream opens
+    // and its first tick fires — guaranteeing one tick really does see all
+    // of it at once, the actual scenario the task describes ("if >100
+    // events land in one poll window").
+    const BURST_SIZE = DEFAULT_EVENTS_LIMIT + 50;
+    const future = Date.now() + 60_000;
+    const seededIds = Array.from({ length: BURST_SIZE }, (_, i) => `evt-burst-${i}`);
+    await Promise.all(seededIds.map((id, i) => store.events.append(makeEvent({ id, occurredAt: new Date(future + i).toISOString(), summary: `burst ${i}` }))));
+
+    dashboardHandle = await startDashboard({ api: createHttpApiClient(`http://127.0.0.1:${serverHandle.port}`), port: 0, eventsStreamPollIntervalMs: 30 });
+    stream = openSseStream(dashboardHandle.port, "/api/events/stream");
+    await waitFor(() => stream!.text().includes(":ok"));
+
+    await waitFor(
+      () => {
+        const text = stream!.text();
+        return seededIds.every((id) => text.includes(`"id":"${id}"`));
+      },
+      { timeoutMs: 5000 },
+    );
+
+    // Precise proof, not just "eventually true": every seeded id was
+    // delivered EXACTLY once — the pre-fix bug drops the middle ~50
+    // entirely; a broken re-derivation could instead duplicate some.
+    const text = stream!.text();
+    for (const id of seededIds) {
+      expect(text.split(`"id":"${id}"`).length - 1).toBe(1);
+    }
+  });
+
+  // Wave 2 fix pass (AMENDMENTS.md A67 FIX 4, minor): setInterval fires on
+  // a fixed wall-clock cadence regardless of whether the PREVIOUS tick's own
+  // api.listEvents call has resolved yet — without a re-entrancy guard, a
+  // slow tick could still be in flight when the next one fires, racing the
+  // same mutable cursor/sentIdsAtCursor state (jitter, or a duplicate
+  // resend). Wraps the real HTTP-backed ApiClient with an artificial delay
+  // on listEvents (longer than the poll interval) and asserts no two calls
+  // are ever concurrently in flight, while confirming ticking still
+  // genuinely happens more than once (not just accidentally serialized).
+  it("a slow api.listEvents call never overlaps with the next tick (re-entrancy guard)", async () => {
+    const { store, cleanup } = await createTestFixture();
+    cleanupStore = cleanup;
+    const clock = createFakeClock();
+    const engine = createFakeEngine(store, { ...clock, setTimeout: () => ({ cancel() {} }) });
+    serverHandle = await startRealServer({ store, engine, clock: { ...clock, setTimeout: () => ({ cancel() {} }) }, port: 0, runTicker: false });
+    const real = createHttpApiClient(`http://127.0.0.1:${serverHandle.port}`);
+
+    let inFlight = 0;
+    let maxInFlight = 0;
+    let callCount = 0;
+    const slowApi: ApiClient = {
+      ...real,
+      async listEvents(since, limit) {
+        inFlight++;
+        maxInFlight = Math.max(maxInFlight, inFlight);
+        callCount++;
+        try {
+          await new Promise((resolve) => setTimeout(resolve, 80)); // deliberately slower than the 20ms poll interval below
+          return await real.listEvents(since, limit);
+        } finally {
+          inFlight--;
+        }
+      },
+    };
+
+    dashboardHandle = await startDashboard({ api: slowApi, port: 0, eventsStreamPollIntervalMs: 20 });
+    stream = openSseStream(dashboardHandle.port, "/api/events/stream");
+    await waitFor(() => stream!.text().includes(":ok"));
+
+    await new Promise((resolve) => setTimeout(resolve, 300)); // several poll intervals' worth of real time — plenty for multiple ticks to have started if unguarded
+
+    expect(maxInFlight).toBe(1); // never more than one tick's own api.listEvents in flight at once
+    expect(callCount).toBeGreaterThan(1); // and ticking genuinely happened more than once — not just accidentally serialized by a fluke
   });
 
   // Disconnect cleanup: destroying the client connection must clear the

@@ -59,12 +59,31 @@ const MIME_TYPES: Record<string, string> = {
  * SIBLING package's dist dir) for reasons unrelated to this file (pnpm's
  * non-hoisted node_modules layout — see that script's own header comment);
  * once bundled, `__dirname` here resolves to wherever the BUNDLE physically
- * lives, not this source file's original location, so every guess below
- * misses (confirmed directly: a real `docker run <image> dashboard` served
- * a 404 for `GET /` despite `packages/dashboard/dist/frontend/index.html`
- * genuinely existing in the image, exactly this failure). The Dockerfile's
+ * lives, not this source file's original location. The Dockerfile's
  * `runtime-base` stage sets this env var to the one absolute path that's
- * actually correct for that specific bundled/containerized layout. */
+ * actually correct for that image's own layout (confirmed directly: a real
+ * `docker run <image> dashboard` served a 404 for `GET /` before that env
+ * var was added, despite `packages/dashboard/dist/frontend/index.html`
+ * genuinely existing in the image).
+ *
+ * Wave 2 fix pass (AMENDMENTS.md A67 FIX 3): the FIRST guess below —
+ * `path.join(__dirname, "frontend")` — already, correctly, covers the
+ * bundled-into-the-published-CLI layout too, with no candidate-list change
+ * needed: `deploy/build-dashboard-launcher.mjs` now copies this package's
+ * built SPA (`packages/dashboard/dist/frontend`) to `packages/cli/dist/
+ * frontend` — a direct sibling of `serve-dashboard.mjs` itself — and
+ * esbuild's ESM bundling rewrites `import.meta.url` (hence `__dirname`,
+ * derived from it below) to the BUNDLE's own real runtime file location
+ * (verified empirically, not assumed, before relying on it: a small esbuild
+ * ESM bundle built from a nested source path and then RUN from a
+ * differently-nested output path still reports `import.meta.url` as its
+ * own real output path). So when `packages/cli/dist/serve-dashboard.mjs`
+ * runs (a real `npm install -g` global install, or `aart watch` spawning
+ * it), `__dirname` here is `packages/cli/dist`, and `path.join(__dirname,
+ * "frontend")` is exactly `packages/cli/dist/frontend` — the copy's own
+ * target. The remaining three guesses stay exactly as they were (dev-layout
+ * fallbacks this fix doesn't touch); Docker keeps using the env var
+ * override above unconditionally, so it never even reaches this list. */
 function getFrontendDir(): string | undefined {
   const override = process.env["AART_DASHBOARD_FRONTEND_DIR"];
   if (override) {
@@ -142,6 +161,82 @@ function redactRun(deps: DashboardDeps, run: RunRecord): RunRecord {
 }
 function redactRuns(deps: DashboardDeps, runs: readonly RunRecord[]): RunRecord[] {
   return runs.map((run) => redactRun(deps, run));
+}
+
+// Wave 2 fix pass (AMENDMENTS.md A67 FIX 1, cold-auditor finding) — a
+// defensive circuit breaker on drainNewEventsSince's own growing-limit loop
+// below, not a real production ceiling (the realistic burst sizes this fix
+// targets converge in 1-2 iterations; see that function's own doc comment).
+const MAX_DRAIN_ATTEMPTS = 6; // 100 -> 200 -> 400 -> 800 -> 1600 -> 3200: comfortably past @aart/server's own MAX_EVENTS_LIMIT (1000) hard clamp within a handful of round-trips
+
+/**
+ * FIX 1 (Wave 2 fix pass, AMENDMENTS.md A67, cold-auditor finding): a single
+ * `api.listEvents(cursor, limit)` call only ever returns the NEWEST `limit`
+ * events matching `occurredAt >= cursor` (EventLogStore.list's own
+ * contract — newest-first, LIMIT applied after the ORDER BY). If more than
+ * `limit` events land between two ticks, the events strictly BETWEEN
+ * "newest" and "the `limit`-th newest" were silently, PERMANENTLY excluded
+ * the moment the old single-page tick advanced `cursor` straight to the
+ * newest event's own timestamp — every LATER tick's `occurredAt >= cursor`
+ * filter then skips right over them, forever.
+ *
+ * Fixed by re-querying `since: cursor` (unchanged) with a GROWING limit
+ * until either (a) the returned batch is smaller than what was requested —
+ * proof nothing was truncated, or (b) growing the limit further stops
+ * returning more results. (b) is the real-world case that matters: a real
+ * HTTP-backed ApiClient's own `GET /events` hard-clamps at @aart/server's
+ * `MAX_EVENTS_LIMIT` (config.ts, 1000) regardless of what's requested, so
+ * asking for more than that can never return more than the clamp already
+ * gave; a same-process fake ApiClient has no such clamp, so (b) only ever
+ * fires against a real deployed server. `since` is never changed between
+ * attempts — re-fetching with a bigger limit re-derives the FULL correct
+ * answer each time (there is no separate "next page" to append; a bigger
+ * limit against the same `since` is always a superset of a smaller one) —
+ * so nothing needs to be stitched together across requests.
+ *
+ * KNOWN, ACCEPTED RESIDUAL LIMIT, flagged here and in AMENDMENTS.md A67 —
+ * not silently left unstated: `EventLogStore.list`'s own interface has only
+ * `since`+`limit`, no upper-bound/continuation-token parameter at all, so
+ * there is no way for this file alone to ask "the next page after the ones
+ * I already have" once MAX_EVENTS_LIMIT's hard clamp is reached. If
+ * genuinely more than 1000 events land strictly between two ticks (a
+ * sustained >600/s event rate against this stream's default 1.5s poll
+ * interval), this drain can only recover the newest 1000 of them THIS
+ * tick — the cursor still only ever advances to what was ACTUALLY sent
+ * (never skips ahead), so a sustained burst this large keeps draining
+ * across subsequent ticks rather than losing anything, but closing this
+ * completely would need a real store/HTTP pagination-shape change, a
+ * larger change than this fix pass's own scope. Below the 1000 ceiling —
+ * the actual bug this fix closes, and the actual scenario the task
+ * describes ("if >100 events land in one poll window") — drainage is fully
+ * correct: nothing is ever dropped.
+ */
+async function drainNewEventsSince(api: ApiClient, cursor: string, initialLimit: number): Promise<EventLogEntry[]> {
+  let limit = initialLimit;
+  let batch = await api.listEvents(cursor, limit);
+  for (let attempt = 1; batch.length === limit && attempt < MAX_DRAIN_ATTEMPTS; attempt++) {
+    const grownLimit = limit * 2;
+    const grown = await api.listEvents(cursor, grownLimit);
+    if (grown.length === batch.length) {
+      // Asking for more didn't return more — either truly nothing further
+      // exists since `cursor` (batch.length happened to land exactly on a
+      // limit boundary), or a real ApiClient's own GET /events hit
+      // @aart/server's hard MAX_EVENTS_LIMIT clamp. Either way, asking for
+      // still more cannot help — this IS the final answer.
+      return grown;
+    }
+    limit = grownLimit;
+    batch = grown;
+  }
+  if (batch.length === limit) {
+    // Exited because MAX_DRAIN_ATTEMPTS was reached while STILL seeing a
+    // full page every time — a genuinely extreme burst. See this
+    // function's own "KNOWN, ACCEPTED RESIDUAL LIMIT" doc above — logged,
+    // not silently swallowed; the cursor (set by the caller, from
+    // batch[0] below) still only advances to what was actually sent.
+    console.warn(`[dashboard] GET /api/events/stream: still seeing full pages after ${MAX_DRAIN_ATTEMPTS} growing attempts (limit=${limit}) while draining events since ${cursor} — delivering ${batch.length} events this tick; a sustained burst this large will keep draining across subsequent ticks.`);
+  }
+  return batch;
 }
 
 export function buildDashboardRouter(
@@ -457,6 +552,18 @@ export function buildDashboardRouter(
     // empty: nothing has been sent yet at the connection's own open time.
     let cursor: string = clock.nowIso();
     let sentIdsAtCursor = new Set<string>();
+    // FIX 4 (Wave 2 fix pass, AMENDMENTS.md A67, minor): re-entrancy guard —
+    // setInterval fires on a fixed wall-clock cadence regardless of whether
+    // the PREVIOUS tick's own awaited api.listEvents call (now potentially
+    // several sequential round-trips, via drainNewEventsSince's growing-
+    // limit loop above) has resolved yet. Without this flag, a slow tick
+    // could still be in flight when the next one fires, and two concurrent
+    // ticks racing the same `cursor`/`sentIdsAtCursor` mutable state could
+    // interleave — reading a half-updated cursor, or writing/advancing out
+    // of order (jitter, or a duplicate resend). Skipping an overlapping
+    // tick entirely (rather than queueing it) is fine: the next tick after
+    // that one will pick up from wherever `cursor` was actually left.
+    let tickRunning = false;
 
     function isNewEvent(event: EventLogEntry): boolean {
       if (event.occurredAt > cursor) return true;
@@ -465,8 +572,10 @@ export function buildDashboardRouter(
 
     async function tick(): Promise<void> {
       if (ctx.res.writableEnded) return; // client already disconnected; the close handler below already cleared the interval, but a tick can still be in flight when it fires
+      if (tickRunning) return; // a previous tick is still in flight — see the doc comment on `tickRunning` above
+      tickRunning = true;
       try {
-        const batch = await api.listEvents(cursor, DEFAULT_EVENTS_LIMIT);
+        const batch = await drainNewEventsSince(api, cursor, DEFAULT_EVENTS_LIMIT);
         // Oldest-of-the-new-batch first: each SSE frame is one sequential
         // client-side "prepend to the top of the feed" (ActivityFeedPage.tsx)
         // — writing newest-first would leave the OLDEST event of this
@@ -478,7 +587,7 @@ export function buildDashboardRouter(
           ctx.res.write(`data: ${JSON.stringify(event)}\n\n`);
         }
         if (batch.length > 0) {
-          const newest = batch[0]!.occurredAt; // api.listEvents is newest-first
+          const newest = batch[0]!.occurredAt; // drainNewEventsSince's own batch is newest-first, same contract api.listEvents always had
           cursor = newest;
           sentIdsAtCursor = new Set(batch.filter((e) => e.occurredAt === newest).map((e) => e.id));
         }
@@ -487,6 +596,8 @@ export function buildDashboardRouter(
         // dashboard process (this route's own explicit contract) — log and
         // keep the connection open; the next tick retries independently.
         console.error("[dashboard] GET /api/events/stream: failed to read events:", err);
+      } finally {
+        tickRunning = false;
       }
     }
 
@@ -494,14 +605,32 @@ export function buildDashboardRouter(
       void tick();
     }, eventsStreamPollIntervalMs);
 
+    // Idempotent shared cleanup for both ways this connection ends: a
+    // normal client disconnect (req "close", already handled before this
+    // fix pass) and a response-stream error (res "error", FIX 7 below — a
+    // silent network partition or a write against an already-broken socket
+    // otherwise surfaces as an UNHANDLED "error" event, which Node treats as
+    // fatal and would crash the whole dashboard process, not just this one
+    // connection). `closed` guards against both firing (a real disconnect
+    // can plausibly trigger both in either order) and double-clearing/
+    // double-ending as a result.
+    let closed = false;
+    function cleanup(): void {
+      if (closed) return;
+      closed = true;
+      clearInterval(interval);
+      if (!ctx.res.writableEnded) ctx.res.end();
+    }
+
     // Read-only broadcast: this stream never touches the real server's own
     // ticker (single-instance constraint respected) — it only ever polls
     // `api.listEvents`, the same read every `GET /api/events` backfill call
     // makes. Each connection owns its own interval/cursor; closing one
     // client's tab never affects any other open stream.
-    ctx.req.on("close", () => {
-      clearInterval(interval);
-      if (!ctx.res.writableEnded) ctx.res.end();
+    ctx.req.on("close", cleanup);
+    ctx.res.on("error", (err) => {
+      console.error("[dashboard] GET /api/events/stream: response stream error:", err);
+      cleanup();
     });
   });
 
@@ -606,7 +735,26 @@ export async function startDashboard(config: DashboardConfig): Promise<Dashboard
   return {
     server,
     port: boundPort,
-    close: () => new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve()))),
+    // Wave 2 fix pass (AMENDMENTS.md A67 FIX 2, SECONDARY): plain
+    // `server.close()` stops accepting NEW connections but waits for every
+    // EXISTING connection — including an idle keep-alive one a client is
+    // simply holding open, or one of this dashboard's own open SSE streams
+    // (GET /api/events/stream, which by design stays open indefinitely) —
+    // to close on its own before its callback fires. That made
+    // `deploy/serve-dashboard.mjs`'s stop() (which calls this same
+    // `close()`) hang on SIGTERM past `aart watch`'s own shutdown grace
+    // period, forcing a SIGKILL rather than the clean exit `aart server`/
+    // `aart worker` already both achieve. `server.closeAllConnections()`
+    // (Node 18.2+, well under this workspace's `engines.node: ">=22"`
+    // floor) force-closes every open connection immediately AFTER `close()`
+    // has already stopped accepting new ones, so the `close()` callback
+    // fires promptly instead of waiting on a keep-alive timeout or an SSE
+    // stream that, by design, never closes itself.
+    close: () =>
+      new Promise<void>((resolve, reject) => {
+        server.close((err) => (err ? reject(err) : resolve()));
+        server.closeAllConnections?.();
+      }),
   };
 }
 
