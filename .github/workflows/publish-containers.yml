@@ -1,0 +1,118 @@
+name: Publish containers
+
+# GHCR multi-arch image publish (AMENDMENTS.md A69), tag-triggered — same
+# `push: tags: ['v*']` trigger as publish.yml (npm), but a SEPARATE workflow
+# rather than a second job in that file: publish.yml's concern is npm OIDC
+# trusted publishing (`permissions: id-token: write`, no package-registry
+# permission needed at all); this workflow's concern is GHCR (`permissions:
+# packages: write`, no id-token needed at all). Splitting them keeps each
+# workflow's permission grant minimal and lets either publish path be
+# re-run/debugged from the Actions tab independently of the other — a
+# failed container push never blocks or gets tangled with the npm publish
+# job's own run, and vice versa. Both still fire from the exact same tag
+# push, so `git tag vX.Y.Z && git push --tags` remains the one ship action
+# ("ship it by tagging it").
+#
+# Auth: the built-in, ephemeral GITHUB_TOKEN — NOT an external secret. GHCR
+# accepts it directly for a package published from the same repository this
+# workflow runs in (docker/login-action below), scoped to write by this
+# job's own `permissions: packages: write` (nothing broader).
+#
+# ONE-TIME MANUAL SETUP REQUIRED, on GitHub, AFTER this workflow's first
+# successful run: the first push to a new GHCR package creates it PRIVATE
+# by default, regardless of the parent repo's own visibility. Anonymous
+# `docker pull ghcr.io/team-monet/aart` (DEPLOY.md's documented path) will
+# 401/404 for anyone without repo access until a repo admin flips this by
+# hand, ONCE: GitHub -> the team-monet org (or whichever account owns the
+# package) -> Packages -> aart -> Package settings -> Change visibility ->
+# Public. This workflow cannot do that step itself — it's a one-time
+# package-level setting, not a per-run action a workflow can set via the
+# GITHUB_TOKEN it's granted here.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: team-monet/aart
+
+jobs:
+  publish-containers:
+    runs-on: ubuntu-latest
+    # Multi-arch (linux/amd64,linux/arm64) under QEMU emulation for the
+    # non-native leg, building the full monorepo (pnpm install + tsc -b +
+    # esbuild bundle, inside Docker, per architecture) from scratch — this
+    # is meaningfully slower than a single-arch CI build. AMENDMENTS.md A49
+    # already found isolated-vm compiling from source (a real g++ build)
+    # rather than using its own bundled prebuild on at least one
+    # architecture natively; budget generously for a beta release's first
+    # real run rather than tune this tightly against a single sample.
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-qemu-action@v3
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Derives image tags from the triggering git tag — v0.10.0 (this
+      # workflow's own trigger) -> "0.10.0" (leading "v" stripped, matching
+      # package.json's own "version" convention, which carries no "v"
+      # prefix) — plus an unconditional floating "latest" (flavor:
+      # latest=false below disables metadata-action's OWN conditional
+      # auto-latest heuristic, which would otherwise decide independently
+      # whether to add it; this repo's own convention — every tagged
+      # release becomes the new `latest`, deterministically, matching
+      # publish.yml's own `npm publish --tag latest`). type=semver (not
+      # type=raw + manual string slicing) also validates the pushed tag is
+      # actually well-formed semver rather than trusting the ref blindly.
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          flavor: |
+            latest=false
+          tags: |
+            type=semver,pattern={{version}}
+            type=raw,value=latest
+
+      # `runtime` only — the lean, DEFAULT target both this Dockerfile
+      # (header comment: "no --target needed for the common case") and
+      # docker-compose.yml's three services (server/worker/dashboard)
+      # actually run. `runtime-browser` (+ Playwright's Chromium, ~3GB vs
+      # ~1.2GB, AMENDMENTS.md A49) is deliberately NOT published here:
+      # multi-arch-under-QEMU already pushes this job's runtime up
+      # meaningfully, and publishing a 3x-larger image by default would
+      # cost every puller (registry storage + pull time) for a capability
+      # most deployments don't use — the Dockerfile's own local-build
+      # guidance already treats runtime-browser as an explicit --target
+      # opt-in, never the accidental default; this workflow mirrors that
+      # same established default rather than inventing a new one. To extend
+      # this later (optional, not done here — a deliberate call, not an
+      # oversight): add a second `docker/build-push-action` step with
+      # `target: runtime-browser` and its own tag suffix (e.g.
+      # `${{ steps.meta.outputs.version }}-browser` alongside a
+      # `-browser`-suffixed `latest`), same `platforms:` list.
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: runtime
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: true
+          sbom: true
