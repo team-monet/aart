@@ -129,6 +129,7 @@ corepack prepare pnpm@10.33.2 --activate
 pnpm install --frozen-lockfile
 pnpm run build
 pnpm --filter @team-monet/aart run build:publish
+pnpm run build:dashboard-launcher      # produces the dashboard leg `aart watch` needs (below) — packages/cli/dist/serve-dashboard.mjs + dist/frontend (AMENDMENTS.md A67 FIX 3)
 cd packages/cli
 pnpm pack                              # writes team-monet-aart-0.1.0.tgz (filename tracks the version — glob *.tgz if it's moved on)
 npm install -g ./team-monet-aart-0.1.0.tgz
@@ -481,6 +482,7 @@ git pull
 pnpm install --frozen-lockfile
 pnpm run build
 pnpm --filter @team-monet/aart run build:publish
+pnpm run build:dashboard-launcher                # dashboard leg for `aart watch` — see part (b)'s own note (AMENDMENTS.md A67 FIX 3)
 cd packages/cli
 pnpm pack
 npm install -g ./team-monet-aart-<version>.tgz   # replaces the previous global install in place
@@ -517,21 +519,34 @@ Stated plainly, matching this repo's own convention (`TEST-DRIVE.md`'s
   dispatches — the authoring machine if you're running locally, the server
   if a deployed workflow uses one. Neither this document nor `TEST-DRIVE.md`
   has verified one end to end — no key was available in either session.
-- **There is no `aart dashboard` on the authoring machine.** `@aart/dashboard`
-  is a private, workspace-only package, never bundled into the published
-  CLI — it isn't part of what part (b) installs, on purpose. The dashboard
-  is a SERVER-side surface: it runs against `aart server`'s HTTP API (see
-  `DEPLOY.md`'s "Two deployment paths" table and `TEST-DRIVE.md` part (e)),
-  not against your local authoring store. If you want to browse what you've
-  authored, `aart server --port 8080` locally and hit its `/workflows`/
-  `/runs` JSON endpoints, or read `aart_get_report` through your coding
-  agent — **`aart_get_report` covers LOCAL runs only** (it reads your own
-  `.aart` store, nothing else — corrected here, this was previously
-  unqualified and read as if it covered everything you'd authored). A run
-  that happened on a REMOTE server (`aart push`/`aart_deploy`, or a
-  bare-process deploy, part (e)) is invisible to it — for that, D2b's
-  `aart_remote_runs`/`aart_remote_run` (part (e)'s new "Debugging a deployed
-  workflow" subsection) are what actually reach it.
+- **`aart watch` now gives you a real, visual dashboard on the authoring
+  machine itself — corrected here (AMENDMENTS.md A67 FIX 3); this bullet
+  previously said there was no dashboard option here at all.** There is
+  still no bare `aart dashboard` subcommand — `@aart/dashboard` stays a
+  private, workspace-only package, never published on its own — but `aart
+  watch` (AMENDMENTS.md A64) boots a real `aart server` against YOUR OWN
+  local authoring root plus a dashboard pointed at it, together, as one
+  command, and opens it in a browser:
+  ```bash
+  cd ~/aart-workflows                # your authoring workspace, part (b)/(d)
+  aart watch --store sqlite
+  ```
+  This works from the exact same global install part (b) already sets up —
+  `AART_DASHBOARD_FRONTEND_DIR` is auto-set by `aart watch` itself (still
+  overridable via that env var if you ever need to point it somewhere
+  else), no extra step beyond part (b)'s own install recipe (which now
+  includes `pnpm run build:dashboard-launcher`, needed for `aart watch`'s
+  dashboard leg — see that section). It's a genuinely local, single-machine
+  view over exactly what you've registered/run/approved in THIS workspace's
+  own `.aart` store — not a server-only, remote-workflow surface.
+  Alternatively, `aart server --port 8080` locally and hit its
+  `/workflows`/`/runs` JSON endpoints directly, or read `aart_get_report`
+  through your coding agent — **`aart_get_report` covers LOCAL runs only**
+  (it reads your own `.aart` store, nothing else). Neither `aart watch`'s
+  dashboard nor `aart_get_report` reaches a run that happened on a REMOTE
+  server (`aart push`/`aart_deploy`, or a bare-process deploy, part (e)) —
+  for that, D2b's `aart_remote_runs`/`aart_remote_run` (part (e)'s "Debugging
+  a deployed workflow" subsection) are what actually reach it.
 - **A bundle carrying `--environment <name>` needs that environment
   pre-registered on the destination, or hydration refuses** (part (e), D1
   "remotes + push," AMENDMENTS.md A56 — fixed this session; previously a
