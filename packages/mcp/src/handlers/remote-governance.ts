@@ -76,14 +76,16 @@ interface RemoteDecisionResponseBody {
   approval?: ApprovalState;
   /**
    * EngineBoundary.ResumeResult (@aart/server) — left opaque here (this
-   * package need not import that type just to pass it through). Whatever
-   * RunRecord it embeds was already redacted by the REMOTE's own engine
-   * before ever being persisted there — the identical "every RunRecord is
-   * redacted at write time" invariant remote-observability.ts's own module
-   * doc comment already establishes for a remote-fetched RunRecord read
-   * back generally — so returning it unchanged reintroduces nothing the
-   * LOCAL approveHandler's own run_step return (governance.ts, `outcome`)
-   * doesn't already accept.
+   * package need not import that type just to pass it through). Despite the
+   * name, ResumeResult never embeds a RunRecord at all (Wave 2 fix pass,
+   * AMENDMENTS.md A67 FIX 8 — this doc comment previously, incorrectly,
+   * claimed it did): it's a small discriminated union of outcome tags plus
+   * an id or a count — `{kind:"resumed"|"duplicate", runId}`,
+   * `{kind:"no_match"}`, `{kind:"ambiguous", matches}`
+   * (packages/server/src/engine/boundary.ts) — so there is no RunRecord
+   * here for this pass-through to have redacted or leaked, regardless.
+   * Returning it unchanged reintroduces nothing the LOCAL approveHandler's
+   * own run_step return (governance.ts, `outcome`) doesn't already accept.
    */
   resume?: unknown;
 }

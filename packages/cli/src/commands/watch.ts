@@ -24,7 +24,7 @@
 // which belongs in this repo's fast/offline/deterministic CI suite. See
 // watch.test.ts's own header comment for exactly what is and isn't covered.
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import path from "node:path";
 import { DEFAULT_HEALTH_PORT, DEFAULT_HTTP_PORT } from "@aart/server";
 import type { HandlerResult } from "@aart/mcp";
@@ -39,6 +39,9 @@ const WATCH_DEFAULT_DASHBOARD_PORT = 4000;
 /** Total time `aart watch` waits for all three `/health` endpoints to come up before giving up and refusing to open a browser at all — generous headroom for a cold sqlite migration + dashboard SPA static-file setup on a slow disk, not derived from any external constraint (same "generous headroom for the common case" discipline AMENDMENTS.md A63 FIX 3 used for `DEFAULT_EVENTS_LIMIT`). */
 const WATCH_READY_TIMEOUT_MS = 30_000;
 const WATCH_READY_POLL_INTERVAL_MS = 250;
+
+/** Wave 2 fix pass (AMENDMENTS.md A67 FIX 5, real-binary-tester finding): bounds EACH individual readiness-poll fetch attempt. Node's `fetch` has no default request timeout of its own — without this, a health endpoint that accepts the TCP connection but never actually responds (a "wedged but alive" process, as opposed to one that isn't listening at all — the ECONNREFUSED case `pollUntilReady`'s own catch already handles fine) would hang that ONE request forever, past `WATCH_READY_TIMEOUT_MS`'s own 30s deadline, since the deadline check only ever runs BETWEEN awaited fetch attempts, never interrupts one already in flight. */
+const WATCH_READY_REQUEST_TIMEOUT_MS = 3_000;
 
 /** How long `aart watch` waits after forwarding SIGTERM to a child before escalating to SIGKILL. `aart server`/`aart worker` drain in-flight work on SIGTERM (process.ts's own `waitForShutdownSignal` + `handle.close()`/`handle.stop()` sequence; DEPLOY.md: "drains in-flight steps to their next checkpoint before exiting") — long enough for a checkpoint, not for an entire in-flight step to finish running. */
 const WATCH_SHUTDOWN_GRACE_MS = 10_000;
@@ -79,32 +82,78 @@ export function resolveWatchConfig(tokens: Tokenized, cli: Pick<CliContext, "roo
 export interface WatchPaths {
   cliDistDir: string;
   serveDashboardScript: string;
-  dashboardDistDir: string;
+  /**
+   * Wave 2 fix pass (AMENDMENTS.md A67 FIX 3) — renamed from this field's
+   * former `dashboardDistDir` (which pointed at `packages/dashboard/dist`,
+   * a monorepo-checkout-only location two directories up from the CLI's own
+   * dist dir, with `checkWatchPreconditions` appending `"frontend"` itself).
+   * Now points DIRECTLY at the frontend directory itself, always a SIBLING
+   * of `serveDashboardScript` — `<cliDistDir>/frontend` — matching the
+   * bundled/installed layout `deploy/build-dashboard-launcher.mjs` now
+   * produces (it copies `packages/dashboard/dist/frontend` to
+   * `packages/cli/dist/frontend`, right beside the launcher it already
+   * built there) rather than the old monorepo-sibling assumption, which
+   * has no equivalent in a real `npm install -g` global install at all (no
+   * `packages/dashboard` ships in the published tarball, on purpose — see
+   * DEPLOY.md).
+   */
+  frontendDir: string;
 }
 
 /**
  * Resolves the two build artifacts `aart watch` needs, relative to the
  * CLI's OWN currently-running entry point (`cliEntryPath` — the real call
- * site passes `process.argv[1]`, e.g. `packages/cli/dist/bin.js` for a real
- * `aart` invocation) rather than `process.cwd()` or this module's own
- * `import.meta.url`. Verified directly, not assumed, before writing this:
- * `deploy/build-dashboard-launcher.mjs`'s own `OUT_FILE` constant bundles
- * `serve-dashboard.mjs` to `packages/cli/dist/serve-dashboard.mjs` —
- * "directly beside packages/cli/node_modules" per that script's own header
- * comment — the EXACT SAME directory `package.json`'s `"bin": {"aart":
- * "./dist/bin.js"}` puts the real entry point in. `packages/dashboard/dist`
- * sits two levels up from there (`packages/cli/dist/../../dashboard/dist`).
- * A pure path computation, no fs access (see `checkWatchPreconditions` for
- * the actual `existsSync` calls) — unit-testable with a synthetic
- * `cliEntryPath` and no real build artifacts on disk.
+ * site passes the REALPATH-resolved `process.argv[1]`, see
+ * `resolveRealCliEntryPath` below, not the raw value) rather than
+ * `process.cwd()` or this module's own `import.meta.url`. Verified
+ * directly, not assumed, before writing this: `deploy/build-dashboard-
+ * launcher.mjs`'s own `OUT_FILE` constant bundles `serve-dashboard.mjs` to
+ * `packages/cli/dist/serve-dashboard.mjs` — "directly beside
+ * packages/cli/node_modules" per that script's own header comment — the
+ * EXACT SAME directory `package.json`'s `"bin": {"aart": "./dist/bin.js"}`
+ * puts the real entry point in, in BOTH the monorepo layout and a real
+ * global npm install (`bin.js`/`serve-dashboard.mjs`/`frontend/` all ship
+ * as siblings inside `packages/cli/dist`, the one thing this package
+ * publishes — package.json's own "files": ["dist"]). A pure path
+ * computation, no fs access (see `checkWatchPreconditions` for the actual
+ * `existsSync` calls) — unit-testable with a synthetic `cliEntryPath` and
+ * no real build artifacts on disk.
  */
 export function resolveWatchPaths(cliEntryPath: string): WatchPaths {
   const cliDistDir = path.dirname(cliEntryPath);
   return {
     cliDistDir,
     serveDashboardScript: path.join(cliDistDir, "serve-dashboard.mjs"),
-    dashboardDistDir: path.resolve(cliDistDir, "..", "..", "dashboard", "dist"),
+    frontendDir: path.join(cliDistDir, "frontend"),
   };
+}
+
+/**
+ * Wave 2 fix pass (AMENDMENTS.md A67 FIX 3, real-binary-tester finding) —
+ * `process.argv[1]` for a globally-installed npm package is frequently a
+ * SYMLINK, not the real file: npm's bin-shim mechanism links
+ * `<prefix>/bin/aart` (or pnpm's own equivalent) to the actual installed
+ * `<prefix>/lib/node_modules/@team-monet/aart/dist/bin.js`. Deriving
+ * sibling paths (`resolveWatchPaths`, above) off the SYMLINK's own
+ * directory instead of its REAL target directory would look for
+ * `serve-dashboard.mjs`/`frontend/` next to e.g. `/usr/local/bin/aart`,
+ * which don't exist there — only next to the real installed `bin.js` do.
+ * Resolving the realpath FIRST, before any sibling-path derivation, fixes
+ * this regardless of how deep the symlink chain is (`fs.realpathSync`
+ * follows every hop). Best-effort: falls back to the original path
+ * unresolved if realpath resolution fails for any reason (e.g. a
+ * genuinely dangling reference) — the same permissive, never-crash-over-a-
+ * path-resolution-nicety tradeoff `openBrowser`'s own try/catch already
+ * makes elsewhere in this file, rather than failing `aart watch` outright
+ * over what `resolveWatchPaths`/`checkWatchPreconditions` will report as a
+ * clear, actionable missing-artifact error moments later regardless.
+ */
+export function resolveRealCliEntryPath(cliEntryPath: string): string {
+  try {
+    return realpathSync(cliEntryPath);
+  } catch {
+    return cliEntryPath;
+  }
 }
 
 export type PreconditionResult = { ok: true } | { ok: false; error: string };
@@ -117,21 +166,20 @@ export type PreconditionResult = { ok: true } | { ok: false; error: string };
  * spending several minutes running a surprise build the caller never asked
  * for.
  *
- * Checks `<dashboardDistDir>/frontend/index.html` specifically, not merely
- * `dashboardDistDir` itself — verified directly (packages/dashboard/
- * frontend/vite.config.ts's own `build.outDir: '../dist/frontend'`) that
- * the real SPA entry point lands at `packages/dashboard/dist/frontend/
- * index.html`, the exact file `@aart/dashboard`'s own `getFrontendDir()`
- * (packages/dashboard/src/server.ts) looks for first. A bare `dist`
- * directory can exist from `tsc -b` alone (that package's own two-step
- * `build` script runs `build:frontend` before `build:backend`, but a
- * partial/interrupted build, or a stale checkout, could still leave the
- * directory present with no SPA inside it) — checking the real file this
- * command actually depends on is a strictly more accurate proxy than
- * checking the parent directory's mere existence.
+ * Checks `<frontendDir>/index.html` specifically, not merely `frontendDir`
+ * itself — verified directly (packages/dashboard/frontend/vite.config.ts's
+ * own `build.outDir: '../dist/frontend'`) that the real SPA entry point
+ * lands at `index.html` inside that directory, the exact file
+ * `@aart/dashboard`'s own `getFrontendDir()` (packages/dashboard/src/
+ * server.ts) looks for first. A bare directory can exist with no SPA
+ * inside it (a partial/interrupted build, or — pre-FIX-3 — a monorepo
+ * `packages/dashboard/dist` with no matching copy ever having been made
+ * into `packages/cli/dist/frontend`) — checking the real file this command
+ * actually depends on is a strictly more accurate proxy than checking the
+ * directory's mere existence.
  */
-export function checkWatchPreconditions(paths: Pick<WatchPaths, "dashboardDistDir" | "serveDashboardScript">): PreconditionResult {
-  const frontendEntry = path.join(paths.dashboardDistDir, "frontend", "index.html");
+export function checkWatchPreconditions(paths: Pick<WatchPaths, "frontendDir" | "serveDashboardScript">): PreconditionResult {
+  const frontendEntry = path.join(paths.frontendDir, "index.html");
   const dashboardMissing = !existsSync(frontendEntry);
   const launcherMissing = !existsSync(paths.serveDashboardScript);
   if (!dashboardMissing && !launcherMissing) return { ok: true };
@@ -149,9 +197,10 @@ export function checkWatchPreconditions(paths: Pick<WatchPaths, "dashboardDistDi
   // @aart/dashboard run build:frontend`) does NOT run `build:dashboard-
   // launcher` — confirmed by reading both scripts, not assumed — so
   // `pnpm run build` alone leaves `packages/cli/dist/serve-dashboard.mjs`
-  // missing even after it succeeds. A remedy that only named `pnpm run
-  // build` would send a caller in a loop: build succeeds, `aart watch`
-  // still refuses to start, for a reason the message never mentioned.
+  // (and, as of FIX 3, `packages/cli/dist/frontend`) missing even after it
+  // succeeds. A remedy that only named `pnpm run build` would send a
+  // caller in a loop: build succeeds, `aart watch` still refuses to start,
+  // for a reason the message never mentioned.
   const remedy = launcherMissing
     ? `Build the workspace first: "pnpm run build" followed by "pnpm run build:dashboard-launcher" (DEPLOY.md's own documented sequence for running the dashboard-equivalent without Docker — the launcher is a separate build step, not produced by "pnpm run build" alone).`
     : `Build the workspace first: "pnpm run build".`;
@@ -179,6 +228,19 @@ export interface DashboardEnvInput {
   store: "fs" | "sqlite";
   root: string;
   deployToken: string | undefined;
+  /**
+   * Wave 2 fix pass (AMENDMENTS.md A67 FIX 3) — the resolved, bundled
+   * frontend directory (`WatchPaths.frontendDir`, always a sibling of
+   * `serveDashboardScript`). Set on the child as `AART_DASHBOARD_FRONTEND_DIR`
+   * below, belt-and-braces: `@aart/dashboard`'s own `getFrontendDir()`
+   * (packages/dashboard/src/server.ts) already resolves this SAME
+   * directory correctly on its own via its `__dirname`-relative guess (see
+   * that function's own doc comment), but `aart watch` already knows the
+   * exact answer from its own path resolution — telling the child directly
+   * means it never has to re-derive (or risk mis-deriving) the same path a
+   * second, independent way.
+   */
+  frontendDir: string;
   /** Defaults to `process.env` at the real call site; tests pass a small synthetic object instead of mutating the real process environment. */
   baseEnv?: NodeJS.ProcessEnv;
 }
@@ -188,10 +250,11 @@ export interface DashboardEnvInput {
  * verified by reading that file directly, not guessed, before writing this
  * (its own top-of-file `process.env.AART_*` reads): `AART_SERVER_URL`,
  * `AART_STORE`, `AART_ROOT`, `AART_DASHBOARD_PORT`, `AART_WORKER_URLS`,
- * and — only when configured — `AART_DEPLOY_TOKEN`. Spread over `baseEnv`
- * (defaulting to the real `process.env`) rather than a bare object literal
- * so the dashboard child inherits everything else a normal environment
- * carries (PATH, etc.), the same way every spawn in this file does.
+ * `AART_DASHBOARD_FRONTEND_DIR` (FIX 3, above), and — only when
+ * configured — `AART_DEPLOY_TOKEN`. Spread over `baseEnv` (defaulting to
+ * the real `process.env`) rather than a bare object literal so the
+ * dashboard child inherits everything else a normal environment carries
+ * (PATH, etc.), the same way every spawn in this file does.
  */
 export function buildDashboardEnv(input: DashboardEnvInput): NodeJS.ProcessEnv {
   return {
@@ -201,6 +264,7 @@ export function buildDashboardEnv(input: DashboardEnvInput): NodeJS.ProcessEnv {
     AART_ROOT: input.root,
     AART_DASHBOARD_PORT: String(input.dashboardPort),
     AART_WORKER_URLS: `http://127.0.0.1:${input.workerHealthPort}`,
+    AART_DASHBOARD_FRONTEND_DIR: input.frontendDir,
     ...(input.deployToken ? { AART_DEPLOY_TOKEN: input.deployToken } : {}),
   };
 }
@@ -250,6 +314,15 @@ export interface PollUntilReadyInput {
   urls: readonly string[];
   timeoutMs: number;
   intervalMs: number;
+  /**
+   * Wave 2 fix pass (AMENDMENTS.md A67 FIX 5) — bounds EACH individual
+   * fetch attempt (`AbortSignal.timeout`), independent of the overall
+   * `timeoutMs` deadline above. Defaults to `WATCH_READY_REQUEST_TIMEOUT_MS`
+   * in production; tests override with a small value so a "connected but
+   * wedged, never responds" endpoint is provable deterministically, without
+   * a real multi-second wait.
+   */
+  requestTimeoutMs?: number;
   /** Defaults to the real global `fetch` (Node 22's built-in — package.json's `engines.node: ">=22"` already requires it). Tests inject a fake so this never makes a real network call. */
   fetchImpl?: typeof fetch;
 }
@@ -268,15 +341,23 @@ function sleep(ms: number): Promise<void> {
  */
 export async function pollUntilReady(input: PollUntilReadyInput): Promise<PollResult> {
   const fetchFn = input.fetchImpl ?? fetch;
+  const requestTimeoutMs = input.requestTimeoutMs ?? WATCH_READY_REQUEST_TIMEOUT_MS;
   const deadline = Date.now() + input.timeoutMs;
   const pending = new Set(input.urls);
   for (;;) {
     for (const url of [...pending]) {
       try {
-        const res = await fetchFn(url);
+        const res = await fetchFn(url, { signal: AbortSignal.timeout(requestTimeoutMs) });
         if (res.ok) pending.delete(url);
       } catch {
-        // Connection refused / DNS not up yet — expected mid-startup.
+        // Connection refused / DNS not up yet (expected mid-startup), OR
+        // this one request's own AbortSignal.timeout fired (a connected-
+        // but-wedged endpoint that accepted the TCP connection but never
+        // actually responded — Node's fetch has no default request timeout
+        // of its own, so without this a single stuck request could hang
+        // the whole poll past its own overall `timeoutMs` deadline, see
+        // `requestTimeoutMs`'s own doc comment above). Either way: not
+        // ready yet, try again next round.
       }
     }
     if (pending.size === 0) return { ok: true };
@@ -287,9 +368,28 @@ export async function pollUntilReady(input: PollUntilReadyInput): Promise<PollRe
   }
 }
 
-/** A minimal structural subset of Node's real `ChildProcess` (kill/once/killed) — satisfied by a real spawned child at the real call site, and by a small fake in tests, so shutdown coordination never needs to spawn a real process to be unit-tested. */
+/**
+ * A minimal structural subset of Node's real `ChildProcess` — satisfied by
+ * a real spawned child at the real call site, and by a small fake in
+ * tests, so shutdown coordination never needs to spawn a real process to
+ * be unit-tested.
+ *
+ * Wave 2 fix pass (AMENDMENTS.md A67 FIX 2, real-binary-tester finding):
+ * `exitCode`/`signalCode` added, `killed` kept but demoted to advisory-only
+ * below — see `shutdownChildren`'s own doc comment for why `killed` alone
+ * is NOT safe to use for "has this child actually exited yet." Node sets
+ * these the same way a real `ChildProcess` always has: `killed` becomes
+ * `true` the moment `.kill()` successfully SENDS a signal (reflects
+ * "signal sent," not "process exited" — Node's own docs are explicit about
+ * this); `exitCode`/`signalCode` are set only once the process has
+ * ACTUALLY exited, whether from a signal, a self-triggered crash, or a
+ * clean voluntary exit — regardless of whether anything ever called
+ * `.kill()` on it at all.
+ */
 export interface ChildLike {
   readonly killed: boolean;
+  readonly exitCode: number | null;
+  readonly signalCode: NodeJS.Signals | null;
   kill(signal?: NodeJS.Signals): boolean;
   once(event: "exit", listener: (code: number | null, signal: NodeJS.Signals | null) => void): void;
 }
@@ -297,6 +397,11 @@ export interface ChildLike {
 export interface ShutdownOptions {
   graceMs: number;
   signal?: NodeJS.Signals;
+}
+
+/** True once `child` has ACTUALLY exited — by any means (a signal, a self-triggered crash, or a clean voluntary exit) — as opposed to merely having had a signal sent to it (`child.killed`, which real Node sets synchronously inside `.kill()` itself and which therefore says nothing about whether the process has actually died yet). */
+function hasExited(child: ChildLike): boolean {
+  return child.exitCode !== null || child.signalCode !== null;
 }
 
 /**
@@ -307,16 +412,56 @@ export interface ShutdownOptions {
  * (process.ts's own `waitForShutdownSignal` + `handle.close()`/
  * `handle.stop()`; DEPLOY.md: "drains in-flight steps to their next
  * checkpoint before exiting") — an immediate SIGKILL would defeat that.
+ *
+ * Wave 2 fix pass (AMENDMENTS.md A67 FIX 2, real-binary-tester + reviewer
+ * findings) — TWO bugs fixed here, same root cause: this function used to
+ * trust `child.killed` as a proxy for "has this child exited," which real
+ * Node's `killed` property never actually means (it reflects "a signal was
+ * sent," set SYNCHRONOUSLY inside `.kill()` itself, not "the process has
+ * died"). Both fixed by switching to `hasExited` (`exitCode`/`signalCode`,
+ * which Node only ever sets on a REAL exit) everywhere below:
+ *
+ * 1. **The SIGKILL escalation was dead code.** The old body called
+ *    `child.kill(signal)` and THEN, inside the SAME `graceMs` timer's
+ *    callback, checked `if (!child.killed) child.kill("SIGKILL")` — but
+ *    `child.killed` was already `true` by the time that timer could ever
+ *    fire (set synchronously the moment `.kill(signal)` above it ran), so
+ *    the SIGKILL branch could never execute, for ANY child, ever. A slow-
+ *    draining child (e.g. the dashboard, whose own `close()` used to wait
+ *    on every open connection — FIX 2's own SECONDARY fix, `server.ts`)
+ *    would silently be left running past `graceMs`, orphaned, while `aart
+ *    watch` printed "Watch stopped." (`ok: true`) as if shutdown had
+ *    genuinely completed.
+ * 2. **The pre-filter didn't skip an already-self-exited (crashed) child.**
+ *    `children.filter(c => !c.killed)` only ever skips a child SOMEONE
+ *    ALREADY CALLED `.kill()` ON — a child that exited entirely on its own
+ *    (crashed) has `killed === false` forever (nothing ever called
+ *    `.kill()` on it), so the old filter would NOT skip it: this function
+ *    would call `.kill(signal)` on an already-dead process (harmless) and
+ *    register a `once("exit")` listener that can NEVER fire (that event
+ *    already happened, before this listener was attached) — stalling this
+ *    child's own wait for the FULL `graceMs` before the timer bails it out.
  */
 export async function shutdownChildren(children: readonly ChildLike[], options: ShutdownOptions): Promise<void> {
   const signal = options.signal ?? "SIGTERM";
-  const alive = children.filter((c) => !c.killed);
+  // Bug 2's fix: skip an already-exited child (self-crashed, or otherwise)
+  // ENTIRELY — never signal it again, never register a listener for an
+  // event that already happened and can't fire again. This resolves the
+  // exit's own promise immediately (it simply isn't in `alive` for
+  // `Promise.all` to wait on at all), satisfying "resolve now without
+  // registering a listener that can't fire."
+  const alive = children.filter((c) => !hasExited(c));
   await Promise.all(
     alive.map(
       (child) =>
         new Promise<void>((resolve) => {
           const timer = setTimeout(() => {
-            if (!child.killed) child.kill("SIGKILL");
+            // Bug 1's fix: escalate based on ACTUAL exit state, never
+            // `child.killed` (see this function's own doc comment above —
+            // `killed` is already `true` by now regardless, for every
+            // child that reaches this timer, so checking it here was the
+            // dead-code bug).
+            if (!hasExited(child)) child.kill("SIGKILL");
             resolve();
           }, options.graceMs);
           child.once("exit", () => {
@@ -381,10 +526,15 @@ function print(line: string): void {
  * working the same as every other command, it just isn't the ONLY output.
  */
 export async function watchCommand(tokens: Tokenized, cli: CliContext, options: ProcessCommandOptions = {}): Promise<HandlerResult> {
-  const cliEntryPath = process.argv[1];
-  if (!cliEntryPath) {
+  const rawCliEntryPath = process.argv[1];
+  if (!rawCliEntryPath) {
     return { ok: false, error: "aart watch: could not determine the running CLI entry point (process.argv[1] is empty) — this should never happen for a real `aart` invocation." };
   }
+  // FIX 3 (AMENDMENTS.md A67) — realpath-resolve BEFORE deriving sibling
+  // paths, so a real `npm install -g`'s bin-shim symlink resolves to the
+  // actual installed package directory, not the symlink's own directory.
+  // See resolveRealCliEntryPath's own doc comment.
+  const cliEntryPath = resolveRealCliEntryPath(rawCliEntryPath);
 
   const paths = resolveWatchPaths(cliEntryPath);
   const precondition = checkWatchPreconditions(paths);
@@ -407,7 +557,7 @@ export async function watchCommand(tokens: Tokenized, cli: CliContext, options: 
   const workerChild = spawn(process.execPath, [cliEntryPath, ...buildWorkerSpawnArgs(config)], { stdio: ["ignore", "pipe", "pipe"] });
   const dashboardChild = spawn(process.execPath, [paths.serveDashboardScript], {
     stdio: ["ignore", "pipe", "pipe"],
-    env: buildDashboardEnv({ ...config, deployToken }),
+    env: buildDashboardEnv({ ...config, deployToken, frontendDir: paths.frontendDir }),
   });
 
   const labeled: Array<{ label: string; child: ChildProcess }> = [
