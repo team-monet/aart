@@ -75,6 +75,13 @@ const DESCRIPTIONS: Record<ToolName, string> = {
     "List recent runs of workflows on a remote aart server, optionally filtered by status — a compact summary per run (not full traces), so you can spot a failing remote run before pulling its full detail. Call this before aart_remote_run when you don't already know exactly which runId you're looking for.",
   aart_remote_run:
     "Fetch the full evidence report for one run on a remote aart server — the model-facing summary or markdown rendering, the same rendering aart_get_report gives for a local run. This is how you actually SEE what happened on a deployed workflow instead of guessing from local code or assuming a push succeeded — never claim a remote run worked without having read its report.",
+  // Wave 2C (AMENDMENTS.md A65) — the WRITE-against-remote half D2b (A62)
+  // explicitly deferred. Not overclaiming beyond aart_remote_run's own
+  // established non-overclaiming precedent: this sends the SAME decision
+  // aart_approve records locally to the remote's own write route, nothing
+  // more.
+  aart_remote_approve:
+    "Record a human's approval decision against a PAUSED run or a pending workflow-version gate (humanReview/riskReview) on a REMOTE aart server — the same decision aart_approve records locally, sent instead to a named remote over HTTP. NEVER call this without the user having explicitly said yes to what you showed them, exactly like aart_approve — this is not a way to unblock a remote run any more than aart_approve is a way to unblock a local one. Not available in strict/production trust modes (the same aart_approve mode gate applies here too — a caller denied local approval cannot use a remote as a workaround), and absent entirely with zero configured remotes.",
 };
 
 const inputSchemas: Record<ToolName, z.ZodType> = {
@@ -148,6 +155,9 @@ const inputSchemas: Record<ToolName, z.ZodType> = {
   // is a self-contained Zod definition, never a cross-package schema reuse.
   aart_remote_runs: z.object({ remote: z.string(), status: z.enum(["pending", "running", "waiting", "completed", "failed", "cancelled"]).optional() }),
   aart_remote_run: z.object({ remote: z.string(), runId: z.string(), format: z.enum(["model", "markdown"]).optional() }),
+  // Wave 2C (AMENDMENTS.md A65) — mirrors aart_approve's own schema exactly
+  // (taskId/decision/reviewer) PLUS the target remote name.
+  aart_remote_approve: z.object({ remote: z.string(), taskId: z.string(), decision: z.enum(["approved", "rejected", "needs_changes"]), reviewer: z.string() }),
 };
 
 export const TOOL_DEFINITIONS: readonly ToolDefinition[] = (Object.keys(DESCRIPTIONS) as ToolName[]).map((name) => ({

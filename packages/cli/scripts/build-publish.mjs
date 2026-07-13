@@ -32,6 +32,24 @@ import * as esbuild from "esbuild";
 
 const BUNDLE_ENTRY_OUTPUTS = new Set(["bin.js", "bin.js.map", "index.js", "index.js.map"]);
 
+// Wave 2 fix pass (AMENDMENTS.md A67 FIX 3): directories under dist/ that
+// are NOT tsc/esbuild per-file output and must never be swept by
+// removeDeadPerFileOutputs below — currently just "frontend"
+// (deploy/build-dashboard-launcher.mjs copies the dashboard's already-built
+// SPA there; its own .js/.js.map chunk files would otherwise look
+// indistinguishable from tsc's dead per-file compiler output to the sweep
+// below and get deleted). This script and build-dashboard-launcher.mjs are
+// two independent scripts invoked in sequence (DEPLOY.md/AUTHORING.md's own
+// documented order runs this one FIRST, matching the Dockerfile's own
+// established order — the frontend copy doesn't exist yet when this
+// script's sweep runs in that order, so this guard is currently belt-and-
+// braces, not load-bearing) — skipped by name defensively anyway, so a
+// future reordering (or a local out-of-order rebuild while iterating) can't
+// silently reintroduce exactly the class of bug this whole script exists to
+// prevent: a runtime asset present at build time, missing from what
+// actually ships.
+const NEVER_SWEEP_DIRS = new Set(["frontend"]);
+
 /**
  * `tsc -b` (run just before this script, see the "build:publish" script
  * definition) emits one .js/.js.map PER SOURCE FILE across all of dist/
@@ -43,13 +61,15 @@ const BUNDLE_ENTRY_OUTPUTS = new Set(["bin.js", "bin.js.map", "index.js", "index
  * two bundle entry outputs. Deliberately leaves every .d.ts/.d.ts.map
  * completely alone — those are still exactly what "types": "./dist/
  * index.d.ts" resolves through for a consuming project, untouched by
- * bundling (esbuild only ever touched bin.js/index.js).
+ * bundling (esbuild only ever touched bin.js/index.js). Never descends into
+ * NEVER_SWEEP_DIRS (see that constant's own doc comment).
  */
 function removeDeadPerFileOutputs(dir) {
   for (const entry of readdirSync(dir)) {
     const full = path.join(dir, entry);
     const st = statSync(full);
     if (st.isDirectory()) {
+      if (NEVER_SWEEP_DIRS.has(entry)) continue;
       removeDeadPerFileOutputs(full);
       continue;
     }

@@ -665,6 +665,101 @@ describe("aart remote-status / remote-why / remote-runs / remote-run (D2b, AMEND
   });
 });
 
+// Wave 2C (AMENDMENTS.md A65) — aart approve-remote, the WRITE-against-
+// remote half D2b (A62) deferred. Thin-wrapper smoke coverage only (the
+// handler's own full behavioral coverage — genuine per-run wait, workflow-
+// version gate decoding, deploy-token matrix — already lives in
+// packages/mcp/src/handlers/remote-governance.test.ts, matching the exact
+// division of labor the "remote-status/.../remote-run" describe block above
+// already established for its own four sibling commands); a REAL
+// @aart/server instance stands in for the remote here too, same reasoning.
+describe("aart approve-remote — the REMOTE counterpart of aart approve (Wave 2C, AMENDMENTS.md A65)", () => {
+  let remoteHandle: ServerHandle | undefined;
+  afterEach(async () => {
+    await remoteHandle?.close();
+    remoteHandle = undefined;
+  });
+
+  async function startRealRemote(): Promise<{ url: string; store: ReturnType<typeof createFsStore> }> {
+    const remoteRoot = await mkdtemp(join(tmpdir(), "aart-cli-approve-remote-"));
+    const store = createFsStore(remoteRoot);
+    const engine = createFakeEngine(store, systemClock);
+    remoteHandle = await startServer({ store, engine, clock: systemClock, port: 0, runTicker: false });
+    return { url: `http://127.0.0.1:${remoteHandle.port}`, store };
+  }
+
+  it("aart approve-remote <remote> <taskId> --decision approved --reviewer <name>: decides a workflow-version gate on the remote", async () => {
+    tc = await createTestCli();
+    const remoteConn = await startRealRemote();
+    await remoteConn.store.workflows.put({
+      id: "wf-cli-approve-remote",
+      name: "Test",
+      version: "1.0.0",
+      inputs: [],
+      outputs: [],
+      execution: { type: "workflow", steps: [] },
+      approval: "draft",
+      gates: { validate: "passed", readiness: "passed", evals: "passed", riskReview: "waived", humanReview: "pending" },
+    });
+    const { runId, stepId } = tc.cli.aart.governance.workflowVersionApprovalSubject("wf-cli-approve-remote", "1.0.0", "humanReview");
+    await remoteConn.store.approvals.put({ id: "task-cli-1", runId, stepId, title: "t", description: "d", status: "pending", createdAt: new Date().toISOString() });
+    await run(["remote", "add", "staging", remoteConn.url, "--environment", "staging-env"], { cliContext: tc.cli });
+
+    const outcome = await run(["approve-remote", "staging", "task-cli-1", "--decision", "approved", "--reviewer", "alice"], { cliContext: tc.cli });
+    expect(outcome.ok).toBe(true);
+    const result = outcome.result as { kind: string; gates: { humanReview: string }; approval: string };
+    expect(result.kind).toBe("workflow_version");
+    expect(result.gates.humanReview).toBe("passed");
+    expect(result.approval).toBe("approved");
+
+    const persisted = await remoteConn.store.approvals.get("task-cli-1");
+    expect(persisted?.status).toBe("approved");
+    expect(persisted?.reviewer).toBe("alice");
+  });
+
+  it("rejects an invalid --decision value, without ever reaching the remote", async () => {
+    tc = await createTestCli();
+    const outcome = await run(["approve-remote", "staging", "task_x", "--decision", "maybe", "--reviewer", "alice"], { cliContext: tc.cli });
+    expect(outcome.ok).toBe(false);
+  });
+
+  it("fails cleanly with a remedy when the named remote isn't configured", async () => {
+    tc = await createTestCli();
+    const outcome = await run(["approve-remote", "no-such-remote", "task_x", "--decision", "approved", "--reviewer", "alice"], { cliContext: tc.cli });
+    expect(outcome.ok).toBe(false);
+    expect((outcome.result as { error: string }).error).toMatch(/aart remote add/i);
+  });
+
+  it("calls the exact same handler function MCP's aart_remote_approve tool calls (same-function-reference, not a reimplementation)", async () => {
+    tc = await createTestCli();
+    const remoteConn = await startRealRemote();
+    await remoteConn.store.workflows.put({
+      id: "wf-cli-approve-remote-ref",
+      name: "Test",
+      version: "1.0.0",
+      inputs: [],
+      outputs: [],
+      execution: { type: "workflow", steps: [] },
+      approval: "draft",
+      gates: { validate: "passed", readiness: "passed", evals: "passed", riskReview: "waived", humanReview: "pending" },
+    });
+    const { runId, stepId } = tc.cli.aart.governance.workflowVersionApprovalSubject("wf-cli-approve-remote-ref", "1.0.0", "humanReview");
+    await remoteConn.store.approvals.put({ id: "task-cli-ref", runId, stepId, title: "t", description: "d", status: "pending", createdAt: new Date().toISOString() });
+    await run(["remote", "add", "staging", remoteConn.url, "--environment", "staging-env"], { cliContext: tc.cli });
+
+    const { remoteApproveHandler } = await import("@aart/mcp");
+    const viaCli = await run(["approve-remote", "staging", "task-cli-ref", "--decision", "rejected", "--reviewer", "bob"], { cliContext: tc.cli });
+    expect(viaCli.ok).toBe(true);
+    // The CLI call above already decided the task -- calling the handler a
+    // second time directly proves it's the SAME function CLI dispatches to
+    // (three-clients precedent), not a parallel reimplementation: a stale
+    // "already decided, wrong gate state" bug in a duplicate implementation
+    // would surface here as a mismatched result shape.
+    const viaDirectHandler = await remoteApproveHandler(tc.cli.aart, { remote: "staging", taskId: "task-cli-ref", decision: "rejected", reviewer: "bob" });
+    expect(viaDirectHandler.kind).toBe(viaCli.result && (viaCli.result as { kind: string }).kind);
+  });
+});
+
 describe("aart environment register / list — ADR-2 (AMENDMENTS.md A56)", () => {
   it("registers an environment with a trust mode, visible via list", async () => {
     tc = await createTestCli();

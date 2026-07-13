@@ -61,6 +61,7 @@ import type {
   EvalRun,
   EvalSuite,
   Environment,
+  EventLogEntry,
   ImprovementBrief,
   RejectedTrigger,
   RunRecord,
@@ -129,6 +130,22 @@ export interface ApiClient {
   listEnvironments(): Promise<Environment[]>;
   listDeployments(): Promise<Deployment[]>;
   listRejectedTriggers(): Promise<RejectedTrigger[]>;
+  /**
+   * V2 Wave 2A (activity feed + live updates, AMENDMENTS.md A66) — the
+   * `GET /events`/`GET /events/stream` source both this dashboard's own
+   * `/api/events` (backfill) and `/api/events/stream` (SSE broadcast) routes
+   * read through. Newest-first, matching `EventLogStore.list`'s own
+   * contract (`@aart/store`'s `types.ts`) — `since`/`limit` are independent,
+   * freely-combinable optional filters, passed straight through by both
+   * implementations below (no dashboard-level re-derivation of the real
+   * server's own `?limit=` default/clamp policy, `@aart/server`'s
+   * `parseEventsLimit` — that policy is the HTTP route's defense against an
+   * unauthenticated caller requesting the entire log in one shot; the local/
+   * embedded fake-client topology below is a same-process direct store read
+   * with no such exposure, so it stays a plain passthrough, same as every
+   * other `list*` method on this fake client).
+   */
+  listEvents(since?: string, limit?: number): Promise<EventLogEntry[]>;
   controlPlaneHealth(): Promise<{ status: string }>;
   workerHealth(workerUrl: string): Promise<HealthPayload>;
 
@@ -290,6 +307,24 @@ export function createHttpApiClient(baseUrl: string, deployToken?: string): ApiC
     async listRejectedTriggers() {
       const { rejected } = await getJson<{ rejected: RejectedTrigger[] }>(`${base}/rejected-triggers`);
       return rejected;
+    },
+    async listEvents(since, limit) {
+      const params = new URLSearchParams();
+      if (since) params.set("since", since);
+      if (limit !== undefined) params.set("limit", String(limit));
+      const qs = params.toString();
+      // deployAuthHeaders attached here too (V2 Wave 2A) even though `GET
+      // /events` is deliberately left OPEN/unauthenticated on the real
+      // server regardless of deployToken configuration (AMENDMENTS.md A63
+      // FIX 2 — an EventLogEntry carries only run-lifecycle metadata, never
+      // trace/inputs/outputs, the same open-always tier as `/deployments`).
+      // Sending the token anyway is harmless (an open route ignores a
+      // Bearer header it doesn't require) and keeps this client uniform
+      // with every other read it makes against a route that MIGHT be
+      // gated (listRuns/getRun/listFlaggedRunsViaApi, D2b/A63 FIX 1) — a
+      // future session that gates /events too would need no change here.
+      const { events } = await getJson<{ events: EventLogEntry[] }>(`${base}/events${qs ? `?${qs}` : ""}`, deployAuthHeaders);
+      return events;
     },
     async controlPlaneHealth() {
       return getJson<{ status: string }>(`${base}/health`);
@@ -459,6 +494,9 @@ export function createFakeApiClient(store: AartStore, options: { workerHealth?: 
     },
     async listRejectedTriggers() {
       return store.rejectedTriggers.list();
+    },
+    async listEvents(since, limit) {
+      return store.events.list({ since, limit });
     },
     async controlPlaneHealth() {
       return { status: "ok" };

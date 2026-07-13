@@ -10,11 +10,12 @@ import { createCliContext, type CliContext, type CreateCliContextOptions } from 
 import { initAgentCommand, initCommand, listCommand, registerCommand, runCommand, validateCommand } from "./commands/authoring.js";
 import { deployCommand, pushCommand, triggerCommand } from "./commands/deployment.js";
 import { environmentCommand } from "./commands/environment.js";
-import { approveCommand, correctionCommand, diffCommand, promoteCommand, requestApprovalCommand } from "./commands/governance.js";
+import { approveCommand, approveRemoteCommand, correctionCommand, diffCommand, promoteCommand, requestApprovalCommand } from "./commands/governance.js";
 import { evalCommand } from "./commands/evals.js";
 import { bundleCommand, flagCommand, mcpCommand, serverCommand, workerCommand } from "./commands/process.js";
 import { remoteCommand } from "./commands/remote.js";
 import { remoteRunCommand, remoteRunsCommand, remoteStatusCommand, remoteWhyCommand } from "./commands/remote-observability.js";
+import { watchCommand } from "./commands/watch.js";
 
 export const USAGE = `AART CLI — usage:
   aart run <workflowId> --input <json> [--version <v>]
@@ -35,12 +36,14 @@ export const USAGE = `AART CLI — usage:
   aart deploy <workflowId> --target <target> [--version <v>]
   aart trigger add <workflowId> --type <type>
   aart approve <taskId> --decision <approved|rejected|needs_changes> --reviewer <name>
+  aart approve-remote <remote> <taskId> --decision <approved|rejected|needs_changes> --reviewer <name>
   aart flag clear <runId> --by <name>
   aart flag list
   aart bundle <workflowId> [--version <v>] [--out <dir>] [--environment <name>]
   aart worker [--bundle <dir>] [--store fs|sqlite] [--root <dir>]
   aart server [--port <n>] [--host <addr>] [--bundle <dir>] [--environment <name>] [--store fs|sqlite] [--root <dir>]
   aart mcp [--store fs|sqlite] [--root <dir>]
+  aart watch [--server-port <n>] [--dashboard-port <n>] [--store fs|sqlite] [--root <dir>]
   aart remote add <name> <url> --environment <envName> [--token-ref <name>]
   aart remote list
   aart remote remove <name>
@@ -217,6 +220,8 @@ export async function run(argv: readonly string[], options: RunOptions = {}): Pr
         return asOutcome(await environmentCommand(tokens, cli));
       case "approve":
         return asOutcome(await approveCommand(tokens, cli));
+      case "approve-remote":
+        return asOutcome(await approveRemoteCommand(tokens, cli));
       case "flag":
         return asOutcome(await flagCommand(tokens, cli));
       case "bundle":
@@ -227,6 +232,14 @@ export async function run(argv: readonly string[], options: RunOptions = {}): Pr
         return asOutcome(await serverCommand(tokens, cli, { blocking: options.blocking }));
       case "mcp":
         return asOutcome(await mcpCommand(tokens, cli, { blocking: options.blocking }));
+      // Wave 2B (AMENDMENTS.md A64) — `aart watch`: boots server+worker+
+      // dashboard as supervised child processes and opens a browser. Same
+      // `{ blocking: options.blocking }` threading as server/worker/mcp
+      // immediately above (RunOptions.blocking's own doc comment: "Threaded
+      // to worker/server/mcp" — watch is a fourth long-running command in
+      // that same family).
+      case "watch":
+        return asOutcome(await watchCommand(tokens, cli, { blocking: options.blocking }));
       // AMENDMENTS.md A63 FIX 7 (optional/low-priority, tester UX) — `--help`/
       // `-h`/`help` used to fall through to `default:` below, so `aart --help`
       // printed the correct USAGE block (still embedded in the JSON `usage`

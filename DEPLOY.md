@@ -194,12 +194,15 @@ git clone <this repo> && cd aart
 pnpm install
 pnpm run build
 pnpm --filter @team-monet/aart run build:publish   # produces packages/cli/dist/bin.js, self-contained
+pnpm run build:dashboard-launcher                   # produces packages/cli/dist/serve-dashboard.mjs + dist/frontend (needed for `aart watch`'s dashboard leg — see below)
 pnpm --filter @team-monet/aart pack                 # team-monet-aart-0.1.0.tgz
 
 # On the target host (Node >=22, matching this repo's own package.json "engines"):
 npm install -g /path/to/team-monet-aart-0.1.0.tgz
 aart --help
 ```
+
+**Wave 2 fix pass (AMENDMENTS.md A67 FIX 3):** `pnpm run build:dashboard-launcher` is a NEW addition to this recipe — before this fix, the published tarball carried `serve-dashboard.mjs` (if that step even ran) with no frontend assets for it to serve at all, and `aart watch`'s own dashboard leg 404'd from a real `npm install -g`. It now also copies the dashboard's built SPA (`packages/dashboard/dist/frontend`) to `packages/cli/dist/frontend` — a sibling of `serve-dashboard.mjs` — which `packages/cli`'s own `"files": ["dist"]` picks up into the tarball the same as everything else in `dist/`. Order relative to `build:publish` doesn't matter (verified directly: `build-publish.mjs`'s own dead-file sweep skips `dist/frontend` by name) — this recipe just matches the Dockerfile's own established order.
 
 `isolated-vm` and `playwright` are real npm dependencies of the CLI
 (un-bundled, by design — see [Platform notes](#platform-notes)) — a plain
@@ -263,12 +266,37 @@ exiting — architecture §4.7; verified directly against a real signal in
 prior sessions, AMENDMENTS.md A42) — systemd's default `TERM` on stop does
 the right thing with no extra `KillSignal=` config needed.
 
-For the dashboard-equivalent without Docker, build `deploy/serve-dashboard.mjs`
-the same way the Dockerfile does (`node deploy/build-dashboard-launcher.mjs`
-after `pnpm run build`) and run the resulting `packages/cli/dist/serve-
-dashboard.mjs` with `node`, or just follow `TEST-DRIVE.md` part (e)'s
-original hand-written `dashboard-dev.mjs` pattern — both call the exact same
-`@aart/dashboard` API.
+For the dashboard-equivalent without Docker: as of AMENDMENTS.md A67 FIX 3,
+`serve-dashboard.mjs` and its frontend ship INSIDE the installed
+`@team-monet/aart` package itself (this section's own install recipe, above,
+now runs `pnpm run build:dashboard-launcher` before packing) — you do NOT
+need to keep the monorepo checkout around on the target host just to run the
+dashboard, correcting an earlier implication here that you did. Run it
+directly from wherever `npm install -g` put it:
+
+```bash
+node "$(dirname "$(readlink -f "$(command -v aart)")")/serve-dashboard.mjs"
+```
+
+(`readlink -f` resolves `aart`'s own bin-shim symlink to the real installed
+`bin.js`, the same realpath resolution `aart watch`'s own `resolveRealCliEntryPath`
+does internally — `serve-dashboard.mjs` is always a sibling of that real file.)
+Set `AART_SERVER_URL`/`AART_STORE`/`AART_ROOT`/`AART_DASHBOARD_PORT`/
+`AART_WORKER_URLS`/`AART_DEPLOY_TOKEN` as needed (`deploy/serve-dashboard.mjs`'s
+own header comment documents each one) — this is the right shape when
+`aart server`/`aart worker` are already running as their own independently-
+supervised systemd units (this section's own topology) and you just want the
+dashboard as a third, equally independent unit.
+
+**`aart watch`** (AMENDMENTS.md A64, fix-passed by A67) is the other option
+— ONE command boots server + worker + dashboard together as supervised
+child processes and opens the dashboard in a browser, also now working from
+this exact same global install (`aart watch --store sqlite`). It's the
+right shape for local/dev use (an authoring machine, see AUTHORING.md), not
+for this section's own "three independently-supervised systemd units"
+production topology — `aart watch` owns its three children as a single
+process tree, which doesn't compose with each role already being its own
+separately-managed systemd unit.
 
 ## Store choice: fs vs sqlite
 

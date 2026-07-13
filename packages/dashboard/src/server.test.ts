@@ -11,11 +11,12 @@
 // (createFakeApiClient reading the same store, standing in for a live S2
 // process this worktree doesn't have).
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { createFakeEngine, startServer as startRealServer, type ServerHandle } from "@aart/server";
+import { createFakeEngine, startServer as startRealServer, DEFAULT_EVENTS_LIMIT, MAX_EVENTS_LIMIT, type ServerHandle } from "@aart/server";
 import { createFakeApiClient, createHttpApiClient } from "./api-client.js";
+import type { ApiClient } from "./api-client.js";
 import { createFakeClock } from "./clock.js";
 import { startDashboard, type DashboardHandle } from "./server.js";
-import { createTestFixture, makeCorrection, makeEnvironment, makeRun, makeWorkflow, type TestFixture } from "./test-support/fixtures.js";
+import { createTestFixture, makeCorrection, makeEnvironment, makeEvent, makeRun, makeWorkflow, type TestFixture } from "./test-support/fixtures.js";
 import fs from "node:fs/promises";
 import { existsSync } from "node:fs";
 import http from "node:http";
@@ -252,6 +253,37 @@ describe("dashboard HTTP server — JSON REST API & SPA fallback routing", () =>
 
       const missing = await fetch(`${baseUrl}/api/runs/does-not-exist`);
       expect(missing.status).toBe(404);
+    });
+
+    // V2 Wave 2A (activity feed, AMENDMENTS.md A66) — the backfill/
+    // initial-load route ActivityFeedPage.tsx calls once on mount. A bare
+    // array (this route's own response shape, matching every sibling
+    // list route in this file — /api/environments, /api/deployments,
+    // /api/approvals, /api/corrections — none of which wrap in an
+    // envelope object either), NOT the real server's own `{ events }`
+    // shape (api-client.ts's listEvents already unwraps that).
+    it("GET /api/events lists events newest-first, honoring ?since & ?limit", async () => {
+      await fixture.store.events.append(makeEvent({ id: "evt-1", occurredAt: "2026-07-10T00:00:00.000Z", summary: "first" }));
+      await fixture.store.events.append(makeEvent({ id: "evt-2", occurredAt: "2026-07-10T00:01:00.000Z", summary: "second" }));
+      await fixture.store.events.append(makeEvent({ id: "evt-3", occurredAt: "2026-07-10T00:02:00.000Z", summary: "third" }));
+
+      const all = await fetch(`${baseUrl}/api/events`);
+      expect(all.status).toBe(200);
+      expect(((await all.json()) as Array<{ id: string }>).map((e) => e.id)).toEqual(["evt-3", "evt-2", "evt-1"]);
+
+      const limited = await fetch(`${baseUrl}/api/events?limit=1`);
+      expect(((await limited.json()) as Array<{ id: string }>).map((e) => e.id)).toEqual(["evt-3"]);
+
+      const since = await fetch(`${baseUrl}/api/events?since=${encodeURIComponent("2026-07-10T00:01:00.000Z")}`);
+      expect(((await since.json()) as Array<{ id: string }>).map((e) => e.id)).toEqual(["evt-3", "evt-2"]);
+
+      // A malformed ?limit= is ignored (falls back to "no limit" through
+      // this route's own parsing, mirroring @aart/server's own
+      // parseEventsLimit "never 400 on a stray query value" looseness for
+      // this same route family), not a 400 or a crash.
+      const malformed = await fetch(`${baseUrl}/api/events?limit=not-a-number`);
+      expect(malformed.status).toBe(200);
+      expect(((await malformed.json()) as unknown[]).length).toBe(3);
     });
 
     it("GET /api/workflows lists ids; GET /api/workflows/:id returns workflow details", async () => {
@@ -778,5 +810,354 @@ describe("dashboard HTTP server — /api/* error mapping preserves upstream stat
     const health = await fetch(`${dashboardBaseUrl}/api/health`);
     expect(health.status).toBe(200);
     expect(await health.json()).toEqual({ status: "ok" });
+  });
+});
+
+// V2 Wave 2A — activity feed + live updates (AMENDMENTS.md A66). STANDING
+// IMPERATIVE: the SSE stream and listEvents must be wired through the REAL
+// composition path — real @aart/server + real startDashboard(createHttpApiClient(...))
+// over real HTTP, the same "no hand-rolled response mocking" bar the
+// error-mapping describe block immediately above already holds itself to.
+
+/**
+ * Polls `condition()` on a short real interval until it's true, or throws
+ * once `timeoutMs` of real wall-clock time has elapsed. A local
+ * reimplementation of @aart/server's own test-helpers.ts `waitFor` (that
+ * file is not re-exported through @aart/server's public index.ts barrel —
+ * this package's own file-ownership boundary doesn't reach into another
+ * package's internals to import it), same reasoning as that file's own doc
+ * comment: a real setInterval-driven side effect (this file's own SSE poll
+ * tick) needs "keep checking until it's actually true," not a fixed sleep
+ * guessing how long is enough.
+ */
+async function waitFor(condition: () => boolean, options: { timeoutMs?: number; intervalMs?: number } = {}): Promise<void> {
+  const timeoutMs = options.timeoutMs ?? 3000;
+  const intervalMs = options.intervalMs ?? 20;
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (condition()) return;
+    if (Date.now() >= deadline) throw new Error(`waitFor: condition not met within ${timeoutMs}ms`);
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+}
+
+/**
+ * Opens a raw, long-lived GET connection and accumulates every chunk as
+ * UTF-8 text — SSE has no natural home in this file's other HTTP test
+ * helper (`rawGet`, above), which reads a single complete response and
+ * returns; a stream is read incrementally, and stays open until the caller
+ * explicitly destroys it (the client-side equivalent of a browser tab
+ * closing an EventSource).
+ */
+function openSseStream(port: number, path: string): { text: () => string; destroy: () => void } {
+  let buffer = "";
+  const req = http.request({ host: "127.0.0.1", port, path, method: "GET" }, (res) => {
+    res.on("data", (chunk: Buffer) => {
+      buffer += chunk.toString("utf8");
+    });
+  });
+  req.on("error", () => {
+    // A destroyed in-flight request legitimately errors (ECONNRESET) — this
+    // helper's own destroy() below is the only thing that ever triggers it
+    // in these tests, and every caller is already done reading by then.
+  });
+  req.end();
+  return { text: () => buffer, destroy: () => req.destroy() };
+}
+
+describe("GET /api/events + GET /api/events/stream — against a REAL @aart/server instance (V2 Wave 2A, AMENDMENTS.md A66)", () => {
+  let serverHandle: ServerHandle | undefined;
+  let dashboardHandle: DashboardHandle | undefined;
+  let cleanupStore: (() => Promise<void>) | undefined;
+  let stream: { text: () => string; destroy: () => void } | undefined;
+
+  afterEach(async () => {
+    stream?.destroy();
+    stream = undefined;
+    await dashboardHandle?.close();
+    dashboardHandle = undefined;
+    await serverHandle?.close();
+    serverHandle = undefined;
+    await cleanupStore?.();
+    cleanupStore = undefined;
+  });
+
+  it("GET /api/events backfills through the real server via the same real ApiClient.listEvents the stream itself uses", async () => {
+    const { store, cleanup } = await createTestFixture();
+    cleanupStore = cleanup;
+    const clock = createFakeClock();
+    const engine = createFakeEngine(store, { ...clock, setTimeout: () => ({ cancel() {} }) });
+    await store.events.append({ id: "evt-a", type: "run.started", occurredAt: "2026-07-10T00:00:00.000Z", summary: "run started" });
+    await store.events.append({ id: "evt-b", type: "run.completed", occurredAt: "2026-07-10T00:01:00.000Z", summary: "run completed" });
+    serverHandle = await startRealServer({ store, engine, clock: { ...clock, setTimeout: () => ({ cancel() {} }) }, port: 0, runTicker: false });
+    dashboardHandle = await startDashboard({ api: createHttpApiClient(`http://127.0.0.1:${serverHandle.port}`), port: 0 });
+
+    const res = await fetch(`http://127.0.0.1:${dashboardHandle.port}/api/events`);
+    expect(res.status).toBe(200);
+    const events = (await res.json()) as Array<{ id: string }>;
+    expect(events.map((e) => e.id)).toEqual(["evt-b", "evt-a"]);
+  });
+
+  it("GET /api/events/stream opens (writes the :ok comment) and broadcasts a newly-appended event within a couple poll intervals, through the real composition path", async () => {
+    const { store, cleanup } = await createTestFixture();
+    cleanupStore = cleanup;
+    const clock = createFakeClock();
+    const engine = createFakeEngine(store, { ...clock, setTimeout: () => ({ cancel() {} }) });
+    serverHandle = await startRealServer({ store, engine, clock: { ...clock, setTimeout: () => ({ cancel() {} }) }, port: 0, runTicker: false });
+    const serverBaseUrl = `http://127.0.0.1:${serverHandle.port}`;
+
+    // A short poll interval (config.ts's own eventsStreamPollIntervalMs,
+    // V2 Wave 2A) — the production default is 1500ms; overridden here so
+    // this test observes a live update in well under a second instead of
+    // several real seconds, without touching the route's own logic at all.
+    dashboardHandle = await startDashboard({ api: createHttpApiClient(serverBaseUrl), port: 0, eventsStreamPollIntervalMs: 30 });
+    const dashboardBaseUrl = `http://127.0.0.1:${dashboardHandle.port}`;
+
+    stream = openSseStream(dashboardHandle.port, "/api/events/stream");
+    await waitFor(() => stream!.text().includes(":ok"));
+
+    // Appended directly to the store — bypassing HTTP entirely, mirroring
+    // AMENDMENTS.md A63's own "seed a real store row directly, prove the
+    // route/adapter reacts" test-seeding convention. Deliberately timed
+    // immediately after the stream opens, no settling delay — proving the
+    // route's own cursor-anchored-at-connection-time design (server.ts's
+    // own comment on `let cursor: string = clock.nowIso()`) needs none:
+    // an earlier draft of this route derived its starting cursor from an
+    // async "seed" read instead, which raced exactly this scenario (an
+    // event appended concurrently with that read could be silently
+    // swallowed) — caught by manually reintroducing that exact shape
+    // during self-review and confirming this test failed against it before
+    // the cursor was anchored synchronously instead.
+    await store.events.append({ id: "evt-live", type: "run.completed", occurredAt: new Date().toISOString(), summary: "a run just completed, live" });
+
+    await waitFor(() => stream!.text().includes("evt-live"), { timeoutMs: 3000 });
+    const frame = stream.text();
+    expect(frame).toContain('"id":"evt-live"');
+    expect(frame).toContain('"summary":"a run just completed, live"');
+    expect(frame).toMatch(/data: \{.*"id":"evt-live".*\}\n\n/); // real SSE wire format, not just JSON floating in the body
+
+    // The dashboard stays healthy through all of this (the same acceptance
+    // bar the /api/* error-mapping describe block above already applies) —
+    // proves the stream's own poll-tick error handling and the open
+    // connection itself never destabilize the rest of the process.
+    const health = await fetch(`${dashboardBaseUrl}/api/health`);
+    expect(health.status).toBe(200);
+  });
+
+  // Wave 2 fix pass (AMENDMENTS.md A67 FIX 1, cold-auditor finding): a
+  // single-page tick only ever reads the NEWEST DEFAULT_EVENTS_LIMIT (100)
+  // events since cursor (EventLogStore.list's own contract — newest-first,
+  // LIMIT applied after the ORDER BY), then unconditionally advanced the
+  // cursor to the newest of THAT batch — so a burst of more than 100 new
+  // events landing inside one poll window permanently excluded everything
+  // strictly between "newest" and "the 100th newest": every later tick's
+  // own `occurredAt >= cursor` filter skips right over them, forever. This
+  // test seeds a burst larger than DEFAULT_EVENTS_LIMIT and asserts EVERY
+  // one of them is eventually delivered on the stream, none dropped — it
+  // fails against the pre-fix single-page tick (verified directly before
+  // landing the fix; see the developer's own return for the exact
+  // command/output).
+  it("delivers ALL events from a burst larger than DEFAULT_EVENTS_LIMIT — none silently dropped", async () => {
+    const { store, cleanup } = await createTestFixture();
+    cleanupStore = cleanup;
+    const clock = createFakeClock();
+    const engine = createFakeEngine(store, { ...clock, setTimeout: () => ({ cancel() {} }) });
+    serverHandle = await startRealServer({ store, engine, clock: { ...clock, setTimeout: () => ({ cancel() {} }) }, port: 0, runTicker: false });
+
+    // The WHOLE burst is fully persisted BEFORE the stream ever opens —
+    // deliberately, not seeded-after-open the way the existing "evt-live"
+    // test does. Seeding one-at-a-time (or even via Promise.all) AFTER
+    // opening the stream lets the 30ms poll interval interleave with the
+    // still-in-progress seeding and drain it incrementally, a few events
+    // per tick — which never actually exercises the single-page-tick bug
+    // this test exists to catch (confirmed directly: an earlier draft of
+    // this test seeding after-open passed even against the PRE-FIX
+    // single-page tick, for exactly this reason — the "burst" was never
+    // actually landing inside one poll window). Timestamped strictly in
+    // the future relative to real "now" (well past the stream's own
+    // connection-open cursor, `clock.nowIso()` a few lines below) so the
+    // ENTIRE pre-seeded burst is still "new" the moment the stream opens
+    // and its first tick fires — guaranteeing one tick really does see all
+    // of it at once, the actual scenario the task describes ("if >100
+    // events land in one poll window").
+    const BURST_SIZE = DEFAULT_EVENTS_LIMIT + 50;
+    const future = Date.now() + 60_000;
+    const seededIds = Array.from({ length: BURST_SIZE }, (_, i) => `evt-burst-${i}`);
+    await Promise.all(seededIds.map((id, i) => store.events.append(makeEvent({ id, occurredAt: new Date(future + i).toISOString(), summary: `burst ${i}` }))));
+
+    dashboardHandle = await startDashboard({ api: createHttpApiClient(`http://127.0.0.1:${serverHandle.port}`), port: 0, eventsStreamPollIntervalMs: 30 });
+    stream = openSseStream(dashboardHandle.port, "/api/events/stream");
+    await waitFor(() => stream!.text().includes(":ok"));
+
+    await waitFor(
+      () => {
+        const text = stream!.text();
+        return seededIds.every((id) => text.includes(`"id":"${id}"`));
+      },
+      { timeoutMs: 5000 },
+    );
+
+    // Precise proof, not just "eventually true": every seeded id was
+    // delivered EXACTLY once — the pre-fix bug drops the middle ~50
+    // entirely; a broken re-derivation could instead duplicate some.
+    const text = stream!.text();
+    for (const id of seededIds) {
+      expect(text.split(`"id":"${id}"`).length - 1).toBe(1);
+    }
+  });
+
+  // Wave 2 fix pass RE-REVIEW CORRECTION (AMENDMENTS.md A67 addendum): the
+  // sibling test above proves drainNewEventsSince fully recovers a burst
+  // below MAX_EVENTS_LIMIT (1000) — this test proves the honest, DOCUMENTED
+  // behavior ABOVE that ceiling, which the original FIX 1 doc comment and
+  // AMENDMENTS.md both mis-described as self-healing ("the cursor... keeps
+  // draining across subsequent ticks rather than losing anything"). It does
+  // NOT self-heal: `tick()` always advances `cursor` to the batch's own
+  // newest event, so a burst bigger than MAX_EVENTS_LIMIT permanently
+  // excludes its oldest overflow from the LIVE stream (the events remain in
+  // the store and are still reachable via GET /api/events/a refresh — see
+  // this route's own updated doc comment). This test also pins the SECOND
+  // bug the same re-review found: the safety-net `console.warn` meant to
+  // surface exactly this condition compared `batch.length` to the CALLER's
+  // own growing requested `limit`, which a real HTTP-backed drain can never
+  // match again once that requested limit exceeds the server's hard
+  // MAX_EVENTS_LIMIT clamp — so the warning was dead code for any burst
+  // large enough to actually hit the cap. Both halves verified failing
+  // against the pre-fix code before landing the fix; see the developer's
+  // own return for the exact revert/re-apply commands and output.
+  it("a burst LARGER than MAX_EVENTS_LIMIT delivers exactly MAX_EVENTS_LIMIT live (documented residual) and fires the cap-hit warning", async () => {
+    const { store, cleanup } = await createTestFixture();
+    cleanupStore = cleanup;
+    const clock = createFakeClock();
+    const engine = createFakeEngine(store, { ...clock, setTimeout: () => ({ cancel() {} }) });
+    serverHandle = await startRealServer({ store, engine, clock: { ...clock, setTimeout: () => ({ cancel() {} }) }, port: 0, runTicker: false });
+
+    // Same seed-fully-before-open discipline as the DEFAULT_EVENTS_LIMIT
+    // burst test above, and for the identical reason — scaled past
+    // MAX_EVENTS_LIMIT itself (not just DEFAULT_EVENTS_LIMIT) so the burst
+    // genuinely exceeds the SERVER's own hard cap, the only way to exercise
+    // it rather than just this route's own growing-limit re-query loop.
+    const BURST_SIZE = MAX_EVENTS_LIMIT + 50;
+    const future = Date.now() + 60_000;
+    const seededIds = Array.from({ length: BURST_SIZE }, (_, i) => `evt-cap-${i}`);
+    await Promise.all(seededIds.map((id, i) => store.events.append(makeEvent({ id, occurredAt: new Date(future + i).toISOString(), summary: `cap ${i}` }))));
+
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      dashboardHandle = await startDashboard({ api: createHttpApiClient(`http://127.0.0.1:${serverHandle.port}`), port: 0, eventsStreamPollIntervalMs: 30 });
+      stream = openSseStream(dashboardHandle.port, "/api/events/stream");
+      await waitFor(() => stream!.text().includes(":ok"));
+
+      // The whole burst drains inside ONE tick (drainNewEventsSince's own
+      // growing-limit loop runs to completion, sequentially, before tick()
+      // ever advances the cursor) — wait for that one tick's own
+      // MAX_EVENTS_LIMIT-sized delivery to land. Unlike the sibling test
+      // above, waiting for EVERY seeded id would hang until this test's own
+      // timeout: the oldest 50 are never coming.
+      await waitFor(
+        () => seededIds.filter((id) => stream!.text().includes(`"id":"${id}"`)).length >= MAX_EVENTS_LIMIT,
+        { timeoutMs: 15000 },
+      );
+      // Nothing further is ever appended and the cursor has already moved
+      // past the whole pre-seeded burst, so no later tick can add anything
+      // — a short settle window just lets any errant extra delivery show up
+      // before the final read below, rather than racing it.
+      await new Promise((resolve) => setTimeout(resolve, 200));
+
+      const text = stream!.text();
+
+      // (a) Exactly MAX_EVENTS_LIMIT delivered — not fewer (a regression to
+      // the old DEFAULT_EVENTS_LIMIT-only cap), not more (the server's own
+      // hard clamp genuinely cannot return more in one request) — and
+      // precisely the NEWEST MAX_EVENTS_LIMIT of the burst
+      // (EventLogStore.list's own newest-first contract): the oldest 50
+      // (evt-cap-0..49) are the permanently-not-pushed-live overflow this
+      // fix pass's corrected doc comment now describes honestly, and the
+      // newest 1000 (evt-cap-50..1049) all arrive.
+      for (let i = 0; i < 50; i++) {
+        expect(text).not.toContain(`"id":"evt-cap-${i}"`);
+      }
+      for (let i = 50; i < BURST_SIZE; i++) {
+        expect(text).toContain(`"id":"evt-cap-${i}"`);
+      }
+
+      // (b) The dead-warning bug, closed: the cap-hit path actually logs
+      // now, naming MAX_EVENTS_LIMIT itself, not just silently delivering.
+      expect(warnSpy).toHaveBeenCalled();
+      const warned = warnSpy.mock.calls.some(([message]) => String(message).includes("per-tick cap") && String(message).includes(String(MAX_EVENTS_LIMIT)));
+      expect(warned).toBe(true);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  }, 20000);
+
+  // Wave 2 fix pass (AMENDMENTS.md A67 FIX 4, minor): setInterval fires on
+  // a fixed wall-clock cadence regardless of whether the PREVIOUS tick's own
+  // api.listEvents call has resolved yet — without a re-entrancy guard, a
+  // slow tick could still be in flight when the next one fires, racing the
+  // same mutable cursor/sentIdsAtCursor state (jitter, or a duplicate
+  // resend). Wraps the real HTTP-backed ApiClient with an artificial delay
+  // on listEvents (longer than the poll interval) and asserts no two calls
+  // are ever concurrently in flight, while confirming ticking still
+  // genuinely happens more than once (not just accidentally serialized).
+  it("a slow api.listEvents call never overlaps with the next tick (re-entrancy guard)", async () => {
+    const { store, cleanup } = await createTestFixture();
+    cleanupStore = cleanup;
+    const clock = createFakeClock();
+    const engine = createFakeEngine(store, { ...clock, setTimeout: () => ({ cancel() {} }) });
+    serverHandle = await startRealServer({ store, engine, clock: { ...clock, setTimeout: () => ({ cancel() {} }) }, port: 0, runTicker: false });
+    const real = createHttpApiClient(`http://127.0.0.1:${serverHandle.port}`);
+
+    let inFlight = 0;
+    let maxInFlight = 0;
+    let callCount = 0;
+    const slowApi: ApiClient = {
+      ...real,
+      async listEvents(since, limit) {
+        inFlight++;
+        maxInFlight = Math.max(maxInFlight, inFlight);
+        callCount++;
+        try {
+          await new Promise((resolve) => setTimeout(resolve, 80)); // deliberately slower than the 20ms poll interval below
+          return await real.listEvents(since, limit);
+        } finally {
+          inFlight--;
+        }
+      },
+    };
+
+    dashboardHandle = await startDashboard({ api: slowApi, port: 0, eventsStreamPollIntervalMs: 20 });
+    stream = openSseStream(dashboardHandle.port, "/api/events/stream");
+    await waitFor(() => stream!.text().includes(":ok"));
+
+    await new Promise((resolve) => setTimeout(resolve, 300)); // several poll intervals' worth of real time — plenty for multiple ticks to have started if unguarded
+
+    expect(maxInFlight).toBe(1); // never more than one tick's own api.listEvents in flight at once
+    expect(callCount).toBeGreaterThan(1); // and ticking genuinely happened more than once — not just accidentally serialized by a fluke
+  });
+
+  // Disconnect cleanup: destroying the client connection must clear the
+  // server's own interval (never leak a timer per abandoned connection) and
+  // must never crash the dashboard process. No assertion can directly
+  // observe "the interval was cleared" from outside the process — the
+  // black-box proof is behavioral: the dashboard keeps serving fine,
+  // immediately and repeatedly, well past several poll intervals' worth of
+  // real time after the disconnect.
+  it("destroying the client connection stops the server-side poll with no crash — the dashboard answers fresh requests immediately after", async () => {
+    const { store, cleanup } = await createTestFixture();
+    cleanupStore = cleanup;
+    const clock = createFakeClock();
+    const engine = createFakeEngine(store, { ...clock, setTimeout: () => ({ cancel() {} }) });
+    serverHandle = await startRealServer({ store, engine, clock: { ...clock, setTimeout: () => ({ cancel() {} }) }, port: 0, runTicker: false });
+    dashboardHandle = await startDashboard({ api: createHttpApiClient(`http://127.0.0.1:${serverHandle.port}`), port: 0, eventsStreamPollIntervalMs: 30 });
+    const dashboardBaseUrl = `http://127.0.0.1:${dashboardHandle.port}`;
+
+    stream = openSseStream(dashboardHandle.port, "/api/events/stream");
+    await waitFor(() => stream!.text().includes(":ok"));
+    stream.destroy();
+
+    await new Promise((resolve) => setTimeout(resolve, 150)); // several 30ms poll intervals' worth of real time
+    const health = await fetch(`${dashboardBaseUrl}/api/health`);
+    expect(health.status).toBe(200);
   });
 });

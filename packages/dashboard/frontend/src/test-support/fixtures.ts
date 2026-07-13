@@ -5,7 +5,7 @@
 // the whole point of this package's own typing pass was making a wrong
 // field name a compile error, and an untyped test fixture would quietly
 // defeat that for every test built on top of it).
-import type { ApprovalTask, Correction, Environment, EvalSuite, RunRecord, Workflow } from "@aart/types";
+import type { ApprovalTask, Correction, Environment, EvalSuite, EventLogEntry, RunRecord, Workflow } from "@aart/types";
 
 let counter = 0;
 function uniq(prefix: string): string {
@@ -89,4 +89,18 @@ export function makeEvalSuite(overrides: Partial<EvalSuite> = {}): EvalSuite {
 
 export function makeEnvironment(overrides: Partial<Environment> = {}): Environment {
   return { id: overrides.id ?? uniq("env"), name: overrides.name ?? "staging", config: {}, ...overrides };
+}
+
+/** V2 Wave 2A (activity feed, AMENDMENTS.md A66) — mirrors the other
+ * make*() factories above, scoped to what ActivityFeedPage.tsx actually
+ * reads (id/type/occurredAt/summary + whichever correlation id a given
+ * test needs to exercise linkForEvent's runId-then-workflowId fallback). */
+export function makeEvent(overrides: Partial<EventLogEntry> = {}): EventLogEntry {
+  return {
+    id: overrides.id ?? uniq("evt"),
+    type: overrides.type ?? "run.completed",
+    occurredAt: overrides.occurredAt ?? "2026-07-10T00:00:00.000Z",
+    summary: overrides.summary ?? "Something happened",
+    ...overrides,
+  };
 }

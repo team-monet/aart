@@ -29,6 +29,10 @@ export function parseRoute(path: string): Route {
     return { name: "workflows", params: {} };
   }
 
+  if (segments[0] === "activity") {
+    return { name: "activity", params: {} };
+  }
+
   if (segments[0] === "waiting-runs") {
     return { name: "waiting-runs", params: {} };
   }
