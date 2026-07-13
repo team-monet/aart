@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import type { LogLine } from "@aart/store";
 import { tryClaimNextRun } from "./claim.js";
+import { PUBLISHED_CLI_VERSION } from "./health.js";
 import { runReclaimSweep } from "./reclaim.js";
 import { startWorker, type WorkerHandle } from "./worker.js";
 import { createFakeClock, createTestFixture, driveClockUntil, flushAsync, waitFor, type TestFixture } from "../test-helpers.js";
@@ -46,7 +47,13 @@ describe("GET /health (architecture ADR-16/§16) — the worker's own endpoint, 
     expect(body.status).toBe("ok");
     expect(body.claimedRuns).toBe(0);
     expect(typeof body.uptime).toBe("number");
-    expect(typeof body.version).toBe("string");
+    // AMENDMENTS.md A69: asserts the real, hardcoded PUBLISHED_CLI_VERSION,
+    // not merely `typeof body.version === "string"` — the old, broken
+    // resolveVersion() (a bundling-unsafe relative package.json read) ALSO
+    // satisfied a bare typeof-string check by falling through to its own
+    // hardcoded "0.0.0" fallback, which is exactly how this bug shipped
+    // undetected (AMENDMENTS.md A68 deviation 6).
+    expect(body.version).toBe(PUBLISHED_CLI_VERSION);
   });
 
   it("claimedRuns reflects live claim count, not a startup snapshot", async () => {
