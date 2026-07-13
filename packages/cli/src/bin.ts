@@ -2,7 +2,7 @@
 // The real `aart` bin entry (package.json: "bin": { "aart": "./dist/bin.js" }).
 // S0's cli stub declared this bin field but shipped no src/bin.ts — this is
 // that real entry, created as part of this session's CLI work.
-import { run, USAGE } from "./cli.js";
+import { run, USAGE, VERSION } from "./cli.js";
 
 const argv = process.argv.slice(2);
 if (argv.length === 0) {
@@ -21,6 +21,15 @@ if (argv.length === 0) {
 // here, same as the zero-arg case.
 if (argv[0] === "--help" || argv[0] === "-h" || argv[0] === "help") {
   process.stdout.write(USAGE);
+  process.exit(0);
+}
+// AMENDMENTS.md A68 (0.10.0 release prep) — `aart --version`/`-v` did not
+// exist anywhere in this CLI's surface before this release (see cli.ts's
+// own VERSION doc comment). Same short-circuit shape as --help immediately
+// above, for the same reason: a version check needs no `.aart` store and
+// should never attempt to construct one.
+if (argv[0] === "--version" || argv[0] === "-v") {
+  process.stdout.write(`${VERSION}\n`);
   process.exit(0);
 }
 
