@@ -1,6 +1,6 @@
 {
   "name": "@team-monet/aart",
-  "version": "0.1.0",
+  "version": "0.10.0",
   "description": "AART CLI — thin command surface over the AART governed workflow runtime. See aart_architecture_v1.md ADR-18: this is the one package in the monorepo published to npm; the other 13 @aart/* packages are internal, workspace-only, and marked private.",
   "type": "module",
   "bin": {

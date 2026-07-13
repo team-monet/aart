@@ -26,14 +26,14 @@ pnpm --filter @team-monet/aart run build:publish
 
 # 2. Pack it into a real tarball.
 cd packages/cli
-pnpm pack                                                # writes team-monet-aart-0.1.0.tgz
+pnpm pack                                                # writes team-monet-aart-0.10.0.tgz
 
 # 3. Install that tarball in a directory that has NO access to this repo's node_modules —
 #    the only way to genuinely prove it's installable, not just "works from source."
 mkdir -p ~/aart-test-drive
 cd ~/aart-test-drive
 npm init -y
-npm install /Users/johnlee/code/aart/packages/cli/team-monet-aart-0.1.0.tgz
+npm install /Users/johnlee/code/aart/packages/cli/team-monet-aart-0.10.0.tgz
 ```
 
 You'll see one warning during install — expected, pre-existing, harmless:

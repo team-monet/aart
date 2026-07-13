@@ -195,10 +195,10 @@ pnpm install
 pnpm run build
 pnpm --filter @team-monet/aart run build:publish   # produces packages/cli/dist/bin.js, self-contained
 pnpm run build:dashboard-launcher                   # produces packages/cli/dist/serve-dashboard.mjs + dist/frontend (needed for `aart watch`'s dashboard leg — see below)
-pnpm --filter @team-monet/aart pack                 # team-monet-aart-0.1.0.tgz
+pnpm --filter @team-monet/aart pack                 # team-monet-aart-0.10.0.tgz
 
 # On the target host (Node >=22, matching this repo's own package.json "engines"):
-npm install -g /path/to/team-monet-aart-0.1.0.tgz
+npm install -g /path/to/team-monet-aart-0.10.0.tgz
 aart --help
 ```
 
