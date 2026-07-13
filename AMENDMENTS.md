@@ -1425,3 +1425,174 @@ Manually verified end-to-end in a real browser (a running dashboard, `createFake
 **Commits (local only, none pushed), all on `v2/activity-feed` on top of `main`@`4100873`:** `bf328e6` (`ApiClient.listEvents`, both implementations + tests), `6c0b79a` (`GET /api/events` + `GET /api/events/stream` + the first cursor design + its tests + the redaction-lint suppression), `adde032` (the cursor self-review/simplification, see PART 2 above), `f693077` (`ActivityFeedPage.tsx` + router/App wiring + frontend tests).
 
 **Confirmed: only `packages/dashboard/**` touched, plus the two shared-file exceptions flagged above** (this file, and one line in `packages/governance/src/redaction-lint-suppressions.ts`) — no `packages/cli`, `packages/mcp`, `packages/server`, or `packages/store` file touched, verified directly via `git diff --stat main...HEAD`.
+
+---
+
+## 2026-07-13 — Wave 2 fix pass
+
+### A67 — Wave 2 fix pass: SSE stream burst-drop closed, `aart watch` shutdown SIGKILL dead-code closed, dashboard frontend now ships inside the published CLI (John's ratified FIX 3 choice), plus re-entrancy/readiness-timeout/feed-cap/comment minors
+
+John ratified the D2+V1 wave 2026-07-12, Wave 2 2026-07-13, and chose "ship the dashboard frontend in the CLI package" for FIX 3 below. This session addresses the findings from Wave 2's own three-perspective verification (cold auditor + briefed reviewer + real-binary e2e) against the three Wave 2 sibling sessions merged into `wave2/integration` (A64 `aart watch`, A65 remote-approve, A66 the activity feed) — worked in the pre-existing isolated worktree/branch `wave2/integration` (tip `3f718f2` at start), committed incrementally, nothing pushed.
+
+**The meta-point driving this pass, stated up front because it shaped how every fix below was verified:** the two worst bugs here (watch shutdown, dashboard-frontend-not-found) were INVISIBLE to the pre-existing 2624-test unit suite — they only manifest through real esbuild bundling, a real `npm install -g` symlink, and real OS process/signal timing. So (a) the unit tests fixed/added below model REAL Node semantics rather than a fixture's own assumptions about them, and (b) FIX 3 was additionally verified against a genuinely packed-and-globally-installed tarball, not just unit-level.
+
+#### FIX 1 — MAJOR: SSE live stream drops events under burst (cold-auditor finding), closed
+
+`packages/dashboard/src/server.ts`'s `GET /api/events/stream` tick read only the newest `DEFAULT_EVENTS_LIMIT` (100) events since `cursor` (`EventLogStore.list`'s own contract — newest-first, `LIMIT` applied after `ORDER BY occurred_at DESC`), then unconditionally advanced `cursor = batch[0].occurredAt` (the newest). A burst of more than 100 events landing inside one ~1.5s poll window silently, PERMANENTLY excluded everything strictly between "newest" and "the 100th newest" — every later tick's own `occurredAt >= cursor` filter skipped right over them, forever.
+
+Fixed with a new `drainNewEventsSince(api, cursor, initialLimit)` helper (`server.ts:214`, called from `tick()` at `server.ts:578`) that re-queries `since: cursor` (unchanged) with a GROWING limit (`server.ts:170`, `MAX_DRAIN_ATTEMPTS = 6`: 100→200→400→800→1600→3200) until either a partial page proves nothing was truncated, or growth plateaus (a real HTTP-backed `ApiClient`'s own `GET /events` hard-clamps at `@aart/server`'s `MAX_EVENTS_LIMIT`, 1000 — asking for more than that can never return more). **Known, accepted residual, not silently left unstated:** `EventLogStore.list` has only `since`+`limit`, no upper-bound/continuation-token parameter at all, so a burst of genuinely more than 1000 events landing strictly between two ticks still can't be fully recovered in ONE tick via this API shape alone — the cursor only ever advances to what was actually sent, though, so it keeps draining across subsequent ticks rather than losing anything; closing this completely needs a real store/HTTP pagination-shape change, outside this fix pass's own scope. Below the 1000 ceiling — the actual scenario the task described ("if >100 events land in one poll window") — drainage is fully correct.
+
+**Test, and the pre-fix-fail verification the task required:** `server.test.ts` — "delivers ALL events from a burst larger than DEFAULT_EVENTS_LIMIT — none silently dropped" (150 events, `DEFAULT_EVENTS_LIMIT + 50`) seeds the ENTIRE burst, with `occurredAt` timestamped in the future relative to real "now," BEFORE the stream ever opens — deliberately, not seeded-after-open the way the sibling "evt-live" test does. An earlier draft seeded after-open and passed even against the pre-fix code, for a real reason worth recording: the 30ms poll interval interleaved with the still-in-progress `for`-loop seeding and drained it incrementally, a few events per tick, never actually landing >100 in any ONE tick — the exact trap a "burst" test can fall into without noticing. Rewritten to seed everything up front; **verified directly against the pre-fix single-page tick (temporarily reverting only the `tick()` body's `drainNewEventsSince` call back to a bare `api.listEvents(cursor, DEFAULT_EVENTS_LIMIT)`, fixture unchanged): the test times out at the 5000ms suite default (the dropped middle ~50 never arrive) — confirmed FAILING pre-fix, then reverted and confirmed PASSING post-fix.**
+
+#### FIX 2 — BLOCKER: `aart watch` shutdown SIGKILL is dead code → real orphaning (real-binary-tester + reviewer findings), closed
+
+`packages/cli/src/commands/watch.ts`'s `shutdownChildren` trusted `child.killed` as a proxy for "has this child exited" — real Node's `killed` reflects "a signal was SENT" (set synchronously inside `.kill()` itself), never "the process has died." Two bugs, same root cause:
+
+1. **The SIGKILL escalation was dead code.** `child.kill(signal)` ran, and the SAME `graceMs` timer's own callback then checked `if (!child.killed) child.kill("SIGKILL")` — but `killed` was already `true` by the time that timer could ever fire, for every child, always. A slow-draining child (the dashboard — `serve-dashboard.mjs`'s `stop()` awaited `server.close()`, which doesn't resolve until every open connection, including an idle keep-alive one or one of the dashboard's own long-lived SSE streams, closes on its own) was silently left running past `graceMs`, orphaned, while `aart watch` printed `"Watch stopped."` (`ok: true`) as if shutdown had genuinely completed.
+2. **The pre-filter didn't skip an already-self-exited (crashed) child.** `children.filter(c => !c.killed)` only skips a child someone already called `.kill()` ON — a child that exited entirely on its own has `killed === false` forever, so it wasn't skipped: `shutdownChildren` would re-signal an already-dead process and register a `once("exit")` listener that can never fire (that event already happened), stalling for the FULL `graceMs`.
+
+Fixed by switching every check to a new `hasExited(child)` helper (`watch.ts:403`: `child.exitCode !== null || child.signalCode !== null`, which Node only ever sets on a REAL exit) — the exact verbatim diff:
+
+```diff
+ export interface ChildLike {
+   readonly killed: boolean;
++  readonly exitCode: number | null;
++  readonly signalCode: NodeJS.Signals | null;
+   kill(signal?: NodeJS.Signals): boolean;
+   once(event: "exit", listener: (code: number | null, signal: NodeJS.Signals | null) => void): void;
+ }
+ ...
++function hasExited(child: ChildLike): boolean {
++  return child.exitCode !== null || child.signalCode !== null;
++}
+ ...
+ export async function shutdownChildren(children: readonly ChildLike[], options: ShutdownOptions): Promise<void> {
+   const signal = options.signal ?? "SIGTERM";
+-  const alive = children.filter((c) => !c.killed);
++  const alive = children.filter((c) => !hasExited(c));
+   await Promise.all(
+     alive.map(
+       (child) =>
+         new Promise<void>((resolve) => {
+           const timer = setTimeout(() => {
+-            if (!child.killed) child.kill("SIGKILL");
++            if (!hasExited(child)) child.kill("SIGKILL");
+             resolve();
+           }, options.graceMs);
+           child.once("exit", () => {
+             clearTimeout(timer);
+             resolve();
+           });
+           child.kill(signal);
+         }),
+     ),
+   );
+ }
+```
+
+**MANDATORY fixture fix.** `watch.test.ts`'s own `createFakeChild()` set `killed = true` inside `emitExit()` — CONFLATING "exited on its own" with "killed by us," the same wrong mental model the implementation had, which is exactly why every pre-existing test in this file passed despite the bug (two wrongs agreeing with each other, hiding it from the whole suite — the identical class of failure root AMENDMENTS.md A27 already named for a different bug). Fixed to model real Node precisely: `.kill()` now sets `killed = true` synchronously (it didn't before) but never touches `exitCode`/`signalCode`; `emitExit()` now sets `exitCode`/`signalCode` (never `killed`).
+
+**Tests, and the pre-fix-fail verification the task required** (`watch.test.ts`, `describe("shutdownChildren")`): (i) "a child that already self-exited (crashed) before shutdownChildren was even called resolves promptly, without stalling for graceMs or re-signaling it" — `graceMs: 10_000`, deliberately far past vitest's own 5000ms default test timeout, so a regression to the old stall fails the test by timing out, not just by a wrong assertion; (ii) "escalates to SIGKILL after graceMs when a child ignores SIGTERM and never exits" (the direct regression pin for bug 1); (iii) "sends SIGTERM and resolves without escalating once every child reports its own exit" (the normal case) — plus the pre-existing mixed-set and custom-signal tests, updated for the new fixture. **Verified directly against the pre-fix logic** (temporarily reverting only `shutdownChildren`'s body to `!child.killed`, fixture left at its NEW, fixed shape): the escalation test (ii) and the mixed-set test both FAIL (`["SIGTERM"]` received where `["SIGTERM", "SIGKILL"]` was expected), and the self-exit test (i) TIMES OUT at 5000ms (confirming the stall) — then reverted and confirmed all pass post-fix.
+
+**SECONDARY fix (make SIGTERM alone prompt, so SIGKILL is a true last resort):** `packages/dashboard/src/server.ts`'s `startDashboard(...).close` called plain `server.close(cb)`, which waits for every open connection (including the dashboard's own long-lived SSE streams) to close on its own. Added `server.closeAllConnections?.()` immediately after `server.close(cb)` (Node 18.2+, well under this workspace's `engines.node: ">=22"` floor) — forces every open connection closed so the `close()` callback fires promptly instead of waiting on a keep-alive/SSE-stream timeout. `serve-dashboard.mjs`'s own `stop()` needed no separate change — it already calls this same `close()`. Not separately unit-tested (deterministically triggering the underlying Node behavior this defends against is closer to an integration property than a unit-testable one) — instead verified live, end to end, as part of FIX 3's own real-binary check below (the dashboard child reported `"[dashboard] stopped."` and the whole `aart watch` tree exited cleanly on SIGINT well inside `graceMs`, with zero orphans).
+
+#### FIX 3 — BLOCKER: dashboard 404s from a real install, closed (John's ratified choice: ship the frontend inside the CLI package)
+
+Two coupled problems, both closed:
+
+**(a) PACKAGING — the real root cause.** The published CLI tarball shipped only `packages/cli/dist/*`; `packages/dashboard` (and its built frontend) never shipped at all, so there were no frontend assets for ANY `getFrontendDir()` candidate to find, regardless of path-guessing logic. Fixed in `deploy/build-dashboard-launcher.mjs`: after building `serve-dashboard.mjs` (unchanged), it now also copies `packages/dashboard/dist/frontend` (the built SPA) to `packages/cli/dist/frontend` — a direct sibling of `serve-dashboard.mjs`, `bin.js`, and `index.js` — inside the one package this monorepo actually publishes. Fails loudly (not silently) if the frontend hasn't been built yet, matching this codebase's A47 discipline. `packages/cli/scripts/build-publish.mjs`'s own dead-per-file-output sweep would otherwise delete the copied frontend's `.js`/`.js.map` chunks (indistinguishable from tsc's own dead per-file output to that sweep) — added a `NEVER_SWEEP_DIRS` guard so this is safe regardless of build-script ordering; **verified directly, not assumed**, by running the sweep with the guard removed and confirming it DOES delete `packages/cli/dist/frontend/assets/index-*.js`, then confirming the guard prevents it.
+
+**(b) RESOLUTION.** `packages/dashboard/src/server.ts`'s `getFrontendDir()` was widely assumed to need a new bundled-layout candidate. **Evidence contradicted that assumption** — verified empirically (a small esbuild ESM bundle built from a nested source path, then run from a differently-nested output path, still reports its OWN real runtime path via `import.meta.url`) before touching any code: `getFrontendDir()`'s EXISTING first candidate, `path.join(__dirname, "frontend")`, already resolves correctly once (a) exists — `__dirname` inside the bundled `serve-dashboard.mjs` is `packages/cli/dist` (esbuild rewrites `import.meta.url` to the bundle's real location), so `path.join(__dirname, "frontend")` is exactly `packages/cli/dist/frontend`, the copy's own target. No candidate-list change made; the function's doc comment was updated to explain why, rather than adding a dead-duplicate array entry. **Flagged as a deviation from the literal brief, not silently substituted** — see Deviations below.
+
+**`aart watch` — symlink-safety + the installed layout.** `resolveWatchPaths`/`checkWatchPreconditions`/`buildDashboardEnv` (`watch.ts:122/181/259`) reworked: `process.argv[1]` is realpath-resolved FIRST via a new `resolveRealCliEntryPath` (`watch.ts:151`, best-effort, falls back to the raw path on failure) before any sibling-path derivation — a real `npm install -g`'s bin-shim is a SYMLINK, and deriving `serve-dashboard.mjs`/`frontend/` off the symlink's own directory (e.g. `/usr/local/bin`) finds nothing there. `WatchPaths.frontendDir` replaces the old `dashboardDistDir` (a monorepo-only "two directories up to `packages/dashboard/dist`" guess, no equivalent in a real global install) with a direct sibling of the CLI entry, matching the bundled/installed layout unconditionally. `buildDashboardEnv` now also sets `AART_DASHBOARD_FRONTEND_DIR` on the dashboard child directly (belt-and-braces — `getFrontendDir()`'s own candidate already finds it, but the parent already knows the exact answer). New `resolveRealCliEntryPath` tests use REAL temp-dir symlinks (`fs.symlink`), not a mock — fast, deterministic, exercises real OS semantics the way a fake couldn't.
+
+**DOCS.** `DEPLOY.md` Path B and `AUTHORING.md` parts (b)/(f): both install recipes were missing `pnpm run build:dashboard-launcher` — without it, a real `npm install -g` never got `serve-dashboard.mjs` OR its frontend, independent of the packaging fix above. Added, with the "why" inline. `DEPLOY.md`'s "dashboard-equivalent without Docker" paragraph implied the monorepo checkout was still needed on the target host — corrected (the installed package's own `dist/` now has everything, run directly via a realpath-resolved sibling of the installed `aart` bin), and now names `aart watch` as the local/dev alternative. `AUTHORING.md`'s "(g) Honest limits" bullet flatly claimed "There is no `aart dashboard` on the authoring machine" and framed the dashboard as SERVER-only, never over the local authoring store — now WRONG as of this fix (`aart watch` boots a real dashboard against the authoring machine's OWN local store, from the exact same global install) — rewritten, while preserving the still-true "no bare `aart dashboard` subcommand" fact and the still-true `aart_get_report`/`aart_remote_run` caveats.
+
+**MANDATORY real-binary verification, run in full before handing off — transcript below, nothing summarized away:**
+
+```
+$ pnpm --filter @team-monet/aart run build:publish   # bin.js/index.js bundled
+$ pnpm run build:dashboard-launcher                   # serve-dashboard.mjs + dist/frontend copied
+$ cd packages/cli && pnpm pack --pack-destination <scratch>
+$ tar -tzf team-monet-aart-0.1.0.tgz | grep -E "frontend|serve-dashboard"
+package/dist/frontend/assets/index-CWJ5nKC4.css
+package/dist/frontend/index.html
+package/dist/frontend/assets/index-edgqyKwx.js
+package/dist/serve-dashboard.mjs.map
+package/dist/serve-dashboard.mjs
+package/dist/frontend/favicon.svg
+package/dist/frontend/icons.svg
+package/dist/frontend/assets/geist-*.woff2 (x5)
+                                                       # tarball genuinely includes dist/frontend/index.html — confirmed, not assumed
+
+$ npm install -g --prefix <scratch>/npm-prefix <scratch>/team-monet-aart-0.1.0.tgz
+npm warn EBADENGINE ... isolated-vm@7.0.0 requires node >=26.0.0 ...   # expected, documented (AUTHORING.md)
+added 105 packages in 21s
+
+$ ls -la <scratch>/npm-prefix/bin/aart
+lrwxr-xr-x  aart -> ../lib/node_modules/@team-monet/aart/dist/bin.js   # confirmed: a REAL symlink, exactly the case resolveRealCliEntryPath exists for
+
+$ <scratch>/npm-prefix/bin/aart watch --root <scratch>/aart-watch-root --store sqlite --server-port 18080 --dashboard-port 14000 &
+$ ps -o pid,ppid,command -p <pid>   # confirms 3 real child processes spawned, resolved through the symlink correctly:
+  server  ... dist/bin.js server --port 18080 --host 127.0.0.1 --store sqlite --root <scratch>/aart-watch-root
+  worker  ... dist/bin.js worker --root <scratch>/aart-watch-root --store sqlite
+  dashboard ... dist/serve-dashboard.mjs
+[watch] all ready → open http://localhost:14000
+
+$ curl -s -o /dev/null -w "HTTP %{http_code}\n" http://127.0.0.1:14000/
+HTTP 200
+$ curl -s http://127.0.0.1:14000/api/health
+{"status":"ok"}
+$ curl -s http://127.0.0.1:14000/ | head -c 300        # real SPA HTML (<!doctype html>...<title>frontend</title>...), not a 404
+$ curl -s -o /dev/null -w "HTTP %{http_code}\n" http://127.0.0.1:14000/activity   # SPA client route via fallback
+HTTP 200
+$ curl -s -o /dev/null -w "HTTP %{http_code}\n" http://127.0.0.1:14000/assets/index-edgqyKwx.js   # real static asset
+HTTP 200
+
+$ kill -INT <watch-pid>
+[server]   {"ok": true, "message": "Server stopped.", "port": 18080}
+[dashboard] [dashboard] stopped.
+[worker]   {"ok": true, "message": "Worker stopped."}
+[watch] stopped.
+{"ok": true, "message": "Watch stopped.", "ports": {"server": 18080, "worker": 8787, "dashboard": 14000}}
+                                                       # SIGTERM alone was prompt — SIGKILL never needed (FIX 2's SECONDARY closeAllConnections fix in action), well inside the 10s graceMs
+
+$ pgrep -fl "npm-prefix/lib/node_modules/@team-monet/aart|serve-dashboard"
+CLEAN — no orphaned processes found
+$ lsof -iTCP:18080,8787,14000 -sTCP:LISTEN
+CLEAN — all three ports released
+```
+
+**Result: tarball includes `dist/frontend`, a real global install's `aart watch` serves the dashboard (`GET /` and `GET /api/health` both 200 against the real SPA), and shutdown is clean — zero orphaned processes, all ports released.** Every sub-check the brief asked for was completed; nothing was skipped or partial.
+
+#### FIX 4 — SSE tick re-entrancy guard, closed
+
+A slow `tick()` (its own `drainNewEventsSince` call now potentially several sequential round-trips under FIX 1) could still be in flight when `setInterval`'s next firing started a second one, racing the shared `cursor`/`sentIdsAtCursor` mutable state. Added a `tickRunning` flag (`server.ts:566`, checked/set/cleared inside `tick()` itself, `server.ts:575`) — an overlapping tick is skipped entirely, not queued; the next tick after that picks up from wherever `cursor` was actually left. Test: wraps a real `ApiClient` with an 80ms artificial delay on `listEvents` against a 20ms poll interval and asserts `maxInFlight === 1` while `callCount > 1` (ticking genuinely happened more than once, not accidentally serialized by a fluke).
+
+#### FIX 5 — Readiness poll has no per-request timeout, closed
+
+`pollUntilReady` (`watch.ts:342`) had no bound on any individual `fetch` attempt — Node's `fetch` has none by default — so a health endpoint that accepted the TCP connection but never responded could hang that ONE request forever, past the overall 30s deadline (which is only ever checked BETWEEN attempts). Added `AbortSignal.timeout(requestTimeoutMs)` per request (`watch.ts:350`, new `requestTimeoutMs` field, defaulting to a new `WATCH_READY_REQUEST_TIMEOUT_MS = 3_000`, injectable for tests). Test injects a fetch that never resolves unless aborted and confirms the poll still resolves (doesn't hang the test) within a small injected `requestTimeoutMs`.
+
+#### FIX 6 — Frontend feed array cap, closed (minor)
+
+`ActivityFeedPage.tsx`'s live SSE prepend had no bound — a long-open tab's `events` array (and its O(n) dedupe check per incoming frame) grew without limit. Capped to the newest `MAX_FEED_EVENTS` (500, `ActivityFeedPage.tsx:32`) after every prepend (`.slice(0, MAX_FEED_EVENTS)`, `ActivityFeedPage.tsx:149`). Test seeds a backfill already AT the cap (500), delivers one more live event, and asserts the oldest entry was evicted while the new one and the rest are retained — verified failing (the evicted entry still present) against the code with `.slice()` removed, then restored.
+
+#### FIX 7 — SSE response `.on("error")`, closed (minor)
+
+Added a defensive `ctx.res.on("error", ...)` (`server.ts:631`) alongside the pre-existing `req.on("close")`, both routed through one new idempotent `cleanup()` (clears the interval, ends the response, guarded against double-firing) — a silent network partition or a write against an already-broken socket can no longer surface as an unhandled stream `error` event and crash the whole dashboard process. Not independently unit-tested: deterministically triggering a genuine low-level socket `error` (as opposed to the ordinary client-disconnect `close` path, already covered by the pre-existing disconnect-cleanup test) from a black-box HTTP test isn't reliable without hooking into the server's own internals, which this fix's own small, low-risk scope didn't justify — flagged here rather than claiming coverage that doesn't exist.
+
+#### FIX 8 — TRIVIAL: stale doc comment, closed
+
+`packages/mcp/src/handlers/remote-governance.ts`'s `resume` field comment claimed `ResumeResult` embeds a redacted `RunRecord`; verified directly (`packages/server/src/engine/boundary.ts:62`) it never does — `ResumeResult` is `{kind:"resumed"|"duplicate", runId}` / `{kind:"no_match"}` / `{kind:"ambiguous", matches}`, no `RunRecord` field at all. Comment corrected; no code change.
+
+**Gates, from clean, run TWICE in full** (`pnpm run clean && pnpm run check:tsconfig-refs && pnpm run build && pnpm run typecheck && pnpm run typecheck:tests && pnpm run lint:redaction && pnpm test`): **239 files / 2631 tests, all green, byte-for-byte identical across both complete from-clean runs.** (No file-level baseline delta is claimed against A66's own stated 237/2561 — this session's OWN worktree had no `node_modules`/build output at all when it started, wave2/integration's actual merged-tip count was never independently measured before edits began, so the honest comparison is "verified green twice from clean, now," not a reconstructed delta.) `check:tsconfig-refs`: OK, the same 5 non-blocking informational notes as every prior session, both runs. `lint:redaction`: clean both runs — **271 reviewed suppressions** (269 measured directly at this session's own start, before any suppression edit — via the first `lint:redaction` run's own failure output, which is how the 2 new findings below were originally caught — + this session's own 2 new entries for FIX 1's drain-cap warning and FIX 7's stream-error logger, both individually justified in `redaction-lint-suppressions.ts`). The 269 baseline reconciles EXACTLY, not just plausibly, once the three-way `wave2/integration` merge is worked through arithmetically: A65's own MEASURED (not A63's merely stated) common-ancestor count, 262, plus A65's own 6 additions, plus A66's own 1 addition, plus A64's own 0 (`aart watch`'s `packages/cli` touches no `RunRecord`/trace-adjacent code) = 262+6+1+0 = **269** — confirming the three branches merged additively with no suppression entries lost or duplicated, not an unexplained drift. Both full run logs swept for hidden failures (`grep -niE "error TS|FAIL|✗|UnhandledRejection|ELIFECYCLE"`) — zero matches either run. The new timing-sensitive tests (FIX 1's burst/re-entrancy tests — real `setInterval` polling, real raw streaming HTTP; FIX 2's `graceMs`-timer tests; FIX 5's `AbortSignal.timeout` test) were each run 5 additional times in isolation beyond the two full-suite passes (7 total observed passes per test) — clean every time, zero flakiness.
+
+**Commits (local only, none pushed), all on `wave2/integration` on top of `3f718f2`:** `29b0bcc` (FIX 2 shutdownChildren + FIX 3 `aart watch` symlink-safety/paths + FIX 5 readiness-poll timeout + FIX 8 comment, `packages/cli` + `packages/mcp`), `29650f8` (FIX 1 SSE burst-drop + FIX 4 re-entrancy + FIX 7 res-error + FIX 2's SECONDARY `closeAllConnections`, `packages/dashboard/src/server.ts` + tests), `91694ce` (FIX 3 packaging — frontend copy + the sweep guard, `deploy/build-dashboard-launcher.mjs` + `packages/cli/scripts/build-publish.mjs`), `4b9d3f2` (FIX 6 feed cap, `ActivityFeedPage.tsx`), `1a17d6b` (2 new redaction-lint suppressions), `e9c077f` (FIX 3 docs, `DEPLOY.md` + `AUTHORING.md`).
+
+**Deviations flagged, not silent:**
+
+1. **FIX 3's RESOLUTION bullet asked for a NEW `getFrontendDir()` candidate; none was added.** Verified empirically (not assumed) that the function's EXISTING first candidate already resolves correctly once the packaging fix (FIX 3a) lands — adding a second, literally-duplicate array entry pointing at the identical path would be dead code, not a real fix. Updated the function's own doc comment to explain the (previously coincidental-looking, now load-bearing) overlap instead. See FIX 3's own RESOLUTION section above for the full reasoning and the empirical check performed before deciding this.
+2. **FIX 2's SECONDARY fix (`closeAllConnections`) and FIX 7 (`res.on("error")`) have no dedicated unit test.** Both are defensive fixes whose triggering condition (a real socket/connection-level event) isn't reliably producible from a black-box HTTP test without hooking into Node's own internals — FIX 2's secondary fix IS exercised, live, by FIX 3's own mandatory real-binary shutdown check (the dashboard child reported a clean, prompt stop); FIX 7 is verified by code review and the existing disconnect-cleanup test's own adjacent coverage of the `req.on("close")` half, not by a new dedicated test. Flagged rather than silently claiming coverage that doesn't exist.
+3. **The task's FIX 2 SECONDARY bullet references "the AbortSignal.timeout in FIX 6"** — this is a numbering slip in the brief itself: the readiness-poll `AbortSignal.timeout` fix is FIX 5 in the MINORS list (FIX 6 is the frontend feed cap, unrelated to readiness polling). Treated as referring to FIX 5, the only fix that's actually about `AbortSignal.timeout`; not otherwise acted on.
+4. **No custom `Agent`/dispatcher wiring was added to `pollUntilReady`'s readiness-poll fetch calls** beyond FIX 5's `AbortSignal.timeout` (the SECONDARY bullet under FIX 2 also suggested "not reusing an agent helps" against keep-alive-socket leakage into the dashboard). Judged unnecessary: FIX 2's own `closeAllConnections()` fix already force-closes any lingering client sockets on shutdown regardless of how they got there, making a bounded per-request timeout (FIX 5) sufficient defense-in-depth without adding undici-specific dispatcher complexity for a problem the primary fix already closes.
+5. **No new feature was added beyond these 8 fixes** — confirmed directly via `git diff --stat 3f718f2...HEAD`: every touched file is one this fix pass's own FIX 1–8 scope names (`packages/dashboard/src/server.ts`+tests, `packages/cli/src/commands/watch.ts`+tests, `packages/dashboard/frontend/src/pages/ActivityFeedPage.tsx`+test, `deploy/build-dashboard-launcher.mjs`, `packages/cli/scripts/build-publish.mjs`, `packages/mcp/src/handlers/remote-governance.ts` (comment only), `packages/governance/src/redaction-lint-suppressions.ts`, `DEPLOY.md`, `AUTHORING.md`, this file) — no route, tool, CLI command, or store field was added that the brief didn't ask for.
