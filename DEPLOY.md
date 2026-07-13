@@ -63,13 +63,49 @@ bundled at build time so it starts the same way the other two roles do.
 
 ## Path A — Docker / Compose
 
-### Build
+### Pull (recommended — AMENDMENTS.md A69)
+
+```bash
+docker pull ghcr.io/team-monet/aart:0.10.0
+```
+
+Published by [`.github/workflows/publish-containers.yml`](./.github/workflows/publish-containers.yml)
+— GHCR, multi-arch (`linux/amd64`, `linux/arm64`) — on every `v*` tag, from
+this same `Dockerfile`'s `runtime` target (the same one `docker-compose.yml`'s
+three services already run). `docker compose pull && docker compose up -d`
+(below) is the fast path: nothing builds locally. Only the lean, no-browser
+`runtime` target ships this way today — `runtime-browser` (Chromium) is
+**not** published as a container image; build it from source (below) if any
+workflow you deploy uses a `browser.*` block. `:latest` also always points at
+the newest tagged release, if you'd rather float than pin an exact version.
+
+**One-time setup note for whoever owns the GHCR package:** the first
+`publish-containers.yml` run creates `ghcr.io/team-monet/aart` as a
+**private** package by default, regardless of this repo's own visibility —
+anonymous `docker pull` (above) 401s/404s until a repo admin flips it once:
+GitHub → the owning org/user → Packages → `aart` → Package settings → Change
+visibility → Public.
+
+**Honesty note (AMENDMENTS.md A69, same caveat A68 already logged for the
+npm/npx path):** this session verified the underlying image for real — a
+local `docker build`/`docker run` of this exact `Dockerfile`'s `runtime`
+target, server+worker+dashboard all confirmed serving — but did **not**
+verify an actual `docker pull ghcr.io/team-monet/aart:0.10.0` against a live
+registry, because `publish-containers.yml` only runs once this branch is
+reviewed and the real `v0.10.0` tag is pushed. The instructions above are the
+designed/expected post-publish behavior, not a re-verified live transcript.
+
+### Build from source
 
 ```bash
 git clone <this repo> && cd aart
 docker build -t aart:latest .                            # lean — no browser automation
 docker build --target runtime-browser -t aart:browser .   # + Playwright's Chromium (needed by any workflow using browser.* blocks)
 ```
+
+Use this path if you need `runtime-browser` (not published, see above), are
+contributing/testing a local change, or are on a platform/arch GHCR doesn't
+cover.
 
 The `Dockerfile` is a multi-stage build (`node:22-bookworm-slim`): `builder`
 (full pnpm workspace install + `tsc -b` + the CLI's esbuild bundle) →
@@ -95,10 +131,16 @@ you run needs a real browser.
 
 ```bash
 cp .env.example .env      # fill in AART_SECRET_<NAME>=... for every webhook/API secret your deployed workflows reference
-docker compose up -d --build
+docker compose pull       # pulls the published image (see "Pull" above)
+docker compose up -d
 curl http://localhost:8080/health   # {"status":"ok"}
 open http://localhost:4000          # dashboard
 ```
+
+Building from source instead: comment out each service's `image:` line in
+`docker-compose.yml` and uncomment its `build:` block right beneath it (all
+three services, kept consistent), then `docker compose up -d --build` in
+place of `pull`/`up -d` above.
 
 `docker-compose.yml` runs `server` + `worker` + `dashboard` against one
 named volume (`aart-store`, mounted at `/data` in all three) — this is what
@@ -121,15 +163,20 @@ push," AMENDMENTS.md A56 — see [Deploy token](#deploy-token) below) run
 against the same store/volume, or the auto-vivified one `aart deploy
 <workflowId> --target <name>` creates on first use.
 
-Swap `target: runtime` for `target: runtime-browser` on `server` and
-`worker` in `docker-compose.yml` if you need Chromium (see above) — `image:
-aart:latest` should then become e.g. `aart:browser` too, on both services,
-consistently.
+If you need Chromium (see "Which one do you need?" above): `runtime-browser`
+isn't published as a container image (see "Pull" above), so switch
+`docker-compose.yml` to the build-from-source shape first — comment out
+`image:` and uncomment `build:` on `server` and `worker` (`dashboard` never
+dispatches a `browser.*` step, so it stays on `runtime`/the published image
+either way) — then change `target: runtime` to `target: runtime-browser` on
+those same two services, consistently, and `docker compose up -d --build`.
 
 ### Bare `docker run` (no compose)
 
 Useful for a quick check or a non-compose orchestrator (Nomad, ECS, k8s —
-adapt the flags, the shape is the same):
+adapt the flags, the shape is the same). Uses the published image (`docker
+pull ghcr.io/team-monet/aart:0.10.0` first, per "Pull" above) — substitute
+your own local tag (e.g. `aart:latest`) if you built from source instead:
 
 ```bash
 docker volume create aart-data
@@ -141,22 +188,22 @@ docker volume create aart-data
 docker run -d --name aart-server \
   -v aart-data:/data -p 8080:8080 \
   --env-file .env \
-  aart:latest server --port 8080 --host 0.0.0.0 --store sqlite
+  ghcr.io/team-monet/aart:0.10.0 server --port 8080 --host 0.0.0.0 --store sqlite
 
 docker run -d --name aart-worker \
   -v aart-data:/data \
   --env-file .env \
-  aart:latest worker --store sqlite
+  ghcr.io/team-monet/aart:0.10.0 worker --store sqlite
 
 docker run -d --name aart-dashboard \
   -v aart-data:/data -p 4000:4000 \
   -e AART_SERVER_URL=http://<server-host>:8080 \
-  aart:latest dashboard
+  ghcr.io/team-monet/aart:0.10.0 dashboard
 
 # One-off CLI commands (register, validate, request-approval, approve,
 # promote, deploy, trigger add, bundle, environment register, ...) against
 # the same store:
-docker run --rm -v aart-data:/data aart:latest register /dev/stdin --store sqlite < my-workflow.yaml
+docker run --rm -v aart-data:/data ghcr.io/team-monet/aart:0.10.0 register /dev/stdin --store sqlite < my-workflow.yaml
 ```
 
 ### Signed webhooks — verified end to end

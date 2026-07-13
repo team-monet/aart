@@ -44,6 +44,12 @@ closing the "install from clone" trap documented in prior versions of
   supervised child processes and opens a browser — one command instead of
   three terminals.
 - **`aart --version` / `-v`.** Did not exist before this release.
+- **Published container images.** `ghcr.io/team-monet/aart` (multi-arch:
+  `linux/amd64`, `linux/arm64`), built from this same `Dockerfile`'s
+  `runtime` target and pushed on every `v*` tag — `docker pull
+  ghcr.io/team-monet/aart:0.10.0` / `docker compose up` now works against a
+  published image, no local `--build` required. See `DEPLOY.md`'s "Pull
+  (recommended)" section.
 
 ### Fixed
 
@@ -51,8 +57,11 @@ closing the "install from clone" trap documented in prior versions of
   the frontend SPA and its launcher previously weren't included in a real
   `npm install -g`, so the dashboard 404'd from anything but a monorepo
   checkout.
+- `aart worker`'s `GET /health` reported a hardcoded `"0.0.0"` in every
+  published build (a bundling-unsafe relative `package.json` read) — now
+  reports the real `0.10.0`.
 
-See `AMENDMENTS.md` entries A56 through A68 for the full detail and
+See `AMENDMENTS.md` entries A56 through A69 for the full detail and
 verification evidence behind every item above.
 
 ## Legacy (`0.1.0`–`0.9.0`, npm only)
