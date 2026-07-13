@@ -77,4 +77,33 @@ describe("ActivityFeedPage", () => {
     });
     expect(screen.getAllByText("Approved by alice")).toHaveLength(1);
   });
+
+  // Wave 2 fix pass (AMENDMENTS.md A67 FIX 6, minor): a long-open tab's live
+  // feed used to grow the events array with no bound at all. MAX_FEED_EVENTS
+  // (500, ActivityFeedPage.tsx) caps it -- backfill 500 (already at the
+  // cap), delivering one more live event must evict the oldest rather than
+  // grow to 501.
+  it("caps the live feed at the newest MAX_FEED_EVENTS entries so a long-open tab doesn't grow the array unboundedly", async () => {
+    const MAX_FEED_EVENTS = 500; // must match ActivityFeedPage.tsx's own cap
+    const backfilled = Array.from({ length: MAX_FEED_EVENTS }, (_, i) =>
+      makeEvent({ id: `evt-${i}`, type: "run.completed", summary: `Backfilled run ${i}`, occurredAt: `2026-07-10T00:${String(i % 60).padStart(2, "0")}:00.000Z` }),
+    );
+    vi.stubGlobal("fetch", mockFetchJson({ "/api/events?": backfilled }));
+    vi.stubGlobal("EventSource", MockEventSource);
+
+    renderWithRouter(<ActivityFeedPage />);
+    expect(await screen.findByText("Backfilled run 0")).toBeTruthy(); // the feed is already at the cap after backfill
+
+    const source = MockEventSource.instances[0];
+    if (!source) throw new Error("no EventSource was constructed");
+    const live = makeEvent({ id: "evt-live", type: "approval.decided", summary: "Approved by alice" });
+
+    act(() => {
+      source.onmessage?.({ data: JSON.stringify(live) });
+    });
+
+    expect(await screen.findByText("Approved by alice")).toBeTruthy(); // the new live event lands at the top
+    expect(screen.queryByText(`Backfilled run ${MAX_FEED_EVENTS - 1}`)).toBeNull(); // the oldest entry (last of the original 500) was evicted to make room, keeping the array at the cap
+    expect(screen.getByText("Backfilled run 0")).toBeTruthy(); // the newest backfilled entry is still retained, right below the new live one
+  });
 });

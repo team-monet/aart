@@ -20,6 +20,17 @@ import type { EventLogEntry } from "@aart/types";
  * limit. */
 const BACKFILL_LIMIT = 50;
 
+/** Wave 2 fix pass (AMENDMENTS.md A67 FIX 6, minor): the live SSE stream
+ * (below) prepends every newly-observed event with no bound of its own —
+ * left running, a long-open tab's `events` array grows without limit,
+ * getting slower to prepend/dedupe/render (an O(n) `.some()` id check per
+ * incoming SSE frame, against an ever-growing `n`) the longer the tab stays
+ * open. Caps the array to the newest `MAX_FEED_EVENTS` after every prepend
+ * — a UI-only bound (independent of BACKFILL_LIMIT above, and of
+ * @aart/server's own DEFAULT_EVENTS_LIMIT/MAX_EVENTS_LIMIT), generous
+ * enough that no real operator scrolling this page would notice the cut. */
+const MAX_FEED_EVENTS = 500;
+
 type EventFamily = "green" | "red" | "blue" | "gray";
 
 /**
@@ -135,7 +146,7 @@ export function ActivityFeedPage() {
     source.onmessage = (ev) => {
       try {
         const incoming = JSON.parse(ev.data) as EventLogEntry;
-        setEvents((prev) => (prev.some((e) => e.id === incoming.id) ? prev : [incoming, ...prev]));
+        setEvents((prev) => (prev.some((e) => e.id === incoming.id) ? prev : [incoming, ...prev].slice(0, MAX_FEED_EVENTS)));
       } catch (err) {
         console.error("Failed to parse activity feed event", err);
       }
