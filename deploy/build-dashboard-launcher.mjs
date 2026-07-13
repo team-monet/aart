@@ -13,7 +13,7 @@
 // dist and packages/store/dist to already exist — this bundles from
 // already-built dist/, it doesn't build them itself, matching build-
 // publish.mjs's own documented precondition).
-import { chmodSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, rmSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import * as esbuild from "esbuild";
@@ -45,6 +45,29 @@ const EXTERNAL = ["@anthropic-ai/sdk", "@modelcontextprotocol/sdk", "@modelconte
 // packages. Piggybacking on packages/cli/dist/'s already-correct
 // resolution is simpler and more robust than inventing a second one.
 const OUT_FILE = path.join(repoRoot, "packages/cli/dist/serve-dashboard.mjs");
+
+// Wave 2 fix pass (AMENDMENTS.md A67 FIX 3 — John's ratified choice: ship
+// the dashboard frontend inside the CLI package). packages/dashboard/dist/
+// frontend is the Vite SPA build (packages/dashboard/frontend/vite.config.ts's
+// own `build.outDir: '../dist/frontend'`, produced by root `pnpm run
+// build`'s own `pnpm --filter @aart/dashboard run build:frontend` step —
+// this script's own precondition, see the header comment above, already
+// assumes `pnpm run build` ran first). Copied to packages/cli/dist/frontend
+// — a direct sibling of OUT_FILE above, and of packages/cli/dist/bin.js/
+// index.js (build-publish.mjs's own bundle entries) — so it ships inside
+// the ONE package this monorepo actually publishes (packages/cli's own
+// package.json "files": ["dist"] already includes anything placed here,
+// verified via a real `pnpm pack` — see AMENDMENTS.md A67). Previously the
+// published tarball carried serve-dashboard.mjs with NOTHING for it to
+// serve: `@aart/dashboard`'s own `getFrontendDir()` (packages/dashboard/
+// src/server.ts) had no frontend assets to find for ANY candidate,
+// regardless of path-guessing logic — this was the actual root cause of
+// the real-binary tester's 404, not (only) a missing candidate; see that
+// function's own updated doc comment for why its EXISTING first candidate
+// already resolves correctly once this copy exists, no candidate-list
+// change needed there.
+const FRONTEND_SRC = path.join(repoRoot, "packages/dashboard/dist/frontend");
+const FRONTEND_DEST = path.join(repoRoot, "packages/cli/dist/frontend");
 
 async function main() {
   await esbuild.build({
@@ -81,7 +104,22 @@ async function main() {
     },
   });
   chmodSync(OUT_FILE, 0o755);
-  console.log(`[build-dashboard-launcher] OK — ${path.relative(repoRoot, OUT_FILE)} is self-contained (workspace @aart/* closure inlined; EXTERNAL packages resolve via packages/cli's own node_modules, right beside it).`);
+
+  // AMENDMENTS.md A47 discipline ("refuse to start rather than serve
+  // emptiness") applied at BUILD time here, not just at `aart watch`'s own
+  // runtime precondition check: fail loudly with an actionable message if
+  // the frontend hasn't actually been built yet, rather than silently
+  // producing a launcher with no frontend to copy (or a cryptic low-level
+  // ENOENT from cpSync below).
+  if (!existsSync(path.join(FRONTEND_SRC, "index.html"))) {
+    console.error(`[build-dashboard-launcher] FAILED — ${path.relative(repoRoot, FRONTEND_SRC)}/index.html does not exist. Run "pnpm run build" first (its own "pnpm --filter @aart/dashboard run build:frontend" step produces it) before this script.`);
+    process.exitCode = 1;
+    return;
+  }
+  rmSync(FRONTEND_DEST, { recursive: true, force: true }); // clear any stale prior copy (e.g. a hashed asset filename that no longer exists in the current build) before copying fresh
+  cpSync(FRONTEND_SRC, FRONTEND_DEST, { recursive: true });
+
+  console.log(`[build-dashboard-launcher] OK — ${path.relative(repoRoot, OUT_FILE)} is self-contained (workspace @aart/* closure inlined; EXTERNAL packages resolve via packages/cli's own node_modules, right beside it). Dashboard frontend copied to ${path.relative(repoRoot, FRONTEND_DEST)}.`);
 }
 
 main().catch((err) => {
