@@ -10,21 +10,23 @@ AART lets you author, run, and govern multi-step workflows that mix deterministi
 npm install -g @team-monet/aart
 ```
 
-This installs the `aart` command.
+This installs the `aart` command. `npx @team-monet/aart <cmd>` works too,
+for a one-off.
 
-> **Before 1.0.0 ships, don't run the command above yet.** `@team-monet/aart`
-> is already a real published npm package name, but the version currently
-> live on the registry is a legacy, architecturally different release (a
-> `commander`-based CLI predating this repo's current command surface —
-> different flags, different commands, no `aart mcp`/`aart bundle`/`aart
-> deploy` as documented below). `npm install -g` — and any `npx -y
-> @team-monet/aart ...` invocation, including the one a coding agent's MCP
-> client might run — will silently fetch that old release instead of what's
-> in this repository, with no error to signal the mismatch. Until this
-> package's version genuinely reaches `1.0.0` on npm, install from this repo
-> instead: see [`AUTHORING.md`](../../AUTHORING.md) at the repository root
-> for the exact clone → build → pack → install sequence (verified against a
-> genuine fresh clone, not just "works from an existing checkout").
+> **Requires `0.10.0` or later.** `@team-monet/aart` was already a claimed
+> npm package name before this repository's current architecture existed —
+> published versions `0.1.0` through `0.9.0` are a legacy, architecturally
+> different release (a `commander`-based CLI with a different command
+> surface entirely — no `aart mcp`/`aart bundle`/`aart deploy` as documented
+> below). `0.10.0` is this repository's first npm release and carries the
+> `latest` dist-tag, so a plain `npm install -g @team-monet/aart` now
+> resolves correctly. If `aart --version` ever prints something other than
+> `0.10.0` or later, or `aart --help` shows flags like `-w/--workspace` or
+> a `doctor` command instead of what's documented below, you've landed on a
+> stale pre-`0.10.0` install — run `npm install -g @team-monet/aart@latest`
+> and re-check. See [`AUTHORING.md`](../../AUTHORING.md) at the repository
+> root part (b) for the from-source path (contributors, or pinning an exact
+> build) and the full history of this version gap.
 
 ## Quick start
 
@@ -79,7 +81,7 @@ aart mcp [--store fs|sqlite] [--root <dir>]
 
 - `aart server` / `aart worker` run AART's own HTTP control plane and durable worker process — see the architecture doc's §13/§14 for local vs. production topology, or [`DEPLOY.md`](../../DEPLOY.md) for the operational version of that story.
 - `aart mcp` starts AART as an MCP (Model Context Protocol) server, exposing the same tool surface the CLI wraps directly to an MCP-speaking agent.
-- `aart init-agent` scaffolds the agent-facing instructions AART ships for coding assistants working against a repo that uses it, plus a ready-to-use `.mcp.json`. By default the generated config invokes this exact `aart` binary directly (`{"command": "node", "args": ["<path to this install's bin.js>", "mcp"]}`) rather than `npx`, so it's correct regardless of whether `@team-monet/aart` is genuinely on the npm registry yet — see the install warning above. Pass `--npx` to opt back into the registry-resolved `npx -y <package> mcp` form once that's actually correct for your install. See [`AUTHORING.md`](../../AUTHORING.md) for the full authoring-machine walkthrough.
+- `aart init-agent` scaffolds the agent-facing instructions AART ships for coding assistants working against a repo that uses it, plus a ready-to-use `.mcp.json`. By default the generated config invokes this exact `aart` binary directly (`{"command": "node", "args": ["<path to this install's bin.js>", "mcp"]}`) rather than `npx` — correct regardless of exactly which install (npm or from-source) generated it, and avoids a fresh `npx` resolve on every MCP client launch. Pass `--npx` to opt into the registry-resolved `npx -y <package> mcp` form instead, safe as of `0.10.0` (see the install note above). See [`AUTHORING.md`](../../AUTHORING.md) for the full authoring-machine walkthrough.
 - `aart request-approval` creates a human-approval request — for a workflow VERSION (the promotion gate) or, automatically, whenever a running workflow hits a `human.approval` step. `aart approve` records the decision either way.
 
 ## Example workflows

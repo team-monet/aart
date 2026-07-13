@@ -1,0 +1,91 @@
+name: Publish
+
+# npm Trusted Publishing (OIDC) — no NPM_TOKEN secret. GitHub Actions issues
+# a short-lived OIDC token that npm's CLI exchanges for a publish
+# credential itself; nothing in this workflow ever handles a long-lived
+# npm token. https://docs.npmjs.com/trusted-publishers
+#
+# ONE-TIME SETUP REQUIRED, on npmjs.com, BEFORE the first tag push can
+# succeed: @team-monet/aart -> Settings -> Trusted Publisher -> add
+# "GitHub Actions" -> repository "team-monet/aart" -> workflow filename
+# "publish.yml" (this file). Without that configured on npm's side first,
+# the "Publish to npm" step below fails authentication — this workflow
+# existing in the repo is necessary but not sufficient by itself.
+#
+# Publishes packages/cli only — the ONE package in this monorepo published
+# to npm (package.json's own description, ADR-18). The other @aart/*
+# packages are private/workspace-only; build:publish (esbuild) bundles the
+# ones packages/cli actually needs straight into its own dist/, so nothing
+# else in this workspace is ever published standalone.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+env:
+  # Keep in sync with package.json engines.node / this repo's pinned dev
+  # toolchain — same convention as ci.yml's own env block.
+  NODE_VERSION: "22"
+  PNPM_VERSION: "10.33.2"
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write # required for npm's OIDC trusted-publish exchange
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # npm Trusted Publishing requires the npm CLI itself to be >=11.5.1;
+      # Node 22's bundled npm is older than that.
+      - name: Upgrade npm for OIDC trusted-publish support
+        run: npm install -g npm@latest
+
+      # Whole-workspace build first — packages/cli's own tsconfig.json
+      # project-references the upstream @aart/* graph, so `tsc -b` here
+      # builds everything build:publish's esbuild step below needs to
+      # bundle from. Also builds the dashboard's frontend (root "build"
+      # script), itself a prerequisite for the dashboard-launcher step.
+      - name: Build
+        run: pnpm run build
+
+      # tsc -b (no-op, already built above) + esbuild-bundles the entire
+      # private @aart/* workspace closure into packages/cli/dist/bin.js +
+      # dist/index.js, so the published tarball is self-contained w.r.t.
+      # private packages (AMENDMENTS.md A33/A35).
+      - name: Build the publishable CLI bundle
+        run: pnpm --filter @team-monet/aart run build:publish
+
+      # Copies the dashboard's built SPA to packages/cli/dist/frontend and
+      # builds dist/serve-dashboard.mjs — the dashboard leg `aart watch`
+      # needs from a real npm install (AMENDMENTS.md A67 FIX 3). Order
+      # relative to build:publish is inert (build-publish.mjs's own
+      # dead-file sweep skips dist/frontend by name) — this just matches
+      # the Dockerfile's own established order (Dockerfile, DEPLOY.md,
+      # AUTHORING.md all run build:publish before this step).
+      - name: Build the dashboard launcher
+        run: pnpm run build:dashboard-launcher
+
+      # No prepublishOnly/prepack script exists in packages/cli/package.json
+      # today (verified directly before writing this workflow — its only
+      # "scripts" are "build" and "build:publish") — nothing to satisfy or
+      # route around here beyond the explicit build steps above.
+      - name: Publish to npm
+        working-directory: packages/cli
+        run: npm publish --provenance --access public --tag latest

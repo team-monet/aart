@@ -155,17 +155,37 @@ RUN chmod +x /app/deploy/entrypoint.sh \
 # "sharing a store volume." Override per-container with -e AART_ROOT=...
 # or `--root <dir>` if you need a different layout.
 ENV AART_ROOT=/data
-# @aart/dashboard's own `getFrontendDir()` guesses the SPA build's location
-# relative to wherever its OWN compiled code is physically running from —
-# correct when that package loads unbundled, wrong once esbuild bundles it
-# into packages/cli/dist/serve-dashboard.mjs (this stage's `dashboard`
-# role, deploy/build-dashboard-launcher.mjs), which is a different
-# directory. This is the one absolute path that's actually correct for
-# THIS image's fixed layout (COPY --from=pruned /workspace /app above
-# preserves the workspace's own packages/dashboard/dist/frontend
-# structure) — verified directly (a real `docker run <image> dashboard`
-# served the real SPA, not a 404, only once this was added).
-ENV AART_DASHBOARD_FRONTEND_DIR=/app/packages/dashboard/dist/frontend
+# @aart/dashboard's own `getFrontendDir()` (packages/dashboard/src/
+# server.ts) checks AART_DASHBOARD_FRONTEND_DIR FIRST, before any
+# __dirname-relative guess. Wave 2 fix pass (AMENDMENTS.md A67 FIX 3)
+# changed where the built SPA actually ships: deploy/build-dashboard-
+# launcher.mjs now copies packages/dashboard/dist/frontend to
+# packages/cli/dist/frontend — a direct sibling of packages/cli/dist/
+# serve-dashboard.mjs (this stage's `dashboard` role) — so a real `npm
+# install -g` of the published CLI tarball has a frontend to serve at all
+# (pre-A67 the tarball shipped serve-dashboard.mjs with nothing for ANY
+# candidate to find, since packages/dashboard was never bundled/copied in).
+# This var previously pointed at packages/dashboard/dist/frontend (the
+# pre-A67 copy location) — repointed here to the new canonical copy
+# (AMENDMENTS.md A69): that old path still physically exists in this image
+# too (COPY --from=pruned /workspace /app preserves the Vite build's own
+# original output location alongside the new copy — nothing deletes it),
+# so the old value wasn't actually BROKEN, just stale/redundant now that a
+# second, canonical copy exists elsewhere. Set explicitly rather than
+# deleted and left to fall through to getFrontendDir()'s own __dirname-
+# relative guess — belt-and-braces, matching the exact same precedent
+# `aart watch`'s own child-process env (commands/watch.ts's
+# buildDashboardEnv) already established: that guess (`path.join(__dirname,
+# "frontend")`) WOULD already resolve this correctly on its own post-A67
+# (verified: esbuild's ESM bundling rewrites `import.meta.url`, hence
+# `__dirname`, to the bundle's own real runtime location — see
+# getFrontendDir()'s own doc comment), but this codebase's established
+# convention is to still set the var explicitly wherever the caller already
+# knows the exact answer, rather than rely silently on a fallback guess.
+# Verified directly (AMENDMENTS.md A69): a real `docker build` +
+# `docker run <image> dashboard` served the real SPA at GET /, not a 404,
+# against this exact path.
+ENV AART_DASHBOARD_FRONTEND_DIR=/app/packages/cli/dist/frontend
 # Server control-plane (8080), worker health (8787), dashboard (4000) —
 # see DEPLOY.md for exactly what each serves. A worker/dashboard-only
 # container simply never binds the ports it doesn't use; EXPOSE is

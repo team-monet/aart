@@ -22,14 +22,14 @@ See also: [`TEST-DRIVE.md`](./TEST-DRIVE.md) — the deeper local walkthrough
 this document's part (d) summarizes (block authoring, `{{ }}` expression
 wiring, the dashboard, more MCP tool detail); [`DEPLOY.md`](./DEPLOY.md) —
 the production server side of the handoff in part (e); `packages/cli/README.md`
-— the published package's own reference (once this repo reaches `1.0.0`, that's
-where `npm install -g @team-monet/aart` starts being correct again — part (b)
-below is about right now, pre-`1.0.0`).
+— the published package's own reference, now correct for a real
+`npm install -g @team-monet/aart` as of `0.10.0` (part (b) below covers the
+same ground, plus the from-source path contributors need).
 
 ## Contents
 
 - [(a) Prerequisites](#a-prerequisites)
-- [(b) The npm trap — read this first](#b-the-npm-trap--read-this-first)
+- [(b) Installing AART](#b-installing-aart)
 - [(c) Wiring the coding agent](#c-wiring-the-coding-agent)
 - [(d) The authoring lifecycle](#d-the-authoring-lifecycle)
 - [(e) Deploying to the server](#e-deploying-to-the-server)
@@ -40,6 +40,11 @@ below is about right now, pre-`1.0.0`).
 ---
 
 ## (a) Prerequisites
+
+**Node ≥22 is the only real requirement for the plain `npm install -g
+@team-monet/aart` install in part (b).** Everything else below (git,
+corepack/pnpm) is only needed for the from-source path — contributors, or
+pinning an exact commit for a controlled build.
 
 - **git** — to clone the repo. Anything reasonably current works; nothing
   here depends on a specific git version.
@@ -77,49 +82,42 @@ below is about right now, pre-`1.0.0`).
   `DEPLOY.md`'s Path A, on whichever machine actually runs the production
   stack. Nothing in this document touches it.
 
-## (b) The npm trap — read this first
+## (b) Installing AART
 
-**Do not run `npm install -g @team-monet/aart` yet.** It's tempting —
-`packages/cli/README.md`'s own Install section leads with exactly that
-command, and it IS the right command once this package reaches `1.0.0` on
-npm. It is **not** right today.
+**`npm install -g @team-monet/aart` (or `npx @team-monet/aart <cmd>` for a
+one-off) is the right command as of `0.10.0`.**
 
-Here's what actually happens if you do it now (verified this session, from
-a machine with nothing else pointing at this repo): `@team-monet/aart` is
-already a real, claimed npm package name, currently at `0.9.0` (published
-2026-06-24 — run `npm view @team-monet/aart dist-tags` yourself; this
-number will keep drifting). That published release predates this repo's
-current architecture — a `commander`-based CLI with a completely different
-command surface. Proof, run against a build of THIS repo that was already
-correctly installed and working on `PATH`:
-
-```
-$ npx -y @team-monet/aart --help
-Usage: aart [options] [command]
-  ...
-  -w, --workspace <dir>     workspace directory (default: $AART_WORKSPACE or ~/.aart)
-Commands:
-  block                     manage blocks & workflows in the local .aa registry
-  show [options] <id>       print a registered definition (review it before approving)
-  pack                      manage workspace packs (.aa/packs — agent-authored native blocks)
-  schedule                  manage OS-delegated schedules ...
-  dashboard [options]       local read-only dashboard: blocks, run history, artifacts, packs
-  doctor                    check Node, sandbox, and browser setup with fix hints
-  ...
+```bash
+npm install -g @team-monet/aart
+aart --version   # 0.10.0 (or later)
+aart --help
 ```
 
-None of that (`-w/--workspace`, `aart block`, `aart pack`, `aart schedule`,
-`aart dashboard`, `aart doctor`) exists in this repo. `npx` resolved the bare
-package name against the **npm registry**, not against the working `aart`
-binary that was sitting right there on `PATH` — installing it globally
-first wouldn't have changed that; `npx <package-name>` (as opposed to `npx
-<bin-name-already-on-PATH>`) always tries the registry first for a scoped
-package spec like this. This is exactly the trap `aart init-agent`'s
-generated MCP config used to walk a coding agent straight into (fixed this
-session — part (c) below), and it's just as real if you try it by hand.
+**Requires `0.10.0` or later.** `@team-monet/aart` was already a claimed
+npm package name before this repository's current architecture existed —
+published versions `0.1.0` through `0.9.0` are a different, unrelated CLI
+(internally `aa-runtime`: a `commander`-based `-w/--workspace`, `aart
+block`, `aart pack`, `aart schedule`, `aart dashboard`, `aart doctor`
+command surface, none of which exists in this repo). Proof of exactly that
+mismatch, reproduced against a correctly-installed build of THIS repo
+sitting on `PATH` at the time, is preserved in AMENDMENTS.md A54 — that's
+the same trap `aart init-agent`'s generated MCP config used to walk a
+coding agent straight into, before A54 fixed it (part (c) below).
 
-**Install from the repo instead, until this package's version genuinely
-reaches `1.0.0`:**
+`0.10.0` is this repository's first npm release and carries the `latest`
+dist-tag, so a plain `npm install -g @team-monet/aart` now resolves
+correctly — no version pin, no registry trap. **If you ever see
+`-w/--workspace` or `aart doctor` in the output instead of this repo's own
+usage block**, you've landed on a stale pre-`0.10.0` install (an old global
+install that didn't get overwritten, a version pin somewhere, or a caching
+npm mirror) — run `npm install -g @team-monet/aart@latest` and re-check
+`aart --version`.
+
+### Installing from source (contributors, or to pin an exact build)
+
+Building from a checkout instead of npm — to contribute, to run a build
+before it's published, or to pin an exact commit for a controlled
+production rollout (`DEPLOY.md`'s Path B does this deliberately):
 
 ```bash
 git clone https://github.com/team-monet/aart.git
@@ -131,8 +129,8 @@ pnpm run build
 pnpm --filter @team-monet/aart run build:publish
 pnpm run build:dashboard-launcher      # produces the dashboard leg `aart watch` needs (below) — packages/cli/dist/serve-dashboard.mjs + dist/frontend (AMENDMENTS.md A67 FIX 3)
 cd packages/cli
-pnpm pack                              # writes team-monet-aart-0.1.0.tgz (filename tracks the version — glob *.tgz if it's moved on)
-npm install -g ./team-monet-aart-0.1.0.tgz
+pnpm pack                              # writes team-monet-aart-<version>.tgz (filename tracks the version — glob *.tgz if it's moved on)
+npm install -g ./team-monet-aart-<version>.tgz
 aart --help
 ```
 
@@ -146,7 +144,8 @@ broke:
 <workflowId> --input <json> ...`, `aart register`, `aart validate
 --registered`, `aart deploy --target`, `aart bundle`, `aart mcp`, ...). If
 you see `-w/--workspace` or `aart doctor` instead, something upstream of
-this reached npm's registry — you're back in the trap.
+this reached npm's registry against a version older than `0.10.0` — see
+the version-pin note above.
 
 ## (c) Wiring the coding agent
 
@@ -201,10 +200,11 @@ It writes two files here:
   never touches the npm registry (closing the part (b) trap for the config
   a coding agent actually spawns from). Before A54, `init-agent` always
   generated `{"command": "npx", "args": ["-y", "@team-monet/aart", "mcp"]}`
-  instead — exactly the trap in part (b), just automated. If you ever need
-  the old registry-resolved form (correct once `1.0.0` is genuinely
-  published), pass `--npx` to `init-agent`; `--package <name>` names a
-  different registry package if you're pointing at a fork.
+  instead — exactly the trap in part (b), just automated (and only actually
+  safe as of `0.10.0`, now that this package is genuinely published as
+  `latest`). If you'd rather use that registry-resolved form now that it's
+  safe, pass `--npx` to `init-agent`; `--package <name>` names a different
+  registry package if you're pointing at a fork.
 
   **Merge-safe as of AMENDMENTS.md A55:** if `.mcp.json` already has other
   servers registered (e.g. a `monet` entry, if this workspace also runs
@@ -475,6 +475,13 @@ an `authenticatedAs` (D2a security hardening, AMENDMENTS.md A59) — surfaced
 by `aart_remote_why` when one exists.
 
 ## (f) Updating the authoring install
+
+```bash
+npm install -g @team-monet/aart@latest
+```
+
+**Building from source instead** (contributors, or pinning an exact
+commit) — same recipe as part (b)'s from-source path:
 
 ```bash
 cd ~/code/aart                                  # wherever you cloned it in part (b)

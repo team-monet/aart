@@ -34,7 +34,11 @@ export interface McpStdioHandle {
 
 export async function startMcpStdioServer(ctx: AartContext, transportOverride?: StdioServerTransport): Promise<McpStdioHandle> {
   const core = createMcpServer(ctx);
-  const mcpServer = new McpServer({ name: "aart", version: "0.1.0" });
+  // Kept in lockstep with packages/cli/package.json's "version" by hand
+  // (AMENDMENTS.md A68, 0.10.0 release prep — bump both together; no test
+  // currently pins this exact string, verified via grep before this
+  // change).
+  const mcpServer = new McpServer({ name: "aart", version: "0.10.0" });
 
   const definitions = await listRegisteredTools(ctx);
   for (const def of definitions) {

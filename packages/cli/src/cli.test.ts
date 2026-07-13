@@ -9,7 +9,7 @@ import { compileWorkflowInput, requestApprovalHandler, runWorkflowHandler as mcp
 import { createFakeEngine, startServer, systemClock, type ServerHandle } from "@aart/server";
 import { createFsStore } from "@aart/store";
 import { afterEach, describe, expect, it } from "vitest";
-import { run, USAGE } from "./cli.js";
+import { run, USAGE, VERSION } from "./cli.js";
 import { createCliContext, type CliContext } from "./cli-context.js";
 import { approvalWaitWorkflowYaml, createTestCli, sampleWorkflowYaml, type TestCli } from "./test-utils.js";
 
@@ -1418,6 +1418,27 @@ describe("--help / -h / help (AMENDMENTS.md A63 FIX 7)", () => {
     expect(outcome.ok).toBe(true);
     expect(outcome.exitCode).toBe(0);
     expect((outcome.result as { usage: string }).usage).toBe(USAGE);
+    expect(JSON.stringify(outcome.result)).not.toMatch(/Unknown command/);
+  });
+});
+
+// AMENDMENTS.md A68 (0.10.0 release prep) — `aart --version`/`-v` did not
+// exist anywhere in this CLI's surface before this release (root
+// AMENDMENTS.md A54's own finding, reconfirmed: "`aart --version` isn't a
+// real command in this CLI's surface — the `USAGE` string has no such
+// flag"). Same shape as the --help/-h/help describe block immediately
+// above: proves `run()` itself reports the real VERSION with a genuine
+// ok:true, not a false "unknown command". bin.ts's own real-process
+// short-circuit (plain stdout text, exit 0) is not exercised here for the
+// same reason the --help short-circuit above isn't — it's a top-level-await
+// process entry point with no exported function to call directly.
+describe("--version / -v (AMENDMENTS.md A68)", () => {
+  it.each(["--version", "-v"])("%s returns ok:true with the real VERSION, not a false 'unknown command'", async (arg) => {
+    tc = await createTestCli();
+    const outcome = await run([arg], { cliContext: tc.cli });
+    expect(outcome.ok).toBe(true);
+    expect(outcome.exitCode).toBe(0);
+    expect((outcome.result as { version: string }).version).toBe(VERSION);
     expect(JSON.stringify(outcome.result)).not.toMatch(/Unknown command/);
   });
 });

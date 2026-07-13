@@ -59,6 +59,23 @@ export const USAGE = `AART CLI — usage:
   --store <kind>  fs (default) or sqlite — which @aart/store adapter backs this invocation. sqlite's db file lives at <root>/aart.db.
 `;
 
+/**
+ * The published `packages/cli` version, kept in lockstep with
+ * package.json's own "version" field by hand (no dynamic `readFileSync` of
+ * package.json at runtime — this bundle is published as a single
+ * self-contained `dist/bin.js`/`dist/index.js` via esbuild, AMENDMENTS.md
+ * A33/A35, and a relative-path package.json read does not survive that
+ * bundling: see `packages/server/src/worker/health.ts`'s `resolveVersion`
+ * for a real instance of exactly this failure mode, flagged separately,
+ * not fixed here — out of this constant's own scope). AMENDMENTS.md A68 —
+ * `aart --version`/`-v` did not exist anywhere in this CLI's surface before
+ * this release (confirmed against A54's own prior finding, this file's
+ * `USAGE` block has never had such a flag); added as part of 0.10.0 release
+ * prep because the release's own tarball-verification step requires a
+ * working `aart --version`.
+ */
+export const VERSION = "0.10.0";
+
 export interface RunOptions {
   /** Reuse an already-constructed CLI context (tests: an isolated tmp-dir store). */
   cliContext?: CliContext;
@@ -256,6 +273,16 @@ export async function run(argv: readonly string[], options: RunOptions = {}): Pr
       case "-h":
       case "help":
         return asOutcome({ ok: true, usage: USAGE });
+      // AMENDMENTS.md A68 (0.10.0 release prep) — same shape as the
+      // --help/-h/help case immediately above: `bin.ts` (the real `aart`
+      // entry point) short-circuits BEFORE ever calling this function,
+      // printing VERSION as plain stdout text at exit 0. This case exists
+      // for defense in depth, so a direct `run()` caller (this package's
+      // own tests, or any other embedder) gets a non-misleading
+      // `{ok:true}` outcome too, not just the real CLI binary.
+      case "--version":
+      case "-v":
+        return asOutcome({ ok: true, version: VERSION });
       case undefined:
         return asOutcome({ ok: false, error: "No command given.", usage: USAGE });
       default:
