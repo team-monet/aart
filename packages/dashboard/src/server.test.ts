@@ -11,7 +11,7 @@
 // (createFakeApiClient reading the same store, standing in for a live S2
 // process this worktree doesn't have).
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { createFakeEngine, startServer as startRealServer, DEFAULT_EVENTS_LIMIT, type ServerHandle } from "@aart/server";
+import { createFakeEngine, startServer as startRealServer, DEFAULT_EVENTS_LIMIT, MAX_EVENTS_LIMIT, type ServerHandle } from "@aart/server";
 import { createFakeApiClient, createHttpApiClient } from "./api-client.js";
 import type { ApiClient } from "./api-client.js";
 import { createFakeClock } from "./clock.js";
@@ -1005,6 +1005,91 @@ describe("GET /api/events + GET /api/events/stream — against a REAL @aart/serv
       expect(text.split(`"id":"${id}"`).length - 1).toBe(1);
     }
   });
+
+  // Wave 2 fix pass RE-REVIEW CORRECTION (AMENDMENTS.md A67 addendum): the
+  // sibling test above proves drainNewEventsSince fully recovers a burst
+  // below MAX_EVENTS_LIMIT (1000) — this test proves the honest, DOCUMENTED
+  // behavior ABOVE that ceiling, which the original FIX 1 doc comment and
+  // AMENDMENTS.md both mis-described as self-healing ("the cursor... keeps
+  // draining across subsequent ticks rather than losing anything"). It does
+  // NOT self-heal: `tick()` always advances `cursor` to the batch's own
+  // newest event, so a burst bigger than MAX_EVENTS_LIMIT permanently
+  // excludes its oldest overflow from the LIVE stream (the events remain in
+  // the store and are still reachable via GET /api/events/a refresh — see
+  // this route's own updated doc comment). This test also pins the SECOND
+  // bug the same re-review found: the safety-net `console.warn` meant to
+  // surface exactly this condition compared `batch.length` to the CALLER's
+  // own growing requested `limit`, which a real HTTP-backed drain can never
+  // match again once that requested limit exceeds the server's hard
+  // MAX_EVENTS_LIMIT clamp — so the warning was dead code for any burst
+  // large enough to actually hit the cap. Both halves verified failing
+  // against the pre-fix code before landing the fix; see the developer's
+  // own return for the exact revert/re-apply commands and output.
+  it("a burst LARGER than MAX_EVENTS_LIMIT delivers exactly MAX_EVENTS_LIMIT live (documented residual) and fires the cap-hit warning", async () => {
+    const { store, cleanup } = await createTestFixture();
+    cleanupStore = cleanup;
+    const clock = createFakeClock();
+    const engine = createFakeEngine(store, { ...clock, setTimeout: () => ({ cancel() {} }) });
+    serverHandle = await startRealServer({ store, engine, clock: { ...clock, setTimeout: () => ({ cancel() {} }) }, port: 0, runTicker: false });
+
+    // Same seed-fully-before-open discipline as the DEFAULT_EVENTS_LIMIT
+    // burst test above, and for the identical reason — scaled past
+    // MAX_EVENTS_LIMIT itself (not just DEFAULT_EVENTS_LIMIT) so the burst
+    // genuinely exceeds the SERVER's own hard cap, the only way to exercise
+    // it rather than just this route's own growing-limit re-query loop.
+    const BURST_SIZE = MAX_EVENTS_LIMIT + 50;
+    const future = Date.now() + 60_000;
+    const seededIds = Array.from({ length: BURST_SIZE }, (_, i) => `evt-cap-${i}`);
+    await Promise.all(seededIds.map((id, i) => store.events.append(makeEvent({ id, occurredAt: new Date(future + i).toISOString(), summary: `cap ${i}` }))));
+
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      dashboardHandle = await startDashboard({ api: createHttpApiClient(`http://127.0.0.1:${serverHandle.port}`), port: 0, eventsStreamPollIntervalMs: 30 });
+      stream = openSseStream(dashboardHandle.port, "/api/events/stream");
+      await waitFor(() => stream!.text().includes(":ok"));
+
+      // The whole burst drains inside ONE tick (drainNewEventsSince's own
+      // growing-limit loop runs to completion, sequentially, before tick()
+      // ever advances the cursor) — wait for that one tick's own
+      // MAX_EVENTS_LIMIT-sized delivery to land. Unlike the sibling test
+      // above, waiting for EVERY seeded id would hang until this test's own
+      // timeout: the oldest 50 are never coming.
+      await waitFor(
+        () => seededIds.filter((id) => stream!.text().includes(`"id":"${id}"`)).length >= MAX_EVENTS_LIMIT,
+        { timeoutMs: 15000 },
+      );
+      // Nothing further is ever appended and the cursor has already moved
+      // past the whole pre-seeded burst, so no later tick can add anything
+      // — a short settle window just lets any errant extra delivery show up
+      // before the final read below, rather than racing it.
+      await new Promise((resolve) => setTimeout(resolve, 200));
+
+      const text = stream!.text();
+
+      // (a) Exactly MAX_EVENTS_LIMIT delivered — not fewer (a regression to
+      // the old DEFAULT_EVENTS_LIMIT-only cap), not more (the server's own
+      // hard clamp genuinely cannot return more in one request) — and
+      // precisely the NEWEST MAX_EVENTS_LIMIT of the burst
+      // (EventLogStore.list's own newest-first contract): the oldest 50
+      // (evt-cap-0..49) are the permanently-not-pushed-live overflow this
+      // fix pass's corrected doc comment now describes honestly, and the
+      // newest 1000 (evt-cap-50..1049) all arrive.
+      for (let i = 0; i < 50; i++) {
+        expect(text).not.toContain(`"id":"evt-cap-${i}"`);
+      }
+      for (let i = 50; i < BURST_SIZE; i++) {
+        expect(text).toContain(`"id":"evt-cap-${i}"`);
+      }
+
+      // (b) The dead-warning bug, closed: the cap-hit path actually logs
+      // now, naming MAX_EVENTS_LIMIT itself, not just silently delivering.
+      expect(warnSpy).toHaveBeenCalled();
+      const warned = warnSpy.mock.calls.some(([message]) => String(message).includes("per-tick cap") && String(message).includes(String(MAX_EVENTS_LIMIT)));
+      expect(warned).toBe(true);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  }, 20000);
 
   // Wave 2 fix pass (AMENDMENTS.md A67 FIX 4, minor): setInterval fires on
   // a fixed wall-clock cadence regardless of whether the PREVIOUS tick's own

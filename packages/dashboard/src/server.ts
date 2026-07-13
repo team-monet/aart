@@ -18,7 +18,7 @@ import { existsSync } from "node:fs";
 import fs from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { createFsStore, type AartStore } from "@aart/store";
-import { DEFAULT_EVENTS_LIMIT } from "@aart/server";
+import { DEFAULT_EVENTS_LIMIT, MAX_EVENTS_LIMIT } from "@aart/server";
 import type { ApiClient } from "./api-client.js";
 import type { DashboardConfig } from "./config.js";
 import { DEFAULT_DASHBOARD_PORT, DEFAULT_EVENTS_STREAM_POLL_INTERVAL_MS } from "./config.js";
@@ -199,17 +199,31 @@ const MAX_DRAIN_ATTEMPTS = 6; // 100 -> 200 -> 400 -> 800 -> 1600 -> 3200: comfo
  * `since`+`limit`, no upper-bound/continuation-token parameter at all, so
  * there is no way for this file alone to ask "the next page after the ones
  * I already have" once MAX_EVENTS_LIMIT's hard clamp is reached. If
- * genuinely more than 1000 events land strictly between two ticks (a
- * sustained >600/s event rate against this stream's default 1.5s poll
- * interval), this drain can only recover the newest 1000 of them THIS
- * tick — the cursor still only ever advances to what was ACTUALLY sent
- * (never skips ahead), so a sustained burst this large keeps draining
- * across subsequent ticks rather than losing anything, but closing this
- * completely would need a real store/HTTP pagination-shape change, a
- * larger change than this fix pass's own scope. Below the 1000 ceiling —
- * the actual bug this fix closes, and the actual scenario the task
- * describes ("if >100 events land in one poll window") — drainage is fully
- * correct: nothing is ever dropped.
+ * genuinely more than MAX_EVENTS_LIMIT (1000) events land inside ONE
+ * tick's own poll window (a sustained >600/s event rate against this
+ * stream's default 1.5s poll interval), this drain can only push the
+ * newest MAX_EVENTS_LIMIT of them to the LIVE stream THIS tick — and this
+ * does NOT self-heal on a later tick (re-review correction, AMENDMENTS.md
+ * A67 addendum — an earlier draft of this comment claimed it did): `tick()`
+ * (below) always advances `cursor` to `batch[0].occurredAt`, the TRUE
+ * newest event returned (unaffected by the cap — both store adapters
+ * `ORDER BY occurred_at DESC` before `LIMIT` is applied, so index 0 is
+ * always the real newest), so the OLDER events that overflowed this tick's
+ * MAX_EVENTS_LIMIT-sized page are permanently skipped by every LATER
+ * tick's own `occurredAt >= cursor` filter — the same class of gap FIX 1
+ * closed below 1000, re-opened above it. Nothing is lost from the SYSTEM:
+ * the overflow stays in the event store and is still returned by `GET
+ * /api/events` (backfill) and visible on a dashboard refresh — only the
+ * LIVE PUSH skips it, for this session. Closing this completely needs a
+ * real store/HTTP pagination-shape change (an oldest-first/range query
+ * `EventLogStore.list` doesn't support today — only `since`+`limit`),
+ * outside this fix pass's own scope — left as a documented follow-up.
+ * Below MAX_EVENTS_LIMIT — the actual bug FIX 1 closes, and the actual
+ * scenario the original task described ("if >100 events land in one poll
+ * window") — drainage is fully correct: nothing is ever dropped, live or
+ * otherwise. The `console.warn` below fires whenever a tick's own drain
+ * hits the MAX_EVENTS_LIMIT cap, so this residual is an observable,
+ * documented signal, not a silent one.
  */
 async function drainNewEventsSince(api: ApiClient, cursor: string, initialLimit: number): Promise<EventLogEntry[]> {
   let limit = initialLimit;
@@ -222,19 +236,39 @@ async function drainNewEventsSince(api: ApiClient, cursor: string, initialLimit:
       // exists since `cursor` (batch.length happened to land exactly on a
       // limit boundary), or a real ApiClient's own GET /events hit
       // @aart/server's hard MAX_EVENTS_LIMIT clamp. Either way, asking for
-      // still more cannot help — this IS the final answer.
-      return grown;
+      // still more cannot help — this IS the final answer. `break` (not an
+      // early `return`) so the ONE cap check below — shared with this
+      // loop's normal exit — is what tells the two cases apart, rather
+      // than silently returning here without ever running that check (a
+      // re-review correction, AMENDMENTS.md A67 addendum: an earlier draft
+      // returned directly from this branch, which is exactly the shape
+      // that let a real cap-hit slip past the warning below undetected).
+      batch = grown;
+      break;
     }
     limit = grownLimit;
     batch = grown;
   }
-  if (batch.length === limit) {
-    // Exited because MAX_DRAIN_ATTEMPTS was reached while STILL seeing a
-    // full page every time — a genuinely extreme burst. See this
-    // function's own "KNOWN, ACCEPTED RESIDUAL LIMIT" doc above — logged,
-    // not silently swallowed; the cursor (set by the caller, from
-    // batch[0] below) still only advances to what was actually sent.
-    console.warn(`[dashboard] GET /api/events/stream: still seeing full pages after ${MAX_DRAIN_ATTEMPTS} growing attempts (limit=${limit}) while draining events since ${cursor} — delivering ${batch.length} events this tick; a sustained burst this large will keep draining across subsequent ticks.`);
+  if (batch.length === MAX_EVENTS_LIMIT) {
+    // Re-review correction (AMENDMENTS.md A67 addendum): this USED to
+    // compare `batch.length` to the CALLER's own last-requested `limit`
+    // (which keeps doubling: 100->200->400->...), not to the SERVER's
+    // actual hard cap — so once `limit` grew past MAX_EVENTS_LIMIT, a real
+    // ApiClient always returned exactly MAX_EVENTS_LIMIT regardless of how
+    // much bigger `limit` got, `batch.length === limit` could never be
+    // true again, and this warning was dead code for any burst large
+    // enough to actually hit the cap (confirmed directly: a burst just
+    // over MAX_EVENTS_LIMIT never fired it before this fix). Comparing
+    // against MAX_EVENTS_LIMIT itself (imported from @aart/server, the
+    // same constant `GET /events`'s own parseEventsLimit clamps to)
+    // detects the real condition: this tick's own drain hit the server's
+    // hard per-request ceiling, so if more than MAX_EVENTS_LIMIT new
+    // events genuinely landed since `cursor`, the oldest of them were not
+    // pushed to the live stream this tick (see this function's own
+    // "KNOWN, ACCEPTED RESIDUAL LIMIT" doc above) — they remain in the
+    // event store and are still available via `GET /api/events` (backfill)
+    // or a dashboard refresh, just not on the live push this session.
+    console.warn(`[dashboard] GET /api/events/stream: live event stream hit the per-tick cap (${batch.length} events, @aart/server's own MAX_EVENTS_LIMIT) while draining events since ${cursor} — if more than ${MAX_EVENTS_LIMIT} new events landed this tick, the oldest overflow was not pushed on the live stream; those events remain available via GET /api/events (backfill) or a dashboard refresh, not the live push.`);
   }
   return batch;
 }
