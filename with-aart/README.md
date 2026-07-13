@@ -31,7 +31,7 @@ _(Repo already cloned locally? Point at `with-aart/bootstrap/install.md` instead
 
 The agent then follows the [bootstrap playbook](bootstrap/install.md): **orient → get AART → wire this workspace's MCP config → offer the global working-instructions install → verify.** Why agent-first: the agent already has tools in your environment, so it can install, verify, and recover from failures conversationally.
 
-**One honest difference from a fully-published harness:** AART is pre-`1.0.0`, so Phase 2 of the playbook installs from source (`git clone` + build) rather than a one-line `npm i -g` — see [`AUTHORING.md`](../AUTHORING.md) part (b) for exactly why `npm i -g @team-monet/aart` isn't safe to run yet. Once `1.0.0` ships, that phase collapses to the single-line form.
+**Phase 2 of the playbook installs AART with `npm install -g @team-monet/aart`** (or `npx @team-monet/aart <cmd>`), correct as of `0.10.0` — see [`AUTHORING.md`](../AUTHORING.md) part (b) for the version-pin note (older `0.1.0`–`0.9.0` releases under this same package name are a different, superseded CLI) and the from-source alternative for contributors.
 
 ## Founder / developer reference
 

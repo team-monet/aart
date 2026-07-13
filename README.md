@@ -8,11 +8,12 @@ file, data), LLM calls, and durable human-in-the-loop waits — with
 approvals, capability-based trust modes, redaction, and evidence capture
 built in rather than bolted on.
 
-> **Status: pre-`1.0.0`.** `@team-monet/aart` is claimed on npm but the
-> published version there predates this repo's current architecture.
-> **Install from source** — see [`AUTHORING.md`](./AUTHORING.md)'s part (b)
-> for the exact commands and why `npm install -g @team-monet/aart` isn't
-> safe to run yet.
+> **Status: pre-`1.0.0` beta.** `npm install -g @team-monet/aart` (or `npx
+> @team-monet/aart <cmd>`) installs the real CLI as of `0.10.0` — the npm
+> versions `0.1.0`–`0.9.0` under this same package name are a different,
+> superseded CLI, not this repository. See [`AUTHORING.md`](./AUTHORING.md)
+> part (b) if `aart --version` doesn't print `0.10.0` or later, or if you'd
+> rather build from source (contributors, or pinning an exact commit).
 
 ## Where to go next
 

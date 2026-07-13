@@ -6,5 +6,5 @@
       "args": ["<absolute path to your install's dist/bin.js — aart init-agent fills this in for you>", "mcp"]
     }
   },
-  "_npx_alternative_once_1_0_0_ships": { "command": "npx", "args": ["-y", "@team-monet/aart", "mcp"] }
+  "_npx_alternative_as_of_0_10_0": { "command": "npx", "args": ["-y", "@team-monet/aart", "mcp"] }
 }
