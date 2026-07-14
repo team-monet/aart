@@ -3,7 +3,7 @@
 // assert no handle/memory growth 'in an obviously alarming way' (the
 // plan's own bar) and admission control actually queueing."
 //
-// Deliberately IN-PROCESS, unlike worker-kill/redacted-legacy-b's own E2E
+// Deliberately IN-PROCESS, unlike worker-kill/review-cycle's own E2E
 // tests — those need a genuinely separate OS process specifically because
 // their whole point is surviving a SIGKILL of that process. This test's
 // concern is different: observing the WORKER's own memory/handle behavior

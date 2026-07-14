@@ -5,8 +5,8 @@
 // real headless browser (Playwright, via @aart/blocks-core's real
 // browser.goto/web.read/browser.screenshot blocks), and real evidence
 // rendering (@aart/evidence's real renderModelFacing, via
-// createRealAartContext — the same real composition redacted-legacy-b/
-// redacted-legacy-a/redaction-adversarial's own E2E tests use, not stubs).
+// createRealAartContext — the same real composition review-cycle/
+// item-review/redaction-adversarial's own E2E tests use, not stubs).
 //
 // "Loop" is this file's own literal proof of AGENTS.md's documented
 // authoring loop (packages/mcp/src/init-agent.ts's generated instructions:

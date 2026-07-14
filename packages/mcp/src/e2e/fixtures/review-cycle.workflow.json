@@ -1,0 +1,124 @@
+{
+  "id": "review-cycle",
+  "name": "Review Cycle — Document Intake & Periodic Recheck Workflow",
+  "version": "0.1.0",
+  "inputs": [
+    { "name": "recordId", "type": "string", "required": true },
+    { "name": "documentText", "type": "string", "required": true, "description": "Already-parsed/uploaded document text (upload happens upstream of this workflow)." }
+  ],
+  "outputs": [],
+  "execution": {
+    "type": "workflow",
+    "steps": [
+      {
+        "id": "parse_document",
+        "uses": "demo.parse",
+        "with": { "rawText": "{{ inputs.documentText }}" }
+      },
+      {
+        "id": "extract_fields",
+        "uses": "llm.extract",
+        "with": {
+          "model": "anthropic/claude-sonnet-5",
+          "prompt": "Extract the record code, total amount, quantity, category, and next review date from this document.",
+          "input": "{{ steps.parse_document.outputs.structuredText }}",
+          "outputSchema": {
+            "type": "object",
+            "properties": {
+              "recordCode": { "type": "string" },
+              "totalAmount": { "type": "number" },
+              "quantity": { "type": "number" },
+              "category": { "type": "string" },
+              "nextReviewDate": { "type": "string" }
+            },
+            "required": ["recordCode", "totalAmount", "quantity", "category", "nextReviewDate"]
+          }
+        }
+      },
+      {
+        "id": "validate_fields",
+        "uses": "demo.validate",
+        "with": {
+          "recordCode": "{{ steps.extract_fields.outputs.recordCode }}",
+          "totalAmount": "{{ steps.extract_fields.outputs.totalAmount }}",
+          "quantity": "{{ steps.extract_fields.outputs.quantity }}"
+        }
+      },
+      {
+        "id": "review_fields",
+        "uses": "human.approval",
+        "with": {
+          "title": "Confirm or correct extracted fields",
+          "description": "Review the extracted fields before they're used to compute a recommendation."
+        }
+      },
+      {
+        "id": "run_scoring",
+        "uses": "demo.compute",
+        "with": {
+          "recordId": "{{ inputs.recordId }}",
+          "validatedFields": "{{ steps.validate_fields.outputs }}"
+        }
+      },
+      {
+        "id": "render_summary",
+        "uses": "demo.render",
+        "with": {
+          "recordId": "{{ inputs.recordId }}",
+          "scoring": "{{ steps.run_scoring.outputs }}"
+        }
+      },
+      {
+        "id": "approve_summary",
+        "uses": "human.approval",
+        "with": {
+          "title": "Approve recommendation summary",
+          "description": "Approve this summary before it's exported."
+        }
+      },
+      {
+        "id": "export_report",
+        "uses": "artifact.write",
+        "with": {
+          "name": "recommendation-summary.pdf",
+          "kind": "pdf",
+          "mime": "application/pdf",
+          "content": "{{ steps.render_summary.outputs.summary }}"
+        }
+      },
+      {
+        "id": "compute_next_window",
+        "uses": "demo.compute_window",
+        "with": { "nextReviewDate": "{{ steps.extract_fields.outputs.nextReviewDate }}" }
+      },
+      {
+        "id": "recheck_wait",
+        "uses": "wait.until",
+        "with": { "resumeAt": "{{ steps.compute_next_window.outputs.resumeAt }}" }
+      },
+      {
+        "id": "rescan",
+        "uses": "demo.compute",
+        "with": { "recordId": "{{ inputs.recordId }}" },
+        "maxIterations": 6,
+        "next": "recheck_wait"
+      }
+    ]
+  },
+  "approval": "approved",
+  "gates": {
+    "validate": "passed",
+    "readiness": "passed",
+    "evals": "passed",
+    "riskReview": "passed",
+    "humanReview": "passed"
+  },
+  "category": "demo",
+  "keywords": ["demo", "flagship", "recheck-timer", "guarded-loop", "human-in-the-loop"],
+  "examples": [
+    {
+      "description": "A document is submitted, extracted, validated, reviewed, scored, summarized, approved, exported, then enters the guarded recheck-scan cycle.",
+      "inputs": { "recordId": "record-42", "documentText": "Record code: 6305123456\nTotal amount: $184.20\nQuantity: 612\nCategory: Standard Tier A\nNext review date: 2027-01-01" }
+    }
+  ]
+}

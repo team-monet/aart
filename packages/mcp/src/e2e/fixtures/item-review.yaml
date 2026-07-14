@@ -1,0 +1,160 @@
+# Item Review — conditional human-gate E2E fixture (neutral, story-free).
+#
+# Deliberately industry-neutral (AMENDMENTS.md A70): this workflow and its
+# compiled `item-review.workflow.json` sibling replace a former example
+# workflow that carried a specific customer/domain narrative, removed from
+# the product (2026-07-14).
+# The if/branch shape, wait behavior, and real-vs-fixture block split are
+# preserved assertion-for-assertion — see `item-review.e2e.test.ts`'s own
+# header comment for the coverage mapping.
+#
+# The flow:
+#
+#   item submitted -> llm.classify claims -> rule check -> risk score ->
+#   human review if needed -> publish/reject -> correction becomes eval
+#
+# "item submitted" has no dedicated step, same convention `review-cycle.yaml`
+# established for "record submitted": this workflow's `itemId`/`itemText`
+# inputs model the already-submitted item arriving as trigger input —
+# "submission" is what produces that input, not a step this workflow itself
+# executes.
+#
+# --- The if/branch design ---
+#
+# `human_review` is the ONLY conditional step: `if: "{{
+# steps.score_risk.outputs.needsReview }}"`. When true (high risk), it
+# dispatches for real — `human.approval` is the one Human-group block that
+# actually creates a `WaitCondition` (architecture §4.4's exhaustive
+# 7-member wait-block-id list; `packages/engine/src/wait/wait-blocks.ts`) —
+# and the run genuinely pauses. When false (low risk), the step is SKIPPED
+# entirely (never dispatched, no wait created) and the run proceeds
+# straight to publish.
+#
+# `then`/`else` route to two DELIBERATELY SEPARATE downstream chains
+# (`finalize_reviewed`/`notify_reviewed` vs `finalize_auto`/`notify_auto`)
+# rather than one shared "publish" step: `@aart/expr`'s resolver fails
+# loudly (not silently `undefined`) if any segment of a `{{ }}` path is
+# missing (`packages/expr/src/resolver.ts`'s `resolvePath`) — a SKIPPED
+# step's trace has no `outputs` at all, so a step reachable from BOTH
+# branches could never safely reference `steps.human_review.outputs.status`
+# (it would throw whenever reached via the low-risk/skip branch). Both
+# chains reconverge at `item_processed` (`flow.noop`, a real, already-
+# implemented no-op block used here purely as a safe closing marker whose
+# own `with:` only ever reads `inputs.itemId` — never a step that only ran
+# on one branch) via an explicit `next:`.
+#
+# --- "correction becomes eval" ---
+#
+# Deliberately NOT a workflow step below. `@aart/evidence`'s correction
+# capture (`recordCorrection`) and eval-example creation
+# (`createEvalExampleFromCorrection`) are store-backed functions with no
+# corresponding `uses:`-able BlockImplementation anywhere in
+# `@aart/blocks-core`/`@aart/llm`. This represents a human, after this run
+# has already completed, reviewing it and promoting a correction into an
+# eval example — a POST-HOC action taken against a finished run, not
+# something inside this workflow's own `execution.steps`.
+# `item-review.e2e.test.ts` exercises this as a separate, explicit step
+# after the run below reaches a terminal state.
+#
+# Real vs fixture, disclosed honestly: `llm.classify` and `human.approval`
+# are real, fully-implemented `@aart/llm`/`@aart/blocks-core` blocks,
+# dispatched through the real `@aart/engine`. `flow.noop` (the
+# `item_processed` closing step) is also real. Every `demo.*` step
+# (`check_rules`, `score_risk`, `finalize_reviewed`/`finalize_auto`,
+# `notify_reviewed`/`notify_auto`) is a domain-pack-shaped fixture,
+# registered only in the E2E test's own BlockRegistry, never in this file.
+
+id: item-review
+name: "Item Review Workflow"
+version: 0.1.0
+
+inputs:
+  itemId:
+    type: string
+    required: true
+  itemText:
+    type: string
+    required: true
+    description: "The submitted item's description/claims text (submission happens upstream of this workflow)."
+
+steps:
+  # llm.classify claims — REAL block, REAL dispatch.
+  - id: classify_item
+    uses: llm.classify
+    with:
+      model: "anthropic/claude-sonnet-5"
+      prompt: "Classify this submitted item's text for policy risk: is it compliant, borderline (needs human review), or clearly prohibited (e.g. unsubstantiated claims)?"
+      input: "{{ inputs.itemText }}"
+      labels: ["compliant", "needs_review", "prohibited"]
+
+  # rule check — deterministic, and DELIBERATELY independent of the LLM's
+  # own classification (separation-of-concerns: the LLM classifies, and
+  # deterministic code checks rules against the raw text, never consulting
+  # classify_item's output).
+  - id: check_rules
+    uses: demo.check
+    with:
+      itemId: "{{ inputs.itemId }}"
+      itemText: "{{ inputs.itemText }}"
+
+  # risk score — fuses the LLM classification with the deterministic rule
+  # check result into the single `needsReview` boolean the conditional
+  # human-review step below is gated on.
+  - id: score_risk
+    uses: demo.score
+    with:
+      claimsLabel: "{{ steps.classify_item.outputs.label }}"
+      rulesPassed: "{{ steps.check_rules.outputs.passed }}"
+      violations: "{{ steps.check_rules.outputs.violations }}"
+
+  # human review if needed — REAL human.approval. Conditional via `if` —
+  # see this file's own header comment for the full if/branch rationale.
+  - id: human_review
+    uses: human.approval
+    if: "{{ steps.score_risk.outputs.needsReview }}"
+    then: finalize_reviewed
+    else: finalize_auto
+    with:
+      title: "Review flagged item"
+      description: "Item {{ inputs.itemId }} was classified \"{{ steps.classify_item.outputs.label }}\" with risk score {{ steps.score_risk.outputs.riskScore }} — review before publish/reject."
+
+  # --- high-risk chain (reached via human_review's `then`) ---
+
+  - id: finalize_reviewed
+    uses: demo.publish
+    with:
+      itemId: "{{ inputs.itemId }}"
+      reviewStatus: "{{ steps.human_review.outputs.status }}"
+      reviewer: "{{ steps.human_review.outputs.reviewer }}"
+
+  - id: notify_reviewed
+    uses: demo.notify
+    with:
+      itemId: "{{ inputs.itemId }}"
+      outcome: "{{ steps.finalize_reviewed.outputs.action }}"
+    next: item_processed
+
+  # --- low-risk chain (reached via human_review's `else`; never
+  # references human_review's outputs) ---
+
+  - id: finalize_auto
+    uses: demo.publish
+    with:
+      itemId: "{{ inputs.itemId }}"
+      reviewStatus: "auto-approved"
+      reviewer: "risk-engine"
+
+  - id: notify_auto
+    uses: demo.notify
+    with:
+      itemId: "{{ inputs.itemId }}"
+      outcome: "{{ steps.finalize_auto.outputs.action }}"
+    next: item_processed
+
+  # --- shared closing marker (both chains converge here) — REAL
+  # flow.noop, deliberately reading only `inputs.itemId`. ---
+
+  - id: item_processed
+    uses: flow.noop
+    with:
+      value: { itemId: "{{ inputs.itemId }}" }
