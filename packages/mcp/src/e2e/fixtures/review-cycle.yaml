@@ -24,8 +24,9 @@
 # `review-cycle.e2e.test.ts`/`review-cycle-worker.mjs`'s own BlockRegistry,
 # never implemented in `@aart/blocks-core`): `demo.parse`, `demo.validate`,
 # `demo.compute` (used twice — the initial scoring pass AND the guarded
-# rescan step, same block id reused both places, matching the original
-# fixture's own precedent for `demo-compute.run`), `demo.render`,
+# rescan step, same block id reused both places, matching the removed
+# original fixture's own precedent of reusing one block id both places),
+# `demo.render`,
 # `demo.compute_window`. This is authored as real `uses:` references anyway
 # — matching what a real user would write against an installed pack.
 #

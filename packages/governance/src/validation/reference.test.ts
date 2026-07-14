@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { CapabilityClosureLookup } from "../capability.js";
 import { validateReferences } from "./reference.js";
 
-const KNOWN_BLOCKS = ["browser.goto", "web.read", "assert.contains", "demo-compute.run", "wait.until"];
+const KNOWN_BLOCKS = ["browser.goto", "web.read", "assert.contains", "demo.compute", "wait.until"];
 const lookup: CapabilityClosureLookup = {
   resolve: (id) => (KNOWN_BLOCKS.includes(id) ? { kind: "block", capabilities: [] } : undefined),
 };
@@ -47,7 +47,7 @@ describe("validateReferences — class 2 (spec §18.2)", () => {
     const findings = validateReferences(
       wf([
         { id: "recheck_wait", uses: "wait.until" },
-        { id: "rescan", uses: "demo-compute.run", next: "recheck_wait" }, // no maxIterations/until
+        { id: "rescan", uses: "demo.compute", next: "recheck_wait" }, // no maxIterations/until
       ]),
       { blockCatalog: lookup, knownBlockIds: KNOWN_BLOCKS },
     );
@@ -58,7 +58,7 @@ describe("validateReferences — class 2 (spec §18.2)", () => {
     const findings = validateReferences(
       wf([
         { id: "recheck_wait", uses: "wait.until" },
-        { id: "rescan", uses: "demo-compute.run", maxIterations: 6, next: "recheck_wait" },
+        { id: "rescan", uses: "demo.compute", maxIterations: 6, next: "recheck_wait" },
       ]),
       { blockCatalog: lookup, knownBlockIds: KNOWN_BLOCKS },
     );
@@ -69,7 +69,7 @@ describe("validateReferences — class 2 (spec §18.2)", () => {
     const findings = validateReferences(
       wf([
         { id: "recheck_wait", uses: "wait.until" },
-        { id: "rescan", uses: "demo-compute.run", until: "{{ steps.rescan.outputs.done }}", next: "recheck_wait" },
+        { id: "rescan", uses: "demo.compute", until: "{{ steps.rescan.outputs.done }}", next: "recheck_wait" },
       ]),
       { blockCatalog: lookup, knownBlockIds: KNOWN_BLOCKS },
     );
