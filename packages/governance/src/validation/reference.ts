@@ -19,7 +19,7 @@ export interface ReferenceValidationContext {
  * to any frozen interface): spec §18.2 lists "no direct self-reference"
  * and "cycles must declare exit guards" as two SEPARATE bullets. Neither
  * source document's worked example (architecture §18.2's own
- * redacted-legacy-b renewal-cycle fixture) demonstrates a true self-loop
+ * guarded-loop worked example) demonstrates a true self-loop
  * (`rescan.next` targets `recheck_wait`, a DIFFERENT earlier step,
  * not itself) — so nothing shows a guarded self-loop being accepted.
  * Treated as two independent rules: `step.next === step.id` is ALWAYS an

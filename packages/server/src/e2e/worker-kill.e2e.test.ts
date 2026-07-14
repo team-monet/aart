@@ -1,12 +1,12 @@
 // Mid-step worker-kill E2E (S9 plan §4's unattempted item, S10 completion).
-// The redacted-legacy-b E2E (packages/mcp/src/e2e/redacted-legacy-b.e2e.test.ts)
+// The review-cycle E2E (packages/mcp/src/e2e/review-cycle.e2e.test.ts)
 // already proves a real worker process survives a SIGKILL issued while
 // HANGING AT A WAIT boundary (the run already checkpointed to "waiting"
 // and durably persisted before the kill). THIS test is the first real-
 // process proof of the DIFFERENT machinery architecture §4.7 actually
 // exists for: a worker killed WHILE ACTIVELY EXECUTING A STEP (mid-
 // dispatch, nothing yet persisted for this attempt) — job_queue's
-// lease/reclaim mechanism, never exercised by redacted-legacy-b's E2E (which
+// lease/reclaim mechanism, never exercised by review-cycle's E2E (which
 // drives engine.triggerRun/executeRun directly, bypassing job_queue's
 // claim loop entirely).
 //
@@ -139,7 +139,7 @@ describe("worker-kill E2E — SIGKILL a real worker process DURING step executio
       expect(stepStarted).toMatchObject({ event: "step-started", attempt: 1 });
 
       // Confirm process A is a real, still-running, independent OS process
-      // before killing it (same discipline as redacted-legacy-b.e2e.test.ts).
+      // before killing it (same discipline as review-cycle.e2e.test.ts).
       expect(a.child.pid).toBeDefined();
       expect(isProcessAlive(a.child.pid!)).toBe(true);
 
@@ -158,7 +158,7 @@ describe("worker-kill E2E — SIGKILL a real worker process DURING step executio
       // step - it died before dispatchOnce ever returned, so
       // appendTracesAndPersist never ran for this attempt. This is the
       // concrete evidence "mid-step" really means mid-step, not "between
-      // steps": a wait-boundary kill (redacted-legacy-b's E2E) always leaves a
+      // steps": a wait-boundary kill (review-cycle's E2E) always leaves a
       // fully-persisted checkpoint; this kill leaves NOTHING for the step
       // that was actually running.
       const runAfterKill = await store.runs.get(runId);
@@ -197,7 +197,7 @@ describe("worker-kill E2E — SIGKILL a real worker process DURING step executio
       const runFinished = await b.nextEvent();
       expect(runFinished).toMatchObject({ event: "run-finished", runId, status: "completed" });
 
-      // --- Step 9: final verification - read the on-disk store directly (a THIRD, independent reader, same discipline as redacted-legacy-b.e2e.test.ts's own final check). ---
+      // --- Step 9: final verification - read the on-disk store directly (a THIRD, independent reader, same discipline as review-cycle.e2e.test.ts's own final check). ---
       const finalRun = await store.runs.get(runId);
       expect(finalRun?.status).toBe("completed");
       expect(finalRun?.trace).toHaveLength(1);

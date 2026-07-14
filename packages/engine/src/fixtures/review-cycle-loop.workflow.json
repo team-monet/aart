@@ -1,0 +1,48 @@
+{
+  "id": "review-cycle-loop",
+  "name": "Review Cycle Loop (guarded loop fragment)",
+  "version": "0.1.0",
+  "inputs": [
+    { "name": "recordId", "type": "string", "required": true },
+    { "name": "nextReviewDate", "type": "string", "required": true }
+  ],
+  "outputs": [],
+  "execution": {
+    "type": "workflow",
+    "steps": [
+      {
+        "id": "compute_next_window",
+        "uses": "demo.compute_window",
+        "with": { "nextReviewDate": "{{ inputs.nextReviewDate }}" }
+      },
+      {
+        "id": "recheck_wait",
+        "uses": "wait.until",
+        "with": { "resumeAt": "{{ steps.compute_next_window.outputs.resumeAt }}" }
+      },
+      {
+        "id": "rescan",
+        "uses": "demo.compute",
+        "with": { "recordId": "{{ inputs.recordId }}" },
+        "maxIterations": 6,
+        "next": "recheck_wait"
+      }
+    ]
+  },
+  "approval": "approved",
+  "gates": {
+    "validate": "passed",
+    "readiness": "passed",
+    "evals": "passed",
+    "riskReview": "passed",
+    "humanReview": "passed"
+  },
+  "category": "demo",
+  "keywords": ["demo", "recheck-timer", "guarded-loop"],
+  "examples": [
+    {
+      "description": "A record due for recheck in ~120 days enters the guarded recheck-scan cycle.",
+      "inputs": { "recordId": "record-42", "nextReviewDate": "2027-01-01T00:00:00.000Z" }
+    }
+  ]
+}

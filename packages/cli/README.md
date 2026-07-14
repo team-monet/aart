@@ -84,15 +84,6 @@ aart mcp [--store fs|sqlite] [--root <dir>]
 - `aart init-agent` scaffolds the agent-facing instructions AART ships for coding assistants working against a repo that uses it, plus a ready-to-use `.mcp.json`. By default the generated config invokes this exact `aart` binary directly (`{"command": "node", "args": ["<path to this install's bin.js>", "mcp"]}`) rather than `npx` — correct regardless of exactly which install (npm or from-source) generated it, and avoids a fresh `npx` resolve on every MCP client launch. Pass `--npx` to opt into the registry-resolved `npx -y <package> mcp` form instead, safe as of `0.10.0` (see the install note above). See [`AUTHORING.md`](../../AUTHORING.md) for the full authoring-machine walkthrough.
 - `aart request-approval` creates a human-approval request — for a workflow VERSION (the promotion gate) or, automatically, whenever a running workflow hits a `human.approval` step. `aart approve` records the decision either way.
 
-## Example workflows
-
-Two full, runnable example workflows ship in this repository's `examples/` directory (not part of the published package, but useful reference material if you're browsing the source):
-
-- `examples/redacted-legacy-b/` — a bill-processing and renewal-recommendation workflow: parse → LLM extraction → deterministic validation → human review → pricing → human approval → export → a guarded renewal-timer re-entry cycle. Demonstrates the full wait/resume durability model, including surviving a real process restart mid-run.
-- `examples/redacted-legacy-a/` — a marketplace-listing review workflow: LLM classification → deterministic policy check → risk scoring → conditional human review → publish/reject → correction-to-eval feedback loop. Demonstrates conditional (`if`/`then`/`else`) branching around a human-in-the-loop gate.
-
-Both README files alongside those examples disclose exactly which steps are real, fully-implemented AART blocks versus illustrative domain-pack stand-ins (packs are a separate, later-roadmap distribution mechanism — see the architecture doc).
-
 ## Status
 
 This is an early (`0.x`) release. The core engine, governance model, and block catalog are built and tested; domain-specific packs (installable third-party block bundles) are not yet part of this release. See this package's `CHANGELOG.md` for release notes.

@@ -119,7 +119,7 @@ export interface RealAartContextResult {
  * `@aart/governance` policy functions, real `@aart/evidence` reports/
  * corrections/eval-running, real `@aart/registry` block search. This is
  * what production entry points and this session's own flagship E2E tests
- * (`examples/redacted-legacy-b`, `examples/redacted-legacy-a`) exercise — an
+ * (`review-cycle`/`item-review`, `packages/mcp/src/e2e/`) exercise — an
  * `options.engine`/`governance`/`evidence`/`registry` override still works
  * (an E2E test that wants to override just one piece can), matching
  * `createAartContext`'s own override discipline.

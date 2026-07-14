@@ -5,6 +5,23 @@ This file summarizes each release; for the full build and verification
 record behind every change (every session's findings, fixes, and evidence)
 see [`AMENDMENTS.md`](./AMENDMENTS.md).
 
+## Unreleased
+
+### Removed
+
+- **The two flagship example workflows and their `examples/` directory.**
+  The product now ships zero customer/domain-specific content — the
+  former example workflows named a specific fictional customer/industry
+  narrative that has no place in a general-purpose runtime. Their
+  end-to-end test coverage is fully preserved: both flows now run against
+  neutral, story-free fixtures living inside the packages that test them
+  (`packages/mcp/src/e2e/fixtures/review-cycle.*`,
+  `packages/mcp/src/e2e/fixtures/item-review.*`,
+  `packages/engine/src/fixtures/review-cycle-loop.*`), with domain-pack
+  fixture blocks renamed under a neutral `demo.*` id namespace. See
+  `AMENDMENTS.md` A70 for the full rationale and before/after coverage
+  mapping.
+
 ## 0.10.0 — 2026-07-13
 
 **Status: beta (pre-`1.0.0`).** The first release of this repository's

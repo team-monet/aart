@@ -1,0 +1,54 @@
+# Review-cycle loop — guarded-loop test fixture (neutral, story-free).
+#
+# This is the guarded back-edge shape architecture §18.2 documents ("A
+# guarded cycle — worked example"): `rescan` declares `maxIterations: 6`
+# and `next: recheck_wait`, an earlier step, making this a legal cycle (an
+# *unguarded* cycle is a validation error, spec §18.2). `recheck_wait` is a
+# `wait.until` timer wait whose `resumeAt` is computed by the preceding
+# `compute_next_window` step (spec §20.2 — a derived value like "120 days
+# before the next review date" cannot be expressed inline in `{{ }}`, per
+# the expression model's deliberate exclusion of arithmetic, spec §14.3).
+#
+# Deliberately industry-neutral (AMENDMENTS.md A70): this fixture and
+# `review-cycle.yaml`/`.workflow.json` (packages/mcp/src/e2e/fixtures/)
+# replace a former repo-root example-workflow fixture that carried a
+# specific customer/domain narrative, removed from the product
+# (2026-07-14). Same step ids/`uses`/`maxIterations`/`next`
+# shape as `review-cycle.yaml`'s own tail — this fragment is reused
+# verbatim as that workflow's closing loop, exactly as this fixture's
+# predecessor was.
+#
+# `demo.compute_window` / `demo.compute` are domain-pack-shaped fixture
+# blocks (not real, shipped blocks) — registered only inside
+# `guarded-loop.test.ts`, never implemented in `@aart/blocks-core`. See
+# that test file's own header comment.
+
+id: review-cycle-loop
+name: "Review Cycle Loop (guarded loop fragment)"
+version: 0.1.0
+
+inputs:
+  recordId:
+    type: string
+    required: true
+  nextReviewDate:
+    type: string
+    required: true
+
+steps:
+  - id: compute_next_window
+    uses: demo.compute_window
+    with:
+      nextReviewDate: "{{ inputs.nextReviewDate }}"
+
+  - id: recheck_wait
+    uses: wait.until
+    with:
+      resumeAt: "{{ steps.compute_next_window.outputs.resumeAt }}"
+
+  - id: rescan
+    uses: demo.compute
+    with:
+      recordId: "{{ inputs.recordId }}"
+    maxIterations: 6
+    next: recheck_wait

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // The rolling-upgrade / schema-version E2E test's runner process (S9 plan
 // §4's unattempted item, S10 completion). Same "must run as a genuinely
-// separate OS process" discipline as redacted-legacy-b-worker.mjs/worker-kill
+// separate OS process" discipline as review-cycle-worker.mjs/worker-kill
 // -worker.mjs — a real rolling upgrade means two DIFFERENT engine builds,
 // running as genuinely separate processes, one reading state the other
 // wrote; simulating that in-process (two engine instances in one Node

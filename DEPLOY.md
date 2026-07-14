@@ -411,9 +411,9 @@ Secrets Manager, ...). `Environment.secretSource` (a per-environment "where
 does this environment's secret come from" descriptor field) exists in the
 store schema and is settable, but **nothing resolves a value from it today**
 — it's real, persisted, and shown read-only in the dashboard's production
-view, but not wired to any actual fetch. If redacted-legacy-a needs real secret-
-manager integration, that's separate feature work, not something to expect
-from `AART_SECRET_*`/`secrets.json` as shipped.
+view, but not wired to any actual fetch. If your deployment needs real
+secret-manager integration, that's separate feature work, not something to
+expect from `AART_SECRET_*`/`secrets.json` as shipped.
 
 For a real deployment: prefer `AART_SECRET_*` env vars injected by whatever
 already manages secrets for your infrastructure (systemd's

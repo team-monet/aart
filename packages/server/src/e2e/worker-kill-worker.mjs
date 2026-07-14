@@ -4,18 +4,18 @@
 // step execution (not at a wait boundary) and prove the lease-expiry ->
 // reclaim-sweep -> bounded-retry machinery (architecture §4.7) recovers
 // the run in a fresh process"). Same "must run as a genuinely separate OS
-// process" rationale as redacted-legacy-b-worker.mjs (this same convention,
+// process" rationale as review-cycle-worker.mjs (this same convention,
 // scripts/smoke/*.mjs before it) — SIGKILL can only prove anything about
 // durability if the thing being killed is a real, separate OS process, not
 // vitest's own process.
 //
-// Distinct from redacted-legacy-b-worker.mjs in a load-bearing way:
-// redacted-legacy-b's E2E kills a worker only ever at a WAIT boundary (after
+// Distinct from review-cycle-worker.mjs in a load-bearing way:
+// review-cycle's E2E kills a worker only ever at a WAIT boundary (after
 // the run has already checkpointed to "waiting" and durably persisted —
 // the kill happens to an otherwise-idle, hanging process). THIS script's
 // whole point is to be killed WHILE ACTIVELY EXECUTING A STEP — proving
 // the job_queue lease/reclaim machinery (architecture §4.7), which
-// redacted-legacy-b's E2E never exercises at all (it drives engine.triggerRun/
+// review-cycle's E2E never exercises at all (it drives engine.triggerRun/
 // executeRun directly, never going through a real job_queue claim loop).
 //
 // Runs a REAL @aart/server startWorker (this package's own claim loop +
@@ -41,7 +41,7 @@ function parseArgs(argv) {
 }
 
 function emit(event) {
-  // One JSON line per event on stdout, same convention as redacted-legacy-b-
+  // One JSON line per event on stdout, same convention as review-cycle-
   // worker.mjs — the test harness reads these to know exactly when a step
   // has GENUINELY started executing (not merely claimed), which is the
   // precise moment it's safe to SIGKILL for a real mid-step proof.
@@ -160,7 +160,7 @@ async function main() {
     }
 
     // Deliberately never resolves on its own — same libuv-handle
-    // requirement redacted-legacy-b-worker.mjs's hangForever() documents (a
+    // requirement review-cycle-worker.mjs's hangForever() documents (a
     // bare unresolved Promise has no associated handle and would let Node
     // exit early); startWorker's own claim-poll timer + health server
     // already provide that, so this just needs to not return, which the

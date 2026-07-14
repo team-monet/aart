@@ -19,7 +19,7 @@ import { createFsStore, recordRunTerminalEvent, type AartStore } from "@aart/sto
 import type { ValidateFn, RunSuccessFn } from "./types.js";
 
 // A fake Anthropic client (AnthropicClientLike, matching
-// packages/mcp/src/e2e/redacted-legacy-b-worker.mjs's own established use of
+// packages/mcp/src/e2e/review-cycle-worker.mjs's own established use of
 // this exact injection point) — this package has no legitimate use for a
 // REAL provider call: an authoring TASK's own scripted/model-generated
 // candidate workflow may itself contain an llm.call/llm.extract/

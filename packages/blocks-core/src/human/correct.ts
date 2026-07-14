@@ -1,7 +1,8 @@
 // human.correct — spec §15.3 Human group.
 //
-// S9 integration fix (found while authoring examples/redacted-legacy-b's full
-// flagship workflow — see root AMENDMENTS.md's dedicated entry on this):
+// S9 integration fix (found while authoring the flagship example
+// workflow's full flow — domain content since removed, A70; see root
+// AMENDMENTS.md's dedicated entry on this):
 // this block's ORIGINAL shape/doc comment claimed it was "wait-shaped,
 // reusing the SAME WaitCondition{type:'approval'} mechanism human.approval
 // uses... this block genuinely pauses the run" — that claim was FALSE in

@@ -5,7 +5,7 @@
 // successful resume on the compatible path."
 //
 // Two genuinely separate OS processes throughout (schema-version-runner.mjs,
-// this same directory) — same discipline as redacted-legacy-b.e2e.test.ts and
+// this same directory) — same discipline as review-cycle.e2e.test.ts and
 // worker-kill.e2e.test.ts: a real rolling-upgrade proof needs a process
 // boundary between "the engine build that wrote this record" and "the
 // engine build trying to resume it," not two engine instances sharing one
