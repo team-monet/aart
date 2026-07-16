@@ -3,7 +3,10 @@ import { Link } from "../router";
 import { Button } from "@/components/ui/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { StatusBadge } from "../components/StatusBadge";
-import { RefreshCw, FileEdit, CheckSquare } from "lucide-react";
+import { PageHeader } from "../components/PageHeader";
+import { LoadingState } from "../components/LoadingState";
+import { EmptyState } from "../components/EmptyState";
+import { Clock, FileEdit, CheckSquare, RefreshCw } from "lucide-react";
 import type { WaitCondition } from "@aart/types";
 
 /** `GET /api/waiting-runs`'s real response shape (server.ts, mirroring
@@ -53,33 +56,38 @@ export function WaitingRunsPage() {
     return `${diffHr}h ${diffMin % 60}m ago`;
   };
 
+  const ageColor = (createdAt: string, serverNow: string) => {
+    const diffMs = new Date(serverNow).getTime() - new Date(createdAt).getTime();
+    const hours = diffMs / (1000 * 60 * 60);
+    if (hours > 4) return "text-rose-400";
+    if (hours > 1) return "text-amber-400";
+    return "text-zinc-400";
+  };
+
   return (
     <div className="space-y-6">
-      <div className="flex justify-between items-center">
-        <div>
-          <h1 className="text-3xl font-bold tracking-tight text-zinc-100">Waiting Runs</h1>
-          <p className="text-sm text-zinc-400">Manage runs blocked on manual decisions, external hooks, or gates.</p>
-        </div>
-        <Button variant="outline" size="sm" onClick={fetchWaitingRuns} className="border-zinc-800 hover:bg-zinc-900 text-zinc-300">
-          <RefreshCw className="mr-1.5 h-4 w-4" />
-          Refresh
-        </Button>
-      </div>
+      <PageHeader
+        icon={Clock}
+        iconColor="text-amber-400"
+        title="Waiting Runs"
+        subtitle="Manage runs blocked on manual decisions, external hooks, or gates."
+        actions={
+          <Button variant="outline" size="sm" onClick={fetchWaitingRuns} className="border-zinc-800 hover:bg-zinc-900 text-zinc-300">
+            <RefreshCw className="mr-1.5 h-4 w-4" />
+            Refresh
+          </Button>
+        }
+      />
 
-      <div className="bg-zinc-950 border border-zinc-900 rounded-xl overflow-hidden">
+      <div className="bg-zinc-900/30 border border-zinc-800 rounded-xl overflow-hidden animate-slide-up">
         {loading ? (
-          <div className="flex justify-center items-center py-24 text-zinc-500 text-sm font-medium">
-            <RefreshCw className="mr-2 h-4 w-4 animate-spin text-zinc-400" />
-            Loading waiting runs...
-          </div>
+          <LoadingState message="Loading waiting runs..." />
         ) : !data || data.waitingRuns.length === 0 ? (
-          <div className="text-center py-24 text-zinc-500 text-sm">
-            No runs are currently waiting on human action.
-          </div>
+          <EmptyState icon={Clock} message="No runs are currently waiting on human action." />
         ) : (
           <Table>
-            <TableHeader className="bg-zinc-900/50 border-zinc-850">
-              <TableRow className="border-zinc-850 hover:bg-transparent">
+            <TableHeader className="bg-zinc-900/50 border-zinc-800">
+              <TableRow className="border-zinc-800 hover:bg-transparent">
                 <TableHead className="text-zinc-400 text-xs font-semibold">Run ID</TableHead>
                 <TableHead className="text-zinc-400 text-xs font-semibold">Step ID</TableHead>
                 <TableHead className="text-zinc-400 text-xs font-semibold">Wait Type</TableHead>
@@ -94,7 +102,7 @@ export function WaitingRunsPage() {
                 const waitType = waitObj.wait?.type || "unknown";
                 
                 return (
-                  <TableRow key={`${runId}-${stepId}`} className="border-zinc-850 hover:bg-zinc-900/20">
+                  <TableRow key={`${runId}-${stepId}`} className="border-zinc-800 hover:bg-zinc-900/20">
                     <TableCell className="font-mono text-zinc-200 text-sm font-medium">
                       <Link href={`/runs/${runId}`} className="text-primary hover:underline">
                         {runId}
@@ -104,7 +112,7 @@ export function WaitingRunsPage() {
                     <TableCell>
                       <StatusBadge status={waitType} />
                     </TableCell>
-                    <TableCell className="text-zinc-400 text-xs font-mono">
+                    <TableCell className={`text-xs font-mono ${waitObj.createdAt ? ageColor(waitObj.createdAt, data.now) : "text-zinc-400"}`}>
                       {waitObj.createdAt ? calculateAge(waitObj.createdAt, data.now) : "-"}
                     </TableCell>
                     <TableCell className="text-right space-x-2">

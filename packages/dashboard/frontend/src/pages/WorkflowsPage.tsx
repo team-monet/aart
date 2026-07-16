@@ -4,7 +4,11 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { StatusBadge } from "../components/StatusBadge";
-import { ArrowLeft, RefreshCw, Check, X, ShieldAlert, Zap, AlertTriangle, ArrowRightLeft } from "lucide-react";
+import { PageHeader } from "../components/PageHeader";
+import { LoadingState } from "../components/LoadingState";
+import { EmptyState } from "../components/EmptyState";
+import { AlertBanner } from "../components/AlertBanner";
+import { ArrowLeft, RefreshCw, Check, X, ShieldAlert, Zap, AlertTriangle, ArrowRightLeft, GitBranch } from "lucide-react";
 import type { Environment, RunRecord, Workflow } from "@aart/types";
 import type { SemanticRiskDiff } from "@aart/governance";
 
@@ -154,32 +158,28 @@ export function WorkflowsPage({ id }: { id?: string }) {
   if (!id) {
     return (
       <div className="space-y-6">
-        <div>
-          <h1 className="text-3xl font-bold tracking-tight text-zinc-100">Workflows</h1>
-          <p className="text-sm text-zinc-400">Manage and audit governed workflow specifications.</p>
-        </div>
+        <PageHeader
+          icon={GitBranch}
+          title="Workflow Definitions"
+          subtitle="Manage and audit governed workflow specifications."
+        />
 
-        <div className="bg-zinc-950 border border-zinc-900 rounded-xl overflow-hidden">
+        <div className="bg-zinc-900/30 border border-zinc-800 rounded-xl overflow-hidden animate-slide-up">
           {loadingList ? (
-            <div className="flex justify-center items-center py-24 text-zinc-500 text-sm font-medium">
-              <RefreshCw className="mr-2 h-4 w-4 animate-spin text-zinc-400" />
-              Loading workflows...
-            </div>
+            <LoadingState message="Loading workflows..." />
           ) : workflowIds.length === 0 ? (
-            <div className="text-center py-24 text-zinc-500 text-sm">
-              No workflows registered.
-            </div>
+            <EmptyState message="No workflows registered." />
           ) : (
             <Table>
-              <TableHeader className="bg-zinc-900/50 border-zinc-850">
-                <TableRow className="border-zinc-850 hover:bg-transparent">
+              <TableHeader className="bg-zinc-900/50 border-zinc-800">
+                <TableRow className="border-zinc-800 hover:bg-transparent">
                   <TableHead className="text-zinc-400 text-xs font-semibold">Workflow ID</TableHead>
                   <TableHead className="text-zinc-400 text-xs font-semibold text-right">Actions</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {workflowIds.map((wId) => (
-                  <TableRow key={wId} className="border-zinc-850 hover:bg-zinc-900/20">
+                  <TableRow key={wId} className="border-zinc-800 hover:bg-zinc-900/20">
                     <TableCell className="text-zinc-200 font-semibold text-sm">
                       <Link href={`/workflows/${wId}`} className="text-primary hover:underline">
                         {wId}
@@ -206,12 +206,7 @@ export function WorkflowsPage({ id }: { id?: string }) {
   // DETAIL VIEW
   // ----------------------------------------------------
   if (loadingDetail || !detail) {
-    return (
-      <div className="flex justify-center items-center py-24 text-zinc-500 text-sm font-medium">
-        <RefreshCw className="mr-2 h-4 w-4 animate-spin text-zinc-400" />
-        Loading workflow details...
-      </div>
-    );
+    return <LoadingState message="Loading workflow details..." />;
   }
 
   const { workflow, versions, recentRuns } = detail;
@@ -229,7 +224,7 @@ export function WorkflowsPage({ id }: { id?: string }) {
             <div className="flex items-center gap-2">
               <span className="text-xs font-semibold text-zinc-500 uppercase tracking-wider">Workflow</span>
               <h1 className="text-2xl font-bold text-zinc-100">{id}</h1>
-              <span className="text-xs text-zinc-400 bg-zinc-900 px-2 py-0.5 border border-zinc-850 rounded font-mono">
+              <span className="text-xs text-zinc-400 bg-zinc-900 px-2 py-0.5 border border-zinc-800 rounded font-mono">
                 v{currentVersion}
               </span>
               <StatusBadge status={workflow.approval || "draft"} />
@@ -245,17 +240,8 @@ export function WorkflowsPage({ id }: { id?: string }) {
         </Button>
       </div>
 
-      {actionError && (
-        <div className="p-3 bg-red-950/30 border border-red-500/20 text-red-400 rounded-lg text-xs font-medium">
-          {actionError}
-        </div>
-      )}
-
-      {actionSuccess && (
-        <div className="p-3 bg-emerald-950/30 border border-emerald-500/20 text-emerald-400 rounded-lg text-xs font-medium">
-          {actionSuccess}
-        </div>
-      )}
+      <AlertBanner variant="error" message={actionError} />
+      <AlertBanner variant="success" message={actionSuccess} />
 
       <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
         {/* Versions Sidebar */}
@@ -304,7 +290,7 @@ export function WorkflowsPage({ id }: { id?: string }) {
             <CardContent>
               <div className="grid grid-cols-2 sm:grid-cols-5 gap-4">
                 {Object.entries(workflow.gates || {}).map(([gateName, status]) => (
-                  <div key={gateName} className="p-3 bg-zinc-900 border border-zinc-850 rounded-lg flex flex-col items-center justify-center text-center space-y-1.5">
+                  <div key={gateName} className="p-3 bg-zinc-900 border border-zinc-800 rounded-lg flex flex-col items-center justify-center text-center space-y-1.5">
                     <span className="text-[10px] uppercase font-bold text-zinc-500 font-sans tracking-wide">
                       {gateName}
                     </span>
@@ -396,9 +382,10 @@ export function WorkflowsPage({ id }: { id?: string }) {
               {/* Promotion Box */}
               <div className="w-full border-t border-zinc-900 my-2 pt-4 flex flex-wrap items-center gap-4">
                 <div className="flex items-center gap-2">
-                  <span className="text-xs text-zinc-400">Promote to:</span>
+                  <label htmlFor="promote-env-select" className="text-xs text-zinc-400">Promote to:</label>
                   <select
-                    className="bg-zinc-900 border border-zinc-850 rounded px-2.5 py-1 text-xs text-zinc-300 focus:outline-none"
+                    id="promote-env-select"
+                    className="bg-zinc-900 border border-zinc-800 rounded px-2.5 py-1 text-xs text-zinc-300 focus:outline-none"
                     value={selectedEnvId}
                     onChange={(e) => setSelectedEnvId(e.target.value)}
                   >
@@ -431,9 +418,10 @@ export function WorkflowsPage({ id }: { id?: string }) {
             <CardContent>
               <form onSubmit={handleCompareRisk} className="flex flex-wrap gap-4 items-end pb-4 border-b border-zinc-900">
                 <div className="space-y-1">
-                  <label className="text-[10px] uppercase font-bold text-zinc-500">From version</label>
+                  <label htmlFor="risk-diff-from" className="text-[10px] uppercase font-bold text-zinc-500">From version</label>
                   <select
-                    className="w-40 bg-zinc-900 border border-zinc-850 rounded p-1.5 text-xs text-zinc-200 focus:outline-none"
+                    id="risk-diff-from"
+                    className="w-40 bg-zinc-900 border border-zinc-800 rounded p-1.5 text-xs text-zinc-200 focus:outline-none"
                     value={fromVersion}
                     onChange={(e) => setFromVersion(e.target.value)}
                   >
@@ -448,9 +436,10 @@ export function WorkflowsPage({ id }: { id?: string }) {
                   <ArrowRightLeft className="h-4 w-4" />
                 </div>
                 <div className="space-y-1">
-                  <label className="text-[10px] uppercase font-bold text-zinc-500">To version</label>
+                  <label htmlFor="risk-diff-to" className="text-[10px] uppercase font-bold text-zinc-500">To version</label>
                   <select
-                    className="w-40 bg-zinc-900 border border-zinc-850 rounded p-1.5 text-xs text-zinc-200 focus:outline-none"
+                    id="risk-diff-to"
+                    className="w-40 bg-zinc-900 border border-zinc-800 rounded p-1.5 text-xs text-zinc-200 focus:outline-none"
                     value={toVersion}
                     onChange={(e) => setToVersion(e.target.value)}
                   >
@@ -461,7 +450,7 @@ export function WorkflowsPage({ id }: { id?: string }) {
                     ))}
                   </select>
                 </div>
-                <Button type="submit" disabled={loadingDiff} className="bg-zinc-900 border border-zinc-800 text-zinc-300 hover:bg-zinc-850 text-xs">
+                <Button type="submit" disabled={loadingDiff} className="bg-zinc-900 border border-zinc-800 text-zinc-300 hover:bg-zinc-800 text-xs">
                   {loadingDiff ? "Computing..." : "Compare Spec"}
                 </Button>
               </form>
@@ -488,7 +477,7 @@ export function WorkflowsPage({ id }: { id?: string }) {
                   )}
 
                   {/* General modifications */}
-                  <pre className="bg-zinc-900 p-4 rounded-lg overflow-x-auto text-xs font-mono text-zinc-300 max-h-80 border border-zinc-850">
+                  <pre className="bg-zinc-900 p-4 rounded-lg overflow-x-auto text-xs font-mono text-zinc-300 max-h-80 border border-zinc-800">
                     {JSON.stringify(riskDiff, null, 2)}
                   </pre>
                 </div>
@@ -503,13 +492,11 @@ export function WorkflowsPage({ id }: { id?: string }) {
             </CardHeader>
             <CardContent className="p-0">
               {recentRuns.length === 0 ? (
-                <div className="p-6 text-center text-zinc-500 text-xs">
-                  No executions recorded for this workflow spec.
-                </div>
+                <EmptyState message="No executions recorded for this workflow spec." />
               ) : (
                 <Table>
-                  <TableHeader className="bg-zinc-900/50 border-zinc-850">
-                    <TableRow className="border-zinc-850 hover:bg-transparent">
+                  <TableHeader className="bg-zinc-900/50 border-zinc-800">
+                    <TableRow className="border-zinc-800 hover:bg-transparent">
                       <TableHead className="text-zinc-400 text-xs font-semibold">Run ID</TableHead>
                       <TableHead className="text-zinc-400 text-xs font-semibold text-center">Version</TableHead>
                       <TableHead className="text-zinc-400 text-xs font-semibold text-center">Status</TableHead>
@@ -518,7 +505,7 @@ export function WorkflowsPage({ id }: { id?: string }) {
                   </TableHeader>
                   <TableBody>
                     {recentRuns.map((run) => (
-                      <TableRow key={run.runId} className="border-zinc-850 hover:bg-zinc-900/20">
+                      <TableRow key={run.runId} className="border-zinc-800 hover:bg-zinc-900/20">
                         <TableCell className="font-mono text-zinc-200 text-xs font-medium">
                           <Link href={`/runs/${run.runId}`} className="text-primary hover:underline">
                             {run.runId}

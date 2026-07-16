@@ -15,7 +15,7 @@ describe("WorkflowsPage", () => {
 
     renderWithRouter(<WorkflowsPage />);
 
-    expect(await screen.findByText("Workflows")).toBeTruthy();
+    expect(await screen.findByText("Workflow Definitions")).toBeTruthy();
     expect(await screen.findByText("wf-1")).toBeTruthy();
   });
 });

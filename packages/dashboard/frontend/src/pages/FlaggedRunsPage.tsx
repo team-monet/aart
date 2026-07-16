@@ -5,6 +5,10 @@ import { Input } from "@/components/ui/input";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { StatusBadge } from "../components/StatusBadge";
+import { PageHeader } from "../components/PageHeader";
+import { LoadingState } from "../components/LoadingState";
+import { EmptyState } from "../components/EmptyState";
+import { AlertBanner } from "../components/AlertBanner";
 import { RefreshCw, ShieldAlert, Sparkles } from "lucide-react";
 import type { RunRecord } from "@aart/types";
 
@@ -45,8 +49,8 @@ export function FlaggedRunsPage() {
     try {
       const res = await fetch(`/api/flagged-runs/${encodeURIComponent(targetRunId)}/clear`, {
         method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
-        body: `clearedBy=${encodeURIComponent(clearedBy)}`,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ clearedBy }),
       });
       if (res.ok) {
         setClearDialogOpen(false);
@@ -64,34 +68,28 @@ export function FlaggedRunsPage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex justify-between items-center">
-        <div>
-          <h1 className="text-3xl font-bold tracking-tight text-zinc-100 flex items-center gap-2">
-            <ShieldAlert className="h-8 w-8 text-rose-500" />
-            Flagged Runs
-          </h1>
-          <p className="text-sm text-zinc-400">Review and mitigate poison, security, or reliability flags raised on runs.</p>
-        </div>
-        <Button variant="outline" size="sm" onClick={fetchFlaggedRuns} className="border-zinc-800 hover:bg-zinc-900 text-zinc-300">
-          <RefreshCw className="mr-1.5 h-4 w-4" />
-          Refresh
-        </Button>
-      </div>
+      <PageHeader
+        icon={ShieldAlert}
+        iconColor="text-rose-400"
+        title="Flagged Runs"
+        subtitle="Review and mitigate poison, security, or reliability flags raised on runs."
+        actions={
+          <Button variant="outline" size="sm" onClick={fetchFlaggedRuns} className="border-zinc-800 hover:bg-zinc-900 text-zinc-300">
+            <RefreshCw className="mr-1.5 h-4 w-4" />
+            Refresh
+          </Button>
+        }
+      />
 
-      <div className="bg-zinc-950 border border-zinc-900 rounded-xl overflow-hidden">
+      <div className="bg-zinc-900/30 border border-zinc-800 rounded-xl overflow-hidden animate-slide-up">
         {loading ? (
-          <div className="flex justify-center items-center py-24 text-zinc-500 text-sm font-medium">
-            <RefreshCw className="mr-2 h-4 w-4 animate-spin text-zinc-400" />
-            Loading flagged runs...
-          </div>
+          <LoadingState message="Loading flagged runs..." />
         ) : flaggedRuns.length === 0 ? (
-          <div className="text-center py-24 text-zinc-500 text-sm">
-            No flagged runs detected.
-          </div>
+          <EmptyState icon={ShieldAlert} message="No flagged runs detected." />
         ) : (
           <Table>
-            <TableHeader className="bg-zinc-900/50 border-zinc-850">
-              <TableRow className="border-zinc-850 hover:bg-transparent">
+            <TableHeader className="bg-zinc-900/50 border-zinc-800">
+              <TableRow className="border-zinc-800 hover:bg-transparent">
                 <TableHead className="text-zinc-400 text-xs font-semibold">Run ID</TableHead>
                 <TableHead className="text-zinc-400 text-xs font-semibold">Workflow</TableHead>
                 <TableHead className="text-zinc-400 text-xs font-semibold">Flag Type</TableHead>
@@ -102,7 +100,7 @@ export function FlaggedRunsPage() {
             </TableHeader>
             <TableBody>
               {flaggedRuns.map((run) => (
-                <TableRow key={run.runId} className="border-zinc-850 hover:bg-zinc-900/20">
+                <TableRow key={run.runId} className="border-zinc-800 hover:bg-zinc-900/20">
                   <TableCell className="font-mono text-zinc-200 text-sm font-medium">
                     <Link href={`/runs/${run.runId}`} className="text-primary hover:underline">
                       {run.runId}
@@ -116,7 +114,7 @@ export function FlaggedRunsPage() {
                     {run.flag?.flaggedAt ? new Date(run.flag.flaggedAt).toLocaleString() : "-"}
                   </TableCell>
                   <TableCell className="text-zinc-400 text-xs font-mono">
-                    {run.flag?.clearedBy || <span className="text-red-400 italic">Active</span>}
+                    {run.flag?.clearedBy || <StatusBadge status="active" />}
                   </TableCell>
                   <TableCell className="text-right">
                     {!run.flag?.clearedBy ? (
@@ -150,18 +148,15 @@ export function FlaggedRunsPage() {
             </DialogDescription>
           </DialogHeader>
           <form onSubmit={handleClearFlag} className="space-y-4 py-2">
-            {actionError && (
-              <div className="p-3 bg-red-950/30 border border-red-500/20 text-red-400 rounded-lg text-xs font-medium">
-                {actionError}
-              </div>
-            )}
+            <AlertBanner variant="error" message={actionError} />
             <div className="space-y-1">
-              <label className="text-xs font-semibold text-zinc-300">Operator/Reviewer Name</label>
+              <label htmlFor="cleared-by" className="text-xs font-semibold text-zinc-300">Operator/Reviewer Name</label>
               <Input
+                id="cleared-by"
                 placeholder="e.g. alice"
                 value={clearedBy}
                 onChange={(e) => setClearedBy(e.target.value)}
-                className="bg-zinc-900 border-zinc-800 text-zinc-100 placeholder:text-zinc-600"
+                className="bg-zinc-900 border-zinc-800 text-zinc-100 placeholder:text-zinc-500"
                 required
               />
             </div>
@@ -170,7 +165,7 @@ export function FlaggedRunsPage() {
                 type="button"
                 variant="outline"
                 onClick={() => setClearDialogOpen(false)}
-                className="border-zinc-850 text-zinc-300 hover:bg-zinc-900"
+                className="border-zinc-800 text-zinc-300 hover:bg-zinc-900"
               >
                 Cancel
               </Button>

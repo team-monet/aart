@@ -5,7 +5,12 @@ import { Input } from "@/components/ui/input";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { StatusBadge } from "../components/StatusBadge";
-import { Play, Filter, RefreshCw } from "lucide-react";
+import { PageHeader } from "../components/PageHeader";
+import { LoadingState } from "../components/LoadingState";
+import { EmptyState } from "../components/EmptyState";
+import { FilterBar } from "../components/FilterBar";
+import { AlertBanner } from "../components/AlertBanner";
+import { Play, RefreshCw } from "lucide-react";
 import type { RunRecord } from "@aart/types";
 
 export function RunsPage() {
@@ -13,7 +18,8 @@ export function RunsPage() {
   const [runs, setRuns] = useState<RunRecord[]>([]);
   const [workflows, setWorkflows] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
-  
+  const [fetchError, setFetchError] = useState("");
+
   // Filters
   const [workflowIdFilter, setWorkflowIdFilter] = useState("");
   const [statusFilter, setStatusFilter] = useState("");
@@ -29,18 +35,22 @@ export function RunsPage() {
 
   const fetchRuns = async () => {
     setLoading(true);
+    setFetchError("");
     try {
       const q = new URLSearchParams();
       if (workflowIdFilter) q.set("workflowId", workflowIdFilter);
       if (statusFilter) q.set("status", statusFilter);
-      
+
       const res = await fetch(`/api/runs?${q.toString()}`);
       if (res.ok) {
         const data = (await res.json()) as RunRecord[];
         setRuns(data);
+      } else {
+        setFetchError("Failed to load runs. Please try again.");
       }
     } catch (err) {
       console.error("Failed to fetch runs", err);
+      setFetchError("Failed to load runs. Please try again.");
     } finally {
       setLoading(false);
     }
@@ -51,9 +61,12 @@ export function RunsPage() {
       const res = await fetch("/api/workflows");
       if (res.ok) {
         setWorkflows(await res.json());
+      } else {
+        setFetchError("Failed to load workflows. Please try again.");
       }
     } catch (err) {
       console.error("Failed to fetch workflows", err);
+      setFetchError("Failed to load workflows. Please try again.");
     }
   };
 
@@ -117,16 +130,16 @@ export function RunsPage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex justify-between items-center">
-        <div>
-          <h1 className="text-3xl font-bold tracking-tight text-zinc-100">Workflow Runs</h1>
-          <p className="text-sm text-zinc-400">Monitor and execute your governed workflows.</p>
-        </div>
-        <div className="flex gap-2">
-          <Button variant="outline" size="sm" onClick={fetchRuns} className="border-zinc-800 hover:bg-zinc-900 text-zinc-300">
-            <RefreshCw className="mr-1.5 h-4 w-4" />
-            Refresh
-          </Button>
+      <PageHeader
+        icon={Play}
+        title="Workflow Runs"
+        subtitle="Monitor and execute your governed workflows."
+        actions={
+          <>
+            <Button variant="outline" size="sm" onClick={fetchRuns} className="border-zinc-800 hover:bg-zinc-900 text-zinc-300">
+              <RefreshCw className="mr-1.5 h-4 w-4" />
+              Refresh
+            </Button>
           
           <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
             <DialogTrigger render={<Button className="bg-primary text-primary-foreground hover:bg-primary/95" />}>
@@ -141,15 +154,12 @@ export function RunsPage() {
                 </DialogDescription>
               </DialogHeader>
               <form onSubmit={handleTriggerRun} className="space-y-4 py-2">
-                {formError && (
-                  <div className="p-3 bg-red-950/30 border border-red-500/20 text-red-400 rounded-lg text-xs font-medium">
-                    {formError}
-                  </div>
-                )}
-                
+                <AlertBanner variant="error" message={formError} />
+
                 <div className="space-y-1">
-                  <label className="text-xs font-semibold text-zinc-300">Workflow ID</label>
+                  <label htmlFor="trigger-workflow-id" className="text-xs font-semibold text-zinc-300">Workflow ID</label>
                   <select
+                    id="trigger-workflow-id"
                     className="w-full bg-zinc-900 border border-zinc-800 rounded-lg p-2 text-sm text-zinc-100 focus:outline-none focus:border-zinc-700"
                     value={formWorkflowId}
                     onChange={(e) => setFormWorkflowId(e.target.value)}
@@ -164,28 +174,31 @@ export function RunsPage() {
                 </div>
 
                 <div className="space-y-1">
-                  <label className="text-xs font-semibold text-zinc-300">Workflow Version (Optional)</label>
+                  <label htmlFor="trigger-workflow-version" className="text-xs font-semibold text-zinc-300">Workflow Version (Optional)</label>
                   <Input
+                    id="trigger-workflow-version"
                     placeholder="e.g. 1.0.0"
                     value={formVersion}
                     onChange={(e) => setFormVersion(e.target.value)}
-                    className="bg-zinc-900 border-zinc-800 text-zinc-100 placeholder:text-zinc-600"
+                    className="bg-zinc-900 border-zinc-800 text-zinc-100 placeholder:text-zinc-500"
                   />
                 </div>
 
                 <div className="space-y-1">
-                  <label className="text-xs font-semibold text-zinc-300">Environment (Optional)</label>
+                  <label htmlFor="trigger-environment" className="text-xs font-semibold text-zinc-300">Environment (Optional)</label>
                   <Input
+                    id="trigger-environment"
                     placeholder="e.g. production"
                     value={formEnvironment}
                     onChange={(e) => setFormEnvironment(e.target.value)}
-                    className="bg-zinc-900 border-zinc-800 text-zinc-100 placeholder:text-zinc-600"
+                    className="bg-zinc-900 border-zinc-800 text-zinc-100 placeholder:text-zinc-500"
                   />
                 </div>
 
                 <div className="space-y-1">
-                  <label className="text-xs font-semibold text-zinc-300">Inputs (JSON)</label>
+                  <label htmlFor="trigger-inputs" className="text-xs font-semibold text-zinc-300">Inputs (JSON)</label>
                   <textarea
+                    id="trigger-inputs"
                     rows={4}
                     placeholder="{}"
                     value={formInputs}
@@ -199,7 +212,7 @@ export function RunsPage() {
                     type="button"
                     variant="outline"
                     onClick={() => setDialogOpen(false)}
-                    className="border-zinc-850 text-zinc-300 hover:bg-zinc-900"
+                    className="border-zinc-800 text-zinc-300 hover:bg-zinc-900"
                   >
                     Cancel
                   </Button>
@@ -210,75 +223,56 @@ export function RunsPage() {
               </form>
             </DialogContent>
           </Dialog>
-        </div>
-      </div>
+          </>
+        }
+      />
 
-      {/* Filters bar */}
-      <div className="flex flex-wrap gap-4 items-center p-4 bg-zinc-950 border border-zinc-900 rounded-xl">
-        <div className="flex items-center gap-1.5 text-zinc-400 text-sm">
-          <Filter className="h-4 w-4" />
-          <span>Filters:</span>
-        </div>
-        
-        <div className="flex gap-2">
-          <select
-            className="bg-zinc-900 border border-zinc-850 rounded-lg px-3 py-1.5 text-xs text-zinc-300 focus:outline-none focus:border-zinc-700"
-            value={workflowIdFilter}
-            onChange={(e) => setWorkflowIdFilter(e.target.value)}
-          >
-            <option value="">All Workflows</option>
-            {workflows.map((id) => (
-              <option key={id} value={id}>
-                {id}
-              </option>
-            ))}
-          </select>
+      <FilterBar
+        showClear={!!(workflowIdFilter || statusFilter)}
+        onClear={() => {
+          setWorkflowIdFilter("");
+          setStatusFilter("");
+        }}
+      >
+        <select
+          className="bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-1.5 text-xs text-zinc-300 focus:outline-none focus:border-zinc-700"
+          value={workflowIdFilter}
+          onChange={(e) => setWorkflowIdFilter(e.target.value)}
+        >
+          <option value="">All Workflows</option>
+          {workflows.map((id) => (
+            <option key={id} value={id}>
+              {id}
+            </option>
+          ))}
+        </select>
 
-          <select
-            className="bg-zinc-900 border border-zinc-850 rounded-lg px-3 py-1.5 text-xs text-zinc-300 focus:outline-none focus:border-zinc-700"
-            value={statusFilter}
-            onChange={(e) => setStatusFilter(e.target.value)}
-          >
-            <option value="">All Statuses</option>
-            <option value="pending">Pending</option>
-            <option value="running">Running</option>
-            <option value="completed">Completed</option>
-            <option value="failed">Failed</option>
-            <option value="waiting">Waiting</option>
-            <option value="cancelled">Cancelled</option>
-          </select>
-        </div>
+        <select
+          className="bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-1.5 text-xs text-zinc-300 focus:outline-none focus:border-zinc-700"
+          value={statusFilter}
+          onChange={(e) => setStatusFilter(e.target.value)}
+        >
+          <option value="">All Statuses</option>
+          <option value="pending">Pending</option>
+          <option value="running">Running</option>
+          <option value="completed">Completed</option>
+          <option value="failed">Failed</option>
+          <option value="waiting">Waiting</option>
+          <option value="cancelled">Cancelled</option>
+        </select>
+      </FilterBar>
 
-        {(workflowIdFilter || statusFilter) && (
-          <Button
-            variant="ghost"
-            size="xs"
-            onClick={() => {
-              setWorkflowIdFilter("");
-              setStatusFilter("");
-            }}
-            className="text-zinc-500 hover:text-zinc-300"
-          >
-            Clear Filters
-          </Button>
-        )}
-      </div>
+      <AlertBanner variant="error" message={fetchError} />
 
-      {/* Runs Table */}
-      <div className="bg-zinc-950 border border-zinc-900 rounded-xl overflow-hidden">
+      <div className="bg-zinc-900/30 border border-zinc-800 rounded-xl overflow-hidden animate-slide-up">
         {loading ? (
-          <div className="flex justify-center items-center py-24 text-zinc-500 text-sm font-medium">
-            <RefreshCw className="mr-2 h-4 w-4 animate-spin text-zinc-400" />
-            Loading runs...
-          </div>
+          <LoadingState message="Loading runs..." />
         ) : runs.length === 0 ? (
-          <div className="text-center py-24 text-zinc-500 text-sm">
-            No workflow runs found.
-          </div>
+          <EmptyState message="No workflow runs found." />
         ) : (
           <Table>
-            <TableHeader className="bg-zinc-900/50 border-zinc-850">
-              <TableRow className="border-zinc-850 hover:bg-transparent">
+            <TableHeader className="bg-zinc-900/50 border-zinc-800">
+              <TableRow className="border-zinc-800 hover:bg-transparent">
                 <TableHead className="text-zinc-400 text-xs font-semibold">Run ID</TableHead>
                 <TableHead className="text-zinc-400 text-xs font-semibold">Workflow</TableHead>
                 <TableHead className="text-zinc-400 text-xs font-semibold text-center">Version</TableHead>
@@ -289,7 +283,7 @@ export function RunsPage() {
             </TableHeader>
             <TableBody>
               {runs.map((run) => (
-                <TableRow key={run.runId} className="border-zinc-850 hover:bg-zinc-900/20">
+                <TableRow key={run.runId} className="border-zinc-800 hover:bg-zinc-900/20">
                   <TableCell className="font-mono text-zinc-200 text-sm font-medium">
                     <Link href={`/runs/${run.runId}`} className="text-primary hover:underline">
                       {run.runId}

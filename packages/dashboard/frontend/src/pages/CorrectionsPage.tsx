@@ -5,7 +5,11 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { RefreshCw, FileEdit, ArrowLeft, Send } from "lucide-react";
+import { PageHeader } from "../components/PageHeader";
+import { LoadingState } from "../components/LoadingState";
+import { EmptyState } from "../components/EmptyState";
+import { AlertBanner } from "../components/AlertBanner";
+import { RefreshCw, FileEdit, ArrowLeft, Send, Pencil } from "lucide-react";
 import type { Correction, EvalSuite } from "@aart/types";
 
 export function CorrectionsPage({ isNewForm }: { isNewForm?: boolean }) {
@@ -178,29 +182,27 @@ export function CorrectionsPage({ isNewForm }: { isNewForm?: boolean }) {
   if (isNewForm) {
     return (
       <div className="space-y-6">
-        <div className="flex items-center gap-3">
-          <Link href="/corrections" className="p-2 border border-zinc-800 hover:bg-zinc-900 text-zinc-300 rounded-lg">
-            <ArrowLeft className="h-4 w-4" />
-          </Link>
-          <div>
-            <h1 className="text-3xl font-bold tracking-tight text-zinc-100">Record Correction</h1>
-            <p className="text-sm text-zinc-400">Identify and patch outputs for human feedback and Evals generation.</p>
-          </div>
-        </div>
+        <PageHeader
+          icon={Pencil}
+          title="Record Correction"
+          subtitle="Identify and patch outputs for human feedback and Evals generation."
+          actions={
+            <Link href="/corrections" className="p-2 border border-zinc-800 hover:bg-zinc-900 text-zinc-300 rounded-lg">
+              <ArrowLeft className="h-4 w-4" />
+            </Link>
+          }
+        />
 
         <Card className="bg-zinc-950 border-zinc-900 max-w-2xl">
           <CardContent className="pt-6">
             <form onSubmit={handleSubmitCorrection} className="space-y-4">
-              {formError && (
-                <div className="p-3 bg-red-950/30 border border-red-500/20 text-red-400 rounded-lg text-xs font-medium">
-                  {formError}
-                </div>
-              )}
+              <AlertBanner variant="error" message={formError} />
 
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-1">
-                  <label className="text-xs font-semibold text-zinc-300">Run ID</label>
+                  <label htmlFor="correction-run-id" className="text-xs font-semibold text-zinc-300">Run ID</label>
                   <Input
+                    id="correction-run-id"
                     placeholder="e.g. run_abc"
                     value={runId}
                     onChange={(e) => setRunId(e.target.value)}
@@ -209,8 +211,9 @@ export function CorrectionsPage({ isNewForm }: { isNewForm?: boolean }) {
                   />
                 </div>
                 <div className="space-y-1">
-                  <label className="text-xs font-semibold text-zinc-300">Step ID</label>
+                  <label htmlFor="correction-step-id" className="text-xs font-semibold text-zinc-300">Step ID</label>
                   <Input
+                    id="correction-step-id"
                     placeholder="e.g. step1"
                     value={stepId}
                     onChange={(e) => setStepId(e.target.value)}
@@ -221,8 +224,9 @@ export function CorrectionsPage({ isNewForm }: { isNewForm?: boolean }) {
               </div>
 
               <div className="space-y-1">
-                <label className="text-xs font-semibold text-zinc-300">Field Path (dot-notation)</label>
+                <label htmlFor="correction-field-path" className="text-xs font-semibold text-zinc-300">Field Path (dot-notation)</label>
                 <Input
+                  id="correction-field-path"
                   placeholder="e.g. outputs.total"
                   value={fieldPath}
                   onChange={(e) => setFieldPath(e.target.value)}
@@ -233,8 +237,9 @@ export function CorrectionsPage({ isNewForm }: { isNewForm?: boolean }) {
 
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div className="space-y-1">
-                  <label className="text-xs font-semibold text-zinc-300">Observed Value (JSON)</label>
+                  <label htmlFor="correction-observed" className="text-xs font-semibold text-zinc-300">Observed Value (JSON)</label>
                   <textarea
+                    id="correction-observed"
                     rows={4}
                     value={observed}
                     onChange={(e) => setObserved(e.target.value)}
@@ -243,8 +248,9 @@ export function CorrectionsPage({ isNewForm }: { isNewForm?: boolean }) {
                   />
                 </div>
                 <div className="space-y-1">
-                  <label className="text-xs font-semibold text-zinc-300">Corrected Value (JSON)</label>
+                  <label htmlFor="correction-corrected" className="text-xs font-semibold text-zinc-300">Corrected Value (JSON)</label>
                   <textarea
+                    id="correction-corrected"
                     rows={4}
                     value={corrected}
                     onChange={(e) => setCorrected(e.target.value)}
@@ -255,8 +261,9 @@ export function CorrectionsPage({ isNewForm }: { isNewForm?: boolean }) {
               </div>
 
               <div className="space-y-1">
-                <label className="text-xs font-semibold text-zinc-300">Reason for correction</label>
+                <label htmlFor="correction-reason" className="text-xs font-semibold text-zinc-300">Reason for correction</label>
                 <Input
+                  id="correction-reason"
                   placeholder="e.g. LLM off-by-one error or hallucination"
                   value={reason}
                   onChange={(e) => setReason(e.target.value)}
@@ -265,8 +272,9 @@ export function CorrectionsPage({ isNewForm }: { isNewForm?: boolean }) {
               </div>
 
               <div className="space-y-1">
-                <label className="text-xs font-semibold text-zinc-300">Reviewer</label>
+                <label htmlFor="correction-reviewer" className="text-xs font-semibold text-zinc-300">Reviewer</label>
                 <Input
+                  id="correction-reviewer"
                   placeholder="e.g. alice"
                   value={reviewer}
                   onChange={(e) => setReviewer(e.target.value)}
@@ -277,7 +285,7 @@ export function CorrectionsPage({ isNewForm }: { isNewForm?: boolean }) {
 
               <div className="pt-2 flex gap-3">
                 <Link href="/corrections">
-                  <Button type="button" variant="outline" className="border-zinc-850 text-zinc-300 hover:bg-zinc-900">
+                  <Button type="button" variant="outline" className="border-zinc-800 text-zinc-300 hover:bg-zinc-900">
                     Cancel
                   </Button>
                 </Link>
@@ -298,33 +306,29 @@ export function CorrectionsPage({ isNewForm }: { isNewForm?: boolean }) {
   // ----------------------------------------------------
   return (
     <div className="space-y-6">
-      <div className="flex justify-between items-center">
-        <div>
-          <h1 className="text-3xl font-bold tracking-tight text-zinc-100">Corrections</h1>
-          <p className="text-sm text-zinc-400">Record and propagate fixes to run traces and seed Eval suites.</p>
-        </div>
-        <div className="flex gap-2">
-          <Button variant="outline" size="sm" onClick={fetchCorrections} className="border-zinc-800 hover:bg-zinc-900 text-zinc-300">
-            <RefreshCw className="mr-1.5 h-4 w-4" />
-            Refresh
-          </Button>
-          <Link href="/corrections/new">
-            <Button className="bg-primary text-primary-foreground">
-              <FileEdit className="mr-1.5 h-4 w-4" />
-              New Correction
+      <PageHeader
+        icon={Pencil}
+        title="Corrections"
+        subtitle="Record and propagate fixes to run traces and seed Eval suites."
+        actions={
+          <>
+            <Button variant="outline" size="sm" onClick={fetchCorrections} className="border-zinc-800 hover:bg-zinc-900 text-zinc-300">
+              <RefreshCw className="mr-1.5 h-4 w-4" />
+              Refresh
             </Button>
-          </Link>
-        </div>
-      </div>
+            <Link href="/corrections/new">
+              <Button className="bg-primary text-primary-foreground">
+                <FileEdit className="mr-1.5 h-4 w-4" />
+                New Correction
+              </Button>
+            </Link>
+          </>
+        }
+      />
 
-      {actionError && (
-        <div className="p-3 bg-red-950/30 border border-red-500/20 text-red-400 rounded-lg text-xs font-medium">
-          {actionError}
-        </div>
-      )}
-
+      <AlertBanner variant="error" message={actionError} />
       {actionSuccess && (
-        <div className="p-3 bg-emerald-950/30 border border-emerald-500/20 text-emerald-400 rounded-lg text-xs font-medium space-y-2">
+        <div className="p-3 bg-emerald-950/30 border border-emerald-500/20 text-emerald-400 rounded-lg text-xs font-medium space-y-2 animate-fade-in">
           <p className="font-semibold">{actionSuccess}</p>
           {actionOutput != null && (
             <pre className="bg-zinc-900 p-2 rounded text-[10px] font-mono text-zinc-300 overflow-x-auto max-w-full">
@@ -334,20 +338,15 @@ export function CorrectionsPage({ isNewForm }: { isNewForm?: boolean }) {
         </div>
       )}
 
-      <div className="bg-zinc-950 border border-zinc-900 rounded-xl overflow-hidden">
+      <div className="bg-zinc-900/30 border border-zinc-800 rounded-xl overflow-hidden animate-slide-up">
         {loadingList ? (
-          <div className="flex justify-center items-center py-24 text-zinc-500 text-sm font-medium">
-            <RefreshCw className="mr-2 h-4 w-4 animate-spin text-zinc-400" />
-            Loading corrections...
-          </div>
+          <LoadingState message="Loading corrections..." />
         ) : corrections.length === 0 ? (
-          <div className="text-center py-24 text-zinc-500 text-sm">
-            No trace corrections recorded.
-          </div>
+          <EmptyState message="No trace corrections recorded." />
         ) : (
           <Table>
-            <TableHeader className="bg-zinc-900/50 border-zinc-850">
-              <TableRow className="border-zinc-850 hover:bg-transparent">
+            <TableHeader className="bg-zinc-900/50 border-zinc-800">
+              <TableRow className="border-zinc-800 hover:bg-transparent">
                 <TableHead className="text-zinc-400 text-xs font-semibold">Run ID</TableHead>
                 <TableHead className="text-zinc-400 text-xs font-semibold">Step ID</TableHead>
                 <TableHead className="text-zinc-400 text-xs font-semibold">Field Path</TableHead>
@@ -360,7 +359,7 @@ export function CorrectionsPage({ isNewForm }: { isNewForm?: boolean }) {
               {corrections.map((corr) => {
                 const key = `${corr.runId}:${corr.stepId}:${corr.fieldPath}`;
                 return (
-                  <TableRow key={key} className="border-zinc-850 hover:bg-zinc-900/20">
+                  <TableRow key={key} className="border-zinc-800 hover:bg-zinc-900/20">
                     <TableCell className="font-mono text-zinc-200 text-xs font-medium">
                       <Link href={`/runs/${corr.runId}`} className="text-primary hover:underline">
                         {corr.runId}
@@ -381,7 +380,7 @@ export function CorrectionsPage({ isNewForm }: { isNewForm?: boolean }) {
                       <Button
                         size="xs"
                         onClick={() => executeOutcome(key, "update-run-output")}
-                        className="bg-sky-650 hover:bg-sky-700 text-white text-[10px] border-0"
+                        className="bg-sky-600 hover:bg-sky-700 text-white text-[10px] border-0"
                       >
                         Patch Run Output
                       </Button>
@@ -392,7 +391,7 @@ export function CorrectionsPage({ isNewForm }: { isNewForm?: boolean }) {
                           setSelectedCorrectionKey(key);
                           setEvalDialogOpen(true);
                         }}
-                        className="bg-purple-650 hover:bg-purple-700 text-white text-[10px] border-0"
+                        className="bg-purple-600 hover:bg-purple-700 text-white text-[10px] border-0"
                       >
                         Create Eval Example
                       </Button>
@@ -400,7 +399,7 @@ export function CorrectionsPage({ isNewForm }: { isNewForm?: boolean }) {
                       <Button
                         size="xs"
                         onClick={() => executeOutcome(key, "create-issue")}
-                        className="bg-zinc-800 hover:bg-zinc-750 text-zinc-300 text-[10px]"
+                        className="bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-[10px]"
                       >
                         Create Issue
                       </Button>
@@ -423,9 +422,10 @@ export function CorrectionsPage({ isNewForm }: { isNewForm?: boolean }) {
           </DialogHeader>
           <form onSubmit={handleCreateEvalExample} className="space-y-4 py-2">
             <div className="space-y-1">
-              <label className="text-xs font-semibold text-zinc-300">Eval Suite</label>
+              <label htmlFor="eval-suite-select" className="text-xs font-semibold text-zinc-300">Eval Suite</label>
               <select
-                className="w-full bg-zinc-900 border border-zinc-800 rounded-lg p-2 text-sm text-zinc-100 focus:outline-none"
+                id="eval-suite-select"
+                className="w-full bg-zinc-900 border border-zinc-800 rounded-lg p-2 text-sm text-zinc-100 focus:outline-none focus:border-zinc-700"
                 value={suiteId}
                 onChange={(e) => setSuiteId(e.target.value)}
               >
@@ -442,7 +442,7 @@ export function CorrectionsPage({ isNewForm }: { isNewForm?: boolean }) {
                 type="button"
                 variant="outline"
                 onClick={() => setEvalDialogOpen(false)}
-                className="border-zinc-850 text-zinc-300 hover:bg-zinc-900"
+                className="border-zinc-800 text-zinc-300 hover:bg-zinc-900"
               >
                 Cancel
               </Button>

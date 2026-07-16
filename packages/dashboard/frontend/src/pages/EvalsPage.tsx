@@ -4,6 +4,10 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
+import { PageHeader } from "../components/PageHeader";
+import { LoadingState } from "../components/LoadingState";
+import { EmptyState } from "../components/EmptyState";
+import { AlertBanner } from "../components/AlertBanner";
 import { StatusBadge } from "../components/StatusBadge";
 import { RefreshCw, Plus, Play, FileSpreadsheet } from "lucide-react";
 import type { EvalRun, EvalSuite } from "@aart/types";
@@ -14,7 +18,7 @@ interface EvalsResponse {
   runs: EvalRun[];
 }
 
-export function EvalsPage({ isNewForm: _isNewForm }: { isNewForm?: boolean }) {
+export function EvalsPage() {
   const [data, setData] = useState<EvalsResponse | null>(null);
   const [workflows, setWorkflows] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
@@ -108,197 +112,187 @@ export function EvalsPage({ isNewForm: _isNewForm }: { isNewForm?: boolean }) {
   };
 
   return (
-    <div className="space-y-8">
-      <div className="flex justify-between items-center">
-        <div>
-          <h1 className="text-3xl font-bold tracking-tight text-zinc-100 flex items-center gap-2">
-            <FileSpreadsheet className="h-8 w-8 text-indigo-400" />
-            Evaluation Suites
-          </h1>
-          <p className="text-sm text-zinc-400">Design benchmark scenarios, monitor assertions, and trigger LLM/agent scorecards.</p>
-        </div>
-        <div className="flex gap-2">
-          <Button variant="outline" size="sm" onClick={fetchData} className="border-zinc-800 hover:bg-zinc-900 text-zinc-300">
-            <RefreshCw className="mr-1.5 h-4 w-4" />
-            Refresh
-          </Button>
-          
-          {/* New Suite Dialog */}
-          <Dialog open={suiteDialogOpen} onOpenChange={setSuiteDialogOpen}>
-            <DialogTrigger render={<Button variant="outline" size="sm" className="border-zinc-800 text-zinc-300 hover:bg-zinc-900" />}>
-              <Plus className="mr-1 h-3.5 w-3.5" />
-              New Suite
-            </DialogTrigger>
-            <DialogContent className="border-zinc-800 bg-zinc-950 max-w-sm">
-              <DialogHeader>
-                <DialogTitle className="text-zinc-100">Create Evaluation Suite</DialogTitle>
-                <DialogDescription className="text-zinc-400">
-                  Establish a test suite to continuously evaluate workflow spec changes.
-                </DialogDescription>
-              </DialogHeader>
-              <form onSubmit={handleCreateSuite} className="space-y-4 py-2">
-                {suiteError && (
-                  <div className="p-3 bg-red-950/30 border border-red-500/20 text-red-400 rounded-lg text-xs font-medium">
-                    {suiteError}
+    <div className="space-y-6">
+      <PageHeader
+        icon={FileSpreadsheet}
+        iconColor="text-indigo-400"
+        title="Evaluation Suites"
+        subtitle="Design benchmark scenarios, monitor assertions, and trigger LLM/agent scorecards."
+        actions={
+          <>
+            <Button variant="outline" size="sm" onClick={fetchData} className="border-zinc-800 hover:bg-zinc-900 text-zinc-300">
+              <RefreshCw className="mr-1.5 h-4 w-4" />
+              Refresh
+            </Button>
+            
+            <Dialog open={suiteDialogOpen} onOpenChange={setSuiteDialogOpen}>
+              <DialogTrigger render={<Button variant="outline" size="sm" className="border-zinc-800 text-zinc-300 hover:bg-zinc-900" />}>
+                <Plus className="mr-1 h-3.5 w-3.5" />
+                New Suite
+              </DialogTrigger>
+              <DialogContent className="border-zinc-800 bg-zinc-950 max-w-sm">
+                <DialogHeader>
+                  <DialogTitle className="text-zinc-100">Create Evaluation Suite</DialogTitle>
+                  <DialogDescription className="text-zinc-400">
+                    Establish a test suite to continuously evaluate workflow spec changes.
+                  </DialogDescription>
+                </DialogHeader>
+                <form onSubmit={handleCreateSuite} className="space-y-4 py-2">
+                  <AlertBanner variant="error" message={suiteError} />
+                  <div className="space-y-1">
+                    <label htmlFor="suite-name" className="text-xs font-semibold text-zinc-300">Suite Name</label>
+                    <Input
+                      id="suite-name"
+                      placeholder="e.g. Accuracy Benchmark"
+                      value={suiteName}
+                      onChange={(e) => setSuiteName(e.target.value)}
+                      className="bg-zinc-900 border-zinc-800 text-zinc-100 placeholder:text-zinc-500"
+                      required
+                    />
                   </div>
-                )}
-                <div className="space-y-1">
-                  <label className="text-xs font-semibold text-zinc-300">Suite Name</label>
-                  <Input
-                    placeholder="e.g. Accuracy Benchmark"
-                    value={suiteName}
-                    onChange={(e) => setSuiteName(e.target.value)}
-                    className="bg-zinc-900 border-zinc-800 text-zinc-100 placeholder:text-zinc-650"
-                    required
-                  />
-                </div>
-                <div className="space-y-1">
-                  <label className="text-xs font-semibold text-zinc-300">Description</label>
-                  <Input
-                    placeholder="Verify LLM extraction limits"
-                    value={suiteDescription}
-                    onChange={(e) => setSuiteDescription(e.target.value)}
-                    className="bg-zinc-900 border-zinc-800 text-zinc-100 placeholder:text-zinc-650"
-                  />
-                </div>
-                <div className="space-y-1">
-                  <label className="text-xs font-semibold text-zinc-300">Scorer ScorerKind</label>
-                  <select
-                    className="w-full bg-zinc-900 border border-zinc-800 rounded-lg p-2 text-sm text-zinc-100 focus:outline-none"
-                    value={scorerKind}
-                    onChange={(e) => setScorerKind(e.target.value)}
-                  >
-                    <option value="exact_match">exact_match</option>
-                    <option value="levenshtein">levenshtein</option>
-                    <option value="numeric_delta">numeric_delta</option>
-                  </select>
-                </div>
-                <DialogFooter className="pt-2">
-                  <Button
-                    type="button"
-                    variant="outline"
-                    onClick={() => setSuiteDialogOpen(false)}
-                    className="border-zinc-850 text-zinc-300 hover:bg-zinc-900"
-                  >
-                    Cancel
-                  </Button>
-                  <Button type="submit" disabled={creatingSuite} className="bg-primary text-primary-foreground">
-                    {creatingSuite ? "Creating..." : "Create Suite"}
-                  </Button>
-                </DialogFooter>
-              </form>
-            </DialogContent>
-          </Dialog>
-
-          {/* Trigger Run Dialog */}
-          <Dialog open={runDialogOpen} onOpenChange={setRunDialogOpen}>
-            <DialogTrigger render={<Button className="bg-primary text-primary-foreground hover:bg-primary/95" />}>
-              <Play className="mr-1 h-3.5 w-3.5 fill-current" />
-              Run Eval Suite
-            </DialogTrigger>
-            <DialogContent className="border-zinc-800 bg-zinc-950 max-w-sm">
-              <DialogHeader>
-                <DialogTitle className="text-zinc-100">Trigger Evaluation Run</DialogTitle>
-                <DialogDescription className="text-zinc-400">
-                  Select a Suite and Workflow to execute benchmark verification.
-                </DialogDescription>
-              </DialogHeader>
-              <form onSubmit={handleTriggerRun} className="space-y-4 py-2">
-                {runError && (
-                  <div className="p-3 bg-red-950/30 border border-red-500/20 text-red-400 rounded-lg text-xs font-medium">
-                    {runError}
+                  <div className="space-y-1">
+                    <label htmlFor="suite-description" className="text-xs font-semibold text-zinc-300">Description</label>
+                    <Input
+                      id="suite-description"
+                      placeholder="Verify LLM extraction limits"
+                      value={suiteDescription}
+                      onChange={(e) => setSuiteDescription(e.target.value)}
+                      className="bg-zinc-900 border-zinc-800 text-zinc-100 placeholder:text-zinc-500"
+                    />
                   </div>
-                )}
-                
-                <div className="space-y-1">
-                  <label className="text-xs font-semibold text-zinc-300">Eval Suite</label>
-                  <select
-                    className="w-full bg-zinc-900 border border-zinc-800 rounded-lg p-2 text-sm text-zinc-100 focus:outline-none"
-                    value={runSuiteId}
-                    onChange={(e) => setRunSuiteId(e.target.value)}
-                    required
-                  >
-                    <option value="">Select suite...</option>
-                    {(data?.suites || []).map((s) => (
-                      <option key={s.id} value={s.id}>
-                        {s.name} ({s.id})
-                      </option>
-                    ))}
-                  </select>
-                </div>
+                  <div className="space-y-1">
+                    <label htmlFor="suite-scorer-kind" className="text-xs font-semibold text-zinc-300">Scorer Kind</label>
+                    <select
+                      id="suite-scorer-kind"
+                      className="w-full bg-zinc-900 border border-zinc-800 rounded-lg p-2 text-sm text-zinc-100 focus:outline-none focus:border-zinc-700"
+                      value={scorerKind}
+                      onChange={(e) => setScorerKind(e.target.value)}
+                    >
+                      <option value="exact_match">exact_match</option>
+                      <option value="levenshtein">levenshtein</option>
+                      <option value="numeric_delta">numeric_delta</option>
+                    </select>
+                  </div>
+                  <DialogFooter className="pt-2">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      onClick={() => setSuiteDialogOpen(false)}
+                      className="border-zinc-800 text-zinc-300 hover:bg-zinc-900"
+                    >
+                      Cancel
+                    </Button>
+                    <Button type="submit" disabled={creatingSuite} className="bg-primary text-primary-foreground">
+                      {creatingSuite ? "Creating..." : "Create Suite"}
+                    </Button>
+                  </DialogFooter>
+                </form>
+              </DialogContent>
+            </Dialog>
 
-                <div className="space-y-1">
-                  <label className="text-xs font-semibold text-zinc-300">Workflow Spec ID</label>
-                  <select
-                    className="w-full bg-zinc-900 border border-zinc-800 rounded-lg p-2 text-sm text-zinc-100 focus:outline-none"
-                    value={runWorkflowId}
-                    onChange={(e) => setRunWorkflowId(e.target.value)}
-                    required
-                  >
-                    <option value="">Select workflow...</option>
-                    {workflows.map((id) => (
-                      <option key={id} value={id}>
-                        {id}
-                      </option>
-                    ))}
-                  </select>
-                </div>
+            <Dialog open={runDialogOpen} onOpenChange={setRunDialogOpen}>
+              <DialogTrigger render={<Button className="bg-primary text-primary-foreground hover:bg-primary/95" />}>
+                <Play className="mr-1 h-3.5 w-3.5 fill-current" />
+                Run Eval Suite
+              </DialogTrigger>
+              <DialogContent className="border-zinc-800 bg-zinc-950 max-w-sm">
+                <DialogHeader>
+                  <DialogTitle className="text-zinc-100">Trigger Evaluation Run</DialogTitle>
+                  <DialogDescription className="text-zinc-400">
+                    Select a Suite and Workflow to execute benchmark verification.
+                  </DialogDescription>
+                </DialogHeader>
+                <form onSubmit={handleTriggerRun} className="space-y-4 py-2">
+                  <AlertBanner variant="error" message={runError} />
+                  
+                  <div className="space-y-1">
+                    <label htmlFor="run-suite-id" className="text-xs font-semibold text-zinc-300">Eval Suite</label>
+                    <select
+                      id="run-suite-id"
+                      className="w-full bg-zinc-900 border border-zinc-800 rounded-lg p-2 text-sm text-zinc-100 focus:outline-none focus:border-zinc-700"
+                      value={runSuiteId}
+                      onChange={(e) => setRunSuiteId(e.target.value)}
+                      required
+                    >
+                      <option value="">Select suite...</option>
+                      {(data?.suites || []).map((s) => (
+                        <option key={s.id} value={s.id}>
+                          {s.name} ({s.id})
+                        </option>
+                      ))}
+                    </select>
+                  </div>
 
-                <div className="space-y-1">
-                  <label className="text-xs font-semibold text-zinc-300">Workflow Version</label>
-                  <Input
-                    placeholder="e.g. 1.0.0"
-                    value={runWorkflowVersion}
-                    onChange={(e) => setRunWorkflowVersion(e.target.value)}
-                    className="bg-zinc-900 border-zinc-800 text-zinc-100 placeholder:text-zinc-600"
-                    required
-                  />
-                </div>
+                  <div className="space-y-1">
+                    <label htmlFor="run-workflow-id" className="text-xs font-semibold text-zinc-300">Workflow Spec ID</label>
+                    <select
+                      id="run-workflow-id"
+                      className="w-full bg-zinc-900 border border-zinc-800 rounded-lg p-2 text-sm text-zinc-100 focus:outline-none focus:border-zinc-700"
+                      value={runWorkflowId}
+                      onChange={(e) => setRunWorkflowId(e.target.value)}
+                      required
+                    >
+                      <option value="">Select workflow...</option>
+                      {workflows.map((id) => (
+                        <option key={id} value={id}>
+                          {id}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
 
-                <DialogFooter className="pt-2">
-                  <Button
-                    type="button"
-                    variant="outline"
-                    onClick={() => setRunDialogOpen(false)}
-                    className="border-zinc-850 text-zinc-300 hover:bg-zinc-900"
-                  >
-                    Cancel
-                  </Button>
-                  <Button type="submit" disabled={triggeringRun} className="bg-primary text-primary-foreground">
-                    {triggeringRun ? "Triggering..." : "Start Eval"}
-                  </Button>
-                </DialogFooter>
-              </form>
-            </DialogContent>
-          </Dialog>
-        </div>
-      </div>
+                  <div className="space-y-1">
+                    <label htmlFor="run-workflow-version" className="text-xs font-semibold text-zinc-300">Workflow Version</label>
+                    <Input
+                      id="run-workflow-version"
+                      placeholder="e.g. 1.0.0"
+                      value={runWorkflowVersion}
+                      onChange={(e) => setRunWorkflowVersion(e.target.value)}
+                      className="bg-zinc-900 border-zinc-800 text-zinc-100 placeholder:text-zinc-500"
+                      required
+                    />
+                  </div>
+
+                  <DialogFooter className="pt-2">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      onClick={() => setRunDialogOpen(false)}
+                      className="border-zinc-800 text-zinc-300 hover:bg-zinc-900"
+                    >
+                      Cancel
+                    </Button>
+                    <Button type="submit" disabled={triggeringRun} className="bg-primary text-primary-foreground">
+                      {triggeringRun ? "Triggering..." : "Start Eval"}
+                    </Button>
+                  </DialogFooter>
+                </form>
+              </DialogContent>
+            </Dialog>
+          </>
+        }
+      />
 
       {loading ? (
-        <div className="flex justify-center items-center py-24 text-zinc-500 text-sm font-medium">
-          <RefreshCw className="mr-2 h-4 w-4 animate-spin text-zinc-400" />
-          Loading evaluation metrics...
-        </div>
+        <LoadingState message="Loading evaluation metrics..." />
       ) : !data ? (
-        <div className="text-center py-24 text-zinc-500 text-sm">
-          No metrics available.
-        </div>
+        <EmptyState message="No metrics available." icon={FileSpreadsheet} />
       ) : (
         <div className="grid grid-cols-1 xl:grid-cols-2 gap-8">
           {/* Suites List */}
-          <Card className="bg-zinc-950 border-zinc-900">
-            <CardHeader className="pb-3 border-b border-zinc-900">
+          <Card className="bg-zinc-900/30 border-zinc-800 animate-slide-up">
+            <CardHeader className="pb-3 border-b border-zinc-800">
               <CardTitle className="text-sm font-semibold text-zinc-300">Registered Suites</CardTitle>
             </CardHeader>
             <CardContent className="p-0">
               {data.suites.length === 0 ? (
-                <div className="p-6 text-center text-zinc-500 text-xs">
-                  No Eval Suites created yet.
+                <div className="p-6">
+                  <EmptyState message="No Eval Suites created yet." icon={FileSpreadsheet} />
                 </div>
               ) : (
                 <Table>
-                  <TableHeader className="bg-zinc-900/50 border-zinc-850">
-                    <TableRow className="border-zinc-850 hover:bg-transparent">
+                  <TableHeader className="bg-zinc-900/50 border-zinc-800">
+                    <TableRow className="border-zinc-800 hover:bg-transparent">
                       <TableHead className="text-zinc-400 text-xs font-semibold">Name</TableHead>
                       <TableHead className="text-zinc-400 text-xs font-semibold">Description</TableHead>
                       <TableHead className="text-zinc-400 text-xs font-semibold">Scorer</TableHead>
@@ -307,7 +301,7 @@ export function EvalsPage({ isNewForm: _isNewForm }: { isNewForm?: boolean }) {
                   </TableHeader>
                   <TableBody>
                     {data.suites.map((suite) => (
-                      <TableRow key={suite.id} className="border-zinc-850 hover:bg-zinc-900/20">
+                      <TableRow key={suite.id} className="border-zinc-800 hover:bg-zinc-900/20">
                         <TableCell className="text-zinc-200 font-semibold text-sm">
                           {suite.name}
                           <div className="text-[10px] text-zinc-500 font-mono mt-0.5">{suite.id}</div>
@@ -324,19 +318,19 @@ export function EvalsPage({ isNewForm: _isNewForm }: { isNewForm?: boolean }) {
           </Card>
 
           {/* Runs List */}
-          <Card className="bg-zinc-950 border-zinc-900">
-            <CardHeader className="pb-3 border-b border-zinc-900">
+          <Card className="bg-zinc-900/30 border-zinc-800 animate-slide-up">
+            <CardHeader className="pb-3 border-b border-zinc-800">
               <CardTitle className="text-sm font-semibold text-zinc-300">Continuous Eval Executions</CardTitle>
             </CardHeader>
             <CardContent className="p-0">
               {data.runs.length === 0 ? (
-                <div className="p-6 text-center text-zinc-500 text-xs">
-                  No Eval runs launched yet.
+                <div className="p-6">
+                  <EmptyState message="No Eval runs launched yet." icon={Play} />
                 </div>
               ) : (
                 <Table>
-                  <TableHeader className="bg-zinc-900/50 border-zinc-850">
-                    <TableRow className="border-zinc-850 hover:bg-transparent">
+                  <TableHeader className="bg-zinc-900/50 border-zinc-800">
+                    <TableRow className="border-zinc-800 hover:bg-transparent">
                       <TableHead className="text-zinc-400 text-xs font-semibold">Run ID</TableHead>
                       <TableHead className="text-zinc-400 text-xs font-semibold">Suite ID</TableHead>
                       <TableHead className="text-zinc-400 text-xs font-semibold">Target Spec</TableHead>
@@ -353,7 +347,7 @@ export function EvalsPage({ isNewForm: _isNewForm }: { isNewForm?: boolean }) {
                       const total = run.total || 0;
 
                       return (
-                        <TableRow key={run.id} className="border-zinc-850 hover:bg-zinc-900/20">
+                        <TableRow key={run.id} className="border-zinc-800 hover:bg-zinc-900/20">
                           <TableCell className="font-mono text-zinc-200 text-xs font-semibold">{run.id}</TableCell>
                           <TableCell className="font-mono text-zinc-400 text-xs">{run.suiteId}</TableCell>
                           <TableCell className="text-zinc-300 text-xs">

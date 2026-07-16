@@ -4,12 +4,17 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { PageHeader } from "../components/PageHeader";
+import { LoadingState } from "../components/LoadingState";
+import { EmptyState } from "../components/EmptyState";
+import { AlertBanner } from "../components/AlertBanner";
 import { RefreshCw, CheckCircle, XCircle, AlertTriangle, ShieldCheck } from "lucide-react";
 import type { ApprovalTask, TrustMode } from "@aart/types";
 
 export function ApprovalsPage() {
   const [approvals, setApprovals] = useState<ApprovalTask[]>([]);
   const [loading, setLoading] = useState(true);
+  const [fetchError, setFetchError] = useState("");
 
   // Dialog State
   const [decisionDialogOpen, setDecisionDialogOpen] = useState(false);
@@ -30,13 +35,17 @@ export function ApprovalsPage() {
 
   const fetchApprovals = async () => {
     setLoading(true);
+    setFetchError("");
     try {
       const res = await fetch("/api/approvals");
       if (res.ok) {
         setApprovals((await res.json()) as ApprovalTask[]);
+      } else {
+        setFetchError("Failed to load approvals.");
       }
     } catch (err) {
       console.error("Failed to fetch approvals", err);
+      setFetchError("Network error loading approvals.");
     } finally {
       setLoading(false);
     }
@@ -59,6 +68,10 @@ export function ApprovalsPage() {
       });
       if (res.ok) {
         setDecisionDialogOpen(false);
+        setTargetTask(null);
+        setStatus("approved");
+        setReviewer("dashboard-operator");
+        setTrustMode("governed");
         fetchApprovals();
       } else {
         const data = await res.json();
@@ -71,36 +84,43 @@ export function ApprovalsPage() {
     }
   };
 
+  const handleDialogOpenChange = (open: boolean) => {
+    setDecisionDialogOpen(open);
+    if (!open) {
+      setTargetTask(null);
+      setStatus("approved");
+      setReviewer("dashboard-operator");
+      setTrustMode("governed");
+      setError("");
+    }
+  };
+
   return (
     <div className="space-y-6">
-      <div className="flex justify-between items-center">
-        <div>
-          <h1 className="text-3xl font-bold tracking-tight text-zinc-100 flex items-center gap-2">
-            <ShieldCheck className="h-8 w-8 text-emerald-400" />
-            Approvals Queue
-          </h1>
-          <p className="text-sm text-zinc-400">Review tasks requiring manual sign-off before workflow execution resumes.</p>
-        </div>
-        <Button variant="outline" size="sm" onClick={fetchApprovals} className="border-zinc-800 hover:bg-zinc-900 text-zinc-300">
-          <RefreshCw className="mr-1.5 h-4 w-4" />
-          Refresh
-        </Button>
-      </div>
+      <PageHeader
+        icon={ShieldCheck}
+        iconColor="text-emerald-400"
+        title="Approvals Queue"
+        subtitle="Review tasks requiring manual sign-off before workflow execution resumes."
+        actions={
+          <Button variant="outline" size="sm" onClick={fetchApprovals} className="border-zinc-800 hover:bg-zinc-900 text-zinc-300">
+            <RefreshCw className="mr-1.5 h-4 w-4" />
+            Refresh
+          </Button>
+        }
+      />
 
-      <div className="bg-zinc-950 border border-zinc-900 rounded-xl overflow-hidden">
+      <AlertBanner variant="error" message={fetchError} />
+
+      <div className="bg-zinc-900/30 border border-zinc-800 rounded-xl overflow-hidden animate-slide-up">
         {loading ? (
-          <div className="flex justify-center items-center py-24 text-zinc-500 text-sm font-medium">
-            <RefreshCw className="mr-2 h-4 w-4 animate-spin text-zinc-400" />
-            Loading approvals queue...
-          </div>
+          <LoadingState message="Loading approvals queue..." />
         ) : approvals.length === 0 ? (
-          <div className="text-center py-24 text-zinc-500 text-sm">
-            No pending approvals at this time.
-          </div>
+          <EmptyState icon={ShieldCheck} message="No pending approvals at this time." />
         ) : (
           <Table>
-            <TableHeader className="bg-zinc-900/50 border-zinc-850">
-              <TableRow className="border-zinc-850 hover:bg-transparent">
+            <TableHeader className="bg-zinc-900/50 border-zinc-800">
+              <TableRow className="border-zinc-800 hover:bg-transparent">
                 <TableHead className="text-zinc-400 text-xs font-semibold">Task ID</TableHead>
                 <TableHead className="text-zinc-400 text-xs font-semibold">Run ID</TableHead>
                 <TableHead className="text-zinc-400 text-xs font-semibold">Title</TableHead>
@@ -111,7 +131,7 @@ export function ApprovalsPage() {
             </TableHeader>
             <TableBody>
               {approvals.map((task) => (
-                <TableRow key={task.id} className="border-zinc-850 hover:bg-zinc-900/20">
+                <TableRow key={task.id} className="border-zinc-800 hover:bg-zinc-900/20">
                   <TableCell className="font-mono text-zinc-300 text-xs font-semibold">{task.id}</TableCell>
                   <TableCell className="font-mono text-zinc-200 text-xs">
                     <Link href={`/runs/${task.runId}`} className="text-primary hover:underline">
@@ -128,6 +148,9 @@ export function ApprovalsPage() {
                       onClick={() => {
                         setTargetTask(task);
                         setStatus("approved");
+                        setReviewer("dashboard-operator");
+                        setTrustMode("governed");
+                        setError("");
                         setDecisionDialogOpen(true);
                       }}
                       className="bg-primary text-primary-foreground hover:bg-primary/95 text-xs"
@@ -142,7 +165,7 @@ export function ApprovalsPage() {
         )}
       </div>
 
-      <Dialog open={decisionDialogOpen} onOpenChange={setDecisionDialogOpen}>
+      <Dialog open={decisionDialogOpen} onOpenChange={handleDialogOpenChange}>
         <DialogContent className="border-zinc-800 bg-zinc-950 max-w-md">
           {targetTask && (
             <>
@@ -153,11 +176,7 @@ export function ApprovalsPage() {
                 </DialogDescription>
               </DialogHeader>
               <form onSubmit={handleDecision} className="space-y-4 py-2">
-                {error && (
-                  <div className="p-3 bg-red-950/30 border border-red-500/20 text-red-400 rounded-lg text-xs font-medium">
-                    {error}
-                  </div>
-                )}
+                <AlertBanner variant="error" message={error} />
 
                 <div className="space-y-1">
                   <label className="text-xs font-semibold text-zinc-300">Decision Outcome</label>
@@ -166,7 +185,7 @@ export function ApprovalsPage() {
                       type="button"
                       variant={status === "approved" ? "default" : "outline"}
                       onClick={() => setStatus("approved")}
-                      className={`text-xs ${status === "approved" ? "bg-emerald-600 hover:bg-emerald-700 text-white" : "border-zinc-850"}`}
+                      className={`text-xs ${status === "approved" ? "bg-emerald-600 hover:bg-emerald-700 text-white" : "border-zinc-800"}`}
                     >
                       <CheckCircle className="mr-1 h-3.5 w-3.5" />
                       Approve
@@ -175,16 +194,16 @@ export function ApprovalsPage() {
                       type="button"
                       variant={status === "needs_changes" ? "default" : "outline"}
                       onClick={() => setStatus("needs_changes")}
-                      className={`text-xs ${status === "needs_changes" ? "bg-amber-600 hover:bg-amber-700 text-white" : "border-zinc-850"}`}
+                      className={`text-xs ${status === "needs_changes" ? "bg-amber-600 hover:bg-amber-700 text-white" : "border-zinc-800"}`}
                     >
                       <AlertTriangle className="mr-1 h-3.5 w-3.5" />
-                      Request changes
+                      Changes
                     </Button>
                     <Button
                       type="button"
                       variant={status === "rejected" ? "default" : "outline"}
                       onClick={() => setStatus("rejected")}
-                      className={`text-xs ${status === "rejected" ? "bg-rose-600 hover:bg-rose-700 text-white" : "border-zinc-850"}`}
+                      className={`text-xs ${status === "rejected" ? "bg-rose-600 hover:bg-rose-700 text-white" : "border-zinc-800"}`}
                     >
                       <XCircle className="mr-1 h-3.5 w-3.5" />
                       Reject
@@ -193,9 +212,10 @@ export function ApprovalsPage() {
                 </div>
 
                 <div className="space-y-1">
-                  <label className="text-xs font-semibold text-zinc-300">Trust Mode</label>
+                  <label htmlFor="approval-trust-mode" className="text-xs font-semibold text-zinc-300">Trust Mode</label>
                   <select
-                    className="w-full bg-zinc-900 border border-zinc-800 rounded-lg p-2 text-sm text-zinc-100 focus:outline-none"
+                    id="approval-trust-mode"
+                    className="w-full bg-zinc-900 border border-zinc-800 rounded-lg p-2 text-sm text-zinc-100 focus:outline-none focus:border-zinc-700"
                     value={trustMode}
                     onChange={(e) => setTrustMode(e.target.value as TrustMode)}
                   >
@@ -207,12 +227,13 @@ export function ApprovalsPage() {
                 </div>
 
                 <div className="space-y-1">
-                  <label className="text-xs font-semibold text-zinc-300">Reviewer Name</label>
+                  <label htmlFor="approval-reviewer" className="text-xs font-semibold text-zinc-300">Reviewer Name</label>
                   <Input
+                    id="approval-reviewer"
                     placeholder="e.g. alice"
                     value={reviewer}
                     onChange={(e) => setReviewer(e.target.value)}
-                    className="bg-zinc-900 border-zinc-800 text-zinc-100 placeholder:text-zinc-600"
+                    className="bg-zinc-900 border-zinc-800 text-zinc-100 placeholder:text-zinc-500"
                     required
                   />
                 </div>
@@ -221,8 +242,8 @@ export function ApprovalsPage() {
                   <Button
                     type="button"
                     variant="outline"
-                    onClick={() => setDecisionDialogOpen(false)}
-                    className="border-zinc-850 text-zinc-300 hover:bg-zinc-900"
+                    onClick={() => handleDialogOpenChange(false)}
+                    className="border-zinc-800 text-zinc-300 hover:bg-zinc-900"
                   >
                     Cancel
                   </Button>

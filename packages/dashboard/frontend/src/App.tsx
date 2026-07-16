@@ -27,21 +27,41 @@ function Sidebar() {
   const { path } = useRouter();
   const activeRoute = parseRoute(path).name;
 
-  const links = [
-    // V2 Wave 2A (AMENDMENTS.md A66) — placed first: the activity feed is
-    // the cross-entity "what's happening right now" view (every lifecycle
-    // event, live), the visible payoff of the VISIBILITY SYMMETRY vision
-    // this slice ships. Rss (not Activity — that icon is already this
-    // sidebar's own Evaluation Suites entry, below).
-    { name: "activity", label: "Activity Feed", path: "/activity", icon: Rss },
-    { name: "runs", label: "Workflow Runs", path: "/runs", icon: Play },
-    { name: "workflows", label: "Workflows Spec", path: "/workflows", icon: GitBranch },
-    { name: "waiting-runs", label: "Waiting Runs", path: "/waiting-runs", icon: Clock },
-    { name: "flagged-runs", label: "Flagged Runs", path: "/flagged-runs", icon: AlertTriangle },
-    { name: "approvals", label: "Approvals Queue", path: "/approvals", icon: CheckSquare },
-    { name: "corrections", label: "Corrections Queue", path: "/corrections", icon: FileEdit },
-    { name: "evals", label: "Evaluation Suites", path: "/evals", icon: Activity },
-    { name: "production", label: "Production Ops", path: "/production", icon: Server },
+  const sections = [
+    {
+      label: "Operations",
+      links: [
+        // V2 Wave 2A (AMENDMENTS.md A66) — placed first: the activity feed is
+        // the cross-entity "what's happening right now" view (every lifecycle
+        // event, live), the visible payoff of the VISIBILITY SYMMETRY vision
+        // this slice ships. Rss (not Activity — that icon is already this
+        // sidebar's own Evaluation Suites entry, below).
+        { name: "activity", label: "Activity Feed", path: "/activity", icon: Rss },
+        { name: "runs", label: "Workflow Runs", path: "/runs", icon: Play },
+        { name: "waiting-runs", label: "Waiting Runs", path: "/waiting-runs", icon: Clock },
+        { name: "flagged-runs", label: "Flagged Runs", path: "/flagged-runs", icon: AlertTriangle },
+      ],
+    },
+    {
+      label: "Governance",
+      links: [
+        { name: "workflows", label: "Workflows", path: "/workflows", icon: GitBranch },
+        { name: "approvals", label: "Approvals", path: "/approvals", icon: CheckSquare },
+        { name: "corrections", label: "Corrections", path: "/corrections", icon: FileEdit },
+      ],
+    },
+    {
+      label: "Quality",
+      links: [
+        { name: "evals", label: "Evaluations", path: "/evals", icon: Activity },
+      ],
+    },
+    {
+      label: "Infrastructure",
+      links: [
+        { name: "production", label: "Production", path: "/production", icon: Server },
+      ],
+    },
   ];
 
   return (
@@ -55,30 +75,37 @@ function Sidebar() {
       </div>
       
       <nav className="flex-1 px-4 py-6 space-y-1 overflow-y-auto">
-        {links.map((link) => {
-          const Icon = link.icon;
-          // check if link matches activeRoute prefix or exact match
-          const isActive = 
-            activeRoute === link.name || 
-            (link.name === "runs" && activeRoute === "run-detail") ||
-            (link.name === "workflows" && activeRoute === "workflow-detail") ||
-            (link.name === "corrections" && activeRoute === "corrections-new");
+        {sections.map((section, sectionIndex) => (
+          <div key={section.label}>
+            {sectionIndex > 0 && <div className="my-3 border-t border-zinc-800/50" />}
+            <div className="px-3 mb-2 mt-1">
+              <span className="text-[10px] text-zinc-600 font-semibold uppercase tracking-wider">{section.label}</span>
+            </div>
+            {section.links.map((link) => {
+              const Icon = link.icon;
+              const isActive = 
+                activeRoute === link.name || 
+                (link.name === "runs" && activeRoute === "run-detail") ||
+                (link.name === "workflows" && activeRoute === "workflow-detail") ||
+                (link.name === "corrections" && activeRoute === "corrections-new");
 
-          return (
-            <Link
-              key={link.path}
-              href={link.path}
-              className={`flex items-center gap-3 px-3 py-2 text-sm rounded-lg transition-all ${
-                isActive
-                  ? "bg-zinc-900 text-zinc-100 font-semibold border-l-2 border-primary pl-2.5"
-                  : "text-zinc-400 hover:bg-zinc-900/40 hover:text-zinc-200"
-              }`}
-            >
-              <Icon className={`h-4 w-4 ${isActive ? "text-primary" : "text-zinc-500"}`} />
-              {link.label}
-            </Link>
-          );
-        })}
+              return (
+                <Link
+                  key={link.path}
+                  href={link.path}
+                  className={`flex items-center gap-3 px-3 py-2 text-sm rounded-lg transition-all duration-200 ${
+                    isActive
+                      ? "bg-primary/10 text-zinc-100 font-semibold"
+                      : "text-zinc-400 hover:bg-zinc-900/50 hover:text-zinc-200"
+                  }`}
+                >
+                  <Icon className={`h-4 w-4 ${isActive ? "text-primary" : "text-zinc-500"}`} />
+                  {link.label}
+                </Link>
+              );
+            })}
+          </div>
+        ))}
       </nav>
 
       <div className="p-4 border-t border-zinc-900 flex items-center gap-2 text-xs text-zinc-500 font-mono">
@@ -127,8 +154,8 @@ function MainContent() {
   };
 
   return (
-    <main className="flex-1 bg-zinc-900/20 min-h-screen p-8 text-zinc-100 overflow-y-auto">
-      <div className="max-w-7xl mx-auto">
+    <main className="flex-1 bg-zinc-950/50 min-h-screen p-8 text-zinc-100 overflow-y-auto">
+      <div className="max-w-7xl mx-auto animate-fade-in" key={route.name}>
         {renderPage()}
       </div>
     </main>

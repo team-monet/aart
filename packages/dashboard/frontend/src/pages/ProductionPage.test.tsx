@@ -17,7 +17,7 @@ describe("ProductionPage", () => {
 
     renderWithRouter(<ProductionPage />);
 
-    expect(await screen.findByText("Production Management")).toBeTruthy();
+    expect(await screen.findByText("Production Ops")).toBeTruthy();
     expect(await screen.findByText("staging")).toBeTruthy();
   });
 });

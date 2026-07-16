@@ -3,6 +3,8 @@ import { Link } from "../router";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { StatusBadge } from "../components/StatusBadge";
+import { LoadingState } from "../components/LoadingState";
+import { AlertBanner } from "../components/AlertBanner";
 import { ArrowLeft, RefreshCw, AlertOctagon, HelpCircle, FileEdit } from "lucide-react";
 import type { RunRecord, StepTrace } from "@aart/types";
 
@@ -10,6 +12,27 @@ import type { RunRecord, StepTrace } from "@aart/types";
 interface RunDetailResponse {
   run: RunRecord;
   reportHtml: string;
+}
+
+/** Map step status → timeline dot color */
+function stepDotColor(status: string): string {
+  switch (status) {
+    case "completed":
+    case "ok":
+      return "bg-emerald-500";
+    case "failed":
+    case "error":
+      return "bg-rose-500";
+    case "running":
+    case "in_progress":
+      return "bg-sky-500";
+    case "waiting":
+      return "bg-purple-500";
+    case "pending":
+      return "bg-amber-500";
+    default:
+      return "bg-zinc-500";
+  }
 }
 
 export function RunDetailPage({ id }: { id: string }) {
@@ -40,12 +63,7 @@ export function RunDetailPage({ id }: { id: string }) {
   }, [id]);
 
   if (loading) {
-    return (
-      <div className="flex justify-center items-center py-24 text-zinc-500 text-sm font-medium">
-        <RefreshCw className="mr-2 h-4 w-4 animate-spin text-zinc-400" />
-        Loading run details...
-      </div>
-    );
+    return <LoadingState message="Loading run details..." />;
   }
 
   if (error || !data) {
@@ -57,9 +75,7 @@ export function RunDetailPage({ id }: { id: string }) {
           </Link>
           <span className="text-sm text-zinc-500">Back to Runs</span>
         </div>
-        <div className="p-6 bg-zinc-950 border border-zinc-900 rounded-xl text-center text-zinc-400">
-          {error || "Run details unavailable"}
-        </div>
+        <AlertBanner variant="error" message={error || "Run details unavailable"} />
       </div>
     );
   }
@@ -102,7 +118,7 @@ export function RunDetailPage({ id }: { id: string }) {
             </div>
           </div>
           <Link href="/flagged-runs">
-            <Button variant="destructive" size="sm" className="bg-red-550 hover:bg-red-600 text-white border-0">
+            <Button variant="destructive" size="sm" className="bg-red-500 hover:bg-red-600 text-white border-0">
               Manage Flags
             </Button>
           </Link>
@@ -130,7 +146,7 @@ export function RunDetailPage({ id }: { id: string }) {
 
       {/* Metadata Cards */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-        <Card className="bg-zinc-950 border-zinc-900">
+        <Card className="bg-zinc-900/30 border-zinc-800">
           <CardHeader className="pb-2">
             <CardTitle className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Timeline</CardTitle>
           </CardHeader>
@@ -150,7 +166,7 @@ export function RunDetailPage({ id }: { id: string }) {
           </CardContent>
         </Card>
 
-        <Card className="bg-zinc-950 border-zinc-900">
+        <Card className="bg-zinc-900/30 border-zinc-800">
           <CardHeader className="pb-2">
             <CardTitle className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Environment</CardTitle>
           </CardHeader>
@@ -170,7 +186,7 @@ export function RunDetailPage({ id }: { id: string }) {
           </CardContent>
         </Card>
 
-        <Card className="bg-zinc-950 border-zinc-900">
+        <Card className="bg-zinc-900/30 border-zinc-800">
           <CardHeader className="pb-2">
             <CardTitle className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Execution Info</CardTitle>
           </CardHeader>
@@ -189,77 +205,92 @@ export function RunDetailPage({ id }: { id: string }) {
 
       {/* JSON Inputs & Outputs */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-        <Card className="bg-zinc-950 border-zinc-900">
+        <Card className="bg-zinc-900/30 border-zinc-800">
           <CardHeader>
             <CardTitle className="text-sm font-semibold text-zinc-300">Run Inputs</CardTitle>
           </CardHeader>
           <CardContent>
-            <pre className="bg-zinc-900 p-4 rounded-lg overflow-x-auto text-xs font-mono text-emerald-400 max-h-60 border border-zinc-850">
+            <pre className="bg-zinc-900 p-4 rounded-lg overflow-x-auto text-xs font-mono text-emerald-400 max-h-60 border border-zinc-800">
               {JSON.stringify(run.inputs || {}, null, 2)}
             </pre>
           </CardContent>
         </Card>
 
-        <Card className="bg-zinc-950 border-zinc-900">
+        <Card className="bg-zinc-900/30 border-zinc-800">
           <CardHeader>
             <CardTitle className="text-sm font-semibold text-zinc-300">Run Outputs</CardTitle>
           </CardHeader>
           <CardContent>
-            <pre className="bg-zinc-900 p-4 rounded-lg overflow-x-auto text-xs font-mono text-cyan-400 max-h-60 border border-zinc-850">
+            <pre className="bg-zinc-900 p-4 rounded-lg overflow-x-auto text-xs font-mono text-cyan-400 max-h-60 border border-zinc-800">
               {JSON.stringify(run.outputs || {}, null, 2)}
             </pre>
           </CardContent>
         </Card>
       </div>
 
-      {/* Trace / Steps list to allow corrections */}
+      {/* Trace / Steps list with visual timeline */}
       {run.trace && run.trace.length > 0 && (
-        <Card className="bg-zinc-950 border-zinc-900">
+        <Card className="bg-zinc-900/30 border-zinc-800">
           <CardHeader>
             <CardTitle className="text-sm font-semibold text-zinc-300">Step Traces & Corrections</CardTitle>
           </CardHeader>
           <CardContent>
-            <div className="divide-y divide-zinc-900">
-              {run.trace.map((step: StepTrace, index: number) => (
-                <div key={index} className="py-4 flex justify-between items-start gap-4 first:pt-0 last:pb-0">
-                  <div className="space-y-1">
-                    <div className="flex items-center gap-2">
-                      <span className="bg-zinc-900 text-zinc-400 font-mono text-[10px] px-2 py-0.5 rounded border border-zinc-850">
-                        Seq {step.seq}
-                      </span>
-                      <h4 className="text-sm font-semibold text-zinc-200">{step.stepId}</h4>
-                      <span className="text-xs font-mono text-zinc-500">({step.block})</span>
-                      <StatusBadge status={step.status} />
-                      {step.postHocCorrected && (
-                        <span className="bg-amber-500/10 text-amber-400 border border-amber-500/20 text-[10px] px-1.5 py-0.5 rounded font-semibold uppercase">
-                          Corrected
-                        </span>
+            <div className="relative">
+              {run.trace.map((step: StepTrace, index: number) => {
+                const isLast = index === (run.trace || []).length - 1;
+                return (
+                  <div key={index} className="relative flex gap-4">
+                    {/* Timeline connector */}
+                    <div className="flex flex-col items-center shrink-0 pt-1">
+                      {/* Dot */}
+                      <div className={`relative z-10 h-3 w-3 rounded-full border-2 border-zinc-950 ${stepDotColor(step.status)}`} />
+                      {/* Vertical line */}
+                      {!isLast && (
+                        <div className="w-px flex-1 bg-zinc-800 mt-0.5" />
                       )}
                     </div>
-                    <div className="grid grid-cols-2 gap-4 text-xs mt-2 pl-4">
-                      <div>
-                        <span className="text-zinc-500 font-semibold">Inputs:</span>
-                        <pre className="text-zinc-400 font-mono mt-0.5 bg-zinc-900/50 p-2 rounded max-h-36 overflow-auto">
-                          {JSON.stringify(step.inputs, null, 2)}
-                        </pre>
+                    {/* Step content */}
+                    <div className="flex-1 pb-6 flex justify-between items-start gap-4">
+                      <div className="space-y-1">
+                        <div className="flex items-center gap-2">
+                          <span className="bg-zinc-900 text-zinc-400 font-mono text-[10px] px-2 py-0.5 rounded border border-zinc-800">
+                            Seq {step.seq}
+                          </span>
+                          <h4 className="text-sm font-semibold text-zinc-200">{step.stepId}</h4>
+                          <span className="text-xs font-mono text-zinc-500">({step.block})</span>
+                          <StatusBadge status={step.status} />
+                          {step.postHocCorrected && (
+                            <span className="bg-amber-500/10 text-amber-400 border border-amber-500/20 text-[10px] px-1.5 py-0.5 rounded font-semibold uppercase">
+                              Corrected
+                            </span>
+                          )}
+                        </div>
+                        <div className="grid grid-cols-2 gap-4 text-xs mt-2 pl-4">
+                          <div>
+                            <span className="text-zinc-500 font-semibold">Inputs:</span>
+                            <pre className="text-zinc-400 font-mono mt-0.5 bg-zinc-900/50 p-2 rounded max-h-36 overflow-auto">
+                              {JSON.stringify(step.inputs, null, 2)}
+                            </pre>
+                          </div>
+                          <div>
+                            <span className="text-zinc-500 font-semibold">Outputs:</span>
+                            <pre className="text-zinc-400 font-mono mt-0.5 bg-zinc-900/50 p-2 rounded max-h-36 overflow-auto">
+                              {JSON.stringify(step.outputs, null, 2)}
+                            </pre>
+                          </div>
+                        </div>
                       </div>
-                      <div>
-                        <span className="text-zinc-500 font-semibold">Outputs:</span>
-                        <pre className="text-zinc-400 font-mono mt-0.5 bg-zinc-900/50 p-2 rounded max-h-36 overflow-auto">
-                          {JSON.stringify(step.outputs, null, 2)}
-                        </pre>
-                      </div>
+                      
+                      <Link href={`/corrections/new?runId=${encodeURIComponent(run.runId)}&stepId=${encodeURIComponent(step.stepId)}`}>
+                        <Button variant="outline" size="sm" className="border-zinc-800 hover:bg-zinc-900 text-zinc-300 shrink-0">
+                          <FileEdit className="mr-1 h-3.5 w-3.5" />
+                          Correct Step
+                        </Button>
+                      </Link>
                     </div>
                   </div>
-                  
-                  <Link href={`/corrections/new?runId=${encodeURIComponent(run.runId)}&stepId=${encodeURIComponent(step.stepId)}`}>
-                    <Button variant="outline" size="sm" className="border-zinc-800 hover:bg-zinc-900 text-zinc-300 shrink-0">
-                      <FileEdit className="mr-1 h-3.5 w-3.5" />
-                      Correct Step
-                    </Button>
-                  </Link>
-                </div>
-              ))}
+                );
+              })}
             </div>
           </CardContent>
         </Card>
@@ -267,13 +298,14 @@ export function RunDetailPage({ id }: { id: string }) {
 
       {/* HTML execution report */}
       {reportHtml && (
-        <Card className="bg-zinc-950 border-zinc-900 overflow-hidden">
-          <CardHeader className="border-b border-zinc-900">
+        <Card className="bg-zinc-900/30 border-zinc-800 overflow-hidden">
+          <CardHeader className="border-b border-zinc-800">
             <CardTitle className="text-sm font-semibold text-zinc-300">HTML Execution Report</CardTitle>
           </CardHeader>
           <CardContent className="p-0 bg-zinc-900">
             <div 
               className="run-report-container p-6 overflow-auto max-h-[600px] text-zinc-200"
+              aria-label="Execution report"
               dangerouslySetInnerHTML={{ __html: reportHtml }} 
             />
           </CardContent>
