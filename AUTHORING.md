@@ -174,7 +174,7 @@ local `.aart` store live), e.g.:
 ```bash
 mkdir -p ~/aart-workflows
 cd ~/aart-workflows
-aart init-agent
+aart init-agent --npx
 ```
 
 `aart init-agent` is the mechanical writer underneath both paths — it stays
@@ -185,26 +185,20 @@ It writes two files here:
 - **`AGENTS.md`** — instructions for the coding agent: the verify reflex,
   the authoring loop (discover → draft → register → validate → run →
   report), `{{ }}` expression wiring, and how approval works for this
-  project's trust mode. Claude Code (or any agent that reads `AGENTS.md`)
-  picks this up automatically. This is the SAME text `with-aart`'s global
+  project's trust mode. Agents that read `AGENTS.md` (e.g. opencode) pick
+  this up automatically; Claude Code reads `CLAUDE.md`, not `AGENTS.md` —
+  copy the content into `CLAUDE.md` instead (as the install playbook's
+  Phase 4 does). This is the SAME text `with-aart`'s global
   install offers to also install once per host (AMENDMENTS.md A55) — one
   generator (`packages/mcp/src/init-agent.ts`), never two hand-maintained
   copies.
-- **`.mcp.json`** — the real MCP server config. As of this session it reads:
+- **`.mcp.json`** — the real MCP server config. `--npx` (as in the example above) makes it read:
   ```json
-  { "mcpServers": { "aart": { "command": "node", "args": ["<absolute path to your install's bin.js>", "mcp"] } } }
+  { "mcpServers": { "aart": { "command": "npx", "args": ["-y", "@team-monet/aart", "mcp"] } } }
   ```
-  That absolute path is wherever `npm install -g` in part (b) actually put
-  it on THIS machine — resolved automatically from the running `aart`
-  process, so it's always correct for however you installed it, and it
-  never touches the npm registry (closing the part (b) trap for the config
-  a coding agent actually spawns from). Before A54, `init-agent` always
-  generated `{"command": "npx", "args": ["-y", "@team-monet/aart", "mcp"]}`
-  instead — exactly the trap in part (b), just automated (and only actually
-  safe as of `0.10.0`, now that this package is genuinely published as
-  `latest`). If you'd rather use that registry-resolved form now that it's
-  safe, pass `--npx` to `init-agent`; `--package <name>` names a different
-  registry package if you're pointing at a fork.
+  **Always pass `--npx`, even with `aart` installed globally — never wire MCP to a resolved absolute binary path.** Without `--npx`, `init-agent` instead self-resolves to wherever the running `aart` process's own entrypoint sits on disk right now (`{"command": "node", "args": ["<absolute path>", "mcp"]}`, resolved from `process.argv[1]`) — under a version manager like `nvm`, that path is pinned to whichever Node version is active at the moment you ran `init-agent`, and it breaks silently, no error, the next time you switch versions (exactly what the 2026-07-16 cold-install trial hit). `--npx` avoids that: the config re-resolves `@team-monet/aart` through `npx` on every launch instead of hardcoding a path. This registry-resolved form used to BE the trap — before A54, it was `init-agent`'s only output, and back then this package name resolved to a stale, unrelated pre-`0.10.0` release on npm — but it's safe again now that `0.10.0` is genuinely published as `latest`, which is why the guidance here flips it back to the default.
+
+  **The one exception: building from source or an unpublished commit.** There, omit `--npx` deliberately — the no-flag, self-resolving form is what wires MCP to the exact custom binary you just built, rather than whatever's currently on the public registry; passing `--npx` there would silently point at the wrong build. `--package <name>` names a different registry package if you're pointing `--npx` at a fork.
 
   **Merge-safe as of AMENDMENTS.md A55:** if `.mcp.json` already has other
   servers registered (e.g. a `monet` entry, if this workspace also runs
@@ -215,7 +209,7 @@ It writes two files here:
 
 Open (or restart) Claude Code with `~/aart-workflows` as its working
 directory / project root — it auto-detects `.mcp.json`. Once connected, you
-should see **16 `aart_*` tools** (verified this session on a brand-new
+should see **17 `aart_*` tools** (verified this session on a brand-new
 project with no `Environment`/`EvalSuite` yet registered — 5 more unlock
 once you have at least one of each, e.g. `aart_deploy_workflow`; see
 `TEST-DRIVE.md` part (d) for the full list): `aart_find_blocks`,
@@ -223,7 +217,7 @@ once you have at least one of each, e.g. `aart_deploy_workflow`; see
 `aart_run_workflow`, `aart_get_report`, `aart_verify`, `aart_approve`,
 `aart_request_approval`, `aart_record_correction`, `aart_list_blocks`,
 `aart_get_schema`, `aart_propose_workflow`, `aart_diff_workflow`,
-`aart_list_waiting_runs`, `aart_resume_run`. If your MCP client shows zero
+`aart_deploy`, `aart_list_waiting_runs`, `aart_resume_run`. If your MCP client shows zero
 tools or an error, check what's actually on the other end of the `command`/
 `args` in `.mcp.json` before assuming AART itself is broken — a stale
 absolute path (see part (f)) fails exactly this way.
