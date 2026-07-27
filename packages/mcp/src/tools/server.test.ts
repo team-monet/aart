@@ -13,7 +13,7 @@ import type { TrustMode } from "@aart/types";
 import type { TestContext } from "../test-utils.js";
 import { createTestContext, sampleWorkflowYaml } from "../test-utils.js";
 import { registerWorkflowHandler } from "../handlers/authoring.js";
-import { TOOL_NAMES } from "../response.js";
+import { TOOL_NAMES, TOOL_TIERS } from "../response.js";
 import { createMcpServer, isToolRegistered, listRegisteredTools } from "./server.js";
 
 let tc: TestContext;
@@ -68,35 +68,12 @@ describe("aart_approve tool-list genuine absence (architecture §7.2's [DECISION
   });
 });
 
-describe("core tools — always registered regardless of mode (architecture §32.2d: 9 of the 10 core tools are unconditional)", () => {
+describe("core tools — discovery/execution tools are unconditional; human decision tools are mode-gated", () => {
   const CORE_MINUS_APPROVE = TOOL_NAMES.filter(
-    (n) =>
-      n !== "aart_approve" &&
-      ![
-        "aart_list_blocks",
-        "aart_get_schema",
-        "aart_propose_workflow",
-        "aart_diff_workflow",
-        "aart_create_eval_from_correction",
-        "aart_run_eval",
-        "aart_promote_workflow",
-        "aart_deploy_workflow",
-        "aart_trigger_workflow",
-        "aart_list_waiting_runs",
-        "aart_resume_run",
-        // D2b "remote reads" (AMENDMENTS.md A62) — extended,
-        // REMOTE_GATED_TOOLS (tools/server.ts), not core.
-        "aart_remote_status",
-        "aart_remote_why",
-        "aart_remote_runs",
-        "aart_remote_run",
-        // Wave 2C (AMENDMENTS.md A65) — extended, gated on trust mode AND
-        // REMOTE_GATED_TOOLS, not core/unconditional.
-        "aart_remote_approve",
-      ].includes(n),
+    (n) => TOOL_TIERS[n] === "core" && n !== "aart_approve" && n !== "aart_approve_pack",
   );
 
-  it("all 9 non-gated core tools are present in every trust mode", async () => {
+  it("all non-gated core tools are present in every trust mode", async () => {
     for (const mode of ["dev", "governed", "strict", "production"] as const) {
       const names = await toolNames(mode);
       for (const tool of CORE_MINUS_APPROVE) expect(names).toContain(tool);
@@ -136,7 +113,7 @@ describe("aart_deploy — registers unconditionally in every trust mode (AMENDME
   });
 });
 
-describe("progressive disclosure — the 5 named extended tools gate on real data existing (architecture §10.1's [DECISION])", () => {
+describe("progressive disclosure — environment/eval extended tools gate on real data existing", () => {
   it("aart_deploy_workflow / aart_trigger_workflow are absent with zero Environment records", async () => {
     tc = await createTestContext();
     const names = (await listRegisteredTools(tc.ctx)).map((d) => d.name);
@@ -177,11 +154,22 @@ describe("progressive disclosure — the 5 named extended tools gate on real dat
     }
   });
 
-  it("core loop stays at or under 10 tools even before any progressive-disclosure precondition is met (spec §32.2d)", async () => {
+  it("core loop includes reuse-first workflow and public Pack discovery/install/approval", async () => {
     tc = await createTestContext({ trustMode: "governed" });
     const defs = await listRegisteredTools(tc.ctx);
     const core = defs.filter((d) => d.tier === "core");
-    expect(core.length).toBeLessThanOrEqual(10);
+    expect(core.map((d) => d.name)).toContain("aart_find_workflows");
+    expect(core.map((d) => d.name)).toContain("aart_find_packs");
+    expect(core).toHaveLength(14);
+  });
+});
+
+describe("aart_approve_pack uses the same human-approval mode gate as aart_approve", () => {
+  it("is present in dev/governed and absent in strict/production", async () => {
+    for (const mode of ["dev", "governed", "strict", "production"] as const) {
+      const names = await toolNames(mode);
+      expect(names.includes("aart_approve_pack")).toBe(mode === "dev" || mode === "governed");
+    }
   });
 });
 

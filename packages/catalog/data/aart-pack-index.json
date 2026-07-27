@@ -1,0 +1,465 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-07-27T00:00:00.000Z",
+  "mode": "preview",
+  "packs": [
+    {
+      "npmPackageName": "aart-pack-browser-checks",
+      "packName": "browser-checks",
+      "version": "1.4.0",
+      "displayName": "Browser Checks",
+      "description": "Inspectable browser journeys for release checks, critical paths and visual evidence.",
+      "contentHash": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "categories": ["browser-automation", "quality"],
+      "tags": ["playwright", "release", "screenshots"],
+      "capabilities": ["browser", "network"],
+      "secrets": [],
+      "author": { "name": "AART Community" },
+      "license": "Apache-2.0",
+      "repository": "https://github.com/aart-dev/aart-pack-browser-checks",
+      "compatibility": { "aart": ">=0.12.0", "node": ">=22", "runtimes": ["Node", "Server"] },
+      "publishedAt": "2026-06-18T08:00:00.000Z",
+      "updatedAt": "2026-07-23T08:00:00.000Z",
+      "verification": {
+        "status": "verified",
+        "verifiedAt": "2026-07-24T08:00:00.000Z",
+        "note": "Manifest, declared capabilities and example workflow were reviewed against this exact content seal."
+      },
+      "stats": { "weeklyDownloads": 1840, "installs": 622, "reuses": 418 },
+      "blocks": [
+        {
+          "manifest": {
+            "id": "browser.assert_journey",
+            "version": "1.4.0",
+            "capabilities": ["browser", "network"],
+            "inputSchema": {},
+            "outputSchema": {},
+            "description": "Run a browser journey and preserve step-level evidence.",
+            "category": "browser-automation"
+          },
+          "examples": [{ "description": "Verify a guest checkout from product page to receipt", "inputs": {} }]
+        },
+        {
+          "manifest": {
+            "id": "browser.capture_checkpoint",
+            "version": "1.4.0",
+            "capabilities": ["browser"],
+            "inputSchema": {},
+            "outputSchema": {},
+            "description": "Capture a named screenshot and DOM checkpoint.",
+            "category": "quality"
+          },
+          "examples": [{ "description": "Keep evidence before and after payment", "inputs": {} }]
+        }
+      ],
+      "workflows": [
+        {
+          "id": "verify-critical-browser-path",
+          "name": "Verify a critical browser path",
+          "version": "1.2.0",
+          "inputs": [],
+          "outputs": [],
+          "execution": { "type": "workflow", "steps": [] },
+          "approval": "draft",
+          "gates": { "validate": "pending", "readiness": "pending", "evals": "pending", "riskReview": "pending", "humanReview": "pending" },
+          "category": "quality",
+          "keywords": ["browser", "release", "critical path"],
+          "examples": [{ "description": "Gate a release on checkout and login", "inputs": {} }]
+        }
+      ]
+    },
+    {
+      "npmPackageName": "aart-pack-github-release",
+      "packName": "github-release",
+      "version": "2.1.0",
+      "displayName": "GitHub Release",
+      "description": "Turn pull requests, checks and release evidence into a reusable governed release flow.",
+      "contentHash": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "categories": ["developer-tools", "quality"],
+      "tags": ["github", "pull-request", "ci"],
+      "capabilities": ["network"],
+      "secrets": ["GITHUB_TOKEN"],
+      "author": { "name": "Northstar Tools" },
+      "license": "MIT",
+      "repository": "https://github.com/northstar-tools/aart-pack-github-release",
+      "compatibility": { "aart": ">=0.12.0", "node": ">=22", "runtimes": ["Node", "Server"] },
+      "publishedAt": "2026-05-11T08:00:00.000Z",
+      "updatedAt": "2026-07-25T08:00:00.000Z",
+      "verification": {
+        "status": "community",
+        "verifiedAt": "2026-07-25T08:00:00.000Z",
+        "note": "Two community maintainers reviewed the declared GitHub scopes and example workflow."
+      },
+      "stats": { "weeklyDownloads": 3190, "installs": 1184, "reuses": 903 },
+      "blocks": [
+        {
+          "manifest": {
+            "id": "github.release_readiness",
+            "version": "2.1.0",
+            "capabilities": ["network"],
+            "inputSchema": {},
+            "outputSchema": {},
+            "description": "Collect pull request reviews, checks and unresolved threads.",
+            "category": "developer-tools"
+          },
+          "examples": [{ "description": "Assess whether pull request 412 is ready to release", "inputs": {} }]
+        },
+        {
+          "manifest": {
+            "id": "github.publish_release_notes",
+            "version": "2.1.0",
+            "capabilities": ["network"],
+            "inputSchema": {},
+            "outputSchema": {},
+            "description": "Publish approved release notes to a GitHub release.",
+            "category": "developer-tools"
+          },
+          "examples": [{ "description": "Publish evidence-backed notes after approval", "inputs": {} }]
+        }
+      ],
+      "workflows": [
+        {
+          "id": "github-governed-release",
+          "name": "Governed GitHub release",
+          "version": "2.0.0",
+          "inputs": [],
+          "outputs": [],
+          "execution": { "type": "workflow", "steps": [] },
+          "approval": "draft",
+          "gates": { "validate": "pending", "readiness": "pending", "evals": "pending", "riskReview": "pending", "humanReview": "pending" },
+          "category": "quality",
+          "keywords": ["github", "release", "approval"],
+          "examples": [{ "description": "Prepare, approve and publish a tagged release", "inputs": {} }]
+        }
+      ]
+    },
+    {
+      "npmPackageName": "aart-pack-data-shaping",
+      "packName": "data-shaping",
+      "version": "1.8.3",
+      "displayName": "Data Shaping",
+      "description": "Composable mapping, validation and deduplication patterns for operational data.",
+      "contentHash": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+      "categories": ["data"],
+      "tags": ["json", "csv", "mapping"],
+      "capabilities": ["filesystem"],
+      "secrets": [],
+      "author": { "name": "Rill Works" },
+      "license": "Apache-2.0",
+      "repository": "https://github.com/rill-works/aart-pack-data-shaping",
+      "compatibility": { "aart": ">=0.11.0", "node": ">=22", "runtimes": ["Node", "Server"] },
+      "publishedAt": "2026-04-02T08:00:00.000Z",
+      "updatedAt": "2026-07-19T08:00:00.000Z",
+      "verification": {
+        "status": "verified",
+        "verifiedAt": "2026-07-20T08:00:00.000Z",
+        "note": "Deterministic fixtures and data-loss behavior were reviewed against the sealed version."
+      },
+      "stats": { "weeklyDownloads": 4280, "installs": 2041, "reuses": 1650 },
+      "blocks": [
+        {
+          "manifest": {
+            "id": "data.map_records",
+            "version": "1.8.3",
+            "capabilities": [],
+            "inputSchema": {},
+            "outputSchema": {},
+            "description": "Map records through an explicit field contract.",
+            "category": "data"
+          },
+          "examples": [{ "description": "Normalize CRM contacts before import", "inputs": {} }]
+        },
+        {
+          "manifest": {
+            "id": "data.dedupe_records",
+            "version": "1.8.3",
+            "capabilities": [],
+            "inputSchema": {},
+            "outputSchema": {},
+            "description": "Deduplicate records with an inspectable match strategy.",
+            "category": "data"
+          },
+          "examples": [{ "description": "Collapse duplicate leads by email and organization", "inputs": {} }]
+        }
+      ],
+      "workflows": [
+        {
+          "id": "clean-import-dataset",
+          "name": "Clean an import dataset",
+          "version": "1.3.0",
+          "inputs": [],
+          "outputs": [],
+          "execution": { "type": "workflow", "steps": [] },
+          "approval": "draft",
+          "gates": { "validate": "pending", "readiness": "pending", "evals": "pending", "riskReview": "pending", "humanReview": "pending" },
+          "category": "data",
+          "keywords": ["clean", "deduplicate", "import"],
+          "examples": [{ "description": "Prepare a CSV for a safe CRM import", "inputs": {} }]
+        }
+      ]
+    },
+    {
+      "npmPackageName": "aart-pack-slack-ops",
+      "packName": "slack-ops",
+      "version": "1.1.2",
+      "displayName": "Slack Operations",
+      "description": "Operational Slack updates with structured messages, escalation and approval boundaries.",
+      "contentHash": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+      "categories": ["communication", "operations"],
+      "tags": ["slack", "notifications", "escalation"],
+      "capabilities": ["network"],
+      "secrets": ["SLACK_BOT_TOKEN"],
+      "author": { "name": "AART Community" },
+      "license": "Apache-2.0",
+      "repository": "https://github.com/aart-dev/aart-pack-slack-ops",
+      "compatibility": { "aart": ">=0.12.0", "node": ">=22", "runtimes": ["Node", "Server"] },
+      "publishedAt": "2026-06-01T08:00:00.000Z",
+      "updatedAt": "2026-07-21T08:00:00.000Z",
+      "verification": {
+        "status": "community",
+        "verifiedAt": "2026-07-22T08:00:00.000Z",
+        "note": "Community review confirmed message-write scope and explicit approval before external posting."
+      },
+      "stats": { "weeklyDownloads": 2250, "installs": 784, "reuses": 671 },
+      "blocks": [
+        {
+          "manifest": {
+            "id": "slack.post_update",
+            "version": "1.1.2",
+            "capabilities": ["network"],
+            "inputSchema": {},
+            "outputSchema": {},
+            "description": "Post a structured operational update to an approved channel.",
+            "category": "communication"
+          },
+          "examples": [{ "description": "Post deployment progress with links to evidence", "inputs": {} }]
+        }
+      ],
+      "workflows": [
+        {
+          "id": "incident-channel-update",
+          "name": "Update an incident channel",
+          "version": "1.1.0",
+          "inputs": [],
+          "outputs": [],
+          "execution": { "type": "workflow", "steps": [] },
+          "approval": "draft",
+          "gates": { "validate": "pending", "readiness": "pending", "evals": "pending", "riskReview": "pending", "humanReview": "pending" },
+          "category": "operations",
+          "keywords": ["incident", "slack", "status"],
+          "examples": [{ "description": "Summarize an incident timeline for responders", "inputs": {} }]
+        }
+      ]
+    },
+    {
+      "npmPackageName": "aart-pack-web-research",
+      "packName": "web-research",
+      "version": "0.9.4",
+      "displayName": "Web Research",
+      "description": "Source-grounded web collection, comparison and evidence capture for repeatable research.",
+      "contentHash": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+      "categories": ["browser-automation", "data"],
+      "tags": ["research", "sources", "comparison"],
+      "capabilities": ["browser", "network"],
+      "secrets": [],
+      "author": { "name": "Fieldnotes Lab" },
+      "license": "MIT",
+      "repository": "https://github.com/fieldnotes-lab/aart-pack-web-research",
+      "compatibility": { "aart": ">=0.12.0", "node": ">=22", "runtimes": ["Node"] },
+      "publishedAt": "2026-07-01T08:00:00.000Z",
+      "updatedAt": "2026-07-26T08:00:00.000Z",
+      "verification": {
+        "status": "unverified",
+        "note": "Publisher metadata only. No independent AART review has been recorded."
+      },
+      "stats": { "weeklyDownloads": 910, "installs": 202, "reuses": 118 },
+      "blocks": [
+        {
+          "manifest": {
+            "id": "research.collect_sources",
+            "version": "0.9.4",
+            "capabilities": ["browser", "network"],
+            "inputSchema": {},
+            "outputSchema": {},
+            "description": "Collect source pages and preserve citation metadata.",
+            "category": "browser-automation"
+          },
+          "examples": [{ "description": "Collect official documentation for a technical comparison", "inputs": {} }]
+        }
+      ],
+      "workflows": [
+        {
+          "id": "compare-with-sources",
+          "name": "Compare options with sources",
+          "version": "0.9.0",
+          "inputs": [],
+          "outputs": [],
+          "execution": { "type": "workflow", "steps": [] },
+          "approval": "draft",
+          "gates": { "validate": "pending", "readiness": "pending", "evals": "pending", "riskReview": "pending", "humanReview": "pending" },
+          "category": "data",
+          "keywords": ["research", "compare", "citations"],
+          "examples": [{ "description": "Compare three platforms using primary sources", "inputs": {} }]
+        }
+      ]
+    },
+    {
+      "npmPackageName": "aart-pack-incident-response",
+      "packName": "incident-response",
+      "version": "1.0.1",
+      "displayName": "Incident Response",
+      "description": "Reusable intake, coordination and handoff workflows for operational incidents.",
+      "contentHash": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
+      "categories": ["operations", "communication"],
+      "tags": ["incident", "on-call", "handoff"],
+      "capabilities": ["network"],
+      "secrets": ["INCIDENT_API_TOKEN"],
+      "author": { "name": "Relay Reliability" },
+      "license": "Apache-2.0",
+      "repository": "https://github.com/relay-reliability/aart-pack-incident-response",
+      "compatibility": { "aart": ">=0.12.0", "node": ">=22", "runtimes": ["Node", "Server"] },
+      "publishedAt": "2026-06-22T08:00:00.000Z",
+      "updatedAt": "2026-07-24T08:00:00.000Z",
+      "verification": {
+        "status": "community",
+        "verifiedAt": "2026-07-24T08:00:00.000Z",
+        "note": "Community reviewers exercised the handoff path and checked external write gates."
+      },
+      "stats": { "weeklyDownloads": 1370, "installs": 431, "reuses": 388 },
+      "blocks": [
+        {
+          "manifest": {
+            "id": "incident.open_record",
+            "version": "1.0.1",
+            "capabilities": ["network"],
+            "inputSchema": {},
+            "outputSchema": {},
+            "description": "Open a structured incident record with deduplicated context.",
+            "category": "operations"
+          },
+          "examples": [{ "description": "Open a record from a production alert", "inputs": {} }]
+        }
+      ],
+      "workflows": [
+        {
+          "id": "triage-and-handoff-incident",
+          "name": "Triage and hand off an incident",
+          "version": "1.0.0",
+          "inputs": [],
+          "outputs": [],
+          "execution": { "type": "workflow", "steps": [] },
+          "approval": "draft",
+          "gates": { "validate": "pending", "readiness": "pending", "evals": "pending", "riskReview": "pending", "humanReview": "pending" },
+          "category": "operations",
+          "keywords": ["incident", "triage", "handoff"],
+          "examples": [{ "description": "Triage an alert and prepare an on-call handoff", "inputs": {} }]
+        }
+      ]
+    },
+    {
+      "npmPackageName": "aart-pack-invoice-intake",
+      "packName": "invoice-intake",
+      "version": "1.3.0",
+      "displayName": "Invoice Intake",
+      "description": "Extract, validate and route invoice data while keeping financial approvals human-owned.",
+      "contentHash": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+      "categories": ["data", "operations"],
+      "tags": ["finance", "documents", "validation"],
+      "capabilities": ["filesystem"],
+      "secrets": [],
+      "author": { "name": "Ledgerline" },
+      "license": "MIT",
+      "repository": "https://github.com/ledgerline/aart-pack-invoice-intake",
+      "compatibility": { "aart": ">=0.12.0", "node": ">=22", "runtimes": ["Node", "Server"] },
+      "publishedAt": "2026-05-29T08:00:00.000Z",
+      "updatedAt": "2026-07-17T08:00:00.000Z",
+      "verification": {
+        "status": "verified",
+        "verifiedAt": "2026-07-18T08:00:00.000Z",
+        "note": "Extraction fixtures, PII handling and approval boundaries were reviewed."
+      },
+      "stats": { "weeklyDownloads": 1640, "installs": 512, "reuses": 476 },
+      "blocks": [
+        {
+          "manifest": {
+            "id": "invoice.extract_fields",
+            "version": "1.3.0",
+            "capabilities": ["filesystem"],
+            "inputSchema": {},
+            "outputSchema": {},
+            "description": "Extract normalized invoice fields with confidence evidence.",
+            "category": "data"
+          },
+          "examples": [{ "description": "Extract supplier, total and due date from a PDF", "inputs": {} }]
+        }
+      ],
+      "workflows": [
+        {
+          "id": "validate-invoice-intake",
+          "name": "Validate invoice intake",
+          "version": "1.2.0",
+          "inputs": [],
+          "outputs": [],
+          "execution": { "type": "workflow", "steps": [] },
+          "approval": "draft",
+          "gates": { "validate": "pending", "readiness": "pending", "evals": "pending", "riskReview": "pending", "humanReview": "pending" },
+          "category": "operations",
+          "keywords": ["invoice", "finance", "review"],
+          "examples": [{ "description": "Validate an invoice before human approval", "inputs": {} }]
+        }
+      ]
+    },
+    {
+      "npmPackageName": "aart-pack-release-evidence",
+      "packName": "release-evidence",
+      "version": "0.8.2",
+      "displayName": "Release Evidence",
+      "description": "Collect test, build and deployment evidence into a reviewable release record.",
+      "contentHash": "sha256:8888888888888888888888888888888888888888888888888888888888888888",
+      "categories": ["quality", "developer-tools"],
+      "tags": ["release", "evidence", "deployment"],
+      "capabilities": ["filesystem", "network"],
+      "secrets": [],
+      "author": { "name": "Proofplane" },
+      "license": "Apache-2.0",
+      "repository": "https://github.com/proofplane/aart-pack-release-evidence",
+      "compatibility": { "aart": ">=0.12.0", "node": ">=22", "runtimes": ["Node", "Server"] },
+      "publishedAt": "2026-07-05T08:00:00.000Z",
+      "updatedAt": "2026-07-20T08:00:00.000Z",
+      "verification": {
+        "status": "unverified",
+        "note": "Publisher metadata only. No independent AART review has been recorded."
+      },
+      "stats": { "weeklyDownloads": 720, "installs": 188, "reuses": 92 },
+      "blocks": [
+        {
+          "manifest": {
+            "id": "evidence.collect_release",
+            "version": "0.8.2",
+            "capabilities": ["filesystem", "network"],
+            "inputSchema": {},
+            "outputSchema": {},
+            "description": "Collect build, test and deployment references into one record.",
+            "category": "quality"
+          },
+          "examples": [{ "description": "Assemble the evidence for a production release", "inputs": {} }]
+        }
+      ],
+      "workflows": [
+        {
+          "id": "assemble-release-evidence",
+          "name": "Assemble release evidence",
+          "version": "0.8.0",
+          "inputs": [],
+          "outputs": [],
+          "execution": { "type": "workflow", "steps": [] },
+          "approval": "draft",
+          "gates": { "validate": "pending", "readiness": "pending", "evals": "pending", "riskReview": "pending", "humanReview": "pending" },
+          "category": "quality",
+          "keywords": ["release", "evidence", "build"],
+          "examples": [{ "description": "Prepare a release packet for human review", "inputs": {} }]
+        }
+      ]
+    }
+  ]
+}

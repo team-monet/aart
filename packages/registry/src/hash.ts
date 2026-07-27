@@ -39,7 +39,8 @@ function sortKeysDeep(value: unknown): unknown {
  * Pack content hash (architecture §11.1). `blockSources` is keyed by block
  * id (e.g. "github.create_issue") mapped to that block's implementation
  * source text. The hash input is built as one JSON structure — `{ manifest,
- * blocks: [{ name, source }, ...] }`, blocks sorted by name — rather than
+ * blocks: [{ name, source }, ...], workflows: [{ name, source }, ...] }`,
+ * both asset collections sorted by name — rather than
  * hand-concatenated strings with separator characters: JSON.stringify
  * already escapes string boundaries correctly (a source file containing a
  * quote, newline, or any other byte can never be mistaken for a
@@ -50,18 +51,26 @@ function sortKeysDeep(value: unknown): unknown {
  * reordering of the `blocks:` YAML array — no actual content change —
  * does not itself change the hash.
  *
- * On load, recompute this from the pack's current manifest + block source
+ * On load, recompute this from the pack's current manifest + block/workflow
+ * sources
  * and compare against the hash recorded at approval time — a mismatch
  * means the approval seal is broken (spec §16.2's "any edit breaks
  * approval seal"). Recomputation is this package's job
  * (`recomputePackManifest`, manifest.ts); the COMPARISON + what-to-do-about-
  * a-mismatch is governance's (`isPackSealBroken`, S4) — see SEAMS.md.
  */
-export function computePackContentHash(manifest: Record<string, unknown>, blockSources: Readonly<Record<string, string>>): string {
+export function computePackContentHash(
+  manifest: Record<string, unknown>,
+  blockSources: Readonly<Record<string, string>>,
+  workflowSources: Readonly<Record<string, string>> = {},
+): string {
   const blocks = Object.keys(blockSources)
     .sort()
     .map((name) => ({ name, source: blockSources[name] }));
-  const payload = canonicalize({ manifest, blocks });
+  const workflows = Object.keys(workflowSources)
+    .sort()
+    .map((name) => ({ name, source: workflowSources[name] }));
+  const payload = canonicalize({ manifest, blocks, workflows });
   const digest = createHash("sha256").update(payload, "utf8").digest("hex");
   return `sha256:${digest}`;
 }

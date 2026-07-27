@@ -7,7 +7,7 @@ import path from "node:path";
 import { createSqliteStore } from "@aart/store/sqlite";
 import { flagString, tokenize, type Tokenized } from "./args.js";
 import { createCliContext, type CliContext, type CreateCliContextOptions } from "./cli-context.js";
-import { initAgentCommand, initCommand, listCommand, registerCommand, runCommand, validateCommand } from "./commands/authoring.js";
+import { findWorkflowsCommand, initAgentCommand, initCommand, listCommand, registerCommand, runCommand, validateCommand } from "./commands/authoring.js";
 import { deployCommand, pushCommand, triggerCommand } from "./commands/deployment.js";
 import { environmentCommand } from "./commands/environment.js";
 import { approveCommand, approveRemoteCommand, correctionCommand, diffCommand, promoteCommand, requestApprovalCommand } from "./commands/governance.js";
@@ -16,12 +16,19 @@ import { bundleCommand, flagCommand, mcpCommand, serverCommand, workerCommand } 
 import { remoteCommand } from "./commands/remote.js";
 import { remoteRunCommand, remoteRunsCommand, remoteStatusCommand, remoteWhyCommand } from "./commands/remote-observability.js";
 import { watchCommand } from "./commands/watch.js";
+import { packCommand } from "./commands/packs.js";
 
 export const USAGE = `AART CLI — usage:
   aart run <workflowId> --input <json> [--version <v>]
   aart validate <path>
   aart validate <workflowId> --registered [--version <v>]
   aart list
+  aart find-workflows [query] [--category <category>] [--scope local|remote|all] [--index-url <url>]
+  aart pack search [query] [--index-url <url>]
+  aart pack add <name> [--version <v>] [--from <local-package-dir>]
+  aart pack list [--status unapproved|approved]
+  aart pack approve <name> --version <v> --reviewer <name>
+  aart pack prepare <local-package-dir> [--out <index-entry.json>]
   aart register <path>
   aart init
   aart init-agent
@@ -57,6 +64,16 @@ export const USAGE = `AART CLI — usage:
 
   --root <dir>    (or AART_ROOT) the .aart store directory. Precedence: flag > env > ./.aart. Also honored by every command above, not only the ones listed.
   --store <kind>  fs (default) or sqlite — which @aart/store adapter backs this invocation. sqlite's db file lives at <root>/aart.db.
+`;
+
+export const INIT_AGENT_USAGE = `AART agent setup — usage:
+  aart init-agent [--npx] [--package <name>] [--bin-path <path>]
+                  [--root <dir>] [--store fs|sqlite] [--cwd <dir>]
+                  [--mcp-config-out <path>] [--instructions-out <path>]
+
+Writes a merge-safe MCP config and canonical AART working instructions.
+The generated MCP command pins the resolved absolute --root and store adapter,
+so the agent host cannot accidentally start against a different workspace.
 `;
 
 /**
@@ -187,6 +204,9 @@ function assertServerRootExists(tokens: Tokenized, aartOptions: CreateCliContext
 
 export async function run(argv: readonly string[], options: RunOptions = {}): Promise<CliOutcome> {
   const [command, ...rest] = argv;
+  if (command === "init-agent" && rest.some((arg) => arg === "--help" || arg === "-h" || arg === "help")) {
+    return asOutcome({ ok: true, usage: INIT_AGENT_USAGE });
+  }
   const tokens = tokenize(rest);
 
   try {
@@ -201,6 +221,8 @@ export async function run(argv: readonly string[], options: RunOptions = {}): Pr
         return asOutcome(await validateCommand(tokens, cli));
       case "list":
         return asOutcome(await listCommand(tokens, cli));
+      case "find-workflows":
+        return asOutcome(await findWorkflowsCommand(tokens, cli));
       case "register":
         return asOutcome(await registerCommand(tokens, cli));
       case "init":
@@ -223,6 +245,8 @@ export async function run(argv: readonly string[], options: RunOptions = {}): Pr
         return asOutcome(await triggerCommand(tokens, cli));
       case "remote":
         return asOutcome(await remoteCommand(tokens, cli));
+      case "pack":
+        return asOutcome(await packCommand(tokens, cli));
       case "push":
         return asOutcome(await pushCommand(tokens, cli));
       case "remote-status":

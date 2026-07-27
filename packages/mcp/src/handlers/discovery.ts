@@ -8,6 +8,7 @@
 // simplified the way the execution/governance handlers are.
 import { WorkflowSchema } from "@aart/types";
 import { toJsonSchema } from "@aart/types";
+import { fetchRemoteRegistryIndex, searchRemoteIndex, searchWorkflows, type WorkflowSearchResult } from "@aart/registry";
 import type { AartContext } from "../context.js";
 import { matchRecipes } from "../recipes.js";
 import type { HandlerResult } from "../response.js";
@@ -15,14 +16,100 @@ import type { HandlerResult } from "../response.js";
 export interface FindBlocksInput {
   query: string;
   category?: string;
+  scope?: "local" | "remote" | "all";
+  indexUrl?: string;
 }
 
 export async function findBlocksHandler(ctx: AartContext, input: FindBlocksInput): Promise<HandlerResult> {
-  const results = ctx.registry.findBlocks({ query: input.query, category: input.category });
+  const scope = input.scope ?? "local";
+  const local =
+    scope === "remote"
+      ? []
+      : ctx.registry
+          .findBlocks({ query: input.query, category: input.category })
+          .map((result) => ({ ...result, source: "local" as const }));
+  let remote: Array<{
+    entry: (typeof local)[number]["entry"];
+    score: number;
+    source: "public";
+  }> = [];
+  if (scope !== "local") {
+    const indexUrl = input.indexUrl ?? process.env.AART_PACK_INDEX_URL;
+    if (!indexUrl) throw new Error("remote block search needs indexUrl or AART_PACK_INDEX_URL");
+    const index = await fetchRemoteRegistryIndex(indexUrl);
+    remote = searchRemoteIndex(index, input.query)
+      .filter((result) => (input.category ? result.manifest.category === input.category : true))
+      .map(({ score, ...entry }) => ({ entry, score, source: "public" as const }));
+  }
+  const results = [...local, ...remote].sort(
+    (a, b) => b.score - a.score || a.entry.manifest.id.localeCompare(b.entry.manifest.id),
+  );
   return {
     ok: results.length > 0,
     query: input.query,
-    blocks: results.map((r) => ({ id: r.entry.manifest.id, description: r.entry.manifest.description, category: r.entry.manifest.category, score: r.score })),
+    scope,
+    blocks: results.map((r) => ({
+      id: r.entry.manifest.id,
+      description: r.entry.manifest.description,
+      category: r.entry.manifest.category,
+      packName: r.entry.packName,
+      source: r.source,
+      score: r.score,
+    })),
+  };
+}
+
+export interface FindWorkflowsInput {
+  query: string;
+  category?: string;
+  scope?: "local" | "remote" | "all";
+  indexUrl?: string;
+}
+
+export async function findWorkflowsHandler(ctx: AartContext, input: FindWorkflowsInput): Promise<HandlerResult> {
+  type RankedWorkflow = WorkflowSearchResult & { source: "local" | "public"; packName?: string };
+  const scope = input.scope ?? "local";
+  const local: RankedWorkflow[] =
+    scope === "remote"
+      ? []
+      : await (async () => {
+          const ids = await ctx.store.workflows.listWorkflowIds();
+          const latest = await Promise.all(ids.map((id) => ctx.store.workflows.getLatest(id)));
+          const workflows = latest.filter((workflow): workflow is NonNullable<typeof workflow> => workflow !== undefined);
+          return searchWorkflows(workflows, input.query)
+            .filter((result) => (input.category ? result.workflow.category === input.category : true))
+            .map((result) => ({ ...result, source: "local" as const, packName: undefined }));
+        })();
+  let remote: RankedWorkflow[] = [];
+  if (scope !== "local") {
+    const indexUrl = input.indexUrl ?? process.env.AART_PACK_INDEX_URL;
+    if (!indexUrl) throw new Error("remote workflow search needs indexUrl or AART_PACK_INDEX_URL");
+    const index = await fetchRemoteRegistryIndex(indexUrl);
+    remote = index.flatMap((pack) =>
+      searchWorkflows(pack.workflows ?? [], input.query)
+        .filter((result) => (input.category ? result.workflow.category === input.category : true))
+        .map((result) => ({ ...result, source: "public" as const, packName: pack.packName })),
+    );
+  }
+  const results = [...local, ...remote].sort(
+    (a, b) => b.score - a.score || a.workflow.id.localeCompare(b.workflow.id),
+  );
+  return {
+    ok: results.length > 0,
+    query: input.query,
+    scope,
+    workflows: results.map(({ workflow, score, source, packName }) => ({
+      id: workflow.id,
+      name: workflow.name,
+      version: workflow.version,
+      category: workflow.category,
+      keywords: workflow.keywords ?? [],
+      approval: workflow.approval,
+      score,
+      source,
+      packName,
+      examples: workflow.examples ?? [],
+    })),
   };
 }
 

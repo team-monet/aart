@@ -179,6 +179,8 @@ export interface PackManifestStore {
   get(name: string, version: string): Promise<PackManifest | undefined>;
   put(manifest: PackManifest): Promise<void>;
   listVersions(name: string): Promise<string[]>;
+  /** Every installed/authored pack name with at least one recorded version. */
+  listNames(): Promise<string[]>;
 }
 
 export interface RejectedTriggerStore {

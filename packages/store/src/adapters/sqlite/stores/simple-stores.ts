@@ -629,6 +629,10 @@ export class SqlitePackManifestStore implements PackManifestStore {
     const rows = await this.exec((db) => dbAll<{ version: string }>(db, "SELECT version FROM pack_manifests WHERE name = ?", [name]));
     return rows.map((r) => r.version);
   }
+  async listNames(): Promise<string[]> {
+    const rows = await this.exec((db) => dbAll<{ name: string }>(db, "SELECT DISTINCT name FROM pack_manifests ORDER BY name"));
+    return rows.map((row) => row.name);
+  }
 }
 
 // ---------------------------------------------------------------------------

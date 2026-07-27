@@ -27,9 +27,9 @@
 // `aart_deploy` is how a caller would configure their first remote's
 // content in the first place — gating it on one already existing would be
 // circular. Server-side enforcement, the remote's own AART_DEPLOY_TOKEN
-// gate, is `aart_deploy`'s actual chokepoint. The remaining 6 original
-// extended tools have no data-existence precondition at all, registering
-// unconditionally alongside the 9 non-gated core tools.
+// gate, is `aart_deploy`'s actual chokepoint. Other extended tools with no
+// data-existence precondition register unconditionally alongside the
+// non-gated core tools.
 //
 // Wave 2C (AMENDMENTS.md A65) adds `aart_remote_approve` — a FOURTH gate
 // shape, and the first needing TWO independent preconditions at once rather
@@ -60,7 +60,7 @@ const EVAL_SUITE_GATED_TOOLS: ReadonlySet<ToolName> = new Set(["aart_create_eval
 const REMOTE_GATED_TOOLS: ReadonlySet<ToolName> = new Set(["aart_remote_status", "aart_remote_why", "aart_remote_runs", "aart_remote_run"]);
 
 export async function isToolRegistered(ctx: AartContext, tool: ToolName): Promise<boolean> {
-  if (tool === "aart_approve") {
+  if (tool === "aart_approve" || tool === "aart_approve_pack") {
     return ctx.governance.isAartApproveRegisteredForMode(ctx.trustMode);
   }
   if (tool === "aart_remote_approve") {

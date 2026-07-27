@@ -7,8 +7,8 @@
 // against the real @aart/store.
 import { existsSync } from "node:fs";
 import { readFile, mkdir, writeFile } from "node:fs/promises";
-import { join } from "node:path";
-import { generateInitAgentOutputs, registerWorkflowHandler, runWorkflowHandler, validateWorkflowHandler, wrapResult, type HandlerResult, type McpConfig } from "@aart/mcp";
+import { join, resolve } from "node:path";
+import { findWorkflowsHandler, generateInitAgentOutputs, registerWorkflowHandler, runWorkflowHandler, validateWorkflowHandler, wrapResult, type HandlerResult, type McpConfig } from "@aart/mcp";
 import type { Tokenized } from "../args.js";
 import { flagBoolean, flagString, requirePositional } from "../args.js";
 import type { CliContext } from "../cli-context.js";
@@ -65,6 +65,21 @@ export async function listCommand(_tokens: Tokenized, cli: CliContext): Promise<
     }),
   );
   return { ok: true, workflows };
+}
+
+export async function findWorkflowsCommand(tokens: Tokenized, cli: CliContext): Promise<HandlerResult & { next: string }> {
+  const query = tokens.positionals.join(" ");
+  const scope = flagString(tokens.flags, "scope");
+  if (scope && scope !== "local" && scope !== "remote" && scope !== "all") {
+    throw new Error('--scope must be "local", "remote", or "all"');
+  }
+  const result = await findWorkflowsHandler(cli.aart, {
+    query,
+    category: flagString(tokens.flags, "category"),
+    scope: scope as "local" | "remote" | "all" | undefined,
+    indexUrl: flagString(tokens.flags, "index-url"),
+  });
+  return wrapResult("aart_find_workflows", result);
 }
 
 export async function initCommand(_tokens: Tokenized, cli: CliContext): Promise<HandlerResult> {
@@ -139,10 +154,19 @@ async function mergeMcpConfig(mcpConfigPath: string, generated: McpConfig): Prom
 }
 
 export async function initAgentCommand(tokens: Tokenized, cli: CliContext): Promise<HandlerResult> {
+  const allowedFlags = new Set(["npx", "package", "bin-path", "cwd", "mcp-config-out", "instructions-out", "root", "store"]);
+  const unknownFlags = Object.keys(tokens.flags).filter((flag) => !allowedFlags.has(flag));
+  if (unknownFlags.length > 0) {
+    throw new Error(`Unknown init-agent flag(s): ${unknownFlags.map((flag) => `--${flag}`).join(", ")}. Run "aart init-agent --help" for the supported flags.`);
+  }
+  const store = flagString(tokens.flags, "store");
   const outputs = generateInitAgentOutputs({
     trustMode: cli.aart.trustMode,
     packageName: flagString(tokens.flags, "package"),
     binPath: resolveBinPath(tokens),
+    nodePath: flagBoolean(tokens.flags, "npx") ? undefined : process.execPath,
+    root: resolve(cli.root),
+    store: store === "sqlite" ? "sqlite" : "fs",
   });
   const cwd = flagString(tokens.flags, "cwd") ?? process.cwd();
   const mcpConfigPath = flagString(tokens.flags, "mcp-config-out") ?? join(cwd, ".mcp.json");
@@ -152,5 +176,12 @@ export async function initAgentCommand(tokens: Tokenized, cli: CliContext): Prom
   const mergedMcpConfig = await mergeMcpConfig(mcpConfigPath, outputs.mcpConfig);
   await writeFile(mcpConfigPath, JSON.stringify(mergedMcpConfig, null, 2), "utf8");
   await writeFile(instructionsPath, outputs.instructions, "utf8");
-  return { ok: true, mcpConfigPath, instructionsPath };
+  return {
+    ok: true,
+    mcpConfigPath,
+    instructionsPath,
+    root: resolve(cli.root),
+    store: store === "sqlite" ? "sqlite" : "fs",
+    next: "Reload the agent host, confirm `aart_find_workflows` and `aart_find_blocks` are available, then ask the user what repeated task they want to turn into a reusable workflow.",
+  };
 }

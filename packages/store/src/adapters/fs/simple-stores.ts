@@ -224,6 +224,10 @@ export class FsPackManifestStore implements PackManifestStore {
     const keys = await this.collection.listKeys();
     return keys.filter((k) => k.startsWith(`${name}__`)).map((k) => k.slice(name.length + 2));
   }
+  async listNames(): Promise<string[]> {
+    const keys = await this.collection.listKeys();
+    return [...new Set(keys.map((key) => key.split("__", 1)[0]).filter((name): name is string => Boolean(name)))].sort();
+  }
 }
 
 export class FsRejectedTriggerStore implements RejectedTriggerStore {

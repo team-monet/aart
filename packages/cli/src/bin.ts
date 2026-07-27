@@ -2,7 +2,7 @@
 // The real `aart` bin entry (package.json: "bin": { "aart": "./dist/bin.js" }).
 // S0's cli stub declared this bin field but shipped no src/bin.ts — this is
 // that real entry, created as part of this session's CLI work.
-import { run, USAGE, VERSION } from "./cli.js";
+import { INIT_AGENT_USAGE, run, USAGE, VERSION } from "./cli.js";
 
 const argv = process.argv.slice(2);
 if (argv.length === 0) {
@@ -21,6 +21,10 @@ if (argv.length === 0) {
 // here, same as the zero-arg case.
 if (argv[0] === "--help" || argv[0] === "-h" || argv[0] === "help") {
   process.stdout.write(USAGE);
+  process.exit(0);
+}
+if (argv[0] === "init-agent" && argv.slice(1).some((arg) => arg === "--help" || arg === "-h" || arg === "help")) {
+  process.stdout.write(INIT_AGENT_USAGE);
   process.exit(0);
 }
 // AMENDMENTS.md A68 (0.10.0 release prep) — `aart --version`/`-v` did not

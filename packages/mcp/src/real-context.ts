@@ -13,11 +13,8 @@
 //     "zero adaptation at merge time" design).
 //   - EvidencePort <- @aart/evidence's real createReportRenderers/
 //     recordCorrection/createEvalExampleFromCorrection/runEvalSuite.
-//   - RegistryPort <- @aart/registry's real findBlocks, fed a
-//     BlockCatalogEntry[] assembled from the same real 56-block catalog
-//     (core built-ins only - see the module doc comment on
-//     buildLocalCatalog below for the documented v1 gap on pack-delivered
-//     blocks).
+//   - RegistryPort <- @aart/registry's real findBlocks, fed the 56 built-ins
+//     plus approved, still-sealed installed Pack blocks.
 //   - BundlerPort/RemotesPort (D1 "remotes + push", AMENDMENTS.md A56) <-
 //     @aart/server's real produceBundle (the resolveAndProduceBundle bridge
 //     below — the SAME function @aart/cli's real-server-port.ts now also
@@ -52,9 +49,8 @@
 // Two DI hooks landed earlier in this same reconciliation pass get their
 // real wiring here for the first time: EngineConfig.onRunTerminal ->
 // @aart/blocks-core's closeBrowserSession (item 10), and
-// EngineConfig.computePackHashes -> @aart/registry's computePackContentHash
-// (item 8) - see buildPackHashComputer's doc comment for why the latter is
-// scoped to core built-ins only, same reasoning as the catalog gap above.
+// EngineConfig.computePackHashes resolves Pack provenance from that same
+// catalog and records active approved Pack seals in execution snapshots.
 import { createEngine, type BlockRegistry, type Engine, type GetGrantedCapabilities } from "@aart/engine";
 import { closeBrowserSession, createBlockCatalog } from "@aart/blocks-core";
 import {
@@ -77,7 +73,7 @@ import {
   type CapabilityClosureNode,
 } from "@aart/governance";
 import { computeEvalsGateStatus, createReportRenderers, recordCorrection as evidenceRecordCorrection, createEvalExampleFromCorrection as evidenceCreateEvalExampleFromCorrection, createScorerRegistry, runEvalSuite } from "@aart/evidence";
-import { computePackContentHash, findBlocks, type BlockCatalogEntry } from "@aart/registry";
+import { findBlocks, listActiveApprovedPackStatesSync, loadApprovedPackBlocksSync, type BlockCatalogEntry } from "@aart/registry";
 import { produceBundle as produceRealBundle, type Bundle } from "@aart/server";
 import { createLlmPack, type CreateLlmPackOptions } from "@aart/llm";
 import { recordRunTerminalEvent, type AartStore } from "@aart/store";
@@ -87,14 +83,9 @@ import { newId } from "./stubs/engine.js";
 import { createRemotesPort } from "./stubs/deploy.js";
 
 // ---------------------------------------------------------------------------
-// The real 56-block catalog: @aart/blocks-core's 51 core built-ins +
-// @aart/llm's 5 llm.* blocks. Pack-delivered blocks are NOT included here -
-// AartStore's PackManifestStore has no "list every known pack" primitive to
-// enumerate them from (reconciliation ledger item 13's own documented v1
-// gap), so a fresh dev store has no installed packs to fold in anyway. This
-// is still a real, complete implementation of the documented core-builtin
-// surface (spec's own "core-builtin total = 56" framing, P9 amendment) -
-// not a placeholder like the 24-manifest catalog it replaces.
+// The real catalog: @aart/blocks-core's 51 core built-ins + @aart/llm's 5
+// llm.* blocks + the active approved version of every installed, still-
+// sealed Pack. Unapproved Pack code is never evaluated.
 // ---------------------------------------------------------------------------
 
 export interface RealCatalog {
@@ -110,7 +101,7 @@ export interface RealCatalogLlmOptions {
   google?: CreateLlmPackOptions["google"];
 }
 
-export function buildRealCatalog(store: AartStore, llmOptions?: RealCatalogLlmOptions): RealCatalog {
+export function buildRealCatalog(store: AartStore, llmOptions?: RealCatalogLlmOptions, packRoot?: string): RealCatalog {
   const scorerRegistryPlaceholder = createScorerRegistry(); // llmJudge wired in below, once the llm pack exists (chicken/egg: the registry needs llmJudge, the catalog's eval blocks need the registry)
   const reportRenderers = createReportRenderers(redactRecord);
   const llmPack = createLlmPack({ store, ...llmOptions });
@@ -127,6 +118,15 @@ export function buildRealCatalog(store: AartStore, llmOptions?: RealCatalogLlmOp
     manifest: impl.manifest,
     examples: [],
   }));
+  if (packRoot) {
+    for (const { implementation, packName } of loadApprovedPackBlocksSync(packRoot)) {
+      if (blocks[implementation.manifest.id]) {
+        throw new Error(`approved pack "${packName}" conflicts with existing block id "${implementation.manifest.id}"`);
+      }
+      blocks[implementation.manifest.id] = implementation;
+      entries.push({ manifest: implementation.manifest, packName, examples: [] });
+    }
+  }
 
   return { blocks, entries, llmJudge: llmPack.llmJudge };
 }
@@ -235,24 +235,27 @@ export function createGetGrantedCapabilities(store: AartStore, blocks: BlockRegi
 }
 
 // ---------------------------------------------------------------------------
-// EngineConfig.computePackHashes adapter (reconciliation ledger item 8) -
-// same documented scope limitation as buildRealCatalog above: only
-// core-built-in blocks are in the registry today (no pack-provenance
-// mapping exists to walk), so this always resolves to an empty record. Once
-// pack-delivered blocks are wired into the catalog (item 13's own tracked
-// gap), this is the function to extend with a real packName->version
-// resolution feeding @aart/registry's computePackContentHash - the plumbing
-// (EngineConfig.computePackHashes's DI seam) is already real and wired;
-// only the "which packs does this workflow actually use" input is the
-// still-open part, and it does not exist because no pack is installed by
-// default in a fresh store.
+// EngineConfig.computePackHashes adapter: maps workflow step ids through the
+// same catalog entries that supplied Pack provenance, then snapshots the
+// active approved Pack's recorded content seal.
 // ---------------------------------------------------------------------------
-export function createComputePackHashes() {
-  return async (_workflow: Workflow, _blocks: BlockRegistry): Promise<Record<string, string>> => {
-    void _workflow;
+export function createComputePackHashes(packRoot?: string, entries: readonly BlockCatalogEntry[] = []) {
+  const owningPackByBlock = new Map(
+    entries.filter((entry) => entry.packName).map((entry) => [entry.manifest.id, entry.packName!]),
+  );
+  const active = packRoot
+    ? new Map(listActiveApprovedPackStatesSync(packRoot).map((state) => [state.name, state]))
+    : new Map();
+  return async (workflow: Workflow, _blocks: BlockRegistry): Promise<Record<string, string>> => {
     void _blocks;
-    void computePackContentHash; // referenced so the real function this will call once packs exist is visibly imported here, not silently forgotten
-    return {};
+    const hashes: Record<string, string> = {};
+    for (const step of workflow.execution.steps) {
+      const packName = owningPackByBlock.get(step.uses);
+      if (!packName) continue;
+      const state = active.get(packName);
+      if (state) hashes[packName] = state.contentHash;
+    }
+    return hashes;
   };
 }
 
@@ -283,14 +286,19 @@ export function createComputePackHashes() {
  * `recordRunTerminalEvent` itself never throws (its own internal
  * try/catch), so this ordering costs `closeBrowserSession` nothing.
  */
-export function createRealEngine(store: AartStore, blocks: BlockRegistry, trustMode: TrustMode): Engine {
+export function createRealEngine(
+  store: AartStore,
+  blocks: BlockRegistry,
+  trustMode: TrustMode,
+  computePackHashes = createComputePackHashes(),
+): Engine {
   return createEngine({
     store,
     redact: redactRecord,
     capabilityCheck: checkCapability,
     getGrantedCapabilities: createGetGrantedCapabilities(store, blocks, trustMode),
     blocks,
-    computePackHashes: createComputePackHashes(),
+    computePackHashes,
     onRunTerminal: async (runId) => {
       await recordRunTerminalEvent(store, runId);
       await closeBrowserSession(runId);
@@ -352,28 +360,13 @@ export function createRealEnginePort(engine: Engine): EnginePort {
 //      install per pack) — the exact same sync/async wall standingApprovals
 //      hits, for the same reason (this port's validateWorkflow has no
 //      Promise-wrapped call site to await one).
-//   2. Even setting (1) aside, there is today no DATA to feed it: this
-//      module's own buildRealCatalog only folds @aart/blocks-core +
-//      @aart/llm into the catalog (documented gap, item 13) — no
-//      pack-delivered block is ever resolvable via `blocks`/`entries`
-//      today, so walking a workflow's steps for `packName` references
-//      (BlockCatalogEntry.packName) always yields the empty set, on a
-//      fresh dev store or any other. A helper that does this walk would be
-//      dead code with nothing to call it into, so none is added.
-//   3. Independent of (1)/(2): AartStore.packManifests has no "current/
-//      latest version of pack X" primitive (get() requires an exact
-//      version; listVersions() returns every known version, unordered by
-//      contract) and no Workflow field pins which pack version it depends
-//      on — "which (name, version) pairs does this workflow use" has no
-//      well-defined answer yet even with real installed packs. Resolving
-//      that is a data-model decision (a pack-version-pinning field, and/or
-//      a "latest" convention) beyond this integration pass's mandate.
-// Same resolution shape as EngineConfig.computePackHashes (item 8) above,
-// applied consistently rather than re-litigated: real DI plumbing exists on
-// governance's side (ValidationContext.packSealChecks is a real, already-
-// wired optional field — validateCapabilities already reads it), but there
-// is nothing correct to compute from here until item 13's catalog gap AND
-// a pack-version-pinning primitive both land. Until then, omitting the
+//   2. Runtime Pack provenance and deterministic active-version selection
+//      now exist, but this synchronous governance port still cannot perform
+//      the file/store I/O needed to recompute seals at validation call time.
+// Same resolution shape as the standing-approval limitation above:
+// governance's ValidationContext.packSealChecks seam is real, but this port
+// must become async or receive precomputed checks before it can populate it
+// without stale state. Until then, omitting the
 // field is the CORRECT output (not a stand-in for one), not just the
 // convenient one — validateCapabilities treats a missing packSealChecks
 // identically to an empty array (`context.packSealChecks ?? []`).

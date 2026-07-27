@@ -18,7 +18,19 @@ const signalSchema = z.object({ name: z.string(), correlationId: z.string(), pay
 
 const DESCRIPTIONS: Record<ToolName, string> = {
   aart_find_blocks:
-    "Search the block catalog by keyword or category before you compose a step. Reach for this FIRST when you need a capability — reusing an existing block is always preferable to authoring new logic, and a block you didn't know existed is a block you'll otherwise reinvent badly.",
+    "After checking aart_find_workflows, search the block catalog by keyword or category before you compose a new step. Reusing an existing block is always preferable to authoring new logic, and a block you didn't know existed is a block you'll otherwise reinvent badly.",
+  aart_find_workflows:
+    "Search the latest registered workflow versions by id, name, category, keywords, and examples BEFORE drafting a new workflow. This is the main reuse check: if another agent already produced a close workflow, adapt or version that durable asset instead of generating a different implementation from scratch.",
+  aart_find_packs:
+    "Search the configured public static Pack index before building new blocks or workflows. This is the remote half of search-before-build: it finds reusable assets published by other people without trusting or executing them.",
+  aart_install_pack:
+    "Download a public npm Pack, or copy one from a linked local directory, into AART's inert unapproved Pack store. Installation records provenance and a content seal but never executes code or grants trust.",
+  aart_list_packs:
+    "List installed Packs with provenance, content hash, and approval status. Use this to show a human exactly what is awaiting review before any approval decision.",
+  aart_approve_pack:
+    "After the user explicitly approves the exact Pack version/hash shown by aart_list_packs, validate its block modules and workflow definitions and record the human decision. NEVER call this without explicit user approval; approved blocks load only on the next process start, while imported workflows remain drafts.",
+  aart_prepare_pack:
+    "Validate a locally authored Pack before publication and generate its deterministic static-index entry. This evaluates only the author's local block modules, verifies package/manifest version alignment, and gives standard npm publishing plus the public JSON index an exact artifact to ship.",
   aart_get_block:
     "Get one block's exact manifest (input/output JSON Schema, capabilities, description) by id. Call this before wiring a step's `with:` — guessing a block's input shape is exactly the kind of thing that fails validation and costs a corrective round-trip.",
   aart_validate:
@@ -85,7 +97,23 @@ const DESCRIPTIONS: Record<ToolName, string> = {
 };
 
 const inputSchemas: Record<ToolName, z.ZodType> = {
-  aart_find_blocks: z.object({ query: z.string(), category: z.string().optional() }),
+  aart_find_blocks: z.object({
+    query: z.string(),
+    category: z.string().optional(),
+    scope: z.enum(["local", "remote", "all"]).optional(),
+    indexUrl: z.string().url().optional(),
+  }),
+  aart_find_workflows: z.object({
+    query: z.string(),
+    category: z.string().optional(),
+    scope: z.enum(["local", "remote", "all"]).optional(),
+    indexUrl: z.string().url().optional(),
+  }),
+  aart_find_packs: z.object({ query: z.string(), indexUrl: z.string().url().optional() }),
+  aart_install_pack: z.object({ name: z.string(), version: z.string().optional(), sourcePath: z.string().optional() }),
+  aart_list_packs: z.object({ status: z.enum(["unapproved", "approved"]).optional() }),
+  aart_approve_pack: z.object({ name: z.string(), version: z.string(), reviewer: z.string() }),
+  aart_prepare_pack: z.object({ sourcePath: z.string(), outputPath: z.string().optional() }),
   aart_get_block: z.object({ id: z.string() }),
   aart_validate: z.object({
     workflow: z.unknown().optional(),

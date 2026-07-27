@@ -19,6 +19,7 @@ import type { PackageManagerAdapter } from "./package-manager.js";
 export interface AuthorPackInput {
   readonly manifestYaml: string;
   readonly blockSources: Readonly<Record<string, string>>;
+  readonly workflowSources?: Readonly<Record<string, string>>;
 }
 
 /**
@@ -30,13 +31,33 @@ export interface AuthorPackInput {
  */
 export async function authorPack(store: AartStore, input: AuthorPackInput, logger?: Logger): Promise<PackManifest> {
   const raw = parsePackManifestYaml(input.manifestYaml);
-  const manifest = buildPackManifest(raw, input.blockSources);
+  const manifest = buildPackManifest(raw, input.blockSources, input.workflowSources);
   await store.packManifests.put(manifest);
   logger?.info("pack authored and registered", { pack: manifest.name, version: manifest.version, approvalStatus: manifest.approvalStatus });
   return manifest;
 }
 
 export class PackNameMismatchError extends Error {}
+
+export async function registerPackFiles(
+  store: AartStore,
+  expectedName: string,
+  files: import("./package-manager.js").InstalledPackageFiles,
+  logger?: Logger,
+): Promise<PackManifest> {
+  const raw = parsePackManifestYaml(files.manifestYaml);
+  if (raw.name !== expectedName) {
+    throw new PackNameMismatchError(`pack declares manifest name "${raw.name}", expected "${expectedName}"`);
+  }
+  const manifest = buildPackManifest(raw, files.blockSources, files.workflowSources);
+  await store.packManifests.put(manifest);
+  logger?.info("pack files registered", {
+    pack: manifest.name,
+    version: manifest.version,
+    approvalStatus: manifest.approvalStatus,
+  });
+  return manifest;
+}
 
 /**
  * npm-distributed pack path (ADR-12, architecture §11.3) — "`aart pack add
@@ -59,12 +80,15 @@ export class PackNameMismatchError extends Error {}
 export async function installPack(store: AartStore, name: string, packageManager: PackageManagerAdapter, logger?: Logger): Promise<PackManifest> {
   const npmPackageName = npmPackageNameFor(name);
   const files = await packageManager.install(npmPackageName);
-  const raw = parsePackManifestYaml(files.manifestYaml);
-  if (raw.name !== name) {
-    throw new PackNameMismatchError(`npm package "${npmPackageName}" declares manifest name "${raw.name}", expected "${name}"`);
+  let manifest: PackManifest;
+  try {
+    manifest = await registerPackFiles(store, name, files);
+  } catch (cause) {
+    if (cause instanceof PackNameMismatchError) {
+      throw new PackNameMismatchError(`npm package "${npmPackageName}" ${cause.message}`);
+    }
+    throw cause;
   }
-  const manifest = buildPackManifest(raw, files.blockSources);
-  await store.packManifests.put(manifest);
   logger?.info("pack installed from registry and registered", {
     pack: manifest.name,
     version: manifest.version,

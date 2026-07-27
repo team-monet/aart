@@ -429,6 +429,7 @@ export function runAartStoreConformanceSuite(label: string, options: Conformance
         await store.packManifests.put(manifest);
         await expect(store.packManifests.get(name, "1")).resolves.toEqual(manifest);
         await expect(store.packManifests.listVersions(name)).resolves.toEqual(["1"]);
+        await expect(store.packManifests.listNames()).resolves.toContain(name);
       });
     });
 

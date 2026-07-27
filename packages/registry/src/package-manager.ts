@@ -9,7 +9,12 @@
 // `createFakePackageManager` (an in-memory catalog) instead of ever
 // shelling out.
 import { promises as fs } from "node:fs";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { join } from "node:path";
+import { parsePackManifestYaml } from "./manifest.js";
+
+const execFileAsync = promisify(execFile);
 
 /**
  * What installing (or resolving an already pnpm-workspace-linked) npm
@@ -26,6 +31,7 @@ import { join } from "node:path";
 export interface InstalledPackageFiles {
   readonly manifestYaml: string;
   readonly blockSources: Readonly<Record<string, string>>;
+  readonly workflowSources?: Readonly<Record<string, string>>;
 }
 
 export interface PackageManagerAdapter {
@@ -69,8 +75,10 @@ export function createFakePackageManager(catalog: Readonly<Record<string, Instal
  *
  * Expected on-disk layout (this package's own convention, since neither
  * source document specifies one): `<packageRoot>/aart-pack.yaml` (the
- * manifest) plus `<packageRoot>/blocks/<blockId>.js` for each block the
- * manifest declares.
+ * manifest), self-contained `<packageRoot>/blocks/<blockId>.cjs` modules,
+ * and `<packageRoot>/workflows/<workflowId>.yaml` definitions. `.js`
+ * blocks remain a compatibility fallback for early fixtures; prepared
+ * public Packs use `.cjs`.
  */
 export function createLinkedPackageManager(options: { resolveRoot: (npmPackageName: string) => string }): PackageManagerAdapter {
   return {
@@ -87,23 +95,52 @@ export function createLinkedPackageManager(options: { resolveRoot: (npmPackageNa
       // parse (with validation) happens once, centrally, in manifest.ts's
       // parsePackManifestYaml; duplicating a second full parser here would
       // be redundant work this function doesn't need to do its own job.
-      const blockIds = extractBlockIdsForFileDiscovery(manifestYaml);
+      const raw = parsePackManifestYaml(manifestYaml);
+      const blockIds = raw.blocks;
       const blockSources: Record<string, string> = {};
       for (const blockId of blockIds) {
-        blockSources[blockId] = await fs.readFile(join(root, "blocks", `${blockId}.js`), "utf8");
+        try {
+          blockSources[blockId] = await fs.readFile(join(root, "blocks", `${blockId}.cjs`), "utf8");
+        } catch (cause) {
+          if ((cause as NodeJS.ErrnoException).code !== "ENOENT") throw cause;
+          blockSources[blockId] = await fs.readFile(join(root, "blocks", `${blockId}.js`), "utf8");
+        }
       }
-      return { manifestYaml, blockSources };
+      const workflowSources: Record<string, string> = {};
+      for (const workflowId of raw.workflows) {
+        workflowSources[workflowId] = await fs.readFile(join(root, "workflows", `${workflowId}.yaml`), "utf8");
+      }
+      return { manifestYaml, blockSources, workflowSources };
     },
   };
 }
 
-/** Cheap regex-based extraction of the `blocks:` YAML list's entries, used only to know which `blocks/<id>.js` files to read before the real (validating) YAML parse runs. Not a substitute for `parsePackManifestYaml` — that remains the single source of truth for manifest validity. */
-function extractBlockIdsForFileDiscovery(manifestYaml: string): string[] {
-  const match = manifestYaml.match(/^blocks:\s*\[(.*)]\s*$/m);
-  const captured = match?.[1];
-  if (!captured) return [];
-  return captured
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean);
+/**
+ * Production npm adapter. Lifecycle scripts are disabled: downloaded code
+ * remains inert until the separate pack approval step.
+ */
+export function createNpmPackageManager(options: {
+  installRoot: string;
+  version?: string;
+  npmPath?: string;
+}): PackageManagerAdapter {
+  const linked = createLinkedPackageManager({
+    resolveRoot: (npmPackageName) => join(options.installRoot, "node_modules", npmPackageName),
+  });
+  return {
+    async install(npmPackageName: string): Promise<InstalledPackageFiles> {
+      await fs.mkdir(options.installRoot, { recursive: true });
+      const spec = options.version ? `${npmPackageName}@${options.version}` : npmPackageName;
+      try {
+        await execFileAsync(
+          options.npmPath ?? "npm",
+          ["install", "--prefix", options.installRoot, "--ignore-scripts", "--no-save", "--package-lock=false", spec],
+          { maxBuffer: 10 * 1024 * 1024 },
+        );
+      } catch (cause) {
+        throw new PackageNotFoundError(`npm could not install "${spec}": ${(cause as Error).message}`);
+      }
+      return linked.install(npmPackageName);
+    },
+  };
 }

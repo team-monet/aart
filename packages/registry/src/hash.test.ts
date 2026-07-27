@@ -54,6 +54,12 @@ describe("computePackContentHash — architecture §11.1", () => {
     expect(edited).not.toBe(original);
   });
 
+  it("a workflow-definition change invalidates the same Pack seal", () => {
+    const original = computePackContentHash(baseManifest, baseBlockSources, { "release-proof": "version: 1.0.0" });
+    const edited = computePackContentHash(baseManifest, baseBlockSources, { "release-proof": "version: 1.0.1" });
+    expect(edited).not.toBe(original);
+  });
+
   it("adding a new block (new key in blockSources) invalidates the hash", () => {
     const original = computePackContentHash(baseManifest, baseBlockSources);
     const edited = computePackContentHash(baseManifest, {

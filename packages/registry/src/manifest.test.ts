@@ -54,8 +54,14 @@ describe("parsePackManifestYaml — architecture §11.1's literal example", () =
     expect(() => parsePackManifestYaml("version: 0.1.0\nblocks: [x]\n")).toThrow(PackManifestParseError);
   });
 
-  it("rejects a manifest with an empty blocks list", () => {
-    expect(() => parsePackManifestYaml("name: x\nversion: 0.1.0\nblocks: []\n")).toThrow(PackManifestParseError);
+  it("rejects a manifest with no block or workflow assets", () => {
+    expect(() => parsePackManifestYaml("name: x\nversion: 0.1.0\nblocks: []\nworkflows: []\n")).toThrow(PackManifestParseError);
+  });
+
+  it("accepts a workflow-only Pack and defaults blocks to empty", () => {
+    const raw = parsePackManifestYaml("name: reusable\nversion: 1.0.0\nworkflows: [release-proof]\n");
+    expect(raw.blocks).toEqual([]);
+    expect(raw.workflows).toEqual(["release-proof"]);
   });
 });
 
@@ -71,6 +77,12 @@ describe("npm naming convention — ADR-12/ADR-18 (unscoped, unrelated to @team-
   it("packNameFromNpmPackage rejects a non-conforming package name", () => {
     expect(() => packNameFromNpmPackage("@team-monet/aart")).toThrow(InvalidPackNameError);
     expect(() => packNameFromNpmPackage("some-other-package")).toThrow(InvalidPackNameError);
+  });
+
+  it("rejects unsafe or option-shaped logical pack names before invoking npm", () => {
+    expect(() => npmPackageNameFor("../demo")).toThrow(InvalidPackNameError);
+    expect(() => npmPackageNameFor("--ignore-scripts")).toThrow(InvalidPackNameError);
+    expect(() => npmPackageNameFor("Demo")).toThrow(InvalidPackNameError);
   });
 
   it("round-trips", () => {
