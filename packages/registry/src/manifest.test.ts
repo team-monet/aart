@@ -70,6 +70,15 @@ describe("parsePackManifestYaml — architecture §11.1's literal example", () =
     expect(raw.blocks).toEqual([]);
     expect(raw.workflows).toEqual(["release-proof"]);
   });
+
+  it("rejects duplicate Block or Workflow declarations before preparation can certify the Pack", () => {
+    expect(() =>
+      parsePackManifestYaml("name: duplicate\nversion: 1.0.0\nblocks: [demo.echo, demo.echo]\n"),
+    ).toThrow(/block ids must be unique/);
+    expect(() =>
+      parsePackManifestYaml("name: duplicate\nversion: 1.0.0\nworkflows: [demo-flow, demo-flow]\n"),
+    ).toThrow(/workflow ids must be unique/);
+  });
 });
 
 describe("npm naming convention — ADR-12/ADR-18 (unscoped, unrelated to @team-monet)", () => {

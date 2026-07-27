@@ -8,6 +8,7 @@ import {
   createLinkedPackageManager,
   createNpmPackageManager,
   fetchRemoteRegistryIndex,
+  listActiveApprovedPackStatesSync,
   listInstalledPackStatesSync,
   loadInstalledPackBlocksSync,
   loadBlockImplementationSourceSync,
@@ -208,9 +209,27 @@ export interface ListPacksInput {
 }
 
 export async function listPacksHandler(ctx: AartContext, input: ListPacksInput): Promise<HandlerResult> {
-  const packs = listInstalledPackStatesSync(ctx.root).filter((state) =>
-    input.status ? state.approvalStatus === input.status : true,
-  );
+  const packs = listInstalledPackStatesSync(ctx.root)
+    .filter((state) => (input.status ? state.approvalStatus === input.status : true))
+    .map((state) => {
+      const installed = readInstalledPackSync(ctx.root, state.name, state.version);
+      const raw = parsePackManifestYaml(installed.files.manifestYaml);
+      const current = buildPackManifest(raw, installed.files.blockSources, installed.files.workflowSources);
+      if (current.contentHash !== state.contentHash) {
+        throw new Error(`pack ${state.name}@${state.version} failed its content seal; reinstall before review`);
+      }
+      return {
+        ...state,
+        displayName: raw.displayName,
+        description: raw.description,
+        capabilities: raw.capabilities,
+        secrets: raw.secrets,
+        assets: {
+          blocks: raw.blocks,
+          workflows: raw.workflows,
+        },
+      };
+    });
   return { ok: true, packs, count: packs.length };
 }
 
@@ -264,8 +283,8 @@ export async function approvePackHandler(ctx: AartContext, input: ApprovePackInp
 
   const seenBlockIds = new Set<string>();
   const approvedBlocksByOtherPack = new Map<string, string>();
-  for (const state of listInstalledPackStatesSync(ctx.root)) {
-    if (state.approvalStatus !== "approved" || state.name === input.name) continue;
+  for (const state of listActiveApprovedPackStatesSync(ctx.root)) {
+    if (state.name === input.name) continue;
     for (const block of loadInstalledPackBlocksSync(ctx.root, state.name, state.version)) {
       approvedBlocksByOtherPack.set(block.manifest.id, state.name);
     }
@@ -290,7 +309,21 @@ export async function approvePackHandler(ctx: AartContext, input: ApprovePackInp
   const workflowWrites: Workflow[] = [];
   for (const workflow of workflows) {
     const existing = await ctx.store.workflows.get(workflow.id, workflow.version);
-    if (existing && !isDeepStrictEqual(existing, workflow)) {
+    const {
+      approval: _candidateApproval,
+      gates: _candidateGates,
+      needsReview: _candidateNeedsReview,
+      promotionBlocked: _candidatePromotionBlocked,
+      ...candidateDefinition
+    } = workflow;
+    const {
+      approval: _existingApproval,
+      gates: _existingGates,
+      needsReview: _existingNeedsReview,
+      promotionBlocked: _existingPromotionBlocked,
+      ...existingDefinition
+    } = existing ?? workflow;
+    if (existing && !isDeepStrictEqual(existingDefinition, candidateDefinition)) {
       throw new Error(
         `pack workflow ${workflow.id}@${workflow.version} conflicts with an existing registered version; publish a new workflow version`,
       );

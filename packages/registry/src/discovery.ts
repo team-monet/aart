@@ -12,6 +12,7 @@
 // reimplementation of the search itself.
 import { ExampleSchema, type BlockManifest, type Example, type Workflow } from "@aart/types";
 import { z } from "zod";
+import { npmPackageNameFor } from "./manifest.js";
 
 /**
  * A block as it appears in a search result. `BlockManifest` (frozen,
@@ -271,7 +272,27 @@ const RemoteRegistryIndexEntrySchema = z
       )
       .optional(),
   })
-  .passthrough();
+  .passthrough()
+  .superRefine((entry, ctx) => {
+    let expectedNpmName: string;
+    try {
+      expectedNpmName = npmPackageNameFor(entry.packName);
+    } catch {
+      ctx.addIssue({
+        code: "custom",
+        path: ["packName"],
+        message: `packName "${entry.packName}" is not a valid public Pack identity`,
+      });
+      return;
+    }
+    if (entry.npmPackageName !== expectedNpmName) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["npmPackageName"],
+        message: `npmPackageName must be "${expectedNpmName}" for Pack "${entry.packName}"`,
+      });
+    }
+  });
 
 const RemoteRegistryIndexDocumentSchema = z.union([
   z.array(RemoteRegistryIndexEntrySchema).transform((packs) => ({ schemaVersion: 1 as const, packs })),

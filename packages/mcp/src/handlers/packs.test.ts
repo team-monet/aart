@@ -161,7 +161,22 @@ workflows: [demo-echo-flow]
 
     const installed = await installPackHandler(ctx, { name: "demo", version: "1.0.0", sourcePath: packageRoot });
     expect(installed).toEqual(expect.objectContaining({ ok: true, approvalStatus: "unapproved" }));
-    expect((await listPacksHandler(ctx, { status: "unapproved" })).count).toBe(1);
+    const awaitingReview = await listPacksHandler(ctx, { status: "unapproved" });
+    expect(awaitingReview.count).toBe(1);
+    expect(awaitingReview.packs).toEqual([
+      expect.objectContaining({
+        name: "demo",
+        contentHash: installed.contentHash,
+        displayName: "Demo Pack",
+        description: "Reusable demo assets",
+        capabilities: [],
+        secrets: [],
+        assets: {
+          blocks: ["demo.echo"],
+          workflows: ["demo-echo-flow"],
+        },
+      }),
+    ]);
 
     const beforeApproval = createRealAartContext({ root, trustMode: "dev" });
     expect(beforeApproval.registry.getBlock("demo.echo")).toBeUndefined();
@@ -224,6 +239,64 @@ workflows: [demo-echo-flow]
       }),
     ).rejects.toThrow(/reviewed content hash does not match/);
     expect((await listPacksHandler(ctx, { status: "unapproved" })).count).toBe(1);
+  });
+
+  it("checks collisions against only the active approved version of another Pack", async () => {
+    const ctx = createAartContext({ root, trustMode: "governed" });
+    const otherRoot = join(publisherRoot, "aart-pack-other");
+    await fs.mkdir(join(otherRoot, "blocks"), { recursive: true });
+    await fs.writeFile(
+      join(otherRoot, "aart-pack.yaml"),
+      "name: other\nversion: 1.0.0\nblocks: [demo.echo]\n",
+      "utf8",
+    );
+    await fs.writeFile(join(otherRoot, "blocks", "demo.echo.cjs"), blockSource, "utf8");
+    await fs.writeFile(
+      join(otherRoot, "package.json"),
+      JSON.stringify({ name: "aart-pack-other", version: "1.0.0" }),
+      "utf8",
+    );
+    const oldVersion = await installPackHandler(ctx, { name: "other", sourcePath: otherRoot });
+    await approvePackHandler(ctx, {
+      name: "other",
+      version: "1.0.0",
+      contentHash: oldVersion.contentHash as string,
+      reviewer: "human-reviewer",
+    });
+
+    await fs.writeFile(
+      join(otherRoot, "aart-pack.yaml"),
+      "name: other\nversion: 2.0.0\nblocks: [other.current]\n",
+      "utf8",
+    );
+    await fs.rm(join(otherRoot, "blocks", "demo.echo.cjs"));
+    await fs.writeFile(
+      join(otherRoot, "blocks", "other.current.cjs"),
+      blockSource.replaceAll("demo.echo", "other.current"),
+      "utf8",
+    );
+    await fs.writeFile(
+      join(otherRoot, "package.json"),
+      JSON.stringify({ name: "aart-pack-other", version: "2.0.0" }),
+      "utf8",
+    );
+    const activeVersion = await installPackHandler(ctx, { name: "other", sourcePath: otherRoot });
+    await approvePackHandler(ctx, {
+      name: "other",
+      version: "2.0.0",
+      contentHash: activeVersion.contentHash as string,
+      reviewer: "human-reviewer",
+    });
+
+    const candidate = await installPackHandler(ctx, { name: "demo", sourcePath: packageRoot });
+    await expect(
+      approvePackHandler(ctx, {
+        name: "demo",
+        version: "1.0.0",
+        contentHash: candidate.contentHash as string,
+        reviewer: "human-reviewer",
+      }),
+    ).resolves.toEqual(expect.objectContaining({ approvalStatus: "approved" }));
   });
 
   it("rejects a Pack block that would make the next process fail on an existing Block id", async () => {
@@ -307,6 +380,33 @@ workflows: [demo-echo-flow]
     ).rejects.toThrow(/conflicts with an existing registered version/);
     expect((await ctx.store.workflows.get("demo-echo-flow", "1.0.0"))?.name).toBe("Locally authored flow");
     expect((await listPacksHandler(ctx, { status: "unapproved" })).count).toBe(1);
+  });
+
+  it("preserves advanced governance state when the Pack workflow definition is unchanged", async () => {
+    const existing = {
+      ...compileWorkflowInput(workflowSource),
+      approval: "approved" as const,
+      gates: {
+        validate: "passed" as const,
+        readiness: "passed" as const,
+        evals: "passed" as const,
+        riskReview: "passed" as const,
+        humanReview: "passed" as const,
+      },
+      needsReview: true,
+      promotionBlocked: true,
+    };
+    const ctx = createAartContext({ root, trustMode: "governed" });
+    await ctx.store.workflows.put(existing);
+    const installed = await installPackHandler(ctx, { name: "demo", sourcePath: packageRoot });
+
+    await approvePackHandler(ctx, {
+      name: "demo",
+      version: "1.0.0",
+      contentHash: installed.contentHash as string,
+      reviewer: "human-reviewer",
+    });
+    expect(await ctx.store.workflows.get("demo-echo-flow", "1.0.0")).toEqual(existing);
   });
 
   it("checks the installed artifact version even when the user did not request a version", async () => {

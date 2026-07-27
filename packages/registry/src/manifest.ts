@@ -65,6 +65,14 @@ export const RawPackManifestSchema = z
     workflows: z.array(safeAssetSegment("workflow id")).default([]),
   })
   .passthrough()
+  .refine((manifest) => new Set(manifest.blocks).size === manifest.blocks.length, {
+    path: ["blocks"],
+    message: "block ids must be unique",
+  })
+  .refine((manifest) => new Set(manifest.workflows).size === manifest.workflows.length, {
+    path: ["workflows"],
+    message: "workflow ids must be unique",
+  })
   .refine((manifest) => manifest.blocks.length + manifest.workflows.length > 0, {
     message: "pack manifest must declare at least one block or workflow",
   });

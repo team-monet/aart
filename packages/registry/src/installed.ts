@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { inspectCommonJsBlockSourceSync, runCommonJsBlockSandbox } from "@aart/engine";
 import type { BlockImplementation, PackManifest } from "@aart/types";
 import { compare as compareSemver } from "semver";
@@ -80,6 +80,19 @@ async function writePackFiles(dir: string, files: InstalledPack["files"], state:
     await writeFile(join(dir, "workflows", `${id}.yaml`), source, "utf8");
   }
   await writeFile(join(dir, "state.json"), JSON.stringify(state, null, 2), "utf8");
+}
+
+async function atomicWriteFile(file: string, content: string): Promise<void> {
+  const temp = join(
+    dirname(file),
+    `.tmp-${basename(file)}-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+  );
+  try {
+    await writeFile(temp, content, "utf8");
+    await rename(temp, file);
+  } finally {
+    await rm(temp, { force: true });
+  }
 }
 
 /**
@@ -194,7 +207,7 @@ export async function approveInstalledPack(
     approvedAt: now.toISOString(),
     reviewer,
   };
-  await writeFile(statePath(root, name, version), JSON.stringify(state, null, 2), "utf8");
+  await atomicWriteFile(statePath(root, name, version), JSON.stringify(state, null, 2));
   return { ...installed, state };
 }
 

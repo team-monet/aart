@@ -284,4 +284,20 @@ describe("parseRemoteRegistryIndexDocument", () => {
       }),
     ).toThrow(/failed validation/);
   });
+
+  it("rejects an index entry whose advertised npm package does not match its Pack identity", () => {
+    expect(() =>
+      parseRemoteRegistryIndexDocument({
+        schemaVersion: 1,
+        packs: [
+          {
+            npmPackageName: "aart-pack-foo",
+            packName: "bar",
+            version: "1.0.0",
+            blocks: [],
+          },
+        ],
+      }),
+    ).toThrow(/aart-pack-bar/);
+  });
 });
