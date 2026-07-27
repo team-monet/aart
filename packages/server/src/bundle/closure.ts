@@ -103,13 +103,13 @@ export async function resolveClosureRegistryEntries(
   options: { packRoot?: string } = {},
 ): Promise<ResolvedClosure> {
   const packs = new Map<string, PackManifest>();
-  const activeManifests = await resolveActivePackManifests(store, options.packRoot);
+  const approvedManifests = await listApprovedPackManifests(store);
+  const activeManifests = options.packRoot
+    ? await resolveFilesystemActivePackManifests(store, options.packRoot)
+    : selectLatestApprovedPackManifests(approvedManifests);
   const ownerByBlockId = new Map<string, PackManifest>();
   for (const manifest of activeManifests) {
-    const blockIds = Array.isArray(manifest.manifest["blocks"])
-      ? manifest.manifest["blocks"].filter((id): id is string => typeof id === "string")
-      : [];
-    for (const blockId of blockIds) {
+    for (const blockId of packBlockIds(manifest)) {
       const existing = ownerByBlockId.get(blockId);
       if (existing && existing.name !== manifest.name) {
         throw new Error(
@@ -122,7 +122,20 @@ export async function resolveClosureRegistryEntries(
   }
   for (const blockId of closure.blockIds) {
     const owner = ownerByBlockId.get(blockId);
-    if (owner) packs.set(`${owner.name}@${owner.version}`, owner);
+    if (owner) {
+      packs.set(`${owner.name}@${owner.version}`, owner);
+      continue;
+    }
+    if (options.packRoot) {
+      const approvedOwners = approvedManifests.filter((manifest) => packBlockIds(manifest).includes(blockId));
+      if (approvedOwners.length > 0) {
+        const ownerNames = [...new Set(approvedOwners.map((manifest) => manifest.name))].sort();
+        throw new Error(
+          `Bundle closure: referenced block "${blockId}" belongs to approved Pack ` +
+            `${ownerNames.map((name) => `"${name}"`).join(", ")}, but no matching approved version is active in the Pack installation.`,
+        );
+      }
+    }
   }
 
   const prompts = new Map<string, PromptRegistryEntry>();
@@ -146,35 +159,53 @@ export async function resolveClosureRegistryEntries(
   return { workflows: closure.workflows, packs, prompts, schemas };
 }
 
-async function resolveActivePackManifests(store: AartStore, packRoot: string | undefined): Promise<PackManifest[]> {
-  if (packRoot) {
-    const manifests: PackManifest[] = [];
-    for (const state of listActiveApprovedPackStatesSync(packRoot)) {
-      const manifest = await store.packManifests.get(state.name, state.version);
-      if (
-        !manifest ||
-        manifest.approvalStatus !== "approved" ||
-        manifest.contentHash !== state.contentHash
-      ) {
-        throw new Error(
-          `Bundle closure: active Pack "${state.name}@${state.version}" does not match an approved store manifest.`,
-        );
-      }
-      manifests.push(manifest);
-    }
-    return manifests;
-  }
-
+async function resolveFilesystemActivePackManifests(store: AartStore, packRoot: string): Promise<PackManifest[]> {
   const manifests: PackManifest[] = [];
-  for (const name of await store.packManifests.listNames()) {
-    const approved: PackManifest[] = [];
-    for (const version of await store.packManifests.listVersions(name)) {
-      const manifest = await store.packManifests.get(name, version);
-      if (manifest?.approvalStatus === "approved") approved.push(manifest);
+  for (const state of listActiveApprovedPackStatesSync(packRoot)) {
+    const manifest = await store.packManifests.get(state.name, state.version);
+    if (
+      !manifest ||
+      manifest.approvalStatus !== "approved" ||
+      manifest.contentHash !== state.contentHash
+    ) {
+      throw new Error(
+        `Bundle closure: active Pack "${state.name}@${state.version}" does not match an approved store manifest.`,
+      );
     }
-    const latestApprovedVersion = highestVersion(approved.map((manifest) => manifest.version));
-    const latestApproved = approved.find((manifest) => manifest.version === latestApprovedVersion);
-    if (latestApproved) manifests.push(latestApproved);
+    manifests.push(manifest);
   }
   return manifests;
+}
+
+async function listApprovedPackManifests(store: AartStore): Promise<PackManifest[]> {
+  const manifests: PackManifest[] = [];
+  for (const name of await store.packManifests.listNames()) {
+    for (const version of await store.packManifests.listVersions(name)) {
+      const manifest = await store.packManifests.get(name, version);
+      if (manifest?.approvalStatus === "approved") manifests.push(manifest);
+    }
+  }
+  return manifests;
+}
+
+function selectLatestApprovedPackManifests(approved: readonly PackManifest[]): PackManifest[] {
+  const byName = new Map<string, PackManifest[]>();
+  for (const manifest of approved) {
+    const versions = byName.get(manifest.name) ?? [];
+    versions.push(manifest);
+    byName.set(manifest.name, versions);
+  }
+  const selected: PackManifest[] = [];
+  for (const versions of byName.values()) {
+    const latestVersion = highestVersion(versions.map((manifest) => manifest.version));
+    const latest = versions.find((manifest) => manifest.version === latestVersion);
+    if (latest) selected.push(latest);
+  }
+  return selected;
+}
+
+function packBlockIds(manifest: PackManifest): string[] {
+  return Array.isArray(manifest.manifest["blocks"])
+    ? manifest.manifest["blocks"].filter((id): id is string => typeof id === "string")
+    : [];
 }

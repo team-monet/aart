@@ -6,6 +6,9 @@ export interface PackRuntimeVersions {
   readonly node: string;
 }
 
+/** Product runtime version used by every Pack compatibility gate. */
+export const AART_VERSION = "0.10.0";
+
 export class PackCompatibilityError extends Error {}
 
 /**

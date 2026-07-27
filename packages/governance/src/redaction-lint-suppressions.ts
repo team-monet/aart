@@ -297,7 +297,7 @@ export const REDACTION_LINT_SUPPRESSIONS: readonly RedactionLintSuppression[] = 
 
   // ---- packages/mcp/src/response.ts ----
   { file: "packages/mcp/src/response.ts", snippet: "return NEXT_TABLE[tool][outcome];", reason: "computeNext looks up one of 42 hardcoded, static affordance strings from NEXT_TABLE -- no variable/run data." },
-  { file: "packages/mcp/src/response.ts", snippet: "return { ...result, next: computeNext(tool, outcome) };", reason: "wrapResult only adds the static `next` affordance string on top of a handler's own already-vetted result -- each handler's own individual redaction reasoning (see its own file's suppression entries) covers `result` itself." },
+  { file: "packages/mcp/src/response.ts", snippet: "return { ...result, next };", reason: "wrapResult only adds a selected static `next` affordance string on top of a handler's own already-vetted result -- each handler's own individual redaction reasoning (see its own file's suppression entries) covers `result` itself." },
 
   // ---- packages/mcp/src/stubs/deploy.ts ---- (D1 "remotes + push", AMENDMENTS.md A56)
   { file: "packages/mcp/src/stubs/deploy.ts", snippet: "return {", reason: "Shared source line across 2 sites, both category-1: createStubBundlerPort's and createRemotesPort's own outer return -- each is a PORT OBJECT of methods (produceBundle; list/get/resolveToken), matching context.ts's own already-established \"DI bundle... port objects made of methods... not persisted/emitted data record\" reasoning. Neither object-literal start is itself a data value." },

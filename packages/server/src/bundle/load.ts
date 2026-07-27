@@ -26,7 +26,9 @@ import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { z } from "zod";
 import {
+  AART_VERSION,
   approveInstalledPack,
+  assertPackCompatibility,
   buildPackManifest,
   parsePackManifestYaml,
   persistInstalledPack,
@@ -625,6 +627,7 @@ async function hydrateBundledPackAssets(
     const backupInstalledRoot = join(packRoot, "packs", `.bundle-installed-backup-${token}`);
     let previousInstallationMoved = false;
     let stagedInstallationActivated = false;
+    let storeRecordsCommitted = false;
     try {
       await fs.mkdir(join(stagingRoot, "packs"), { recursive: true });
       try {
@@ -649,6 +652,11 @@ async function hydrateBundledPackAssets(
         if (installed.manifest.contentHash !== manifest.contentHash) {
           throw new Error(`Bundle load: persisted Pack assets "${key}" no longer match the bundle seal.`);
         }
+        const raw = parsePackManifestYaml(assets.manifestYaml);
+        assertPackCompatibility(raw.compatibility, {
+          aart: AART_VERSION,
+          node: process.versions.node,
+        });
         await approveInstalledPack(
           stagingRoot,
           manifest.name,
@@ -659,10 +667,10 @@ async function hydrateBundledPackAssets(
         );
       }
 
-      // The store transaction is still the authority for whether hydration
-      // commits. Only after it succeeds do we atomically swap the prepared
-      // Pack tree into place.
-      await persistStoreRecords();
+      // Activate the fully validated Pack tree before exposing the
+      // deployment in the store. If the store transaction fails, the
+      // previous tree is restored below; a committed Deployment can
+      // therefore never point at missing or stale executable assets.
       try {
         await fs.rename(installedRoot, backupInstalledRoot);
         previousInstallationMoved = true;
@@ -679,17 +687,32 @@ async function hydrateBundledPackAssets(
         }
         throw cause;
       }
-      if (previousInstallationMoved) {
-        await fs.rm(backupInstalledRoot, { recursive: true, force: true });
-        previousInstallationMoved = false;
+      try {
+        await persistStoreRecords();
+        storeRecordsCommitted = true;
+      } catch (storeCause) {
+        try {
+          await fs.rm(installedRoot, { recursive: true, force: true });
+          stagedInstallationActivated = false;
+          if (previousInstallationMoved) {
+            await fs.rename(backupInstalledRoot, installedRoot);
+            previousInstallationMoved = false;
+          }
+        } catch (rollbackCause) {
+          throw new Error(
+            "Bundle load: store hydration failed and the previous Pack installation could not be restored.",
+            { cause: new AggregateError([storeCause, rollbackCause]) },
+          );
+        }
+        throw storeCause;
       }
     } finally {
       if (!stagedInstallationActivated && previousInstallationMoved) {
         await fs.rename(backupInstalledRoot, installedRoot).catch(() => undefined);
       }
       await fs.rm(stagingRoot, { recursive: true, force: true });
-      if (stagedInstallationActivated) {
-        await fs.rm(backupInstalledRoot, { recursive: true, force: true });
+      if (storeRecordsCommitted) {
+        await fs.rm(backupInstalledRoot, { recursive: true, force: true }).catch(() => undefined);
       }
     }
   });

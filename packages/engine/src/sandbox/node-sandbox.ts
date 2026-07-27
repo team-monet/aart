@@ -288,6 +288,16 @@ function commonJsProgram(options: CommonJsEvaluationOptions): string {
         "use strict";
         var Date = (function (NativeDate) {
           var safePrototype = Object.create(null);
+          var localDateMethods = new Set([
+            "getDate", "getDay", "getFullYear", "getHours", "getMinutes",
+            "getMonth", "getSeconds", "getTimezoneOffset", "getYear",
+            "setDate", "setFullYear", "setHours", "setMinutes", "setMonth",
+            "setSeconds", "setYear", "toDateString", "toLocaleDateString",
+            "toLocaleString", "toLocaleTimeString", "toString", "toTimeString"
+          ]);
+          function rejectLocalDateOperation() {
+            throw new Error("public Pack dates cannot use host locale or local timezone; use explicit UTC methods");
+          }
           function DeterministicDate() {
             if (!new.target || arguments.length === 0) {
               throw new Error("public Pack blocks cannot read ambient time; pass time as an explicit input");
@@ -314,10 +324,25 @@ function commonJsProgram(options: CommonJsEvaluationOptions): string {
           };
           DeterministicDate.UTC = NativeDate.UTC;
           for (var key of Reflect.ownKeys(NativeDate.prototype)) {
-            if (key !== "constructor") {
+            if (key !== "constructor" && key !== Symbol.toPrimitive && !localDateMethods.has(key)) {
               Object.defineProperty(safePrototype, key, Object.getOwnPropertyDescriptor(NativeDate.prototype, key));
             }
           }
+          for (var key of localDateMethods) {
+            Object.defineProperty(safePrototype, key, {
+              value: rejectLocalDateOperation,
+              writable: false,
+              configurable: false
+            });
+          }
+          Object.defineProperty(safePrototype, Symbol.toPrimitive, {
+            value: function (hint) {
+              if (hint === "number") return NativeDate.prototype.getTime.call(this);
+              return rejectLocalDateOperation();
+            },
+            writable: false,
+            configurable: false
+          });
           Object.defineProperty(safePrototype, "constructor", {
             value: DeterministicDate,
             writable: false,
@@ -349,6 +374,27 @@ function commonJsProgram(options: CommonJsEvaluationOptions): string {
         // locale/timezone/time input explicitly, exposing Intl would reopen
         // ambient time and host-dependent output through a side door.
         var Intl = undefined;
+        function rejectLocaleSensitiveOperation() {
+          throw new Error("public Pack blocks cannot use host locale; format deterministic values explicitly");
+        }
+        function blockLocaleMethod(prototype, method) {
+          if (!prototype || !(method in prototype)) return;
+          Object.defineProperty(prototype, method, {
+            value: rejectLocaleSensitiveOperation,
+            writable: false,
+            configurable: false
+          });
+        }
+        blockLocaleMethod(Object.prototype, "toLocaleString");
+        blockLocaleMethod(Array.prototype, "toLocaleString");
+        blockLocaleMethod(Number.prototype, "toLocaleString");
+        if (typeof BigInt === "function") blockLocaleMethod(BigInt.prototype, "toLocaleString");
+        blockLocaleMethod(String.prototype, "localeCompare");
+        blockLocaleMethod(String.prototype, "toLocaleLowerCase");
+        blockLocaleMethod(String.prototype, "toLocaleUpperCase");
+        if (typeof Uint8Array === "function") {
+          blockLocaleMethod(Object.getPrototypeOf(Uint8Array.prototype), "toLocaleString");
+        }
         Object.defineProperty(globalThis, "Date", { value: Date, writable: false, configurable: false });
         Object.defineProperty(globalThis, "Math", { value: Math, writable: false, configurable: false });
         Object.defineProperty(globalThis, "Intl", { value: undefined, writable: false, configurable: false });

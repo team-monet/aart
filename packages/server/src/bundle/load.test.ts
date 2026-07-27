@@ -269,6 +269,66 @@ describe("readBundleFromDisk / hydrateBundle — round-trip (S12)", () => {
     expect(listActiveApprovedPackStatesSync(destinationRoot)).toEqual([
       expect.objectContaining({ name: "demo", version: "1.0.0", approvalStatus: "approved" }),
     ]);
+    expect(await server.store.deployments.list()).toEqual([]);
+  });
+
+  it("rejects bundled Pack assets that are incompatible with the target runtime before activation", async () => {
+    laptop = await createTestFixture();
+    server = await createTestFixture();
+    const sourceRoot = await fs.mkdtemp(join(tmpdir(), "aart-bundle-incompatible-source-"));
+    const destinationRoot = await fs.mkdtemp(join(tmpdir(), "aart-bundle-incompatible-destination-"));
+    packRoots.push(sourceRoot, destinationRoot);
+    const source = `module.exports = {
+      manifest: {
+        id: "future.echo",
+        version: "1.0.0",
+        capabilities: [],
+        inputSchema: {},
+        outputSchema: {},
+        description: "Future-only echo"
+      },
+      execute: (input) => input
+    };`;
+    const installed = await persistInstalledPack(
+      sourceRoot,
+      {
+        manifestYaml:
+          'name: future-only\nversion: 1.0.0\ncompatibility:\n  aart: ">=99.0.0"\nblocks: [future.echo]\n',
+        blockSources: { "future.echo": source },
+      },
+      { kind: "workspace", source: "different-runtime" },
+    );
+    // Simulates a seal approved by a newer producing runtime. Target
+    // hydration must independently enforce its own compatibility.
+    await approveInstalledPack(
+      sourceRoot,
+      "future-only",
+      "1.0.0",
+      "source-reviewer",
+      new Date("2026-07-28T00:00:00.000Z"),
+      installed.manifest.contentHash,
+    );
+    await laptop.store.packManifests.put({ ...installed.manifest, approvalStatus: "approved" });
+    await laptop.store.workflows.put(
+      baseWorkflow({
+        id: "future-pack-wf",
+        version: "1",
+        execution: { type: "workflow", steps: [{ id: "echo", uses: "future.echo", with: {} }] },
+      }),
+    );
+    const bundle = await produceBundle(laptop.store, {
+      workflowId: "future-pack-wf",
+      workflowVersion: "1",
+      packRoot: sourceRoot,
+    });
+
+    await expect(hydrateBundle(server.store, bundle, server.clock, destinationRoot)).rejects.toThrow(
+      /requires AART >=99\.0\.0/,
+    );
+    await expect(fs.stat(join(destinationRoot, "packs", "installed", "future-only"))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+    expect(await server.store.deployments.list()).toEqual([]);
   });
 
   it("a bundle produced on one store hydrates every definition category into a completely different store, verbatim", async () => {

@@ -159,6 +159,40 @@ describe("produceBundle — transitive closure (architecture §0.3, ADR-04)", ()
     }
   });
 
+  it("fails closed when an approved referenced Pack has no active installed version", async () => {
+    fx = await createTestFixture();
+    const packRoot = await fs.mkdtemp(join(tmpdir(), "aart-bundle-missing-active-pack-"));
+    try {
+      await fx.store.packManifests.put({
+        name: "browser-checks",
+        version: "1.0.0",
+        contentHash: "sha256:missing-active",
+        manifest: { blocks: ["browser.assert_journey"] },
+        approvalStatus: "approved",
+      });
+      await fx.store.workflows.put(
+        baseWorkflow({
+          id: "missing-pack-wf",
+          version: "1",
+          execution: {
+            type: "workflow",
+            steps: [{ id: "assert", uses: "browser.assert_journey", with: {} }],
+          },
+        }),
+      );
+
+      await expect(
+        produceBundle(fx.store, {
+          workflowId: "missing-pack-wf",
+          workflowVersion: "1",
+          packRoot,
+        }),
+      ).rejects.toThrow(/belongs to approved Pack "browser-checks".*no matching approved version is active/i);
+    } finally {
+      await fs.rm(packRoot, { recursive: true, force: true });
+    }
+  });
+
   it("does NOT include a pack manifest for a core built-in namespace (browser.*) with no registered PackManifest", async () => {
     fx = await createTestFixture();
     await setUpTwoLevelFixture(fx);

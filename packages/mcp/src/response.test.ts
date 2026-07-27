@@ -108,6 +108,27 @@ describe("wrapResult — the shared envelope (architecture §10.2's [DECISION])"
     expect(wrapped.next).toContain("No matching blocks found");
   });
 
+  it("does not offer installation for preview-only Pack catalog fixtures", () => {
+    const wrapped = wrapResult("aart_find_packs", {
+      ok: true,
+      matched: true,
+      indexMode: "preview",
+      packs: [{ package: "@aart-pack/demo" }],
+    });
+    expect(wrapped.next).toContain("preview catalog fixtures");
+    expect(wrapped.next).not.toContain("aart_install_pack");
+  });
+
+  it("offers installation for published Pack search results", () => {
+    const wrapped = wrapResult("aart_find_packs", {
+      ok: true,
+      matched: true,
+      indexMode: "production",
+      packs: [{ package: "@aart-pack/demo" }],
+    });
+    expect(wrapped.next).toContain("aart_install_pack");
+  });
+
   it("never mutates the input result object", () => {
     const input = { ok: true as const };
     const wrapped = wrapResult("aart_verify", input);

@@ -4,6 +4,7 @@
 // package had to fill.
 export { canonicalize, computePackContentHash } from "./hash.js";
 export {
+  AART_VERSION,
   assertPackCompatibility,
   PackCompatibilityError,
   type PackRuntimeVersions,
