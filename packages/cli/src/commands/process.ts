@@ -45,7 +45,7 @@ export function waitForShutdownSignal(): Promise<void> {
 async function maybeHydrateBundle(tokens: Tokenized, cli: CliContext): Promise<HydrateBundleResult | undefined> {
   const bundleDir = flagString(tokens.flags, "bundle");
   if (!bundleDir) return undefined;
-  return hydrateBundleFromDisk(cli.aart.store, bundleDir);
+  return cli.startupBundle ?? hydrateBundleFromDisk(cli.aart.store, bundleDir, undefined, cli.root);
 }
 
 export async function workerCommand(tokens: Tokenized, cli: CliContext, options: ProcessCommandOptions = {}): Promise<HandlerResult> {

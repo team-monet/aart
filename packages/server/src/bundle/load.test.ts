@@ -7,6 +7,12 @@ import { promises as fs } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import {
+  approveInstalledPack,
+  loadInstalledPackBlocksSync,
+  persistInstalledPack,
+  readInstalledPackSync,
+} from "@aart/registry";
 import type { Workflow } from "@aart/types";
 import { loadTriggerBindingsFromDeployments } from "../triggers/registry.js";
 import { createTestFixture, type TestFixture } from "../test-helpers.js";
@@ -16,6 +22,7 @@ import { hydrateBundle, hydrateBundleFromDisk, readBundleFromDisk, readBundleFro
 let laptop: TestFixture | undefined;
 let server: TestFixture | undefined;
 let outDir: string | undefined;
+const packRoots: string[] = [];
 
 afterEach(async () => {
   await laptop?.cleanup();
@@ -24,6 +31,7 @@ afterEach(async () => {
   server = undefined;
   if (outDir) await fs.rm(outDir, { recursive: true, force: true });
   outDir = undefined;
+  await Promise.all(packRoots.splice(0).map((root) => fs.rm(root, { recursive: true, force: true })));
 });
 
 const approvedGates = { validate: "passed" as const, readiness: "passed" as const, evals: "passed" as const, riskReview: "passed" as const, humanReview: "passed" as const };
@@ -96,12 +104,90 @@ function bundleToFiles(bundle: Bundle): Record<string, string> {
   };
   for (const [key, workflow] of Object.entries(bundle.definitions)) files[`definitions/${sanitizeFilename(key)}.json`] = JSON.stringify(workflow, null, 2);
   for (const [key, manifest] of Object.entries(bundle.packs)) files[`packs/${sanitizeFilename(key)}.json`] = JSON.stringify(manifest, null, 2);
+  for (const [key, assets] of Object.entries(bundle.packAssets ?? {})) files[`pack-assets/${sanitizeFilename(key)}.json`] = JSON.stringify(assets, null, 2);
   for (const [key, entry] of Object.entries(bundle.registry.prompts)) files[`registry/prompts/${sanitizeFilename(key)}.json`] = JSON.stringify(entry, null, 2);
   for (const [key, entry] of Object.entries(bundle.registry.schemas)) files[`registry/schemas/${sanitizeFilename(key)}.json`] = JSON.stringify(entry, null, 2);
   return files;
 }
 
 describe("readBundleFromDisk / hydrateBundle — round-trip (S12)", () => {
+  it("ships sealed Pack code and restores an executable approved Pack on a fresh destination root", async () => {
+    laptop = await createTestFixture();
+    server = await createTestFixture();
+    const sourceRoot = await fs.mkdtemp(join(tmpdir(), "aart-bundle-pack-source-"));
+    const destinationRoot = await fs.mkdtemp(join(tmpdir(), "aart-bundle-pack-destination-"));
+    packRoots.push(sourceRoot, destinationRoot);
+    const source = `module.exports = {
+      manifest: {
+        id: "demo.echo",
+        version: "1.0.0",
+        capabilities: [],
+        inputSchema: {},
+        outputSchema: {},
+        description: "Echo a value"
+      },
+      execute: (input) => ({ value: input.value })
+    };`;
+    const installed = await persistInstalledPack(
+      sourceRoot,
+      {
+        manifestYaml: "name: demo\nversion: 1.0.0\nblocks: [demo.echo]\n",
+        blockSources: { "demo.echo": source },
+      },
+      { kind: "workspace", source: "test" },
+    );
+    await approveInstalledPack(
+      sourceRoot,
+      "demo",
+      "1.0.0",
+      "reviewer",
+      new Date("2026-07-27T00:00:00.000Z"),
+      installed.manifest.contentHash,
+    );
+    await laptop.store.packManifests.put({ ...installed.manifest, approvalStatus: "approved" });
+    await laptop.store.workflows.put(
+      baseWorkflow({
+        id: "pack-wf",
+        version: "1",
+        execution: { type: "workflow", steps: [{ id: "echo", uses: "demo.echo", with: { value: "hello" } }] },
+      }),
+    );
+
+    const bundle = await produceBundle(laptop.store, {
+      workflowId: "pack-wf",
+      workflowVersion: "1",
+      packRoot: sourceRoot,
+    });
+    expect(bundle.manifest.packs).toContainEqual({
+      name: "demo",
+      version: "1.0.0",
+      contentHash: installed.manifest.contentHash,
+      assets: true,
+    });
+    expect(bundle.packAssets?.["demo@1.0.0"]?.blockSources["demo.echo"]).toBe(source);
+
+    outDir = await fs.mkdtemp(join(tmpdir(), "aart-bundle-pack-out-"));
+    await writeBundleToDisk(bundle, outDir);
+    await hydrateBundleFromDisk(server.store, outDir, server.clock, destinationRoot);
+
+    expect(readInstalledPackSync(destinationRoot, "demo", "1.0.0").state).toMatchObject({
+      approvalStatus: "approved",
+      contentHash: installed.manifest.contentHash,
+    });
+    const [implementation] = loadInstalledPackBlocksSync(destinationRoot, "demo", "1.0.0");
+    await expect(
+      implementation!.execute(
+        { value: "hello" },
+        {
+          runId: "run",
+          stepId: "echo",
+          resolveSecret: async () => "secret",
+          writeArtifact: async () => ({ id: "artifact", path: "/tmp/artifact" }),
+        },
+      ),
+    ).resolves.toEqual({ value: "hello" });
+  });
+
   it("a bundle produced on one store hydrates every definition category into a completely different store, verbatim", async () => {
     laptop = await createTestFixture();
     await setUpTwoLevelFixture(laptop);

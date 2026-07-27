@@ -446,6 +446,9 @@ importers:
       '@aart/governance':
         specifier: workspace:*
         version: link:../governance
+      '@aart/registry':
+        specifier: workspace:*
+        version: link:../registry
       '@aart/store':
         specifier: workspace:*
         version: link:../store

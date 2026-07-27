@@ -78,6 +78,8 @@ import {
   listActiveApprovedPackStatesSync,
   listInstalledPackStatesSync,
   loadInstalledPackBlocksSync,
+  parsePackManifestYaml,
+  readInstalledPackSync,
   type BlockCatalogEntry,
 } from "@aart/registry";
 import { produceBundle as produceRealBundle, type Bundle } from "@aart/server";
@@ -266,14 +268,21 @@ export function createGetGrantedCapabilities(store: AartStore, blocks: BlockRegi
 // active approved Pack's recorded content seal.
 // ---------------------------------------------------------------------------
 export function createComputePackHashes(packRoot?: string, entries: readonly BlockCatalogEntry[] = []) {
-  const owningPackByBlock = new Map(
+  const catalogOwningPackByBlock = new Map(
     entries.filter((entry) => entry.packName).map((entry) => [entry.manifest.id, entry.packName!]),
   );
-  const active = packRoot
-    ? new Map(listActiveApprovedPackStatesSync(packRoot).map((state) => [state.name, state]))
-    : new Map();
   return async (workflow: Workflow, _blocks: BlockRegistry): Promise<Record<string, string>> => {
     void _blocks;
+    const owningPackByBlock = new Map(catalogOwningPackByBlock);
+    const active = new Map(
+      (packRoot ? listActiveApprovedPackStatesSync(packRoot) : []).map((state) => {
+        const installed = readInstalledPackSync(packRoot!, state.name, state.version);
+        for (const blockId of parsePackManifestYaml(installed.files.manifestYaml).blocks) {
+          owningPackByBlock.set(blockId, state.name);
+        }
+        return [state.name, state] as const;
+      }),
+    );
     const hashes: Record<string, string> = {};
     for (const step of workflow.execution.steps) {
       const packName = owningPackByBlock.get(step.uses);
@@ -319,7 +328,45 @@ export function createRealEngine(
   computePackHashes = createComputePackHashes(),
   packBlocksByHash: ReadonlyMap<string, BlockRegistry> = new Map(),
   activePackBlockIds: ReadonlySet<string> = new Set(),
+  packRoot?: string,
 ): Engine {
+  const runtimePackBlocksByHash = new Map(packBlocksByHash);
+  const loadPackVersion = (contentHash: string): BlockRegistry | undefined => {
+    const cached = runtimePackBlocksByHash.get(contentHash);
+    if (cached) return cached;
+    if (!packRoot) return undefined;
+    const state = listInstalledPackStatesSync(packRoot).find(
+      (candidate) => candidate.approvalStatus === "approved" && candidate.contentHash === contentHash,
+    );
+    if (!state) return undefined;
+    const loaded = Object.fromEntries(
+      loadInstalledPackBlocksSync(packRoot, state.name, state.version).map((implementation) => [
+        implementation.manifest.id,
+        implementation,
+      ]),
+    );
+    runtimePackBlocksByHash.set(contentHash, loaded);
+    return loaded;
+  };
+  const loadActivePackBlock = (blockId: string): BlockImplementation | undefined => {
+    if (!packRoot) return undefined;
+    const ownerByBlockId = new Map<string, string>();
+    for (const state of listActiveApprovedPackStatesSync(packRoot)) {
+      for (const [activeBlockId, implementation] of Object.entries(loadPackVersion(state.contentHash) ?? {})) {
+        const priorOwner = ownerByBlockId.get(activeBlockId);
+        if (priorOwner && priorOwner !== state.name) {
+          throw new Error(`approved pack "${state.name}" conflicts with pack "${priorOwner}" on block id "${activeBlockId}"`);
+        }
+        const existing = blocks[activeBlockId];
+        if (existing && existing !== implementation && !activePackBlockIds.has(activeBlockId)) {
+          throw new Error(`approved pack "${state.name}" conflicts with existing block id "${activeBlockId}"`);
+        }
+        ownerByBlockId.set(activeBlockId, state.name);
+        blocks[activeBlockId] = implementation;
+      }
+    }
+    return blocks[blockId];
+  };
   return createEngine({
     store,
     redact: redactRecord,
@@ -328,13 +375,20 @@ export function createRealEngine(
     blocks,
     resolveBlockForRun: (run, blockId) => {
       for (const hash of Object.values(run.snapshot.packHashes)) {
-        const implementation = packBlocksByHash.get(hash)?.[blockId];
+        const implementation = loadPackVersion(hash)?.[blockId];
         if (implementation) return implementation;
       }
-      if (run.snapshot.capturedAt !== "" && activePackBlockIds.has(blockId)) {
+      if (
+        run.snapshot.capturedAt !== "" &&
+        (activePackBlockIds.has(blockId) ||
+          (!blocks[blockId] && Object.keys(run.snapshot.packHashes).length > 0))
+      ) {
         throw new Error(
           `Pack block "${blockId}" cannot resume because its snapshotted implementation is unavailable`,
         );
+      }
+      if (activePackBlockIds.has(blockId) || !blocks[blockId]) {
+        return loadActivePackBlock(blockId) ?? blocks[blockId];
       }
       return blocks[blockId];
     },
@@ -538,6 +592,9 @@ function bundleToBundleLike(bundle: Bundle): BundleLike {
   for (const [key, manifest] of Object.entries(bundle.packs)) {
     files[`packs/${sanitizeBundleFilename(key)}.json`] = JSON.stringify(manifest, null, 2);
   }
+  for (const [key, assets] of Object.entries(bundle.packAssets ?? {})) {
+    files[`pack-assets/${sanitizeBundleFilename(key)}.json`] = JSON.stringify(assets, null, 2);
+  }
   for (const [key, entry] of Object.entries(bundle.registry.prompts)) {
     files[`registry/prompts/${sanitizeBundleFilename(key)}.json`] = JSON.stringify(entry, null, 2);
   }
@@ -590,15 +647,25 @@ async function resolveDeploymentForEnvironmentName(store: AartStore, workflowId:
 }
 
 /** The shared bridge itself — `BundlerPort.produceBundle`'s real implementation, and (imported into `@aart/cli`) `ServerPort.produceBundle`'s real implementation too. */
-export async function resolveAndProduceBundle(store: AartStore, params: { workflowId: string; workflowVersion: string; environment?: string }): Promise<BundleLike> {
+export async function resolveAndProduceBundle(
+  store: AartStore,
+  params: { workflowId: string; workflowVersion: string; environment?: string },
+  packRoot?: string,
+): Promise<BundleLike> {
   const deployment = await resolveDeploymentForEnvironmentName(store, params.workflowId, params.workflowVersion, params.environment);
-  const bundle = await produceRealBundle(store, { workflowId: params.workflowId, workflowVersion: params.workflowVersion, deployment, targetEnvironment: params.environment });
+  const bundle = await produceRealBundle(store, {
+    workflowId: params.workflowId,
+    workflowVersion: params.workflowVersion,
+    deployment,
+    targetEnvironment: params.environment,
+    packRoot,
+  });
   return bundleToBundleLike(bundle);
 }
 
-export function createRealBundlerPort(store: AartStore): BundlerPort {
+export function createRealBundlerPort(store: AartStore, packRoot?: string): BundlerPort {
   return {
-    produceBundle: (params) => resolveAndProduceBundle(store, params),
+    produceBundle: (params) => resolveAndProduceBundle(store, params, packRoot),
   };
 }
 

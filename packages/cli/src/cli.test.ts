@@ -1222,6 +1222,90 @@ describe("aart server / aart worker — composition-time root check (AMENDMENTS.
     expect((list.result as { workflows: { id: string }[] }).workflows.map((w) => w.id)).toContain("wf-bundle-root-check");
   });
 
+  it("a fresh destination restores bundled Pack code before constructing its runtime catalog", async () => {
+    base = await mkdtemp(join(tmpdir(), "aart-server-pack-bundle-"));
+    const sourceRoot = join(base, "source", ".aart");
+    const packDir = join(base, "aart-pack-demo");
+    await mkdir(join(packDir, "blocks"), { recursive: true });
+    await writeFile(join(packDir, "aart-pack.yaml"), "name: demo\nversion: 1.0.0\nblocks: [demo.echo]\n", "utf8");
+    await writeFile(
+      join(packDir, "package.json"),
+      JSON.stringify({ name: "aart-pack-demo", version: "1.0.0" }),
+      "utf8",
+    );
+    await writeFile(
+      join(packDir, "blocks", "demo.echo.cjs"),
+      `module.exports = {
+        manifest: {
+          id: "demo.echo",
+          version: "1.0.0",
+          capabilities: [],
+          inputSchema: {},
+          outputSchema: {},
+          description: "Echo a value"
+        },
+        execute: (input) => ({ value: input.value })
+      };`,
+      "utf8",
+    );
+    const added = await run(["pack", "add", "demo", "--from", packDir, "--root", sourceRoot]);
+    expect(added.ok).toBe(true);
+    const contentHash = (added.result as { contentHash: string }).contentHash;
+    const approved = await run([
+      "pack",
+      "approve",
+      "demo",
+      "--version",
+      "1.0.0",
+      "--content-hash",
+      contentHash,
+      "--reviewer",
+      "bundle-e2e",
+      "--root",
+      sourceRoot,
+    ]);
+    expect(approved.ok).toBe(true);
+
+    const workflowPath = join(base, "pack-workflow.yaml");
+    await writeFile(
+      workflowPath,
+      `id: bundled-pack-wf
+name: Bundled Pack Workflow
+version: 1.0.0
+inputs:
+  value:
+    type: string
+    required: true
+steps:
+  - id: echo
+    uses: demo.echo
+    with:
+      value: "{{ inputs.value }}"
+`,
+      "utf8",
+    );
+    expect((await run(["register", workflowPath, "--root", sourceRoot])).ok).toBe(true);
+    const outDir = join(base, "bundle-out");
+    expect((await run(["bundle", "bundled-pack-wf", "--out", outDir, "--root", sourceRoot])).ok).toBe(true);
+
+    const destinationRoot = join(base, "fresh", ".aart");
+    const started = await run(
+      ["server", "--port", "0", "--root", destinationRoot, "--bundle", outDir],
+      { blocking: false },
+    );
+    expect(started.ok).toBe(true);
+    const executed = await run([
+      "run",
+      "bundled-pack-wf",
+      "--input",
+      '{"value":"hello"}',
+      "--root",
+      destinationRoot,
+    ]);
+    expect(executed.ok).toBe(true);
+    expect((executed.result as { status: string }).status).toBe("completed");
+  });
+
   it("an explicit cliContext override bypasses the check entirely (this package's own fast unit tests, which never point at a real --root)", async () => {
     tc = await createTestCli(); // tc.root is a real tmpdir but NEVER passed as --root here
     const outcome = await run(["server", "--port", "0"], { cliContext: tc.cli, blocking: false });

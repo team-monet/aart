@@ -4,7 +4,9 @@
 import { existsSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import path from "node:path";
+import { createFsStore } from "@aart/store";
 import { createSqliteStore } from "@aart/store/sqlite";
+import { hydrateBundleFromDisk } from "@aart/server";
 import { flagString, tokenize, type Tokenized } from "./args.js";
 import { createCliContext, type CliContext, type CreateCliContextOptions } from "./cli-context.js";
 import { findBlocksCommand, findWorkflowsCommand, initAgentCommand, initCommand, listCommand, registerCommand, reportCommand, runCommand, validateCommand } from "./commands/authoring.js";
@@ -145,19 +147,28 @@ function asOutcome(result: { ok?: boolean } & Record<string, unknown>): CliOutco
  */
 async function resolveCliContext(tokens: Tokenized, aartOptions: CreateCliContextOptions | undefined): Promise<CliContext> {
   const root = flagString(tokens.flags, "root") ?? process.env.AART_ROOT ?? aartOptions?.root;
+  const resolvedRoot = root ?? path.join(process.cwd(), ".aart");
   const storeFlag = flagString(tokens.flags, "store");
   if (storeFlag !== undefined && storeFlag !== "fs" && storeFlag !== "sqlite") {
     throw new Error(`--store must be "fs" or "sqlite" (got "${storeFlag}").`);
   }
 
-  if (storeFlag === "sqlite" && !aartOptions?.store) {
-    const resolvedRoot = root ?? path.join(process.cwd(), ".aart");
+  let store = aartOptions?.store;
+  if (storeFlag === "sqlite" && !store) {
     await mkdir(resolvedRoot, { recursive: true });
-    const store = await createSqliteStore(path.join(resolvedRoot, "aart.db"));
-    return createCliContext({ ...aartOptions, root: resolvedRoot, store });
+    store = await createSqliteStore(path.join(resolvedRoot, "aart.db"));
+  } else if (!store) {
+    store = createFsStore(resolvedRoot);
   }
 
-  return createCliContext({ ...aartOptions, root });
+  const bundleDir = flagString(tokens.flags, "bundle");
+  const startupBundle = bundleDir
+    ? await hydrateBundleFromDisk(store, bundleDir, undefined, resolvedRoot)
+    : undefined;
+  return {
+    ...createCliContext({ ...aartOptions, root: resolvedRoot, store }),
+    ...(startupBundle ? { startupBundle } : {}),
+  };
 }
 
 /** Resolves `--root`/`AART_ROOT`/`aartOptions.root` with the exact same precedence `resolveCliContext` applies internally (flag > env > programmatic option > `./.aart` default) — shared so `assertServerRootExists` below and the context construction it gates never disagree about which path is "the" root. */

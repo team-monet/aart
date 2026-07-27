@@ -137,7 +137,7 @@ export function createRealServerPort(store: AartStore, engine: Engine, root: str
       // that type's doc comment) — this composition root doesn't need its
       // own default, just to pass through whatever the caller (commands/
       // process.ts's --host/AART_HOST) resolved.
-      return startRealServer({ store, engine: boundary, port: config.port, host: config.host, secretResolver, environmentId, deployToken, deployTokenNext, logSink: consoleJsonSink });
+      return startRealServer({ store, engine: boundary, packRoot: root, port: config.port, host: config.host, secretResolver, environmentId, deployToken, deployTokenNext, logSink: consoleJsonSink });
     },
 
     async startWorker(options): Promise<WorkerHandleLike> {
@@ -156,7 +156,7 @@ export function createRealServerPort(store: AartStore, engine: Engine, root: str
     // params.environment's name to a Deployment, threads it into
     // manifest.targetEnvironment, and flattens the result to BundleLike —
     // see this file's own module doc comment.
-    produceBundle: (params): Promise<BundleLike> => resolveAndProduceBundle(store, params),
+    produceBundle: (params): Promise<BundleLike> => resolveAndProduceBundle(store, params, root),
 
     async writeBundleToDisk(bundle: BundleLike, outDir: string): Promise<void> {
       await writeBundleFilesToDisk(bundle.files, outDir);

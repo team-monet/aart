@@ -8,6 +8,7 @@ import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
+import { buildPackManifest, parsePackManifestYaml, readInstalledPackSync } from "@aart/registry";
 import type { AartStore } from "@aart/store";
 import type { Deployment, PackManifest, PromptRegistryEntry, SchemaRegistryEntry, Workflow } from "@aart/types";
 import { computeClosure, resolveClosureRegistryEntries } from "./closure.js";
@@ -36,11 +37,18 @@ export const BundleManifestSchema = z.object({
   createdAt: z.string(),
   bundleHash: z.string(),
   workflows: z.array(z.object({ workflowId: z.string(), version: z.string() })),
-  packs: z.array(z.object({ name: z.string(), version: z.string(), contentHash: z.string() })),
+  packs: z.array(z.object({ name: z.string(), version: z.string(), contentHash: z.string(), assets: z.literal(true).optional() })),
   prompts: z.array(z.object({ name: z.string(), version: z.string(), contentHash: z.string() })),
   schemas: z.array(z.object({ name: z.string(), version: z.string(), contentHash: z.string() })),
 });
 export type BundleManifest = z.infer<typeof BundleManifestSchema>;
+
+export const BundledPackAssetsSchema = z.object({
+  manifestYaml: z.string(),
+  blockSources: z.record(z.string(), z.string()),
+  workflowSources: z.record(z.string(), z.string()),
+});
+export type BundledPackAssets = z.infer<typeof BundledPackAssetsSchema>;
 
 export interface Bundle {
   manifest: BundleManifest;
@@ -48,6 +56,8 @@ export interface Bundle {
   definitions: Record<string, Workflow>;
   /** Keyed by `${name}@${version}` (architecture §0.3's `packs/`, pinned versions). */
   packs: Record<string, PackManifest>;
+  /** Sealed executable assets for Pack-backed blocks, keyed by the same `${name}@${version}` key as `packs`. */
+  packAssets?: Record<string, BundledPackAssets>;
   /** Architecture §0.3's `registry/` — prompt/schema entries referenced. */
   registry: {
     prompts: Record<string, PromptRegistryEntry>;
@@ -95,6 +105,7 @@ export function computeBundleHash(input: {
   manifest: Omit<BundleManifest, "bundleHash" | "createdAt">;
   definitions: Record<string, unknown>;
   packs: Record<string, unknown>;
+  packAssets?: Record<string, unknown>;
   registry: { prompts: Record<string, unknown>; schemas: Record<string, unknown> };
   triggers: unknown;
 }): string {
@@ -120,6 +131,8 @@ export interface ProduceBundleParams {
    * (via `deployment`) the triggerConfig lookup.
    */
   targetEnvironment?: string;
+  /** AART root containing approved Pack assets. When present, every Pack in the closure is shipped as a sealed executable asset. */
+  packRoot?: string;
 }
 
 export async function produceBundle(store: AartStore, params: ProduceBundleParams): Promise<Bundle> {
@@ -131,6 +144,26 @@ export async function produceBundle(store: AartStore, params: ProduceBundleParam
 
   const packs: Record<string, PackManifest> = {};
   for (const [key, manifest] of resolved.packs) packs[key] = manifest;
+
+  const packAssets: Record<string, BundledPackAssets> = {};
+  if (params.packRoot) {
+    for (const [key, manifest] of resolved.packs) {
+      const installed = readInstalledPackSync(params.packRoot, manifest.name, manifest.version);
+      const recomputed = buildPackManifest(
+        parsePackManifestYaml(installed.files.manifestYaml),
+        installed.files.blockSources,
+        installed.files.workflowSources,
+      );
+      if (installed.state.approvalStatus !== "approved" || installed.state.contentHash !== manifest.contentHash || recomputed.contentHash !== manifest.contentHash) {
+        throw new Error(`Bundle production: approved Pack assets for "${key}" do not match the store's sealed contentHash.`);
+      }
+      packAssets[key] = {
+        manifestYaml: installed.files.manifestYaml,
+        blockSources: { ...installed.files.blockSources },
+        workflowSources: { ...installed.files.workflowSources },
+      };
+    }
+  }
 
   const prompts: Record<string, PromptRegistryEntry> = {};
   for (const [key, entry] of resolved.prompts) prompts[key] = entry;
@@ -162,7 +195,7 @@ export async function produceBundle(store: AartStore, params: ProduceBundleParam
     }),
     packs: [...resolved.packs.entries()].map(([k, m]) => {
       const [name, version] = k.split("@");
-      return { name: name!, version: version!, contentHash: m.contentHash };
+      return { name: name!, version: version!, contentHash: m.contentHash, ...(packAssets[k] ? { assets: true as const } : {}) };
     }),
     prompts: [...resolved.prompts.entries()].map(([k, e]) => {
       const [name, version] = k.split("@");
@@ -185,12 +218,20 @@ export async function produceBundle(store: AartStore, params: ProduceBundleParam
   // schemas/triggers, and the manifest's own structural workflow/version
   // list) IS included.
   const { createdAt: _createdAt, ...hashableManifest } = manifestWithoutHash;
-  const bundleHash = computeBundleHash({ manifest: hashableManifest, definitions, packs, registry: { prompts, schemas }, triggers });
+  const bundleHash = computeBundleHash({
+    manifest: hashableManifest,
+    definitions,
+    packs,
+    ...(Object.keys(packAssets).length > 0 ? { packAssets } : {}),
+    registry: { prompts, schemas },
+    triggers,
+  });
 
   return {
     manifest: { ...manifestWithoutHash, bundleHash },
     definitions,
     packs,
+    ...(Object.keys(packAssets).length > 0 ? { packAssets } : {}),
     registry: { prompts, schemas },
     triggers,
   };
@@ -212,6 +253,13 @@ export async function writeBundleToDisk(bundle: Bundle, outDir: string): Promise
   await fs.mkdir(packsDir, { recursive: true });
   for (const [key, manifest] of Object.entries(bundle.packs)) {
     await fs.writeFile(join(packsDir, `${sanitizeFilename(key)}.json`), JSON.stringify(manifest, null, 2));
+  }
+  if (bundle.packAssets) {
+    const packAssetsDir = join(outDir, "pack-assets");
+    await fs.mkdir(packAssetsDir, { recursive: true });
+    for (const [key, assets] of Object.entries(bundle.packAssets)) {
+      await fs.writeFile(join(packAssetsDir, `${sanitizeFilename(key)}.json`), JSON.stringify(assets, null, 2));
+    }
   }
 
   const registryDir = join(outDir, "registry");

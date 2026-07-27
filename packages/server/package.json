@@ -21,6 +21,7 @@
     "@aart/evidence": "workspace:*",
     "@aart/expr": "workspace:*",
     "@aart/governance": "workspace:*",
+    "@aart/registry": "workspace:*",
     "@aart/store": "workspace:*",
     "@aart/types": "workspace:*",
     "zod": "4.4.3"

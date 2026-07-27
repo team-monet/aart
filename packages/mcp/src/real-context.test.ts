@@ -7,6 +7,7 @@
 // existing test-suite hygiene (see context.ts's own doc comment on why
 // createAartContext's DEFAULT stays stub-bound).
 import { afterEach, describe, expect, it } from "vitest";
+import { approveInstalledPack, persistInstalledPack } from "@aart/registry";
 import type { BlockImplementation, Workflow } from "@aart/types";
 import { createRealAartContext, createRealAartContextWithEngine, type AartContext } from "./context.js";
 import { buildRealCatalog, createRealEngine } from "./real-context.js";
@@ -57,6 +58,64 @@ describe("buildRealCatalog", () => {
     } finally {
       await cleanupTempRoot(tmpRoot);
     }
+  });
+});
+
+describe("createRealAartContext — Pack catalog refresh", () => {
+  it("can execute a Pack installed after the long-running context was constructed", async () => {
+    ctx = await setup();
+    const installed = await persistInstalledPack(
+      root!,
+      {
+        manifestYaml: "name: hotpack\nversion: 1.0.0\nblocks: [hotpack.echo]\n",
+        blockSources: {
+          "hotpack.echo": `module.exports = {
+            manifest: {
+              id: "hotpack.echo",
+              version: "1.0.0",
+              capabilities: [],
+              inputSchema: {},
+              outputSchema: {},
+              description: "Hot-loaded Pack block"
+            },
+            execute: (input) => ({ value: input.value })
+          };`,
+        },
+      },
+      { kind: "workspace", source: "bundle-test" },
+    );
+    await approveInstalledPack(
+      root!,
+      "hotpack",
+      "1.0.0",
+      "bundle-test",
+      new Date("2026-07-27T00:00:00.000Z"),
+      installed.manifest.contentHash,
+    );
+    await ctx.store.packManifests.put({ ...installed.manifest, approvalStatus: "approved" });
+    await ctx.store.workflows.put({
+      id: "hot-pack-workflow",
+      name: "Hot Pack Workflow",
+      version: "1.0.0",
+      inputs: [{ name: "value", type: "string", required: true }],
+      outputs: [],
+      execution: {
+        type: "workflow",
+        steps: [{ id: "echo", uses: "hotpack.echo", with: { value: "{{ inputs.value }}" } }],
+      },
+      approval: "approved",
+      gates: { validate: "passed", readiness: "passed", evals: "passed", riskReview: "passed", humanReview: "passed" },
+    });
+
+    const result = await runWorkflowHandler(ctx, {
+      workflowId: "hot-pack-workflow",
+      workflowVersion: "1.0.0",
+      input: { value: "hello" },
+    });
+    expect(result).toMatchObject({ ok: true, status: "completed" });
+    expect(typeof result.runId).toBe("string");
+    const run = await ctx.store.runs.get(result.runId as string);
+    expect(run?.snapshot.packHashes).toEqual({ hotpack: installed.manifest.contentHash });
   });
 });
 

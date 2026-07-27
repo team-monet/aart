@@ -162,6 +162,7 @@ export function createRealAartContextWithEngine(options: CreateAartContextOption
           createComputePackHashes(resolvedRoot, catalog!.entries),
           catalog!.packBlocksByHash,
           new Set(catalog!.entries.filter((entry) => entry.packName).map((entry) => entry.manifest.id)),
+          resolvedRoot,
         )
       : undefined;
 
@@ -169,7 +170,7 @@ export function createRealAartContextWithEngine(options: CreateAartContextOption
   const engine = options.engine ?? createRealEnginePort(realEngine!);
   const evidence = options.evidence ?? createRealEvidencePort(store, realEngine!);
   const registry = options.registry ?? createRealRegistryPort(catalog!.entries);
-  const bundler = options.bundler ?? createRealBundlerPort(store);
+  const bundler = options.bundler ?? createRealBundlerPort(store, resolvedRoot);
   const remotes = options.remotes ?? createRealRemotesPort(resolvedRoot);
   return { context: { root: resolvedRoot, store, engine, governance, evidence, registry, bundler, remotes, trustMode, now }, engine: realEngine };
 }

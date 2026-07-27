@@ -24,6 +24,13 @@
 import { promises as fs } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
+import {
+  approveInstalledPack,
+  buildPackManifest,
+  parsePackManifestYaml,
+  persistInstalledPack,
+  withPackMutationLock,
+} from "@aart/registry";
 import type { AartStore } from "@aart/store";
 import {
   DeploymentSchema,
@@ -40,7 +47,14 @@ import {
 } from "@aart/types";
 import { normalizeEnvironmentTrustMode } from "@aart/governance";
 import { systemClock, type Clock } from "../clock.js";
-import { BundleManifestSchema, computeBundleHash, sanitizeFilename, type Bundle } from "./bundle.js";
+import {
+  BundledPackAssetsSchema,
+  BundleManifestSchema,
+  computeBundleHash,
+  sanitizeFilename,
+  type Bundle,
+  type BundledPackAssets,
+} from "./bundle.js";
 
 const TriggerConfigSchema = z.record(z.string(), z.unknown());
 
@@ -303,6 +317,13 @@ async function readBundleFromSource(source: BundleSource): Promise<Bundle> {
     manifest.packs.map((p) => `${p.name}@${p.version}`),
     "pack manifest",
   );
+  const packEntriesWithAssets = manifest.packs.filter((pack) => pack.assets === true);
+  const rawPackAssets = await readRawEntries(
+    source,
+    "pack-assets",
+    packEntriesWithAssets.map((p) => `${p.name}@${p.version}`),
+    "pack executable assets",
+  );
   const rawPrompts = await readRawEntries(
     source,
     "registry/prompts",
@@ -324,6 +345,7 @@ async function readBundleFromSource(source: BundleSource): Promise<Bundle> {
     manifest: hashableManifest,
     definitions: Object.fromEntries(rawWorkflows.map((e) => [e.key, e.raw])),
     packs: Object.fromEntries(rawPacks.map((e) => [e.key, e.raw])),
+    ...(rawPackAssets.length > 0 ? { packAssets: Object.fromEntries(rawPackAssets.map((e) => [e.key, e.raw])) } : {}),
     registry: {
       prompts: Object.fromEntries(rawPrompts.map((e) => [e.key, e.raw])),
       schemas: Object.fromEntries(rawSchemas.map((e) => [e.key, e.raw])),
@@ -358,6 +380,29 @@ async function readBundleFromSource(source: BundleSource): Promise<Bundle> {
   }
 
   const packs = validateRegistryEntries<PackManifest>(rawPacks, manifest.packs, PackManifestSchema, errors);
+  const packAssets: Record<string, BundledPackAssets> = {};
+  for (const entry of rawPackAssets) {
+    const parsed = BundledPackAssetsSchema.safeParse(entry.raw);
+    if (!parsed.success) {
+      errors.push(`${entry.filePath}: failed Pack asset schema validation:\n${parsed.error.message}`);
+      continue;
+    }
+    try {
+      const recomputed = buildPackManifest(
+        parsePackManifestYaml(parsed.data.manifestYaml),
+        parsed.data.blockSources,
+        parsed.data.workflowSources,
+      );
+      const expected = manifest.packs.find((pack) => `${pack.name}@${pack.version}` === entry.key);
+      if (!expected || `${recomputed.name}@${recomputed.version}` !== entry.key || recomputed.contentHash !== expected.contentHash) {
+        errors.push(`${entry.filePath}: executable assets do not match the manifest seal for "${entry.key}".`);
+        continue;
+      }
+      packAssets[entry.key] = parsed.data;
+    } catch (cause) {
+      errors.push(`${entry.filePath}: executable assets failed Pack validation: ${cause instanceof Error ? cause.message : String(cause)}`);
+    }
+  }
   const prompts = validateRegistryEntries<PromptRegistryEntry>(rawPrompts, manifest.prompts, PromptRegistryEntrySchema, errors);
   const schemas = validateRegistryEntries<SchemaRegistryEntry>(rawSchemas, manifest.schemas, SchemaRegistryEntrySchema, errors);
 
@@ -365,7 +410,14 @@ async function readBundleFromSource(source: BundleSource): Promise<Bundle> {
     throw new Error(`Bundle load: ${errors.length} definition(s) in ${source.describe()} failed validation:\n${errors.join("\n")}`);
   }
 
-  return { manifest, definitions, packs, registry: { prompts, schemas }, triggers };
+  return {
+    manifest,
+    definitions,
+    packs,
+    ...(Object.keys(packAssets).length > 0 ? { packAssets } : {}),
+    registry: { prompts, schemas },
+    triggers,
+  };
 }
 
 /** Reads a bundle directory (architecture §0.3's layout) off disk into an in-memory `Bundle` — see `readBundleFromSource`'s own doc comment for the full validation contract this delegates to. */
@@ -400,11 +452,28 @@ export async function readBundleFromEnvelope(files: Readonly<Record<string, stri
  * verification too.
  */
 export function verifyBundleHash(bundle: Bundle): void {
+  const expectedAssetKeys = new Set(
+    bundle.manifest.packs
+      .filter((pack) => pack.assets === true)
+      .map((pack) => `${pack.name}@${pack.version}`),
+  );
+  const actualAssetKeys = Object.keys(bundle.packAssets ?? {});
+  for (const key of expectedAssetKeys) {
+    if (!bundle.packAssets?.[key]) {
+      throw new Error(`Bundle load: manifest declares executable Pack assets for "${key}", but the sealed assets are missing.`);
+    }
+  }
+  for (const key of actualAssetKeys) {
+    if (!expectedAssetKeys.has(key)) {
+      throw new Error(`Bundle load: executable Pack assets "${key}" are not declared by manifest.json.`);
+    }
+  }
   const { createdAt: _createdAt, bundleHash, ...hashableManifest } = bundle.manifest;
   const recomputed = computeBundleHash({
     manifest: hashableManifest,
     definitions: bundle.definitions,
     packs: bundle.packs,
+    ...(bundle.packAssets ? { packAssets: bundle.packAssets } : {}),
     registry: bundle.registry,
     triggers: bundle.triggers,
   });
@@ -456,7 +525,7 @@ export type HydrateBundleResult =
  * full, process killed) can never leave the idempotency marker written
  * without the definitions it's supposed to vouch for, or vice versa.
  */
-export async function hydrateBundle(store: AartStore, bundle: Bundle, clock: Clock = systemClock): Promise<HydrateBundleResult> {
+export async function hydrateBundle(store: AartStore, bundle: Bundle, clock: Clock = systemClock, packRoot?: string): Promise<HydrateBundleResult> {
   verifyBundleHash(bundle);
 
   const { workflowId, workflowVersion, bundleHash, targetEnvironment: targetEnvironmentName } = bundle.manifest;
@@ -468,10 +537,11 @@ export async function hydrateBundle(store: AartStore, bundle: Bundle, clock: Clo
   const deploymentId = target ? bundleDeploymentIdForEnvironment(workflowId, workflowVersion, target.environment.id) : bundleDeploymentId(workflowId, workflowVersion);
   const existing = await store.deployments.get(deploymentId);
 
-  if (existing?.bundleHash === bundleHash) {
-    return { kind: "already_hydrated", workflowId, workflowVersion, bundleHash, deploymentId };
-  }
   if (existing?.bundleHash !== undefined) {
+    if (existing.bundleHash === bundleHash) {
+      if (bundle.packAssets) await hydrateBundledPackAssets(bundle, packRoot, clock, async () => undefined);
+      return { kind: "already_hydrated", workflowId, workflowVersion, bundleHash, deploymentId };
+    }
     throw new Error(
       `Bundle load: "${workflowId}@${workflowVersion}" is already hydrated into this store from a DIFFERENT bundle ` +
         `(currently hydrated bundleHash: ${existing.bundleHash}; this bundle's hash: ${bundleHash}). ` +
@@ -496,26 +566,81 @@ export async function hydrateBundle(store: AartStore, bundle: Bundle, clock: Clo
     ...(target ? { promoted: target.promoted } : {}),
   };
 
-  await store.transact(async (tx) => {
-    for (const workflow of Object.values(bundle.definitions)) await tx.workflows.put(workflow);
-    for (const pack of Object.values(bundle.packs)) await tx.packManifests.put(pack);
-    for (const prompt of Object.values(bundle.registry.prompts)) await tx.promptRegistry.put(prompt);
-    for (const schema of Object.values(bundle.registry.schemas)) await tx.schemaRegistry.put(schema);
-    // Only the legacy fallback auto-vivifies its own Environment row — a
-    // real named target was already proven to exist by
-    // resolveHydrationTarget above, and must never be silently re-written
-    // here (no auto-vivification for the real path, by design).
-    if (!target) {
-      await tx.environments.put(BUNDLE_ENVIRONMENT);
-    }
-    await tx.deployments.put(deployment);
-  });
+  const persistStoreRecords = async (): Promise<void> => {
+    await store.transact(async (tx) => {
+      for (const workflow of Object.values(bundle.definitions)) await tx.workflows.put(workflow);
+      for (const pack of Object.values(bundle.packs)) await tx.packManifests.put(pack);
+      for (const prompt of Object.values(bundle.registry.prompts)) await tx.promptRegistry.put(prompt);
+      for (const schema of Object.values(bundle.registry.schemas)) await tx.schemaRegistry.put(schema);
+      // Only the legacy fallback auto-vivifies its own Environment row — a
+      // real named target was already proven to exist by
+      // resolveHydrationTarget above, and must never be silently re-written
+      // here (no auto-vivification for the real path, by design).
+      if (!target) {
+        await tx.environments.put(BUNDLE_ENVIRONMENT);
+      }
+      await tx.deployments.put(deployment);
+    });
+  };
+
+  if (bundle.packAssets) {
+    await hydrateBundledPackAssets(bundle, packRoot, clock, persistStoreRecords);
+  } else {
+    await persistStoreRecords();
+  }
 
   return { kind: "hydrated", workflowId, workflowVersion, bundleHash, deploymentId };
 }
 
 /** `readBundleFromDisk` + `hydrateBundle` in one call — what `aart server --bundle <dir>` / `aart worker --bundle <dir>` (packages/cli/src/commands/process.ts) actually call. */
-export async function hydrateBundleFromDisk(store: AartStore, bundleDir: string, clock: Clock = systemClock): Promise<HydrateBundleResult> {
+export async function hydrateBundleFromDisk(
+  store: AartStore,
+  bundleDir: string,
+  clock: Clock = systemClock,
+  packRoot?: string,
+): Promise<HydrateBundleResult> {
   const bundle = await readBundleFromDisk(bundleDir);
-  return hydrateBundle(store, bundle, clock);
+  return hydrateBundle(store, bundle, clock, packRoot);
+}
+
+async function hydrateBundledPackAssets(
+  bundle: Bundle,
+  packRoot: string | undefined,
+  clock: Clock,
+  persistStoreRecords: () => Promise<void>,
+): Promise<void> {
+  if (!bundle.packAssets || Object.keys(bundle.packAssets).length === 0) {
+    await persistStoreRecords();
+    return;
+  }
+  if (!packRoot) {
+    throw new Error("Bundle load: this bundle contains executable Pack assets, but no Pack root was configured for hydration.");
+  }
+  await withPackMutationLock(packRoot, async () => {
+    for (const [key, assets] of Object.entries(bundle.packAssets!)) {
+      const manifest = bundle.packs[key];
+      if (!manifest) throw new Error(`Bundle load: Pack assets "${key}" have no matching Pack manifest.`);
+      const installed = await persistInstalledPack(
+        packRoot,
+        assets,
+        { kind: "workspace", source: `bundle:${bundle.manifest.bundleHash}` },
+        new Date(clock.nowIso()),
+      );
+      if (installed.manifest.contentHash !== manifest.contentHash) {
+        throw new Error(`Bundle load: persisted Pack assets "${key}" no longer match the bundle seal.`);
+      }
+    }
+    await persistStoreRecords();
+    for (const [key] of Object.entries(bundle.packAssets!)) {
+      const manifest = bundle.packs[key]!;
+      await approveInstalledPack(
+        packRoot,
+        manifest.name,
+        manifest.version,
+        `bundle:${bundle.manifest.bundleHash}`,
+        new Date(clock.nowIso()),
+        manifest.contentHash,
+      );
+    }
+  });
 }
