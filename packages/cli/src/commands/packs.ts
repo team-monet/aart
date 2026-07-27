@@ -21,8 +21,10 @@ export async function packCommand(tokens: Tokenized, cli: CliContext): Promise<H
     });
     return {
       ...wrapResult("aart_find_packs", result),
-      next: result.matched
-        ? "Choose the closest result, then run `aart pack add <name> --version <version>`."
+      next: result.matched && result.indexMode === "preview"
+        ? "These are preview catalog fixtures, not published packages. Prepare and publish a real Pack before installation."
+        : result.matched
+          ? "Choose the closest result, then run `aart pack add <name> --version <version>`."
         : "Broaden the query or prepare the smallest reusable Pack with `aart pack prepare <directory>`.",
     };
   }

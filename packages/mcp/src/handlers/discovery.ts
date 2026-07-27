@@ -32,14 +32,20 @@ export async function findBlocksHandler(ctx: AartContext, input: FindBlocksInput
     entry: (typeof local)[number]["entry"];
     score: number;
     source: "public";
+    catalogMode: "preview" | "production";
   }> = [];
   if (scope !== "local") {
     const indexUrl = input.indexUrl ?? process.env.AART_PACK_INDEX_URL;
     if (!indexUrl) throw new Error("remote block search needs indexUrl or AART_PACK_INDEX_URL");
     const index = await fetchRemoteRegistryIndex(indexUrl);
-    remote = searchRemoteIndex(index, input.query)
+    remote = searchRemoteIndex(index.packs, input.query)
       .filter((result) => (input.category ? result.manifest.category === input.category : true))
-      .map(({ score, ...entry }) => ({ entry, score, source: "public" as const }));
+      .map(({ score, ...entry }) => ({
+        entry,
+        score,
+        source: "public" as const,
+        catalogMode: index.mode,
+      }));
   }
   const results = [...local, ...remote].sort(
     (a, b) => b.score - a.score || a.entry.manifest.id.localeCompare(b.entry.manifest.id),
@@ -56,6 +62,7 @@ export async function findBlocksHandler(ctx: AartContext, input: FindBlocksInput
       packName: r.entry.packName,
       examples: r.entry.examples,
       source: r.source,
+      ...("catalogMode" in r ? { catalogMode: r.catalogMode } : {}),
       score: r.score,
     })),
   };
@@ -87,10 +94,15 @@ export async function findWorkflowsHandler(ctx: AartContext, input: FindWorkflow
     const indexUrl = input.indexUrl ?? process.env.AART_PACK_INDEX_URL;
     if (!indexUrl) throw new Error("remote workflow search needs indexUrl or AART_PACK_INDEX_URL");
     const index = await fetchRemoteRegistryIndex(indexUrl);
-    remote = index.flatMap((pack) =>
+    remote = index.packs.flatMap((pack) =>
       searchWorkflows(pack.workflows ?? [], input.query)
         .filter((result) => (input.category ? result.workflow.category === input.category : true))
-        .map((result) => ({ ...result, source: "public" as const, packName: pack.packName })),
+        .map((result) => ({
+          ...result,
+          source: "public" as const,
+          packName: pack.packName,
+          catalogMode: index.mode,
+        })),
     );
   }
   const results = [...local, ...remote].sort(
@@ -101,17 +113,18 @@ export async function findWorkflowsHandler(ctx: AartContext, input: FindWorkflow
     matched: results.length > 0,
     query: input.query,
     scope,
-    workflows: results.map(({ workflow, score, source, packName }) => ({
-      id: workflow.id,
-      name: workflow.name,
-      version: workflow.version,
-      category: workflow.category,
-      keywords: workflow.keywords ?? [],
-      approval: workflow.approval,
-      score,
-      source,
-      packName,
-      examples: workflow.examples ?? [],
+    workflows: results.map((result) => ({
+      id: result.workflow.id,
+      name: result.workflow.name,
+      version: result.workflow.version,
+      category: result.workflow.category,
+      keywords: result.workflow.keywords ?? [],
+      approval: result.workflow.approval,
+      score: result.score,
+      source: result.source,
+      packName: result.packName,
+      ...("catalogMode" in result ? { catalogMode: result.catalogMode } : {}),
+      examples: result.workflow.examples ?? [],
     })),
   };
 }

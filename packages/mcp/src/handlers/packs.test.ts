@@ -66,7 +66,7 @@ license: Apache-2.0
 repository: https://example.com/demo/repository
 homepage: https://example.com/demo
 compatibility:
-  aart: ">=0.12.0"
+  aart: ">=0.10.0 <0.11.0"
   node: ">=22"
   runtimes: [Node, Server]
 capabilities: []
@@ -278,6 +278,56 @@ workflows: [demo-echo-flow]
       }),
     ).rejects.toThrow(/reviewed content hash does not match/);
     expect((await listPacksHandler(ctx, { status: "unapproved" })).count).toBe(1);
+  });
+
+  it("refuses approval when the Pack requires an unsupported AART version", async () => {
+    await fs.writeFile(
+      join(packageRoot, "aart-pack.yaml"),
+      (await fs.readFile(join(packageRoot, "aart-pack.yaml"), "utf8")).replace(
+        'aart: ">=0.10.0 <0.11.0"',
+        'aart: ">=0.12.0"',
+      ),
+      "utf8",
+    );
+    const ctx = createAartContext({ root, trustMode: "governed" });
+    const installed = await installPackHandler(ctx, { name: "demo", sourcePath: packageRoot });
+
+    await expect(
+      approvePackHandler(ctx, {
+        name: "demo",
+        version: "1.0.0",
+        contentHash: installed.contentHash as string,
+        reviewer: "human-reviewer",
+      }),
+    ).rejects.toThrow(/requires AART >=0\.12\.0.*runtime is 0\.10\.0/i);
+    expect((await listPacksHandler(ctx, { status: "unapproved" })).count).toBe(1);
+  });
+
+  it("preserves preview catalog status instead of advertising fixtures as installable Packs", async () => {
+    const indexUrl = `data:application/json,${encodeURIComponent(
+      JSON.stringify({
+        schemaVersion: 1,
+        mode: "preview",
+        packs: [
+          {
+            npmPackageName: "aart-pack-demo",
+            packName: "demo",
+            version: "1.0.0",
+            blocks: [],
+          },
+        ],
+      }),
+    )}`;
+    const result = await findPacksHandler(createAartContext({ root }), {
+      query: "demo",
+      indexUrl,
+    });
+    expect(result).toEqual(
+      expect.objectContaining({
+        indexMode: "preview",
+        packs: [expect.objectContaining({ name: "demo", installable: false })],
+      }),
+    );
   });
 
   it("uses only the explicitly active version and never revives a dormant conflicting version", async () => {
@@ -631,7 +681,7 @@ blocks: [demo.echo]
     expect(entry.tags).toEqual(["reusable", "starter"]);
     expect(entry.author).toEqual({ name: "Demo Publisher", url: "https://example.com/demo" });
     expect(entry.license).toBe("Apache-2.0");
-    expect(entry.compatibility).toEqual({ aart: ">=0.12.0", node: ">=22", runtimes: ["Node", "Server"] });
+    expect(entry.compatibility).toEqual({ aart: ">=0.10.0 <0.11.0", node: ">=22", runtimes: ["Node", "Server"] });
     expect(entry.blocks[0]?.manifest.id).toBe("demo.echo");
     expect(entry.workflows).toEqual([expect.objectContaining({ id: "demo-echo-flow", approval: "draft" })]);
   });

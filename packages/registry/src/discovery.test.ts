@@ -147,6 +147,7 @@ describe("public Pack catalog index contract", () => {
     const source = await readFile(new URL("../../catalog/data/aart-pack-index.json", import.meta.url), "utf8");
     const document = parseRemoteRegistryIndexDocument(JSON.parse(source), "catalog fixture");
     expect(document.schemaVersion).toBe(1);
+    expect(document.mode).toBe("preview");
     expect(document.packs.length).toBeGreaterThanOrEqual(6);
     expect(document.packs.every((pack) => (pack.categories?.length ?? 0) > 0)).toBe(true);
   });
@@ -264,6 +265,13 @@ describe("searchWorkflows — reusable workflow discovery", () => {
 });
 
 describe("parseRemoteRegistryIndexDocument", () => {
+  it("defaults legacy indexes to production while preserving an explicit preview mode", () => {
+    expect(parseRemoteRegistryIndexDocument({ schemaVersion: 1, packs: [] }).mode).toBe("production");
+    expect(
+      parseRemoteRegistryIndexDocument({ schemaVersion: 1, mode: "preview", packs: [] }).mode,
+    ).toBe("preview");
+  });
+
   it("rejects public Pack versions that cannot be installed as SemVer artifacts", () => {
     expect(() =>
       parseRemoteRegistryIndexDocument({

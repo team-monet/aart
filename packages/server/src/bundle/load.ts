@@ -22,10 +22,13 @@
 // distinct failure mode this ordering also surfaces correctly, with its own
 // clear error rather than a confusing hash mismatch.)
 import { promises as fs } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { z } from "zod";
 import {
+  AART_VERSION,
   approveInstalledPack,
+  assertPackCompatibility,
   buildPackManifest,
   parsePackManifestYaml,
   persistInstalledPack,
@@ -617,30 +620,125 @@ async function hydrateBundledPackAssets(
     throw new Error("Bundle load: this bundle contains executable Pack assets, but no Pack root was configured for hydration.");
   }
   await withPackMutationLock(packRoot, async () => {
-    for (const [key, assets] of Object.entries(bundle.packAssets!)) {
-      const manifest = bundle.packs[key];
-      if (!manifest) throw new Error(`Bundle load: Pack assets "${key}" have no matching Pack manifest.`);
-      const installed = await persistInstalledPack(
-        packRoot,
-        assets,
-        { kind: "workspace", source: `bundle:${bundle.manifest.bundleHash}` },
-        new Date(clock.nowIso()),
-      );
-      if (installed.manifest.contentHash !== manifest.contentHash) {
-        throw new Error(`Bundle load: persisted Pack assets "${key}" no longer match the bundle seal.`);
+    const token = randomUUID();
+    const stagingRoot = join(packRoot, "packs", `.bundle-hydration-${token}`);
+    const installedRoot = join(packRoot, "packs", "installed");
+    const stagedInstalledRoot = join(stagingRoot, "packs", "installed");
+    const backupInstalledRoot = join(packRoot, "packs", `.bundle-installed-backup-${token}`);
+    const failedInstalledRoot = join(packRoot, "packs", `.bundle-installed-failed-${token}`);
+    let previousInstallationMoved = false;
+    let stagedInstallationActivated = false;
+    let storeRecordsCommitted = false;
+    const restorePreviousInstallation = async (): Promise<void> => {
+      if (stagedInstallationActivated) {
+        try {
+          await fs.rename(installedRoot, failedInstalledRoot);
+          stagedInstallationActivated = false;
+        } catch (moveCause) {
+          try {
+            await fs.rm(installedRoot, { recursive: true, force: true });
+            stagedInstallationActivated = false;
+          } catch (removeCause) {
+            throw new AggregateError(
+              [moveCause, removeCause],
+              "Bundle load: failed to move or remove the uncommitted Pack installation.",
+            );
+          }
+        }
       }
-    }
-    await persistStoreRecords();
-    for (const [key] of Object.entries(bundle.packAssets!)) {
-      const manifest = bundle.packs[key]!;
-      await approveInstalledPack(
-        packRoot,
-        manifest.name,
-        manifest.version,
-        `bundle:${bundle.manifest.bundleHash}`,
-        new Date(clock.nowIso()),
-        manifest.contentHash,
-      );
+      if (previousInstallationMoved) {
+        await fs.rename(backupInstalledRoot, installedRoot);
+        previousInstallationMoved = false;
+      }
+    };
+    try {
+      await fs.mkdir(join(stagingRoot, "packs"), { recursive: true });
+      try {
+        await fs.cp(installedRoot, stagedInstalledRoot, { recursive: true });
+      } catch (cause) {
+        if ((cause as NodeJS.ErrnoException).code !== "ENOENT") throw cause;
+      }
+
+      // Build and approve the complete candidate installation away from the
+      // live Pack root. Any malformed asset, seal mismatch, or approval
+      // failure leaves the currently active installation byte-for-byte
+      // untouched.
+      for (const [key, assets] of Object.entries(bundle.packAssets!)) {
+        const manifest = bundle.packs[key];
+        if (!manifest) throw new Error(`Bundle load: Pack assets "${key}" have no matching Pack manifest.`);
+        const installed = await persistInstalledPack(
+          stagingRoot,
+          assets,
+          { kind: "workspace", source: `bundle:${bundle.manifest.bundleHash}` },
+          new Date(clock.nowIso()),
+        );
+        if (installed.manifest.contentHash !== manifest.contentHash) {
+          throw new Error(`Bundle load: persisted Pack assets "${key}" no longer match the bundle seal.`);
+        }
+        const raw = parsePackManifestYaml(assets.manifestYaml);
+        assertPackCompatibility(raw.compatibility, {
+          aart: AART_VERSION,
+          node: process.versions.node,
+        });
+        await approveInstalledPack(
+          stagingRoot,
+          manifest.name,
+          manifest.version,
+          `bundle:${bundle.manifest.bundleHash}`,
+          new Date(clock.nowIso()),
+          manifest.contentHash,
+        );
+      }
+
+      // Activate the fully validated Pack tree before exposing the
+      // deployment in the store. If the store transaction fails, the
+      // previous tree is restored below; a committed Deployment can
+      // therefore never point at missing or stale executable assets.
+      try {
+        await fs.rename(installedRoot, backupInstalledRoot);
+        previousInstallationMoved = true;
+      } catch (cause) {
+        if ((cause as NodeJS.ErrnoException).code !== "ENOENT") throw cause;
+      }
+      try {
+        await fs.rename(stagedInstalledRoot, installedRoot);
+        stagedInstallationActivated = true;
+      } catch (cause) {
+        if (previousInstallationMoved) {
+          await fs.rename(backupInstalledRoot, installedRoot);
+          previousInstallationMoved = false;
+        }
+        throw cause;
+      }
+      try {
+        await persistStoreRecords();
+        storeRecordsCommitted = true;
+      } catch (storeCause) {
+        try {
+          // Moving the uncommitted candidate out of the live path is the
+          // critical rollback step. Cleanup is deliberately deferred until
+          // after the prior tree is restored, so a deletion failure cannot
+          // leave executable assets ahead of the authoritative store.
+          await restorePreviousInstallation();
+        } catch (rollbackCause) {
+          throw new Error(
+            "Bundle load: store hydration failed and the previous Pack installation could not be restored.",
+            { cause: new AggregateError([storeCause, rollbackCause]) },
+          );
+        }
+        throw storeCause;
+      }
+    } finally {
+      if (!storeRecordsCommitted && (stagedInstallationActivated || previousInstallationMoved)) {
+        await restorePreviousInstallation().catch(() => undefined);
+      }
+      await fs.rm(stagingRoot, { recursive: true, force: true });
+      if (storeRecordsCommitted) {
+        await fs.rm(backupInstalledRoot, { recursive: true, force: true }).catch(() => undefined);
+      }
+      if (!stagedInstallationActivated) {
+        await fs.rm(failedInstalledRoot, { recursive: true, force: true }).catch(() => undefined);
+      }
     }
   });
 }

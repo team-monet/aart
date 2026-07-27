@@ -274,5 +274,9 @@ export type HandlerResult = { ok: boolean } & Record<string, unknown>;
  */
 export function wrapResult<T extends HandlerResult>(tool: ToolName, result: T): T & { next: string } {
   const outcome = result.ok && result.matched !== false ? "success" : "failure";
-  return { ...result, next: computeNext(tool, outcome) };
+  const next =
+    tool === "aart_find_packs" && outcome === "success" && result.indexMode === "preview"
+      ? "These are preview catalog fixtures, not published packages. Prepare and publish a real Pack before offering installation."
+      : computeNext(tool, outcome);
+  return { ...result, next };
 }

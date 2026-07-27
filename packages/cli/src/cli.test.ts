@@ -410,6 +410,32 @@ describe("aart find-blocks", () => {
 });
 
 describe("aart pack", () => {
+  it("does not offer an install command for preview catalog fixtures", async () => {
+    tc = await createTestCli();
+    const indexUrl = `data:application/json,${encodeURIComponent(
+      JSON.stringify({
+        schemaVersion: 1,
+        mode: "preview",
+        packs: [
+          {
+            npmPackageName: "aart-pack-preview-demo",
+            packName: "preview-demo",
+            version: "1.0.0",
+            blocks: [],
+          },
+        ],
+      }),
+    )}`;
+    const outcome = await run(
+      ["pack", "search", "preview", "--index-url", indexUrl],
+      { cliContext: tc.cli },
+    );
+    expect(outcome.ok).toBe(true);
+    expect((outcome.result as { indexMode: string }).indexMode).toBe("preview");
+    expect((outcome.result as { next: string }).next).toContain("preview catalog fixtures");
+    expect((outcome.result as { next: string }).next).not.toContain("aart pack add");
+  });
+
   it("adds a workflow-only Pack inertly, lists it, then registers its workflow only after human approval", async () => {
     tc = await createTestCli();
     const packDir = join(tc.cwd, "aart-pack-cli-reuse");

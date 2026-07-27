@@ -25,6 +25,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import type { z } from "zod";
 import type { AartContext } from "./context.js";
 import { listRegisteredTools, createMcpServer } from "./tools/server.js";
+import { AART_VERSION } from "./version.js";
 
 export interface McpStdioHandle {
   mcpServer: McpServer;
@@ -34,11 +35,7 @@ export interface McpStdioHandle {
 
 export async function startMcpStdioServer(ctx: AartContext, transportOverride?: StdioServerTransport): Promise<McpStdioHandle> {
   const core = createMcpServer(ctx);
-  // Kept in lockstep with packages/cli/package.json's "version" by hand
-  // (AMENDMENTS.md A68, 0.10.0 release prep — bump both together; no test
-  // currently pins this exact string, verified via grep before this
-  // change).
-  const mcpServer = new McpServer({ name: "aart", version: "0.10.0" });
+  const mcpServer = new McpServer({ name: "aart", version: AART_VERSION });
 
   const definitions = await listRegisteredTools(ctx);
   for (const def of definitions) {

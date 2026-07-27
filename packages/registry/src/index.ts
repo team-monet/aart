@@ -4,6 +4,12 @@
 // package had to fill.
 export { canonicalize, computePackContentHash } from "./hash.js";
 export {
+  AART_VERSION,
+  assertPackCompatibility,
+  PackCompatibilityError,
+  type PackRuntimeVersions,
+} from "./compatibility.js";
+export {
   authorPack,
   installPack,
   registerPackFiles,
@@ -44,6 +50,8 @@ export {
   type DiscoveryScope,
   type FindBlocksInput,
   type RemoteRegistryIndexEntry,
+  type RemoteRegistryIndexDocument,
+  type PackCompatibility,
   type PackSearchResult,
   RemoteRegistryIndexError,
   type WorkflowSearchResult,

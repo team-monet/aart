@@ -72,6 +72,7 @@ export { matchRecipe, matchRecipes, RECIPES, type Recipe, type RecipeMatch } fro
 export { generateInitAgentOutputs, type GenerateInitAgentOptions, type InitAgentOutputs, type McpConfig } from "./init-agent.js";
 
 export { BUILTIN_BLOCK_CATALOG, NATIVE_ALIASES } from "./catalog.js";
+export { AART_VERSION } from "./version.js";
 
 export * from "./handlers/index.js";
 

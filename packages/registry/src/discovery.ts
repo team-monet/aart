@@ -96,6 +96,8 @@ export interface RemoteRegistryIndexEntry {
 
 export interface RemoteRegistryIndexDocument {
   readonly schemaVersion: 1;
+  /** Preview indexes contain discovery fixtures and must never be presented as installable packages. */
+  readonly mode: "preview" | "production";
   readonly generatedAt?: string;
   readonly packs: readonly RemoteRegistryIndexEntry[];
 }
@@ -286,10 +288,15 @@ const RemoteRegistryIndexEntrySchema = z
   });
 
 const RemoteRegistryIndexDocumentSchema = z.union([
-  z.array(RemoteRegistryIndexEntrySchema).transform((packs) => ({ schemaVersion: 1 as const, packs })),
+  z.array(RemoteRegistryIndexEntrySchema).transform((packs) => ({
+    schemaVersion: 1 as const,
+    mode: "production" as const,
+    packs,
+  })),
   z
     .object({
       schemaVersion: z.literal(1).default(1),
+      mode: z.enum(["preview", "production"]).default("production"),
       generatedAt: z.string().datetime().optional(),
       packs: z.array(RemoteRegistryIndexEntrySchema),
     })
@@ -312,7 +319,7 @@ export function parseRemoteRegistryIndexDocument(
 export async function fetchRemoteRegistryIndex(
   indexUrl: string,
   fetcher: typeof fetch = fetch,
-): Promise<RemoteRegistryIndexEntry[]> {
+): Promise<RemoteRegistryIndexDocument> {
   let response: Response;
   try {
     response = await fetcher(indexUrl);
@@ -323,7 +330,7 @@ export async function fetchRemoteRegistryIndex(
     throw new RemoteRegistryIndexError(`public pack index ${indexUrl} returned HTTP ${response.status}`);
   }
   const parsed = (await response.json()) as unknown;
-  return [...parseRemoteRegistryIndexDocument(parsed, `public pack index ${indexUrl}`).packs];
+  return parseRemoteRegistryIndexDocument(parsed, `public pack index ${indexUrl}`);
 }
 
 export interface FindBlocksInput {

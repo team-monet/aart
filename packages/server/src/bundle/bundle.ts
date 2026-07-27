@@ -137,7 +137,7 @@ export interface ProduceBundleParams {
 
 export async function produceBundle(store: AartStore, params: ProduceBundleParams): Promise<Bundle> {
   const closure = await computeClosure(store, params.workflowId, params.workflowVersion);
-  const resolved = await resolveClosureRegistryEntries(store, closure);
+  const resolved = await resolveClosureRegistryEntries(store, closure, { packRoot: params.packRoot });
 
   const definitions: Record<string, Workflow> = {};
   for (const [key, workflow] of resolved.workflows) definitions[key] = workflow;
