@@ -12,7 +12,7 @@ import {
   listInstalledPackStatesSync,
   loadInstalledPackBlocks,
   loadInstalledPackBlocksSync,
-  loadBlockImplementationSourceSync,
+  loadBlockImplementationSource,
   npmPackageNameFor,
   parsePackManifestYaml,
   persistInstalledPack,
@@ -40,6 +40,8 @@ export interface PreparePackInput {
 interface PreparePackHandlerOptions {
   /** Trusted composition-layer authority used only by the explicit CLI `--out` flag. */
   allowArbitraryOutputPath?: boolean;
+  /** Test/composition override; production preparation shares a ten-second Pack-wide isolate budget. */
+  inspectionBudgetMs?: number;
 }
 
 export async function preparePackHandler(
@@ -63,11 +65,14 @@ export async function preparePackHandler(
     throw new Error(`package.json version ${packageJson.version ?? ""} does not match manifest version ${raw.version}`);
   }
   const manifest = buildPackManifest(raw, files.blockSources, files.workflowSources);
-  const blocks = raw.blocks.map((id) => ({
-    manifest: loadBlockImplementationSourceSync(files.blockSources[id]!, id).manifest,
-    packName: raw.name,
-    examples: [],
-  }));
+  const inspectionDeadline = Date.now() + (options.inspectionBudgetMs ?? 10_000);
+  const blocks = [];
+  for (const id of raw.blocks) {
+    const remaining = inspectionDeadline - Date.now();
+    if (remaining <= 0) throw new Error(`Pack ${raw.name}@${raw.version} exceeded its preparation inspection budget`);
+    const implementation = await loadBlockImplementationSource(files.blockSources[id]!, id, remaining);
+    blocks.push({ manifest: implementation.manifest, packName: raw.name, examples: [] });
+  }
   const workflows = raw.workflows.map((id) => {
     const source = files.workflowSources?.[id];
     if (source === undefined) throw new Error(`pack is missing workflow definition ${id}`);
@@ -327,7 +332,6 @@ async function approvePackUnlocked(ctx: AartContext, input: ApprovePackInput): P
     }
   }
 
-  const workflowWrites: Workflow[] = [];
   for (const workflow of workflows) {
     const existing = await ctx.store.workflows.get(workflow.id, workflow.version);
     const {
@@ -349,7 +353,6 @@ async function approvePackUnlocked(ctx: AartContext, input: ApprovePackInput): P
         `pack workflow ${workflow.id}@${workflow.version} conflicts with an existing registered version; publish a new workflow version`,
       );
     }
-    if (!existing) workflowWrites.push(workflow);
   }
 
   const decidedAt = ctx.now().toISOString();
@@ -360,7 +363,32 @@ async function approvePackUnlocked(ctx: AartContext, input: ApprovePackInput): P
       reviewer: input.reviewer,
       decidedAt,
     });
-    for (const workflow of workflowWrites) await tx.workflows.put(workflow);
+    for (const workflow of workflows) {
+      const existing = await tx.workflows.get(workflow.id, workflow.version);
+      if (existing) {
+        const {
+          approval: _candidateApproval,
+          gates: _candidateGates,
+          needsReview: _candidateNeedsReview,
+          promotionBlocked: _candidatePromotionBlocked,
+          ...candidateDefinition
+        } = workflow;
+        const {
+          approval: _existingApproval,
+          gates: _existingGates,
+          needsReview: _existingNeedsReview,
+          promotionBlocked: _existingPromotionBlocked,
+          ...existingDefinition
+        } = existing;
+        if (!isDeepStrictEqual(existingDefinition, candidateDefinition)) {
+          throw new Error(
+            `pack workflow ${workflow.id}@${workflow.version} conflicts with an existing registered version; publish a new workflow version`,
+          );
+        }
+        continue;
+      }
+      await tx.workflows.put(workflow);
+    }
     return decision;
   });
   await approveInstalledPack(

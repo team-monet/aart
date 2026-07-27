@@ -190,6 +190,74 @@ describe("createRealEngine — Pack version pinning", () => {
     expect(resumed.run.status).toBe("completed");
     expect(resumed.run.trace.find((step) => step.stepId === "pack_step")?.outputs).toEqual({ version: "1.0.0" });
   });
+
+  it("fails closed when a snapshotted Pack seal disappears instead of falling back to a same-id core block", async () => {
+    root = await makeTempRoot("aart-mcp-pack-missing-snapshot-");
+    const { createFsStore } = await import("@aart/store");
+    const store = createFsStore(root);
+    const coreBlocks = buildRealCatalog(store).blocks;
+    const packBlock: BlockImplementation = {
+      manifest: {
+        id: "demo.echo",
+        version: "1.0.0",
+        capabilities: [],
+        inputSchema: { type: "object" },
+        outputSchema: { type: "object" },
+        description: "Pack implementation",
+      },
+      execute: async () => ({ source: "pack" }),
+    };
+    const coreReplacement: BlockImplementation = {
+      ...packBlock,
+      manifest: { ...packBlock.manifest, version: "9.0.0", description: "Core replacement" },
+      execute: async () => ({ source: "core" }),
+    };
+    const workflow: Workflow = {
+      id: "missing-pack-snapshot",
+      name: "Missing Pack snapshot",
+      version: "1.0.0",
+      inputs: [],
+      outputs: [],
+      execution: {
+        type: "workflow",
+        steps: [
+          { id: "review", uses: "wait.manual" },
+          { id: "pack_step", uses: "demo.echo" },
+        ],
+      },
+      approval: "approved",
+      gates: { validate: "passed", readiness: "passed", evals: "passed", riskReview: "passed", humanReview: "passed" },
+    };
+    await store.workflows.put(workflow);
+    const v1Hash = "sha256:missing-v1";
+    const firstProcess = createRealEngine(
+      store,
+      { ...coreBlocks, "demo.echo": packBlock },
+      "dev",
+      async () => ({ demo: v1Hash }),
+      new Map([[v1Hash, { "demo.echo": packBlock }]]),
+    );
+    const created = await firstProcess.triggerRun({
+      workflow,
+      trigger: { id: "missing-pack", type: "manual", source: "test", payload: null, receivedAt: new Date().toISOString() },
+      inputs: {},
+    });
+    expect((await firstProcess.executeRun(created.runId)).status).toBe("waiting");
+
+    const restartedProcess = createRealEngine(
+      store,
+      { ...coreBlocks, "demo.echo": coreReplacement },
+      "dev",
+      async () => ({}),
+      new Map(),
+    );
+    const resumed = await restartedProcess.resumeManual(created.runId, "review", { reviewer: "operator" });
+    expect(resumed.kind).toBe("resumed");
+    if (resumed.kind !== "resumed") throw new Error("expected the waiting run to resume");
+    expect(resumed.run.status).toBe("failed");
+    expect(resumed.run.error).toMatch(/snapshotted implementation is unavailable/);
+    expect(resumed.run.trace.find((step) => step.stepId === "pack_step")?.outputs).not.toEqual({ source: "core" });
+  });
 });
 
 describe("createRealAartContext — end-to-end against the real engine (not StubEngine's simulated semantics)", () => {

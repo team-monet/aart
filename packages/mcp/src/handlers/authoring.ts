@@ -10,8 +10,10 @@
 // `workflow`-type block from other workflows (block-type dispatch for
 // node/command/connector/native/workflow is uniform, per S1's SEAMS.md Seam
 // 6), which is presumably the origin of the tool's name.
-import { WorkflowSchema } from "@aart/types";
+import { isDeepStrictEqual } from "node:util";
+import { withPackMutationLock } from "@aart/registry";
 import { recordEvent } from "@aart/store";
+import { WorkflowSchema } from "@aart/types";
 import type { AartContext } from "../context.js";
 import type { HandlerResult } from "../response.js";
 import { compileWorkflowInput, YamlCompileError } from "../yaml-compiler.js";
@@ -108,11 +110,42 @@ export async function registerWorkflowHandler(ctx: AartContext, input: RegisterW
   // governance state machine's SOLE writer of `approval`, architecture
   // §7.1) is what ever moves it past "draft", never registration itself.
   const draft = WorkflowSchema.parse({ ...compiled, approval: "draft", gates: DRAFT_GATES });
-  await ctx.store.workflows.put(draft);
-  await recordEvent(
-    ctx.store,
-    { type: "workflow.version_registered", workflowId: draft.id, workflowVersion: draft.version, summary: `${draft.id}@${draft.version} registered` },
-    ctx.now,
-  );
-  return { ok: true, workflowId: draft.id, workflowVersion: draft.version, approval: draft.approval };
+  return withPackMutationLock(ctx.root, async () => {
+    const existing = await ctx.store.workflows.get(draft.id, draft.version);
+    if (existing) {
+      const {
+        approval: _draftApproval,
+        gates: _draftGates,
+        needsReview: _draftNeedsReview,
+        promotionBlocked: _draftPromotionBlocked,
+        ...draftDefinition
+      } = draft;
+      const {
+        approval: _existingApproval,
+        gates: _existingGates,
+        needsReview: _existingNeedsReview,
+        promotionBlocked: _existingPromotionBlocked,
+        ...existingDefinition
+      } = existing;
+      if (!isDeepStrictEqual(existingDefinition, draftDefinition)) {
+        return {
+          ok: false,
+          error: `workflow ${draft.id}@${draft.version} is already registered with a different definition; publish a new workflow version`,
+        };
+      }
+      return {
+        ok: true,
+        workflowId: existing.id,
+        workflowVersion: existing.version,
+        approval: existing.approval,
+      };
+    }
+    await ctx.store.workflows.put(draft);
+    await recordEvent(
+      ctx.store,
+      { type: "workflow.version_registered", workflowId: draft.id, workflowVersion: draft.version, summary: `${draft.id}@${draft.version} registered` },
+      ctx.now,
+    );
+    return { ok: true, workflowId: draft.id, workflowVersion: draft.version, approval: draft.approval };
+  });
 }

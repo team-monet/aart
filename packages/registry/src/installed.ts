@@ -82,7 +82,7 @@ export async function withPackMutationLock<T>(root: string, operation: () => Pro
         if ((statCause as NodeJS.ErrnoException).code === "ENOENT") continue;
         throw statCause;
       }
-      if (Date.now() >= deadline) throw new Error("timed out waiting for another Pack install or approval to finish");
+      if (Date.now() >= deadline) throw new Error("timed out waiting for another Pack or workflow registry mutation to finish");
       await new Promise((resolve) => setTimeout(resolve, 25));
     }
   }

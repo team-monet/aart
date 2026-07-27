@@ -264,6 +264,22 @@ describe("searchWorkflows — reusable workflow discovery", () => {
 });
 
 describe("parseRemoteRegistryIndexDocument", () => {
+  it("rejects public Pack versions that cannot be installed as SemVer artifacts", () => {
+    expect(() =>
+      parseRemoteRegistryIndexDocument({
+        schemaVersion: 1,
+        packs: [
+          {
+            npmPackageName: "aart-pack-invalid-version",
+            packName: "invalid-version",
+            version: "not-a-version",
+            blocks: [],
+          },
+        ],
+      }),
+    ).toThrow(/valid SemVer/);
+  });
+
   it("rejects an incomplete Block manifest at the public-index boundary", () => {
     expect(() =>
       parseRemoteRegistryIndexDocument({

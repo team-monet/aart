@@ -12,6 +12,7 @@
 // reimplementation of the search itself.
 import { BlockManifestSchema, ExampleSchema, WorkflowSchema, type BlockManifest, type Example, type Workflow } from "@aart/types";
 import { z } from "zod";
+import { valid as validSemver } from "semver";
 import { npmPackageNameFor } from "./manifest.js";
 
 /**
@@ -211,7 +212,7 @@ const RemoteRegistryIndexEntrySchema = z
   .object({
     npmPackageName: z.string().min(1),
     packName: z.string().min(1),
-    version: z.string().min(1),
+    version: z.string().min(1).refine((version) => validSemver(version) !== null, "version must be valid SemVer"),
     displayName: z.string().min(1).optional(),
     description: z.string().min(1).optional(),
     contentHash: z.string().regex(/^sha256:[a-f0-9]{64}$/).optional(),

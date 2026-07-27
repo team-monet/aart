@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createAartContext, createRealAartContext } from "../context.js";
 import { compileWorkflowInput } from "../yaml-compiler.js";
+import { registerWorkflowHandler } from "./authoring.js";
 import { runWorkflowHandler } from "./execution.js";
 import {
   approvePackHandler,
@@ -467,6 +468,27 @@ workflows: [demo-echo-flow]
     expect((await listPacksHandler(ctx, { status: "unapproved" })).count).toBe(1);
   });
 
+  it("serializes Pack approval with ordinary registration so neither can overwrite the other", async () => {
+    const ctx = createAartContext({ root, trustMode: "governed" });
+    const installed = await installPackHandler(ctx, { name: "demo", sourcePath: packageRoot });
+    const localSource = workflowSource.replace("Demo echo flow", "Concurrent local flow");
+    const [approvalOutcome, registrationOutcome] = await Promise.allSettled([
+      approvePackHandler(ctx, {
+        name: "demo",
+        version: "1.0.0",
+        contentHash: installed.contentHash as string,
+        reviewer: "human-reviewer",
+      }),
+      registerWorkflowHandler(ctx, { workflow: localSource }),
+    ]);
+    const approvalWon = approvalOutcome.status === "fulfilled";
+    const registrationWon =
+      registrationOutcome.status === "fulfilled" && registrationOutcome.value.ok === true;
+    expect(Number(approvalWon) + Number(registrationWon)).toBe(1);
+    const stored = await ctx.store.workflows.get("demo-echo-flow", "1.0.0");
+    expect(stored?.name).toBe(approvalWon ? "Demo echo flow" : "Concurrent local flow");
+  });
+
   it("preserves advanced governance state when the Pack workflow definition is unchanged", async () => {
     const existing = {
       ...compileWorkflowInput(workflowSource),
@@ -612,6 +634,24 @@ blocks: [demo.echo]
     expect(entry.compatibility).toEqual({ aart: ">=0.12.0", node: ">=22", runtimes: ["Node", "Server"] });
     expect(entry.blocks[0]?.manifest.id).toBe("demo.echo");
     expect(entry.workflows).toEqual([expect.objectContaining({ id: "demo-echo-flow", approval: "draft" })]);
+  });
+
+  it("inspects prepared Pack modules asynchronously under one Pack-wide budget", async () => {
+    await fs.writeFile(
+      join(packageRoot, "blocks", "demo.echo.cjs"),
+      "while (true) {}\n",
+      "utf8",
+    );
+    const ctx = createAartContext({ root: publisherRoot });
+    const startedAt = Date.now();
+    const preparing = preparePackHandler(
+      ctx,
+      { sourcePath: packageRoot },
+      { inspectionBudgetMs: 100 },
+    );
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(Date.now() - startedAt).toBeLessThan(80);
+    await expect(preparing).rejects.toThrow();
   });
 
   it("keeps arbitrary preparation output paths on the explicit CLI surface", async () => {

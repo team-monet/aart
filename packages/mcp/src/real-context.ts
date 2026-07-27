@@ -374,13 +374,20 @@ export function createRealEngine(
     getGrantedCapabilities: createGetGrantedCapabilities(store, blocks, trustMode),
     blocks,
     resolveBlockForRun: (run, blockId) => {
+      let missingSnapshottedPack = false;
       for (const hash of Object.values(run.snapshot.packHashes)) {
-        const implementation = loadPackVersion(hash)?.[blockId];
+        const versionBlocks = loadPackVersion(hash);
+        if (!versionBlocks) {
+          missingSnapshottedPack = true;
+          continue;
+        }
+        const implementation = versionBlocks[blockId];
         if (implementation) return implementation;
       }
       if (
         run.snapshot.capturedAt !== "" &&
-        (activePackBlockIds.has(blockId) ||
+        (missingSnapshottedPack ||
+          activePackBlockIds.has(blockId) ||
           (!blocks[blockId] && Object.keys(run.snapshot.packHashes).length > 0))
       ) {
         throw new Error(
