@@ -271,6 +271,30 @@ function commonJsProgram(options: CommonJsEvaluationOptions): string {
   return `
       (function () {
         "use strict";
+        var Date = (function (NativeDate) {
+          function DeterministicDate() {
+            if (!new.target || arguments.length === 0) {
+              throw new Error("public Pack blocks cannot read ambient time; pass time as an explicit input");
+            }
+            return Reflect.construct(NativeDate, Array.from(arguments));
+          }
+          DeterministicDate.now = function () {
+            throw new Error("public Pack blocks cannot read ambient time; pass time as an explicit input");
+          };
+          DeterministicDate.parse = NativeDate.parse;
+          DeterministicDate.UTC = NativeDate.UTC;
+          DeterministicDate.prototype = NativeDate.prototype;
+          return DeterministicDate;
+        })(globalThis.Date);
+        var Math = Object.create(globalThis.Math);
+        Object.defineProperty(Math, "random", {
+          value: function () {
+            throw new Error("public Pack blocks cannot use ambient randomness; pass a deterministic value as an explicit input");
+          }
+        });
+        Object.freeze(Math);
+        Object.defineProperty(globalThis, "Date", { value: Date, writable: false, configurable: false });
+        Object.defineProperty(globalThis, "Math", { value: Math, writable: false, configurable: false });
         var module = { exports: {} };
         var exports = module.exports;
         ${options.source}

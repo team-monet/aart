@@ -59,6 +59,7 @@ export {
   loadInstalledPackBlocksSync,
   persistInstalledPack,
   readInstalledPackState,
+  withPackMutationLock,
   readInstalledPackSync,
   InvalidPackAssetNameError,
   PackBlockLoadError,

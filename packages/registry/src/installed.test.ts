@@ -3,8 +3,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  approveInstalledPack,
   listActiveApprovedPackStatesSync,
   listInstalledPackStatesSync,
+  persistInstalledPack,
+  readInstalledPackState,
   type InstalledPackState,
 } from "./installed.js";
 
@@ -58,5 +61,46 @@ describe("installed Pack enumeration", () => {
     expect(listActiveApprovedPackStatesSync(root)).toEqual([
       expect.objectContaining({ name: "demo", version: "1.0.0" }),
     ]);
+  });
+});
+
+describe("installed Pack approval", () => {
+  it("rechecks the reviewed content hash at the final state transition", async () => {
+    const root = await fs.mkdtemp(join(tmpdir(), "aart-installed-approval-"));
+    roots.push(root);
+    const installed = await persistInstalledPack(
+      root,
+      {
+        manifestYaml: "name: demo\nversion: 1.0.0\nblocks: [demo.echo]\n",
+        blockSources: {
+          "demo.echo": `module.exports = {
+            manifest: {
+              id: "demo.echo",
+              version: "1.0.0",
+              capabilities: [],
+              inputSchema: {},
+              outputSchema: {},
+              description: "demo"
+            },
+            execute: async () => ({ ok: true })
+          };`,
+        },
+      },
+      { kind: "workspace", source: "test" },
+    );
+
+    await expect(
+      approveInstalledPack(
+        root,
+        "demo",
+        "1.0.0",
+        "reviewer",
+        new Date("2026-07-27T00:01:00.000Z"),
+        `${installed.state.contentHash}-replaced`,
+      ),
+    ).rejects.toThrow(/reviewed content hash no longer matches/);
+    expect(await readInstalledPackState(root, "demo", "1.0.0")).toEqual(
+      expect.objectContaining({ approvalStatus: "unapproved" }),
+    );
   });
 });

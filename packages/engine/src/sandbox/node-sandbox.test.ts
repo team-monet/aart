@@ -152,7 +152,7 @@ describe("runNodeSandbox — hard timeout", () => {
 
 describe("public Pack CommonJS sandbox scheduling", () => {
   it("does not block host timers while a CPU-heavy Pack transform runs", async () => {
-    let completed = false;
+    let settled = false;
     const execution = runCommonJsBlockSandbox({
       source: `module.exports = {
         manifest: {
@@ -164,22 +164,68 @@ describe("public Pack CommonJS sandbox scheduling", () => {
           description: "CPU-heavy scheduling probe"
         },
         execute() {
-          const end = Date.now() + 200;
-          while (Date.now() < end) {}
+          let total = 0;
+          for (let index = 0; index < 1000000000; index += 1) {
+            total = (total + index) % 1000003;
+          }
           return { ok: true };
         }
       };`,
       expectedId: "test.slow",
       resolvedInputs: {},
       executionContext: { runId: "run-1", stepId: "slow" },
-      timeoutMs: 1_000,
-    }).then((result) => {
-      completed = true;
-      return result;
-    });
+      timeoutMs: 250,
+    }).then(
+      (result) => {
+        settled = true;
+        return { result };
+      },
+      (error: unknown) => {
+        settled = true;
+        return { error };
+      },
+    );
 
     await new Promise((resolve) => setTimeout(resolve, 25));
-    expect(completed).toBe(false);
-    await expect(execution).resolves.toEqual({ ok: true });
+    expect(settled).toBe(false);
+    const observed = await execution;
+    expect("error" in observed).toBe(true);
+    if ("error" in observed) expect(observed.error).toBeInstanceOf(TimeoutError);
+  });
+
+  it("rejects ambient time and randomness so retries and servers reproduce the same output", async () => {
+    const source = `module.exports = {
+      manifest: {
+        id: "test.nondeterministic",
+        version: "1.0.0",
+        capabilities: [],
+        inputSchema: {},
+        outputSchema: {},
+        description: "Nondeterminism probe"
+      },
+      execute(input) {
+        if (input.kind === "time") return { value: Date.now() };
+        if (input.kind === "global-time") return { value: globalThis.Date.now() };
+        if (input.kind === "constructor-time") return { value: new globalThis.Date() };
+        return { value: globalThis.Math.random() };
+      }
+    };`;
+    const base = {
+      source,
+      expectedId: "test.nondeterministic",
+      executionContext: { runId: "run-1", stepId: "probe" },
+    };
+    await expect(runCommonJsBlockSandbox({ ...base, resolvedInputs: { kind: "time" } })).rejects.toThrow(
+      /cannot read ambient time/,
+    );
+    await expect(runCommonJsBlockSandbox({ ...base, resolvedInputs: { kind: "global-time" } })).rejects.toThrow(
+      /cannot read ambient time/,
+    );
+    await expect(runCommonJsBlockSandbox({ ...base, resolvedInputs: { kind: "constructor-time" } })).rejects.toThrow(
+      /cannot read ambient time/,
+    );
+    await expect(runCommonJsBlockSandbox({ ...base, resolvedInputs: { kind: "random" } })).rejects.toThrow(
+      /cannot use ambient randomness/,
+    );
   });
 });

@@ -400,6 +400,45 @@ workflows: [demo-echo-flow]
     expect((await listPacksHandler(ctx, { status: "unapproved" })).count).toBe(1);
   });
 
+  it("serializes concurrent approvals so two Packs cannot claim the same Block id", async () => {
+    const ctx = createAartContext({ root, trustMode: "governed" });
+    const otherRoot = join(publisherRoot, "aart-pack-other");
+    await fs.mkdir(join(otherRoot, "blocks"), { recursive: true });
+    await fs.writeFile(
+      join(otherRoot, "aart-pack.yaml"),
+      "name: other\nversion: 1.0.0\nblocks: [demo.echo]\n",
+      "utf8",
+    );
+    await fs.writeFile(join(otherRoot, "blocks", "demo.echo.cjs"), blockSource, "utf8");
+    await fs.writeFile(
+      join(otherRoot, "package.json"),
+      JSON.stringify({ name: "aart-pack-other", version: "1.0.0" }),
+      "utf8",
+    );
+
+    const demo = await installPackHandler(ctx, { name: "demo", sourcePath: packageRoot });
+    const other = await installPackHandler(ctx, { name: "other", sourcePath: otherRoot });
+    const outcomes = await Promise.allSettled([
+      approvePackHandler(ctx, {
+        name: "demo",
+        version: "1.0.0",
+        contentHash: demo.contentHash as string,
+        reviewer: "reviewer-a",
+      }),
+      approvePackHandler(ctx, {
+        name: "other",
+        version: "1.0.0",
+        contentHash: other.contentHash as string,
+        reviewer: "reviewer-b",
+      }),
+    ]);
+
+    expect(outcomes.filter((outcome) => outcome.status === "fulfilled")).toHaveLength(1);
+    expect(outcomes.filter((outcome) => outcome.status === "rejected")).toHaveLength(1);
+    expect((await listPacksHandler(ctx, { status: "approved" })).count).toBe(1);
+    expect((await listPacksHandler(ctx, { status: "unapproved" })).count).toBe(1);
+  });
+
   it("preserves an existing local workflow version instead of replacing it during Pack approval", async () => {
     const localWorkflow = compileWorkflowInput(workflowSource.replace("Demo echo flow", "Locally authored flow"));
     const ctx = createAartContext({ root, trustMode: "governed" });

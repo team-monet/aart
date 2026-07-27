@@ -7,7 +7,7 @@
 // existing test-suite hygiene (see context.ts's own doc comment on why
 // createAartContext's DEFAULT stays stub-bound).
 import { afterEach, describe, expect, it } from "vitest";
-import type { Workflow } from "@aart/types";
+import type { BlockImplementation, Workflow } from "@aart/types";
 import { createRealAartContext, createRealAartContextWithEngine, type AartContext } from "./context.js";
 import { buildRealCatalog, createRealEngine } from "./real-context.js";
 import { makeTempRoot, cleanupTempRoot } from "./test-utils.js";
@@ -57,6 +57,79 @@ describe("buildRealCatalog", () => {
     } finally {
       await cleanupTempRoot(tmpRoot);
     }
+  });
+});
+
+describe("createRealEngine — Pack version pinning", () => {
+  it("resumes a waiting run with the Pack implementation captured in its snapshot", async () => {
+    root = await makeTempRoot("aart-mcp-pack-snapshot-");
+    const { createFsStore } = await import("@aart/store");
+    const store = createFsStore(root);
+    const coreBlocks = buildRealCatalog(store).blocks;
+    const packBlock = (version: string): BlockImplementation => ({
+      manifest: {
+        id: "demo.echo",
+        version,
+        capabilities: [],
+        inputSchema: { type: "object" },
+        outputSchema: { type: "object" },
+        description: `Demo Pack ${version}`,
+      },
+      execute: async () => ({ version }),
+    });
+    const v1 = packBlock("1.0.0");
+    const v2 = packBlock("2.0.0");
+    const v1Hash = "sha256:v1";
+    const v2Hash = "sha256:v2";
+    const workflow: Workflow = {
+      id: "pack-snapshot-resume",
+      name: "Pack snapshot resume",
+      version: "1.0.0",
+      inputs: [],
+      outputs: [],
+      execution: {
+        type: "workflow",
+        steps: [
+          { id: "review", uses: "wait.manual" },
+          { id: "pack_step", uses: "demo.echo" },
+        ],
+      },
+      approval: "approved",
+      gates: { validate: "passed", readiness: "passed", evals: "passed", riskReview: "passed", humanReview: "passed" },
+    };
+    await store.workflows.put(workflow);
+
+    const firstProcess = createRealEngine(
+      store,
+      { ...coreBlocks, "demo.echo": v1 },
+      "dev",
+      async () => ({ demo: v1Hash }),
+      new Map([[v1Hash, { "demo.echo": v1 }]]),
+    );
+    const created = await firstProcess.triggerRun({
+      workflow,
+      trigger: { id: "pack-v1", type: "manual", source: "test", payload: null, receivedAt: new Date().toISOString() },
+      inputs: {},
+    });
+    const waiting = await firstProcess.executeRun(created.runId);
+    expect(waiting.status).toBe("waiting");
+    expect(waiting.snapshot.packHashes).toEqual({ demo: v1Hash });
+
+    const restartedProcess = createRealEngine(
+      store,
+      { ...coreBlocks, "demo.echo": v2 },
+      "dev",
+      async () => ({ demo: v2Hash }),
+      new Map([
+        [v1Hash, { "demo.echo": v1 }],
+        [v2Hash, { "demo.echo": v2 }],
+      ]),
+    );
+    const resumed = await restartedProcess.resumeManual(created.runId, "review", { reviewer: "operator" });
+    expect(resumed.kind).toBe("resumed");
+    if (resumed.kind !== "resumed") throw new Error("expected the waiting run to resume");
+    expect(resumed.run.status).toBe("completed");
+    expect(resumed.run.trace.find((step) => step.stepId === "pack_step")?.outputs).toEqual({ version: "1.0.0" });
   });
 });
 

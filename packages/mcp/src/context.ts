@@ -155,7 +155,13 @@ export function createRealAartContextWithEngine(options: CreateAartContextOption
   // finding this session settles).
   const realEngine =
     !options.engine || !options.evidence
-      ? createRealEngine(store, catalog!.blocks, trustMode, createComputePackHashes(resolvedRoot, catalog!.entries))
+      ? createRealEngine(
+          store,
+          catalog!.blocks,
+          trustMode,
+          createComputePackHashes(resolvedRoot, catalog!.entries),
+          catalog!.packBlocksByHash,
+        )
       : undefined;
 
   const governance = options.governance ?? createRealGovernancePort(catalog!.blocks, trustMode);

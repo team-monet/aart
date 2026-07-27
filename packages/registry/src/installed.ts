@@ -1,5 +1,5 @@
 import { existsSync, readFileSync, readdirSync } from "node:fs";
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { inspectCommonJsBlockSourceSync, runCommonJsBlockSandbox } from "@aart/engine";
 import type { BlockImplementation, PackManifest } from "@aart/types";
@@ -38,6 +38,46 @@ export class InvalidPackAssetNameError extends Error {}
 export class PackInstallConflictError extends Error {}
 export class PackSealBrokenError extends Error {}
 export class PackBlockLoadError extends Error {}
+
+const PACK_MUTATION_LOCK_STALE_MS = 5 * 60_000;
+const PACK_MUTATION_LOCK_WAIT_MS = 30_000;
+
+export async function withPackMutationLock<T>(root: string, operation: () => Promise<T>): Promise<T> {
+  const lockDir = join(root, "packs", ".mutation-lock");
+  await mkdir(dirname(lockDir), { recursive: true });
+  const deadline = Date.now() + PACK_MUTATION_LOCK_WAIT_MS;
+  while (true) {
+    try {
+      await mkdir(lockDir);
+      break;
+    } catch (cause) {
+      if ((cause as NodeJS.ErrnoException).code !== "EEXIST") throw cause;
+      try {
+        const info = await stat(lockDir);
+        if (Date.now() - info.mtimeMs > PACK_MUTATION_LOCK_STALE_MS) {
+          await rm(lockDir, { recursive: true, force: true });
+          continue;
+        }
+      } catch (statCause) {
+        if ((statCause as NodeJS.ErrnoException).code === "ENOENT") continue;
+        throw statCause;
+      }
+      if (Date.now() >= deadline) throw new Error("timed out waiting for another Pack install or approval to finish");
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+  }
+  const heartbeat = setInterval(() => {
+    const now = new Date();
+    void utimes(lockDir, now, now).catch(() => undefined);
+  }, 10_000);
+  heartbeat.unref();
+  try {
+    return await operation();
+  } finally {
+    clearInterval(heartbeat);
+    await rm(lockDir, { recursive: true, force: true });
+  }
+}
 
 function assertSafeSegment(value: string, kind: string): void {
   if (!SAFE_SEGMENT.test(value) || value === "." || value === "..") {
@@ -194,12 +234,21 @@ export async function approveInstalledPack(
   version: string,
   reviewer: string,
   now: Date = new Date(),
+  expectedContentHash?: string,
 ): Promise<InstalledPack> {
   const installed = readInstalledPackSync(root, name, version);
   const raw = parsePackManifestYaml(installed.files.manifestYaml);
   const current = buildPackManifest(raw, installed.files.blockSources, installed.files.workflowSources);
   if (current.contentHash !== installed.state.contentHash) {
     throw new PackSealBrokenError(`pack ${name}@${version} changed after installation; reinstall or publish a new version before approval`);
+  }
+  if (
+    expectedContentHash !== undefined &&
+    (installed.state.contentHash !== expectedContentHash || current.contentHash !== expectedContentHash)
+  ) {
+    throw new PackSealBrokenError(
+      `reviewed content hash no longer matches pack ${name}@${version}; approval was not recorded`,
+    );
   }
   const state: InstalledPackState = {
     ...installed.state,

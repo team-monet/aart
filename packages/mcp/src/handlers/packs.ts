@@ -18,6 +18,7 @@ import {
   readInstalledPackSync,
   registerPackFiles,
   searchRemotePacks,
+  withPackMutationLock,
 } from "@aart/registry";
 import { writePackApprovalDecision } from "@aart/governance";
 import type { Workflow } from "@aart/types";
@@ -166,6 +167,10 @@ export interface InstallPackInput {
 }
 
 export async function installPackHandler(ctx: AartContext, input: InstallPackInput): Promise<HandlerResult> {
+  return withPackMutationLock(ctx.root, () => installPackUnlocked(ctx, input));
+}
+
+async function installPackUnlocked(ctx: AartContext, input: InstallPackInput): Promise<HandlerResult> {
   const packageManager = input.sourcePath
     ? createLinkedPackageManager({ resolveRoot: () => resolve(input.sourcePath!) })
     : createNpmPackageManager({ installRoot: resolve(ctx.root, "packs", "npm"), version: input.version });
@@ -261,6 +266,10 @@ function importedDraft(workflow: Workflow): Workflow {
 }
 
 export async function approvePackHandler(ctx: AartContext, input: ApprovePackInput): Promise<HandlerResult> {
+  return withPackMutationLock(ctx.root, () => approvePackUnlocked(ctx, input));
+}
+
+async function approvePackUnlocked(ctx: AartContext, input: ApprovePackInput): Promise<HandlerResult> {
   const installed = readInstalledPackSync(ctx.root, input.name, input.version);
   const raw = parsePackManifestYaml(installed.files.manifestYaml);
   const current = buildPackManifest(raw, installed.files.blockSources, installed.files.workflowSources);
@@ -345,7 +354,14 @@ export async function approvePackHandler(ctx: AartContext, input: ApprovePackInp
     reviewer: input.reviewer,
     decidedAt,
   });
-  await approveInstalledPack(ctx.root, input.name, input.version, input.reviewer, new Date(decidedAt));
+  await approveInstalledPack(
+    ctx.root,
+    input.name,
+    input.version,
+    input.reviewer,
+    new Date(decidedAt),
+    input.contentHash,
+  );
   return {
     ok: true,
     pack: approved.name,

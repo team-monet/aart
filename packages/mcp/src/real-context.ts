@@ -73,7 +73,14 @@ import {
   type CapabilityClosureNode,
 } from "@aart/governance";
 import { computeEvalsGateStatus, createReportRenderers, recordCorrection as evidenceRecordCorrection, createEvalExampleFromCorrection as evidenceCreateEvalExampleFromCorrection, createScorerRegistry, runEvalSuite } from "@aart/evidence";
-import { findBlocks, listActiveApprovedPackStatesSync, loadApprovedPackBlocksSync, type BlockCatalogEntry } from "@aart/registry";
+import {
+  findBlocks,
+  listActiveApprovedPackStatesSync,
+  listInstalledPackStatesSync,
+  loadApprovedPackBlocksSync,
+  loadInstalledPackBlocksSync,
+  type BlockCatalogEntry,
+} from "@aart/registry";
 import { produceBundle as produceRealBundle, type Bundle } from "@aart/server";
 import { createLlmPack, type CreateLlmPackOptions } from "@aart/llm";
 import { recordRunTerminalEvent, type AartStore } from "@aart/store";
@@ -91,6 +98,7 @@ import { createRemotesPort } from "./stubs/deploy.js";
 export interface RealCatalog {
   blocks: BlockRegistry;
   entries: readonly BlockCatalogEntry[];
+  packBlocksByHash: ReadonlyMap<string, BlockRegistry>;
   llmJudge: ReturnType<typeof createLlmPack>["llmJudge"];
 }
 
@@ -118,7 +126,16 @@ export function buildRealCatalog(store: AartStore, llmOptions?: RealCatalogLlmOp
     manifest: impl.manifest,
     examples: [],
   }));
+  const packBlocksByHash = new Map<string, BlockRegistry>();
   if (packRoot) {
+    for (const state of listInstalledPackStatesSync(packRoot)) {
+      if (state.approvalStatus !== "approved") continue;
+      const versionBlocks: BlockRegistry = {};
+      for (const implementation of loadInstalledPackBlocksSync(packRoot, state.name, state.version)) {
+        versionBlocks[implementation.manifest.id] = implementation;
+      }
+      packBlocksByHash.set(state.contentHash, versionBlocks);
+    }
     for (const { implementation, packName } of loadApprovedPackBlocksSync(packRoot)) {
       if (blocks[implementation.manifest.id]) {
         throw new Error(`approved pack "${packName}" conflicts with existing block id "${implementation.manifest.id}"`);
@@ -128,7 +145,7 @@ export function buildRealCatalog(store: AartStore, llmOptions?: RealCatalogLlmOp
     }
   }
 
-  return { blocks, entries, llmJudge: llmPack.llmJudge };
+  return { blocks, entries, packBlocksByHash, llmJudge: llmPack.llmJudge };
 }
 
 // ---------------------------------------------------------------------------
@@ -291,13 +308,29 @@ export function createRealEngine(
   blocks: BlockRegistry,
   trustMode: TrustMode,
   computePackHashes = createComputePackHashes(),
+  packBlocksByHash: ReadonlyMap<string, BlockRegistry> = new Map(),
 ): Engine {
+  const packBlockIds = new Set(
+    [...packBlocksByHash.values()].flatMap((versionBlocks) => Object.keys(versionBlocks)),
+  );
   return createEngine({
     store,
     redact: redactRecord,
     capabilityCheck: checkCapability,
     getGrantedCapabilities: createGetGrantedCapabilities(store, blocks, trustMode),
     blocks,
+    resolveBlockForRun: (run, blockId) => {
+      for (const hash of Object.values(run.snapshot.packHashes)) {
+        const implementation = packBlocksByHash.get(hash)?.[blockId];
+        if (implementation) return implementation;
+      }
+      if (run.snapshot.capturedAt !== "" && packBlockIds.has(blockId)) {
+        throw new Error(
+          `Pack block "${blockId}" cannot resume because its snapshotted implementation is unavailable`,
+        );
+      }
+      return blocks[blockId];
+    },
     computePackHashes,
     onRunTerminal: async (runId) => {
       await recordRunTerminalEvent(store, runId);
