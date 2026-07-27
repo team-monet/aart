@@ -30,7 +30,7 @@ const DESCRIPTIONS: Record<ToolName, string> = {
   aart_approve_pack:
     "After the user explicitly approves the exact Pack version/hash shown by aart_list_packs, validate its block modules and workflow definitions and record the human decision. NEVER call this without explicit user approval; approved blocks load only on the next process start, while imported workflows remain drafts.",
   aart_prepare_pack:
-    "Validate a locally authored Pack before publication and generate its deterministic static-index entry. This evaluates only the author's local block modules, verifies package/manifest version alignment, and gives standard npm publishing plus the public JSON index an exact artifact to ship.",
+    "Validate a locally authored Pack before publication and generate its deterministic static-index entry as aart-index-entry.json inside that Pack directory. This evaluates only the author's local block modules, verifies package/manifest version alignment, and gives standard npm publishing plus the public JSON index an exact artifact to ship.",
   aart_get_block:
     "Get one block's exact manifest (input/output JSON Schema, capabilities, description) by id. Call this before wiring a step's `with:` — guessing a block's input shape is exactly the kind of thing that fails validation and costs a corrective round-trip.",
   aart_validate:
@@ -118,7 +118,7 @@ const inputSchemas: Record<ToolName, z.ZodType> = {
     contentHash: z.string().regex(/^sha256:[a-f0-9]{64}$/),
     reviewer: z.string(),
   }),
-  aart_prepare_pack: z.object({ sourcePath: z.string(), outputPath: z.string().optional() }),
+  aart_prepare_pack: z.object({ sourcePath: z.string() }),
   aart_get_block: z.object({ id: z.string() }),
   aart_validate: z.object({
     workflow: z.unknown().optional(),

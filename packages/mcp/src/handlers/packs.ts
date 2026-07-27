@@ -1,5 +1,6 @@
+import { constants } from "node:fs";
 import { resolve } from "node:path";
-import { readFile, writeFile } from "node:fs/promises";
+import { open, readFile } from "node:fs/promises";
 import { isDeepStrictEqual } from "node:util";
 import {
   approveInstalledPack,
@@ -33,7 +34,16 @@ export interface PreparePackInput {
   outputPath?: string;
 }
 
-export async function preparePackHandler(_ctx: AartContext, input: PreparePackInput): Promise<HandlerResult> {
+interface PreparePackHandlerOptions {
+  /** Trusted composition-layer authority used only by the explicit CLI `--out` flag. */
+  allowArbitraryOutputPath?: boolean;
+}
+
+export async function preparePackHandler(
+  _ctx: AartContext,
+  input: PreparePackInput,
+  options: PreparePackHandlerOptions = {},
+): Promise<HandlerResult> {
   const sourcePath = resolve(input.sourcePath);
   const manager = createLinkedPackageManager({ resolveRoot: () => sourcePath });
   const files = await manager.install("linked-pack");
@@ -90,8 +100,20 @@ export async function preparePackHandler(_ctx: AartContext, input: PreparePackIn
     blocks,
     workflows,
   };
+  if (input.outputPath !== undefined && !options.allowArbitraryOutputPath) {
+    throw new Error("custom Pack preparation output paths are CLI-only; MCP writes aart-index-entry.json inside the Pack directory");
+  }
   const outputPath = resolve(input.outputPath ?? resolve(sourcePath, "aart-index-entry.json"));
-  await writeFile(outputPath, `${JSON.stringify(entry, null, 2)}\n`, "utf8");
+  const handle = await open(
+    outputPath,
+    constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | constants.O_NOFOLLOW,
+    0o644,
+  );
+  try {
+    await handle.writeFile(`${JSON.stringify(entry, null, 2)}\n`, "utf8");
+  } finally {
+    await handle.close();
+  }
   return {
     ok: true,
     pack: raw.name,
@@ -241,6 +263,13 @@ export async function approvePackHandler(ctx: AartContext, input: ApprovePackInp
   });
 
   const seenBlockIds = new Set<string>();
+  const approvedBlocksByOtherPack = new Map<string, string>();
+  for (const state of listInstalledPackStatesSync(ctx.root)) {
+    if (state.approvalStatus !== "approved" || state.name === input.name) continue;
+    for (const block of loadInstalledPackBlocksSync(ctx.root, state.name, state.version)) {
+      approvedBlocksByOtherPack.set(block.manifest.id, state.name);
+    }
+  }
   for (const block of blocks) {
     const id = block.manifest.id;
     if (seenBlockIds.has(id)) {
@@ -251,6 +280,10 @@ export async function approvePackHandler(ctx: AartContext, input: ApprovePackInp
     if (existing && existing.packName !== input.name) {
       const owner = existing.packName ? `approved pack "${existing.packName}"` : "AART core";
       throw new Error(`pack block id "${id}" conflicts with ${owner}; approval was not recorded`);
+    }
+    const approvedPackOwner = approvedBlocksByOtherPack.get(id);
+    if (approvedPackOwner) {
+      throw new Error(`pack block id "${id}" conflicts with approved pack "${approvedPackOwner}"; approval was not recorded`);
     }
   }
 

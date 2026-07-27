@@ -1,6 +1,6 @@
 import { TimeoutError } from "@aart/types";
 import { describe, expect, it } from "vitest";
-import { runNodeSandbox } from "./node-sandbox.js";
+import { runCommonJsBlockSandbox, runNodeSandbox } from "./node-sandbox.js";
 
 describe("runNodeSandbox — basic execution", () => {
   it("runs a simple function body and returns its result", async () => {
@@ -147,5 +147,39 @@ describe("runNodeSandbox — hard timeout", () => {
 
   it("a script well within its timeout budget completes normally", async () => {
     await expect(runNodeSandbox({ code: "return { ok: true };", resolvedInputs: {}, timeoutMs: 5_000 })).resolves.toEqual({ ok: true });
+  });
+});
+
+describe("public Pack CommonJS sandbox scheduling", () => {
+  it("does not block host timers while a CPU-heavy Pack transform runs", async () => {
+    let completed = false;
+    const execution = runCommonJsBlockSandbox({
+      source: `module.exports = {
+        manifest: {
+          id: "test.slow",
+          version: "1.0.0",
+          capabilities: [],
+          inputSchema: {},
+          outputSchema: {},
+          description: "CPU-heavy scheduling probe"
+        },
+        execute() {
+          const end = Date.now() + 200;
+          while (Date.now() < end) {}
+          return { ok: true };
+        }
+      };`,
+      expectedId: "test.slow",
+      resolvedInputs: {},
+      executionContext: { runId: "run-1", stepId: "slow" },
+      timeoutMs: 1_000,
+    }).then((result) => {
+      completed = true;
+      return result;
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(completed).toBe(false);
+    await expect(execution).resolves.toEqual({ ok: true });
   });
 });

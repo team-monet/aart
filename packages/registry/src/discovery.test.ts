@@ -85,6 +85,18 @@ describe("searchLocalCatalog — spec §44.3 'locally... searchable against the 
     expect(results).toEqual([]);
   });
 
+  it("does not claim a missing exact-looking Block id matched because one generic token appears elsewhere", () => {
+    const noisyCatalog = [
+      entry({
+        manifest: manifest({
+          id: "artifact.write",
+          description: "Write a result with a reusable file name",
+        }),
+      }),
+    ];
+    expect(searchLocalCatalog(noisyCatalog, "reuse.normalize-name")).toEqual([]);
+  });
+
   it("ties break alphabetically by block id", () => {
     const tied: BlockCatalogEntry[] = [entry({ manifest: manifest({ id: "z.block", description: "widget" }) }), entry({ manifest: manifest({ id: "a.block", description: "widget" }) })];
     const results = searchLocalCatalog(tied, "widget");

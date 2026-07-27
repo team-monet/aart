@@ -149,9 +149,10 @@ function scoreEntry(entry: BlockCatalogEntry, tokens: string[]): number {
 
 function rank(entries: readonly BlockCatalogEntry[], query: string): BlockSearchResult[] {
   const tokens = tokenize(query);
+  const minimumScore = tokens.length > 1 ? 2 : 1;
   return entries
     .map((entry) => ({ ...entry, score: scoreEntry(entry, tokens) }))
-    .filter((result) => result.score > 0)
+    .filter((result) => result.score >= minimumScore)
     .sort((a, b) => b.score - a.score || a.manifest.id.localeCompare(b.manifest.id));
 }
 
@@ -173,6 +174,7 @@ export function searchRemoteWorkflows(index: readonly RemoteRegistryIndexEntry[]
 
 export function searchRemotePacks(index: readonly RemoteRegistryIndexEntry[], query: string): PackSearchResult[] {
   const tokens = tokenize(query);
+  const minimumScore = tokens.length > 1 ? 2 : 1;
   return index
     .map((pack) => {
       if (tokens.length === 0) return { pack, score: 1 };
@@ -198,7 +200,7 @@ export function searchRemotePacks(index: readonly RemoteRegistryIndexEntry[], qu
       }
       return { pack, score };
     })
-    .filter((result) => result.score > 0)
+    .filter((result) => result.score >= minimumScore)
     .sort((a, b) => b.score - a.score || a.pack.packName.localeCompare(b.pack.packName));
 }
 
@@ -372,8 +374,9 @@ function scoreWorkflow(workflow: Workflow, tokens: string[]): number {
  */
 export function searchWorkflows(workflows: readonly Workflow[], query: string): WorkflowSearchResult[] {
   const tokens = tokenize(query);
+  const minimumScore = tokens.length > 1 ? 2 : 1;
   return workflows
     .map((workflow) => ({ workflow, score: scoreWorkflow(workflow, tokens) }))
-    .filter((result) => result.score > 0)
+    .filter((result) => result.score >= minimumScore)
     .sort((a, b) => b.score - a.score || a.workflow.id.localeCompare(b.workflow.id));
 }

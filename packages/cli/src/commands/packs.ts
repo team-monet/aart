@@ -82,10 +82,14 @@ export async function packCommand(tokens: Tokenized, cli: CliContext): Promise<H
   }
   if (action === "prepare") {
     const sourcePath = requirePositional(tokens.positionals, 1, "pack source path");
-    const result = await preparePackHandler(cli.aart, {
-      sourcePath,
-      outputPath: flagString(tokens.flags, "out"),
-    });
+    const result = await preparePackHandler(
+      cli.aart,
+      {
+        sourcePath,
+        outputPath: flagString(tokens.flags, "out"),
+      },
+      { allowArbitraryOutputPath: true },
+    );
     return {
       ...wrapResult("aart_prepare_pack", result),
       next: result.ok

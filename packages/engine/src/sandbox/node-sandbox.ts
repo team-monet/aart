@@ -145,6 +145,13 @@ export function inspectCommonJsBlockSourceSync(
     timeoutMs: options.timeoutMs,
     mode: "inspect",
   }) as { manifest?: unknown; executeType?: unknown; executeTag?: unknown };
+  return validateInspectedCommonJsBlock(result, expectedId);
+}
+
+function validateInspectedCommonJsBlock(
+  result: { manifest?: unknown; executeType?: unknown; executeTag?: unknown },
+  expectedId: string,
+): BlockManifest {
   const parsed = BlockManifestSchema.safeParse(result.manifest);
   if (!parsed.success || result.executeType !== "function") {
     throw new Error(`block ${expectedId} must export a valid { manifest, execute } implementation`);
@@ -170,10 +177,18 @@ export function inspectCommonJsBlockSourceSync(
  * module state nor attacker-controlled globals survive between runs.
  */
 export async function runCommonJsBlockSandbox(options: CommonJsBlockSandboxOptions): Promise<unknown> {
-  // Re-inspection also pins the runtime export to the same constrained
-  // contract used by prepare/approval/startup.
-  inspectCommonJsBlockSourceSync(options.source, options.expectedId, options);
-  return evaluateCommonJsBlockSync({
+  // Runtime re-inspection and dispatch both use isolated-vm's asynchronous
+  // evaluation path. A slow Pack transform must not block host timers,
+  // worker lease heartbeats, health checks, or unrelated HTTP requests.
+  const inspection = (await evaluateCommonJsBlock({
+    source: options.source,
+    expectedId: options.expectedId,
+    memoryLimitMb: options.memoryLimitMb,
+    timeoutMs: options.timeoutMs,
+    mode: "inspect",
+  })) as { manifest?: unknown; executeType?: unknown; executeTag?: unknown };
+  validateInspectedCommonJsBlock(inspection, options.expectedId);
+  return evaluateCommonJsBlock({
     ...options,
     mode: "execute",
   });
@@ -183,6 +198,30 @@ type CommonJsEvaluationOptions = Omit<CommonJsBlockSandboxOptions, "resolvedInpu
   Partial<Pick<CommonJsBlockSandboxOptions, "resolvedInputs" | "executionContext">> & {
     mode: "inspect" | "execute";
   };
+
+async function evaluateCommonJsBlock(options: CommonJsEvaluationOptions): Promise<unknown> {
+  const memoryLimit = options.memoryLimitMb ?? 8;
+  const timeout = options.timeoutMs ?? 5_000;
+  const isolate = new ivm.Isolate({ memoryLimit });
+  try {
+    const context = await isolate.createContext();
+    await context.global.set("__AART_INPUT_JSON__", JSON.stringify(options.resolvedInputs ?? null));
+    await context.global.set(
+      "__AART_CONTEXT_JSON__",
+      JSON.stringify(options.executionContext ?? { runId: "", stepId: "" }),
+    );
+    const wrapped = commonJsProgram(options);
+    let resultJson: string;
+    try {
+      resultJson = (await context.eval(wrapped, { timeout })) as string;
+    } catch (err) {
+      throw classifySandboxError(err);
+    }
+    return parseCommonJsResult(resultJson, options.expectedId);
+  } finally {
+    isolate.dispose();
+  }
+}
 
 function evaluateCommonJsBlockSync(options: CommonJsEvaluationOptions): unknown {
   const memoryLimit = options.memoryLimitMb ?? 8;
@@ -195,27 +234,41 @@ function evaluateCommonJsBlockSync(options: CommonJsEvaluationOptions): unknown 
       "__AART_CONTEXT_JSON__",
       JSON.stringify(options.executionContext ?? { runId: "", stepId: "" }),
     );
-    const operation =
-      options.mode === "inspect"
-        ? `return JSON.stringify({
-            manifest: candidate && candidate.manifest,
-            executeType: candidate && typeof candidate.execute,
-            executeTag: candidate && Object.prototype.toString.call(candidate.execute)
-          });`
-        : `
-          if (!candidate || typeof candidate !== "object" || typeof candidate.execute !== "function") {
-            throw new Error("block ${escapeForDoubleQuotedString(options.expectedId)} must export { manifest, execute }");
-          }
-          var result = candidate.execute(
-            JSON.parse(__AART_INPUT_JSON__),
-            JSON.parse(__AART_CONTEXT_JSON__)
-          );
-          if (result && typeof result.then === "function") {
-            throw new Error("public Pack block execute() must return synchronously; asynchronous host capabilities are not available inside the Pack sandbox");
-          }
-          return JSON.stringify(result === undefined ? null : result);
-        `;
-    const wrapped = `
+    const wrapped = commonJsProgram(options);
+    let resultJson: string;
+    try {
+      resultJson = context.evalSync(wrapped, { timeout }) as string;
+    } catch (err) {
+      throw classifySandboxError(err);
+    }
+    return parseCommonJsResult(resultJson, options.expectedId);
+  } finally {
+    isolate.dispose();
+  }
+}
+
+function commonJsProgram(options: CommonJsEvaluationOptions): string {
+  const operation =
+    options.mode === "inspect"
+      ? `return JSON.stringify({
+          manifest: candidate && candidate.manifest,
+          executeType: candidate && typeof candidate.execute,
+          executeTag: candidate && Object.prototype.toString.call(candidate.execute)
+        });`
+      : `
+        if (!candidate || typeof candidate !== "object" || typeof candidate.execute !== "function") {
+          throw new Error("block ${escapeForDoubleQuotedString(options.expectedId)} must export { manifest, execute }");
+        }
+        var result = candidate.execute(
+          JSON.parse(__AART_INPUT_JSON__),
+          JSON.parse(__AART_CONTEXT_JSON__)
+        );
+        if (result && typeof result.then === "function") {
+          throw new Error("public Pack block execute() must return synchronously; asynchronous host capabilities are not available inside the Pack sandbox");
+        }
+        return JSON.stringify(result === undefined ? null : result);
+      `;
+  return `
       (function () {
         "use strict";
         var module = { exports: {} };
@@ -228,19 +281,13 @@ function evaluateCommonJsBlockSync(options: CommonJsEvaluationOptions): unknown 
         ${operation}
       })();
     `;
-    let resultJson: string;
-    try {
-      resultJson = context.evalSync(wrapped, { timeout }) as string;
-    } catch (err) {
-      throw classifySandboxError(err);
-    }
-    try {
-      return JSON.parse(resultJson);
-    } catch {
-      throw new Error(`public Pack block ${options.expectedId} returned a value that did not round-trip through JSON`);
-    }
-  } finally {
-    isolate.dispose();
+}
+
+function parseCommonJsResult(resultJson: string, expectedId: string): unknown {
+  try {
+    return JSON.parse(resultJson);
+  } catch {
+    throw new Error(`public Pack block ${expectedId} returned a value that did not round-trip through JSON`);
   }
 }
 

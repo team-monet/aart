@@ -254,6 +254,43 @@ workflows: [demo-echo-flow]
     expect((await listPacksHandler(ctx, { status: "unapproved" })).count).toBe(1);
   });
 
+  it("detects a Block collision after another Pack is approved in the same long-lived context", async () => {
+    const ctx = createAartContext({ root, trustMode: "governed" });
+    const first = await installPackHandler(ctx, { name: "demo", sourcePath: packageRoot });
+    await approvePackHandler(ctx, {
+      name: "demo",
+      version: "1.0.0",
+      contentHash: first.contentHash as string,
+      reviewer: "human-reviewer",
+    });
+
+    const otherRoot = join(publisherRoot, "aart-pack-other");
+    await fs.mkdir(join(otherRoot, "blocks"), { recursive: true });
+    await fs.writeFile(
+      join(otherRoot, "aart-pack.yaml"),
+      "name: other\nversion: 1.0.0\nblocks: [demo.echo]\n",
+      "utf8",
+    );
+    await fs.writeFile(join(otherRoot, "blocks", "demo.echo.cjs"), blockSource, "utf8");
+    await fs.writeFile(
+      join(otherRoot, "package.json"),
+      JSON.stringify({ name: "aart-pack-other", version: "1.0.0" }),
+      "utf8",
+    );
+
+    const second = await installPackHandler(ctx, { name: "other", sourcePath: otherRoot });
+    await expect(
+      approvePackHandler(ctx, {
+        name: "other",
+        version: "1.0.0",
+        contentHash: second.contentHash as string,
+        reviewer: "human-reviewer",
+      }),
+    ).rejects.toThrow(/conflicts with approved pack "demo"/);
+    expect((await listPacksHandler(ctx, { status: "approved" })).count).toBe(1);
+    expect((await listPacksHandler(ctx, { status: "unapproved" })).count).toBe(1);
+  });
+
   it("preserves an existing local workflow version instead of replacing it during Pack approval", async () => {
     const localWorkflow = compileWorkflowInput(workflowSource.replace("Demo echo flow", "Locally authored flow"));
     const ctx = createAartContext({ root, trustMode: "governed" });
@@ -390,5 +427,25 @@ blocks: [demo.echo]
     expect(entry.compatibility).toEqual({ aart: ">=0.12.0", node: ">=22", runtimes: ["Node", "Server"] });
     expect(entry.blocks[0]?.manifest.id).toBe("demo.echo");
     expect(entry.workflows).toEqual([expect.objectContaining({ id: "demo-echo-flow", approval: "draft" })]);
+  });
+
+  it("keeps arbitrary preparation output paths on the explicit CLI surface", async () => {
+    const ctx = createAartContext({ root: publisherRoot });
+    await expect(
+      preparePackHandler(ctx, {
+        sourcePath: packageRoot,
+        outputPath: join(publisherRoot, "unrelated.json"),
+      }),
+    ).rejects.toThrow(/CLI-only/);
+  });
+
+  it("does not follow a symlink at the fixed MCP preparation output", async () => {
+    const victim = join(publisherRoot, "victim.txt");
+    await fs.writeFile(victim, "keep me", "utf8");
+    await fs.symlink(victim, join(packageRoot, "aart-index-entry.json"));
+    const ctx = createAartContext({ root: publisherRoot });
+
+    await expect(preparePackHandler(ctx, { sourcePath: packageRoot })).rejects.toThrow();
+    await expect(fs.readFile(victim, "utf8")).resolves.toBe("keep me");
   });
 });
