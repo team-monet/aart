@@ -16,6 +16,10 @@ export const ModelFacingReportSchema = z.object({
       error: z.string(),
     }),
   ),
+  // The workflow's declared outputMapping resolved into its public result.
+  // This is intentionally the compact workflow-level contract, not the
+  // potentially much larger per-step trace.
+  outputs: z.record(z.string(), z.unknown()),
   artifactRefs: z.array(
     z.object({
       id: z.string(),

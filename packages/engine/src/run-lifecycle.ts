@@ -5,10 +5,11 @@
 // what a worker calls after claiming a run from `job_queue` (job_queue
 // claim/lease/reclaim itself is explicitly S2/`@aart/server`'s scope,
 // architecture §4.7 — this package never touches claim/lease/release).
-import { createTrackingSecretResolver, throwingSecretResolver } from "./redaction.js";
-import { buildExprContext, resolveBooleanExpression } from "./expr-context.js";
+import { resolveExpression } from "@aart/expr";
 import type { RunRecord, StepTrace, Workflow, WorkflowStep } from "@aart/types";
 import { ConcurrencyRejectedError } from "@aart/types";
+import { buildExprContext, resolveBooleanExpression } from "./expr-context.js";
+import { createTrackingSecretResolver, throwingSecretResolver } from "./redaction.js";
 import { decideConcurrency, releaseQueuedRuns, resolveConcurrencyKey } from "./concurrency.js";
 import { applyRedaction } from "./redaction.js";
 import { assertSchemaVersionCompatible, CURRENT_ENGINE_SCHEMA_VERSION } from "./schema-version.js";
@@ -125,6 +126,34 @@ export async function finalizeTerminal(
 ): Promise<RunRecord> {
   const now = config.now?.() ?? new Date();
   let updated = run;
+  let terminalStatus = status;
+  let terminalError = errorMessage;
+  let outputs = updated.outputs;
+
+  // A workflow's declared outputMapping is its public result contract. Step
+  // traces are execution evidence; callers should not have to reverse-engineer
+  // the last step (or know the workflow's internal graph) to obtain the actual
+  // result. Resolve the mapping only on successful completion, against the
+  // same expression context and tracked secret resolver used by step inputs.
+  if (status === "completed" && workflow.execution.outputMapping) {
+    try {
+      const context = buildExprContext(updated);
+      const secretResolver = createTrackingSecretResolver(config.resolveSecret ?? throwingSecretResolver, resolvedSecretRefs);
+      outputs = {};
+      for (const [name, expression] of Object.entries(workflow.execution.outputMapping)) {
+        outputs[name] = await resolveExpression(expression, context, { secretResolver });
+      }
+    } catch (err) {
+      // A declared result that cannot be produced is a failed workflow, even
+      // when every individual block completed. Persist a terminal failure
+      // instead of leaving the run stuck in "running" or reporting success
+      // with an absent result.
+      terminalStatus = "failed";
+      terminalError = `Workflow output mapping failed: ${err instanceof Error ? err.message : String(err)}`;
+      outputs = undefined;
+    }
+  }
+
   // ExecutionSnapshot capture (architecture §4.5) — "once per run, at the
   // earlier of (a) the run's first wait, or (b) run completion if it never
   // waits." A run that entered at least one wait already has one (captured
@@ -133,7 +162,7 @@ export async function finalizeTerminal(
   if (!isSnapshotCaptured(updated.snapshot)) {
     updated = { ...updated, snapshot: await captureExecutionSnapshot(workflow, config.blocks, now, config.computePackHashes) };
   }
-  updated = { ...updated, status, error: errorMessage, endedAt: now.toISOString(), updatedAt: now.toISOString() };
+  updated = { ...updated, status: terminalStatus, outputs, error: terminalError, endedAt: now.toISOString(), updatedAt: now.toISOString() };
   const redacted = applyRedaction(config.redact, updated, resolvedSecretRefs);
   await config.store.runs.put(redacted);
 

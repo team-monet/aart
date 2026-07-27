@@ -144,6 +144,53 @@ steps:
     expect(() => compileYamlWorkflow(badYaml)).toThrow(/operators are not supported/);
   });
 
+  it("rejects an invalid public outputMapping expression before registration", () => {
+    const badYaml = `id: bad-output
+name: Bad Output
+version: 0.1.0
+outputs:
+  result:
+    type: string
+    required: true
+steps:
+  - id: read
+    uses: web.read
+outputMapping:
+  result: "{{ steps.read.outputs.text + 1 }}"
+`;
+    expect(() => compileYamlWorkflow(badYaml)).toThrow(/outputMapping "result".*operators are not supported/s);
+  });
+
+  it("rejects a required declared output with no outputMapping entry", () => {
+    expect(() =>
+      compileYamlWorkflow(`id: missing-output
+name: Missing Output
+version: 0.1.0
+outputs:
+  result:
+    type: string
+    required: true
+steps:
+  - id: read
+    uses: web.read
+`),
+    ).toThrow(/required output "result" has no outputMapping entry/);
+  });
+
+  it("rejects an outputMapping field that is not part of the declared public outputs", () => {
+    expect(() =>
+      compileYamlWorkflow(`id: extra-output
+name: Extra Output
+version: 0.1.0
+steps:
+  - id: read
+    uses: web.read
+outputMapping:
+  result: "{{ steps.read.outputs.text }}"
+`),
+    ).toThrow(/outputMapping "result" is not declared in outputs/);
+  });
+
   it("accepts a well-formed secrets.* expression", () => {
     const yamlSource = `id: with-secret
 name: With Secret

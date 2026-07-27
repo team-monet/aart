@@ -40,7 +40,7 @@ const DESCRIPTIONS: Record<ToolName, string> = {
   aart_run_workflow:
     "Execute a registered workflow by id and get back a run record (status, outputs, per-step trace). This is how a draft actually proves itself — call aart_validate first so a run failure means something real broke, not a shape you could have caught earlier.",
   aart_get_report:
-    "Fetch the full evidence report for a run — the model-facing summary (headline, failures, artifact references) or a human-readable markdown rendering. Treat this as the source of truth for whether something worked; never claim a run succeeded without having read its report.",
+    "Fetch the full evidence report for a run — the model-facing summary (headline, workflow outputs, failures, artifact references) or a human-readable markdown rendering. Treat this as the source of truth for what the workflow produced and whether it worked; never claim a run succeeded without having read its report.",
   aart_verify:
     "One-shot verify: give it a URL (and optionally what you expect to see) and get back a real evidence report — page loaded, text checked, screenshot captured. This is the easiest way to actually SEE whether something works before you say it does, instead of assuming from reading code. Before you claim the app works, call this.",
   aart_approve:

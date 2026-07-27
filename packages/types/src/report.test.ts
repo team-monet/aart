@@ -8,6 +8,7 @@ describe("ModelFacingReportSchema", () => {
       workflowId: "checkout-smoke",
       workflowVersion: "0.1.0",
       failures: headline === "failed" ? [{ stepId: "assert", block: "assert.contains", error: "mismatch" }] : [],
+      outputs: { result: "ok" },
       artifactRefs: [{ id: "art_1", kind: "screenshot", uri: "artifacts/run_1/art_1.png" }],
       next: headline === "waiting" ? "resume when signal arrives" : "none",
     };
@@ -20,6 +21,7 @@ describe("ModelFacingReportSchema", () => {
       workflowId: "x",
       workflowVersion: "1",
       failures: [],
+      outputs: {},
       artifactRefs: [],
       next: "none",
     });

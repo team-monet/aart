@@ -35,6 +35,18 @@ describe("renderModelFacing", () => {
     expect(report.failures).toEqual([{ stepId: "b", block: "http.request", error: "boom" }]);
   });
 
+  it("returns workflow-level outputs without requiring callers to inspect step traces", () => {
+    const report = renderModelFacing(fixtureRunRecord({ status: "completed", outputs: { items: ["alpha", "beta"], count: 2 } }), identityRedact);
+    expect(report.outputs).toEqual({ items: ["alpha", "beta"], count: 2 });
+  });
+
+  it("surfaces a run-level output mapping failure when no individual step failed", () => {
+    const report = renderModelFacing(fixtureRunRecord({ status: "failed", error: "Workflow output mapping failed: missing field" }), identityRedact);
+    expect(report.failures).toEqual([
+      { stepId: "$workflow", block: "workflow.outputMapping", error: "Workflow output mapping failed: missing field" },
+    ]);
+  });
+
   it("maps artifacts to references carrying a uri (path), never bytes/payload", () => {
     const run = fixtureRunRecord({
       artifacts: [{ id: "a1", runId: "r", name: "shot.png", kind: "screenshot", mime: "image/png", path: "artifacts/a1.png", bytes: 999, createdAt: "t" }],

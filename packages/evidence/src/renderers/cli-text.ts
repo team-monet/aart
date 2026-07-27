@@ -17,6 +17,7 @@ export function renderCliText(run: RunRecord, redact: RedactFn, resolvedSecretRe
     `approval=${model.approval.approved ? "approved" : "not-approved"} mode=${model.approval.mode} trigger=${model.trigger.type}/${model.trigger.source}`,
   );
   lines.push(`steps: ${model.stepsSummary.length} total, ${model.failures.length} failed, ${model.artifacts.length} artifact(s)`);
+  lines.push(`outputs: ${JSON.stringify(model.outputs)}`);
 
   if (model.failures.length > 0) {
     lines.push("failures:");

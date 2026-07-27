@@ -3,7 +3,7 @@ import type { RunRecord } from "@aart/types";
 import { applyRedaction, type RedactFn } from "../redact.js";
 import { buildReportModel } from "../report-model.js";
 
-/** Renders `run` as a Markdown report. Section order matches spec §19.4's 9-element report UX exactly (enforced by ReportModel's field order, report-model.ts) — errors/failures render before the full-trace section. */
+/** Renders `run` as a Markdown report. Section order follows spec §19.4's report UX plus A74's first-class workflow Outputs section (enforced by ReportModel's field order, report-model.ts) — errors/failures still render before the full-trace section. */
 export function renderMarkdown(run: RunRecord, redact: RedactFn, resolvedSecretRefs: ReadonlySet<string> = new Set()): string {
   const clean = applyRedaction(run, redact, resolvedSecretRefs);
   const model = buildReportModel(clean);
@@ -33,6 +33,13 @@ export function renderMarkdown(run: RunRecord, redact: RedactFn, resolvedSecretR
       lines.push(`- \`${s.stepId}\` (${s.block}): **${s.status}**${s.durationMs !== undefined ? ` — ${s.durationMs}ms` : ""}`);
     }
   }
+
+  // Public workflow result — outputMapping, not an internal step guess.
+  lines.push("");
+  lines.push("## Outputs");
+  lines.push("```json");
+  lines.push(JSON.stringify(model.outputs, null, 2));
+  lines.push("```");
 
   // 5. errors/failures
   if (model.failures.length > 0) {

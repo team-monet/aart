@@ -336,13 +336,27 @@ export function createReportRenderers(redact: DashboardDeps["redact"]): ReportRe
         workflowId: r.workflowId,
         workflowVersion: r.workflowVersion,
         failures: r.trace.filter((t) => t.status === "failed").map((t) => ({ stepId: t.stepId, block: t.block, error: t.error ?? "unknown error" })),
+        outputs: r.outputs ?? {},
         artifactRefs: r.artifacts.map((a) => ({ id: a.id, kind: a.kind, uri: a.path })),
         next: headline === "waiting" ? "wait for resume" : headline === "passed" ? "done" : "inspect failures",
       };
     },
     markdown(run, resolvedSecretRefs) {
       const r = redacted(run, resolvedSecretRefs);
-      const lines = [`# Run ${r.runId}`, ``, `- Workflow: ${r.workflowId}@${r.workflowVersion}`, `- Status: ${r.status}`, `- Started: ${r.startedAt}`, ``, `## Steps`];
+      const lines = [
+        `# Run ${r.runId}`,
+        ``,
+        `- Workflow: ${r.workflowId}@${r.workflowVersion}`,
+        `- Status: ${r.status}`,
+        `- Started: ${r.startedAt}`,
+        ``,
+        `## Outputs`,
+        "```json",
+        JSON.stringify(r.outputs ?? {}, null, 2),
+        "```",
+        ``,
+        `## Steps`,
+      ];
       for (const t of r.trace) lines.push(`- \`${t.stepId}\` (${t.block}): ${t.status}${t.error ? ` — ${t.error}` : ""}`);
       return lines.join("\n");
     },

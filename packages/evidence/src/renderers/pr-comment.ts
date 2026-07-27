@@ -54,6 +54,12 @@ export function renderPrComment(
     lines.push(`Score: ${options.evalSummary.passed}/${options.evalSummary.total}`);
   }
 
+  lines.push("");
+  lines.push("Outputs:");
+  lines.push("```json");
+  lines.push(JSON.stringify(model.outputs, null, 2));
+  lines.push("```");
+
   if (model.artifacts.length > 0) {
     lines.push("");
     lines.push("Artifacts:");

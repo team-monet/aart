@@ -115,6 +115,44 @@ describe("executeRun — fresh execution", () => {
     expect(finished.endedAt).toBeTruthy();
   });
 
+  it("resolves the workflow outputMapping into the completed RunRecord's public outputs", async () => {
+    const { store, config } = await setup();
+    const workflow = fixtureWorkflow({
+      inputs: [{ name: "value", type: "string", required: true }],
+      outputs: [{ name: "result", type: "object", required: true }],
+      execution: {
+        type: "workflow",
+        steps: [{ id: "s1", uses: "test.echo", with: { value: "{{ inputs.value }}" } }],
+        outputMapping: { result: "{{ steps.s1.outputs.echoed }}" },
+      },
+    });
+    await store.workflows.put(workflow);
+    const run = await triggerRun(config, { workflow, trigger: fixtureTrigger(), inputs: { value: "reusable" } });
+    const finished = await executeRun(config, run.runId);
+
+    expect(finished.status).toBe("completed");
+    expect(finished.outputs).toEqual({ result: { value: "reusable" } });
+    await expect(store.runs.get(run.runId)).resolves.toMatchObject({ outputs: { result: { value: "reusable" } } });
+  });
+
+  it("fails terminally when a declared workflow output cannot be resolved", async () => {
+    const { store, config } = await setup();
+    const workflow = fixtureWorkflow({
+      execution: {
+        type: "workflow",
+        steps: [{ id: "s1", uses: "test.echo" }],
+        outputMapping: { result: "{{ steps.s1.outputs.missing }}" },
+      },
+    });
+    await store.workflows.put(workflow);
+    const run = await triggerRun(config, { workflow, trigger: fixtureTrigger(), inputs: {} });
+    const finished = await executeRun(config, run.runId);
+
+    expect(finished.status).toBe("failed");
+    expect(finished.outputs).toBeUndefined();
+    expect(finished.error).toMatch(/workflow output mapping failed/i);
+  });
+
   it("captures ExecutionSnapshot at completion for a run that never waits", async () => {
     const { store, config } = await setup();
     const workflow = fixtureWorkflow({ execution: { type: "workflow", steps: [{ id: "s1", uses: "test.echo" }] } });

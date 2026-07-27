@@ -19,6 +19,7 @@ function makeTestRedactor(secretValue: string, marker = "[REDACTED:TEST_SECRET]"
 function secretBearingRun() {
   return fixtureRunRecord({
     status: "failed",
+    outputs: { tokenEcho: SECRET_VALUE },
     trace: [
       {
         seq: 0,
@@ -33,6 +34,18 @@ function secretBearingRun() {
     ],
   });
 }
+
+describe("workflow outputs are first-class report results", () => {
+  const run = fixtureRunRecord({ status: "completed", outputs: { items: ["alpha", "beta"], count: 2 } });
+
+  it("renders outputs directly in model, markdown, HTML, PR-comment, and CLI-text formats", () => {
+    expect(renderModelFacing(run, identityRedact).outputs).toEqual({ items: ["alpha", "beta"], count: 2 });
+    expect(renderMarkdown(run, identityRedact)).toContain('"items": [');
+    expect(renderHtml(run, identityRedact)).toContain("<h2>Outputs</h2>");
+    expect(renderPrComment(run, identityRedact)).toContain("Outputs:");
+    expect(renderCliText(run, identityRedact)).toContain('outputs: {"items":["alpha","beta"],"count":2}');
+  });
+});
 
 describe("every one of the 6 renderers calls the injected RedactFn before returning output (architecture §9.2, this session's DoD)", () => {
   const run = secretBearingRun();

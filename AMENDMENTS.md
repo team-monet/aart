@@ -1956,3 +1956,67 @@ must pass the same local human approval gate as every other Pack.
 slice. Production hosting, domain choice, npm publication, and static-index
 publication are external mutations and require explicit authorization. The
 site build and canonical-index validation are ready locally.
+
+### A74 — Two-workspace Pack moat proof, fresh-server unattended execution, and first-class workflow outputs
+
+**Acceptance shape:** the reuse claim was tested as a product loop, not by
+calling the same local files twice. An isolated Agent A first searched, found
+no suitable local asset, then authored and deterministically prepared
+`string-list-normalization@1.0.0`. A separate Agent B received only the
+natural-language outcome, searched the configured public index before
+drafting, found the published Workflow and Block, installed the Pack inertly,
+and created no duplicate. The exact reviewed seal was
+`sha256:d4124536e7e40c8b5974f48176b71dca66b1c19db4cfbe38d666082549ea5081`.
+It remained inactive until John explicitly approved that hash; a fresh AART
+process then loaded the Block and imported Workflow, validation passed, and
+the workflow completed against deliberately inconsistent input.
+
+**Unattended deployment proof:** Agent B bundled the approved Pack-backed
+workflow. A fresh destination used a new SQLite store, `aart server
+--bundle`, and a separate `aart worker` process. `POST /runs/trigger` created
+run `0a54c2b7-c9c5-4ffd-aa9c-5632f63fbf38`; the worker claimed it without a
+person or authoring agent and completed it. `GET /runs/<id>` returned the
+normalized step result `["", "alpha", "beta", "gamma"]`, and the execution
+snapshot bound the run to the same exact Pack hash above. This closes A72's
+previously explicit deployment gap: sealed Pack executable assets now travel
+inside the bundle and need neither npm installation nor a second approval on
+the destination.
+
+**Founder-visible product gap found by the proof:** the server's step trace
+held the correct transformed value, but `aart run` and the default
+`aart report` showed only `completed`/`passed`. A successful automation that
+does not return its result is not functionally complete. The runtime now
+resolves `Workflow.execution.outputMapping` at terminal completion and
+persists it as `RunRecord.outputs`. An unresolvable declared output fails the
+workflow terminally instead of reporting success with missing data.
+Authoring now syntax-checks expressions inside `outputMapping`, requires
+every declared required output to have a mapping, and rejects mappings for
+undeclared output names before registration.
+`ModelFacingReport` now always carries workflow-level `outputs` (empty object
+when none are declared), and model, Markdown, HTML, PR-comment, CLI-text,
+dashboard-stub, and report-block renderers expose the same result contract.
+This remains distinct from the full per-step trace: consumers get the
+workflow's authored public output rather than guessing which internal step
+matters.
+
+The post-fix proof rebuilt the actual npm tarball and repeated the
+fresh-store server/worker flow. Run
+`1ff76586-6f20-4451-9178-61fbd300b518` returned the same normalized values
+as top-level HTTP `RunRecord.outputs`, the default model report, and the
+Markdown Outputs section, while retaining the exact approved Pack hash in
+its execution snapshot.
+
+**Runtime observation, not papered over as a product defect:** the published
+`isolated-vm@7` artifact used in this proof has native prebuilds for the
+supported Node runtime on this machine; forcing the process through Node 22
+reproduced `ERR_DLOPEN_FAILED`, while the installed/generated Node 26 runtime
+worked. The fresh server and worker proof therefore used the same Node 26
+binary. `init-agent` pinning the actual `process.execPath` is the correct
+behavior here; changing it to an arbitrary older Node would create the ABI
+mismatch rather than solve it.
+
+**Intentional boundaries retained:** a missing public index remains a loud
+remote-discovery configuration error, the checked-in Pack catalog remains
+preview data rather than a fake production registry, and npm publication was
+not performed. Those are launch/configuration boundaries, not failures of
+the isolated reuse-and-execute acceptance loop above.

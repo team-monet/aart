@@ -62,6 +62,7 @@ export function buildModelFacingReport(run: RunRecord): ModelFacingReport {
     workflowId: run.workflowId,
     workflowVersion: run.workflowVersion,
     failures,
+    outputs: run.outputs ?? {},
     artifactRefs,
     next: nextForHeadline(headline),
   };

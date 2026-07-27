@@ -562,9 +562,10 @@ Stated plainly, matching this repo's own convention (`TEST-DRIVE.md`'s
   after explicit human review run `aart pack approve` with that exact
   `--content-hash`. Approved blocks join
   the catalog on the next AART process start; imported workflows remain
-  drafts and still need validation/promotion. A fresh server bundle does not
-  yet receive executable Pack files (AMENDMENTS.md A72), so Pack-backed
-  unattended deployment is the remaining closure rather than something this
-  guide claims already works.
+  drafts and still need validation/promotion. Deployment bundles now carry
+  the approved Pack's sealed executable assets as well as its manifest, so a
+  fresh server and worker can execute the same Pack-backed workflow without a
+  destination-side npm install or another human approval
+  (`AMENDMENTS.md` A74).
 - **`isolated-vm` wants Node ≥26; this repo runs on Node ≥22.** Disclosed,
   pre-existing, not addressed by this document (part (b)'s install warning).

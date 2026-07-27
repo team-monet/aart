@@ -57,6 +57,7 @@ function buildModelFacing(run: RunRecord): ModelFacingReport {
     workflowId: run.workflowId,
     workflowVersion: run.workflowVersion,
     failures,
+    outputs: run.outputs ?? {},
     artifactRefs: run.artifacts.map((artifact) => ({ id: artifact.id, kind: artifact.kind, uri: artifact.path })),
     next: failures.length > 0 ? `Review ${failures.length} failed step(s): ${failures.map((f) => f.stepId).join(", ")}` : "No action needed.",
   };

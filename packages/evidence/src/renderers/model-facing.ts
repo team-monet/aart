@@ -48,6 +48,13 @@ export function renderModelFacing(run: RunRecord, redact: RedactFn, resolvedSecr
   const failures = clean.trace
     .filter((t) => t.status === "failed")
     .map((t) => ({ stepId: t.stepId, block: t.block, error: t.error ?? "Step failed with no recorded error message." }));
+  if (clean.status === "failed" && clean.error && failures.length === 0) {
+    failures.push({
+      stepId: "$workflow",
+      block: clean.error.startsWith("Workflow output mapping failed:") ? "workflow.outputMapping" : "workflow",
+      error: clean.error,
+    });
+  }
 
   // Artifact references, not payloads (spec §32.7): `uri` is Artifact.path
   // (a pointer into the artifact BLOB store, architecture §5.4) — never
@@ -60,6 +67,7 @@ export function renderModelFacing(run: RunRecord, redact: RedactFn, resolvedSecr
     workflowId: clean.workflowId,
     workflowVersion: clean.workflowVersion,
     failures,
+    outputs: clean.outputs ?? {},
     artifactRefs,
     next: nextAffordance(clean.status),
   };
