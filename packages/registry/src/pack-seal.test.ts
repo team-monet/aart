@@ -72,4 +72,25 @@ describe("computePackSealChecks — the shape S4's CapabilityValidationContext.p
       { packName: "slack", sealBroken: true },
     ]);
   });
+
+  it("recomputes a workflow Pack seal with its workflow source bytes", async () => {
+    const workflowManifestYaml = "name: workflow-pack\nversion: 1.0.0\nworkflows: [release-proof]\n";
+    const workflowSources = { "release-proof": "id: release-proof\nname: Release proof\nversion: 1.0.0\nsteps: []\n" };
+    await authorPack(store, {
+      manifestYaml: workflowManifestYaml,
+      blockSources: {},
+      workflowSources,
+    });
+    const packageManager = createFakePackageManager({
+      "aart-pack-workflow-pack": {
+        manifestYaml: workflowManifestYaml,
+        blockSources: {},
+        workflowSources,
+      },
+    });
+
+    await expect(
+      computePackSealChecks(store, [{ name: "workflow-pack", version: "1.0.0" }], packageManager),
+    ).resolves.toEqual([{ packName: "workflow-pack", sealBroken: false }]);
+  });
 });

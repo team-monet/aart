@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { canonicalize, computePackContentHash } from "./hash.js";
 
@@ -58,6 +59,16 @@ describe("computePackContentHash — architecture §11.1", () => {
     const original = computePackContentHash(baseManifest, baseBlockSources, { "release-proof": "version: 1.0.0" });
     const edited = computePackContentHash(baseManifest, baseBlockSources, { "release-proof": "version: 1.0.1" });
     expect(edited).not.toBe(original);
+  });
+
+  it("preserves the legacy block-only hash payload across workflow support upgrades", () => {
+    const blocks = Object.keys(baseBlockSources)
+      .sort()
+      .map((name) => ({ name, source: baseBlockSources[name as keyof typeof baseBlockSources] }));
+    const legacyDigest = createHash("sha256")
+      .update(canonicalize({ manifest: baseManifest, blocks }), "utf8")
+      .digest("hex");
+    expect(computePackContentHash(baseManifest, baseBlockSources)).toBe(`sha256:${legacyDigest}`);
   });
 
   it("adding a new block (new key in blockSources) invalidates the hash", () => {

@@ -10,7 +10,7 @@
 // (AMENDMENTS.md A1) — `@aart/mcp` (S5)'s actual `aart_find_blocks` MCP
 // tool is expected to be a thin caller of `findBlocks` below, not a
 // reimplementation of the search itself.
-import { ExampleSchema, type BlockManifest, type Example, type Workflow } from "@aart/types";
+import { ExampleSchema, WorkflowSchema, type BlockManifest, type Example, type Workflow } from "@aart/types";
 import { z } from "zod";
 import { npmPackageNameFor } from "./manifest.js";
 
@@ -260,17 +260,7 @@ const RemoteRegistryIndexEntrySchema = z
         })
         .passthrough(),
     ),
-    workflows: z
-      .array(
-        z
-          .object({
-            id: z.string().min(1),
-            name: z.string().min(1),
-            version: z.string().min(1),
-          })
-          .passthrough(),
-      )
-      .optional(),
+    workflows: z.array(WorkflowSchema).optional(),
   })
   .passthrough()
   .superRefine((entry, ctx) => {

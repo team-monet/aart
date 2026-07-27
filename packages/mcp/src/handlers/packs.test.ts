@@ -167,6 +167,7 @@ workflows: [demo-echo-flow]
       expect.objectContaining({
         name: "demo",
         contentHash: installed.contentHash,
+        sealStatus: "verified",
         displayName: "Demo Pack",
         description: "Reusable demo assets",
         capabilities: [],
@@ -206,6 +207,41 @@ workflows: [demo-echo-flow]
     expect(run.trace).toEqual([expect.objectContaining({ block: "demo.echo", status: "completed" })]);
     const storedRun = await consumer.store.runs.get(run.runId as string);
     expect(storedRun?.snapshot.packHashes).toEqual({ demo: expect.stringMatching(/^sha256:/) });
+  });
+
+  it("keeps Pack management usable to inspect and reinstall a broken approved Pack", async () => {
+    const ctx = createAartContext({ root, trustMode: "governed" });
+    const installed = await installPackHandler(ctx, { name: "demo", sourcePath: packageRoot });
+    await approvePackHandler(ctx, {
+      name: "demo",
+      version: "1.0.0",
+      contentHash: installed.contentHash as string,
+      reviewer: "human-reviewer",
+    });
+    await fs.writeFile(
+      join(root, "packs", "installed", "demo", "1.0.0", "blocks", "demo.echo.cjs"),
+      `${blockSource}\n// broken after approval`,
+      "utf8",
+    );
+
+    expect(() => createRealAartContext({ root, trustMode: "governed" })).toThrow(/content seal/);
+    const recovery = createRealAartContext({
+      root,
+      trustMode: "governed",
+      loadInstalledPacks: false,
+    });
+    expect(await listPacksHandler(recovery, {})).toEqual(
+      expect.objectContaining({
+        packs: [expect.objectContaining({ name: "demo", sealStatus: "broken" })],
+      }),
+    );
+
+    await installPackHandler(recovery, { name: "demo", sourcePath: packageRoot });
+    expect(await listPacksHandler(recovery, {})).toEqual(
+      expect.objectContaining({
+        packs: [expect.objectContaining({ name: "demo", sealStatus: "verified" })],
+      }),
+    );
   });
 
   it("keeps a changed approved version sealed instead of silently replacing it", async () => {

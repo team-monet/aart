@@ -212,23 +212,29 @@ export async function listPacksHandler(ctx: AartContext, input: ListPacksInput):
   const packs = listInstalledPackStatesSync(ctx.root)
     .filter((state) => (input.status ? state.approvalStatus === input.status : true))
     .map((state) => {
-      const installed = readInstalledPackSync(ctx.root, state.name, state.version);
-      const raw = parsePackManifestYaml(installed.files.manifestYaml);
-      const current = buildPackManifest(raw, installed.files.blockSources, installed.files.workflowSources);
-      if (current.contentHash !== state.contentHash) {
-        throw new Error(`pack ${state.name}@${state.version} failed its content seal; reinstall before review`);
+      try {
+        const installed = readInstalledPackSync(ctx.root, state.name, state.version);
+        const raw = parsePackManifestYaml(installed.files.manifestYaml);
+        const current = buildPackManifest(raw, installed.files.blockSources, installed.files.workflowSources);
+        return {
+          ...state,
+          sealStatus: current.contentHash === state.contentHash ? "verified" : "broken",
+          displayName: raw.displayName,
+          description: raw.description,
+          capabilities: raw.capabilities,
+          secrets: raw.secrets,
+          assets: {
+            blocks: raw.blocks,
+            workflows: raw.workflows,
+          },
+        };
+      } catch {
+        return {
+          ...state,
+          sealStatus: "broken",
+          reviewUnavailable: true,
+        };
       }
-      return {
-        ...state,
-        displayName: raw.displayName,
-        description: raw.description,
-        capabilities: raw.capabilities,
-        secrets: raw.secrets,
-        assets: {
-          blocks: raw.blocks,
-          workflows: raw.workflows,
-        },
-      };
     });
   return { ok: true, packs, count: packs.length };
 }

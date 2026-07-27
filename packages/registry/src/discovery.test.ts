@@ -300,4 +300,40 @@ describe("parseRemoteRegistryIndexDocument", () => {
       }),
     ).toThrow(/aart-pack-bar/);
   });
+
+  it("rejects malformed workflow keywords and examples at the public-index boundary", () => {
+    expect(() =>
+      parseRemoteRegistryIndexDocument({
+        schemaVersion: 1,
+        packs: [
+          {
+            npmPackageName: "aart-pack-bad-workflow",
+            packName: "bad-workflow",
+            version: "1.0.0",
+            blocks: [],
+            workflows: [
+              {
+                id: "bad",
+                name: "Bad workflow",
+                version: "1.0.0",
+                inputs: [],
+                outputs: [],
+                execution: { type: "workflow", steps: [] },
+                approval: "draft",
+                gates: {
+                  validate: "pending",
+                  readiness: "pending",
+                  evals: "pending",
+                  riskReview: "pending",
+                  humanReview: "pending",
+                },
+                keywords: "not-an-array",
+                examples: {},
+              },
+            ],
+          },
+        ],
+      }),
+    ).toThrow(/failed validation/);
+  });
 });

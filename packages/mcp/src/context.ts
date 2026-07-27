@@ -49,6 +49,8 @@ export interface CreateAartContextOptions {
   now?: () => Date;
   /** `createRealAartContext` only (ignored by `createAartContext`, which never constructs a real `@aart/llm` pack) — passthrough to `buildRealCatalog`'s own `RealCatalogLlmOptions` (real-context.ts), for injecting a fake provider client/fetcher in tests that need the REAL llm.extract/llm.classify block dispatch without a real API key. */
   llm?: RealCatalogLlmOptions;
+  /** Real composition only: false keeps installed Pack code out of the startup catalog so Pack management can inspect or reinstall a broken approved Pack. */
+  loadInstalledPacks?: boolean;
 }
 
 const VALID_TRUST_MODES: readonly TrustMode[] = ["dev", "governed", "strict", "production"];
@@ -143,7 +145,8 @@ export function createRealAartContextWithEngine(options: CreateAartContextOption
   // provider adapters, assembles 56 block manifests), not free, so this
   // only happens when at least one port isn't explicitly overridden.
   const needsRealCatalog = !options.engine || !options.governance || !options.evidence || !options.registry;
-  const catalog = needsRealCatalog ? buildRealCatalog(store, options.llm, resolvedRoot) : undefined;
+  const packRoot = options.loadInstalledPacks === false ? undefined : resolvedRoot;
+  const catalog = needsRealCatalog ? buildRealCatalog(store, options.llm, packRoot) : undefined;
   // trustMode threaded through explicitly (AMENDMENTS.md, S15) — this is
   // what makes the real capability-dispatch chokepoint (architecture §4.6,
   // via createGetGrantedCapabilities) agree with the SAME trustMode this

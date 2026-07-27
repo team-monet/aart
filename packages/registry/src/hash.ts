@@ -70,7 +70,11 @@ export function computePackContentHash(
   const workflows = Object.keys(workflowSources)
     .sort()
     .map((name) => ({ name, source: workflowSources[name] }));
-  const payload = canonicalize({ manifest, blocks, workflows });
+  // Preserve the pre-workflow hash wire format for existing block-only
+  // Packs. Workflow Packs extend the payload only when workflow bytes are
+  // actually present, so an upgrade cannot invalidate an unchanged
+  // historical block-only approval.
+  const payload = canonicalize(workflows.length > 0 ? { manifest, blocks, workflows } : { manifest, blocks });
   const digest = createHash("sha256").update(payload, "utf8").digest("hex");
   return `sha256:${digest}`;
 }

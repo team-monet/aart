@@ -215,7 +215,11 @@ export async function run(argv: readonly string[], options: RunOptions = {}): Pr
     if (!options.cliContext && (command === "server" || command === "worker")) {
       assertServerRootExists(tokens, options.aartOptions);
     }
-    const cli = options.cliContext ?? (await resolveCliContext(tokens, options.aartOptions));
+    const contextOptions =
+      command === "pack"
+        ? { ...options.aartOptions, loadInstalledPacks: false }
+        : options.aartOptions;
+    const cli = options.cliContext ?? (await resolveCliContext(tokens, contextOptions));
     switch (command) {
       case "run":
         return asOutcome(await runCommand(tokens, cli));

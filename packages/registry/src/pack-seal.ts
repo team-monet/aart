@@ -57,7 +57,7 @@ export async function computePackSealChecks(store: AartStore, packs: readonly Pa
 
     const files = await packageManager.install(npmPackageNameFor(name));
     const raw = parsePackManifestYaml(files.manifestYaml);
-    const current = recomputePackManifest(approved, raw, files.blockSources);
+    const current = recomputePackManifest(approved, raw, files.blockSources, files.workflowSources);
 
     checks.push({ packName: name, sealBroken: approved.contentHash !== current.contentHash });
   }
