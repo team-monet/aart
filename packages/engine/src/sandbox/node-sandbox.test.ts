@@ -1,6 +1,6 @@
 import { TimeoutError } from "@aart/types";
 import { describe, expect, it } from "vitest";
-import { runCommonJsBlockSandbox, runNodeSandbox } from "./node-sandbox.js";
+import { inspectCommonJsBlockSource, runCommonJsBlockSandbox, runNodeSandbox } from "./node-sandbox.js";
 
 describe("runNodeSandbox — basic execution", () => {
   it("runs a simple function body and returns its result", async () => {
@@ -151,6 +151,23 @@ describe("runNodeSandbox — hard timeout", () => {
 });
 
 describe("public Pack CommonJS sandbox scheduling", () => {
+  it("inspects a hostile module asynchronously without blocking host timers", async () => {
+    let settled = false;
+    const inspection = inspectCommonJsBlockSource("while (true) {}", "test.hostile", { timeoutMs: 200 }).then(
+      () => {
+        settled = true;
+        return undefined;
+      },
+      (error: unknown) => {
+        settled = true;
+        return error;
+      },
+    );
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(settled).toBe(false);
+    expect(await inspection).toBeInstanceOf(TimeoutError);
+  });
+
   it("does not block host timers while a CPU-heavy Pack transform runs", async () => {
     let settled = false;
     const execution = runCommonJsBlockSandbox({

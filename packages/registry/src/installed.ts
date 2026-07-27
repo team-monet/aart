@@ -1,7 +1,8 @@
 import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
-import { inspectCommonJsBlockSourceSync, runCommonJsBlockSandbox } from "@aart/engine";
+import { inspectCommonJsBlockSource, inspectCommonJsBlockSourceSync, runCommonJsBlockSandbox } from "@aart/engine";
 import type { BlockImplementation, PackManifest } from "@aart/types";
 import { compare as compareSemver } from "semver";
 import { buildPackManifest, parsePackManifestYaml } from "./manifest.js";
@@ -49,18 +50,32 @@ const PACK_MUTATION_LOCK_WAIT_MS = 30_000;
 
 export async function withPackMutationLock<T>(root: string, operation: () => Promise<T>): Promise<T> {
   const lockDir = join(root, "packs", ".mutation-lock");
+  const ownerFile = join(lockDir, "owner");
+  const ownerToken = `${process.pid}-${randomUUID()}`;
   await mkdir(dirname(lockDir), { recursive: true });
   const deadline = Date.now() + PACK_MUTATION_LOCK_WAIT_MS;
   while (true) {
     try {
       await mkdir(lockDir);
+      await writeFile(ownerFile, ownerToken, "utf8");
       break;
     } catch (cause) {
       if ((cause as NodeJS.ErrnoException).code !== "EEXIST") throw cause;
       try {
         const info = await stat(lockDir);
         if (Date.now() - info.mtimeMs > PACK_MUTATION_LOCK_STALE_MS) {
-          await rm(lockDir, { recursive: true, force: true });
+          const inspectedOwner = await readFile(ownerFile, "utf8").catch(() => `unknown-${info.ino}-${info.mtimeMs}`);
+          const quarantine = `${lockDir}.stale-${inspectedOwner.replace(/[^A-Za-z0-9-]/g, "_").slice(0, 160)}`;
+          try {
+            // Every contender derives the same non-empty destination from
+            // the stale owner's token. Exactly one rename can succeed;
+            // later contenders cannot rename a freshly-acquired lock over
+            // that occupied quarantine directory.
+            await rename(lockDir, quarantine);
+          } catch (renameCause) {
+            const code = (renameCause as NodeJS.ErrnoException).code;
+            if (code !== "ENOENT" && code !== "EEXIST" && code !== "ENOTEMPTY") throw renameCause;
+          }
           continue;
         }
       } catch (statCause) {
@@ -72,15 +87,21 @@ export async function withPackMutationLock<T>(root: string, operation: () => Pro
     }
   }
   const heartbeat = setInterval(() => {
-    const now = new Date();
-    void utimes(lockDir, now, now).catch(() => undefined);
+    void readFile(ownerFile, "utf8")
+      .then((currentOwner) => {
+        if (currentOwner !== ownerToken) return;
+        const now = new Date();
+        return utimes(lockDir, now, now);
+      })
+      .catch(() => undefined);
   }, 10_000);
   heartbeat.unref();
   try {
     return await operation();
   } finally {
     clearInterval(heartbeat);
-    await rm(lockDir, { recursive: true, force: true });
+    const currentOwner = await readFile(ownerFile, "utf8").catch(() => undefined);
+    if (currentOwner === ownerToken) await rm(lockDir, { recursive: true, force: true });
   }
 }
 
@@ -220,7 +241,9 @@ export function listInstalledPackStatesSync(root: string): InstalledPackState[] 
     for (const versionEntry of readdirSync(nameDir, { withFileTypes: true })) {
       if (!versionEntry.isDirectory()) continue;
       const file = join(nameDir, versionEntry.name, "state.json");
-      if (existsSync(file)) states.push(JSON.parse(readFileSync(file, "utf8")) as InstalledPackState);
+      if (!existsSync(file)) continue;
+      const state = JSON.parse(readFileSync(file, "utf8")) as InstalledPackState;
+      if (state.name === nameEntry.name && state.version === versionEntry.name) states.push(state);
     }
   }
   return states.sort((a, b) => a.name.localeCompare(b.name) || a.version.localeCompare(b.version));
@@ -312,6 +335,25 @@ export function loadBlockImplementationSourceSync(source: string, expectedId: st
   };
 }
 
+export async function loadBlockImplementationSource(source: string, expectedId: string, timeoutMs?: number): Promise<BlockImplementation> {
+  let manifest: BlockImplementation["manifest"];
+  try {
+    manifest = await inspectCommonJsBlockSource(source, expectedId, { timeoutMs });
+  } catch (cause) {
+    throw new PackBlockLoadError(`could not inspect public Pack block ${expectedId}: ${(cause as Error).message}`, { cause });
+  }
+  return {
+    manifest,
+    execute: async (resolvedInputs, ctx) =>
+      runCommonJsBlockSandbox({
+        source,
+        expectedId,
+        resolvedInputs,
+        executionContext: { runId: ctx.runId, stepId: ctx.stepId },
+      }),
+  };
+}
+
 export function loadBlockImplementationFileSync(file: string, expectedId: string): BlockImplementation {
   return loadBlockImplementationSourceSync(readFileSync(file, "utf8"), expectedId);
 }
@@ -343,4 +385,26 @@ export function loadInstalledPackBlocksSync(root: string, name: string, version:
     throw new PackSealBrokenError(`pack ${name}@${version} failed its content seal`);
   }
   return raw.blocks.map((id) => loadBlockImplementationSourceSync(installed.files.blockSources[id]!, id));
+}
+
+export async function loadInstalledPackBlocks(
+  root: string,
+  name: string,
+  version: string,
+  packInspectionBudgetMs = 10_000,
+): Promise<BlockImplementation[]> {
+  const installed = readInstalledPackSync(root, name, version);
+  const raw = parsePackManifestYaml(installed.files.manifestYaml);
+  const current = buildPackManifest(raw, installed.files.blockSources, installed.files.workflowSources);
+  if (current.contentHash !== installed.state.contentHash) {
+    throw new PackSealBrokenError(`pack ${name}@${version} failed its content seal`);
+  }
+  const deadline = Date.now() + packInspectionBudgetMs;
+  const loaded: BlockImplementation[] = [];
+  for (const id of raw.blocks) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) throw new PackBlockLoadError(`Pack ${name}@${version} exceeded its inspection budget`);
+    loaded.push(await loadBlockImplementationSource(installed.files.blockSources[id]!, id, remaining));
+  }
+  return loaded;
 }

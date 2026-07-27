@@ -161,6 +161,7 @@ export function createRealAartContextWithEngine(options: CreateAartContextOption
           trustMode,
           createComputePackHashes(resolvedRoot, catalog!.entries),
           catalog!.packBlocksByHash,
+          new Set(catalog!.entries.filter((entry) => entry.packName).map((entry) => entry.manifest.id)),
         )
       : undefined;
 

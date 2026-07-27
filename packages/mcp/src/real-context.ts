@@ -77,8 +77,8 @@ import {
   findBlocks,
   listActiveApprovedPackStatesSync,
   listInstalledPackStatesSync,
-  loadApprovedPackBlocksSync,
   loadInstalledPackBlocksSync,
+  PackSealBrokenError,
   type BlockCatalogEntry,
 } from "@aart/registry";
 import { produceBundle as produceRealBundle, type Bundle } from "@aart/server";
@@ -130,18 +130,28 @@ export function buildRealCatalog(store: AartStore, llmOptions?: RealCatalogLlmOp
   if (packRoot) {
     for (const state of listInstalledPackStatesSync(packRoot)) {
       if (state.approvalStatus !== "approved") continue;
-      const versionBlocks: BlockRegistry = {};
-      for (const implementation of loadInstalledPackBlocksSync(packRoot, state.name, state.version)) {
-        versionBlocks[implementation.manifest.id] = implementation;
+      try {
+        const versionBlocks: BlockRegistry = {};
+        for (const implementation of loadInstalledPackBlocksSync(packRoot, state.name, state.version)) {
+          versionBlocks[implementation.manifest.id] = implementation;
+        }
+        packBlocksByHash.set(state.contentHash, versionBlocks);
+      } catch (cause) {
+        if (!(cause instanceof PackSealBrokenError)) throw cause;
       }
-      packBlocksByHash.set(state.contentHash, versionBlocks);
     }
-    for (const { implementation, packName } of loadApprovedPackBlocksSync(packRoot)) {
-      if (blocks[implementation.manifest.id]) {
-        throw new Error(`approved pack "${packName}" conflicts with existing block id "${implementation.manifest.id}"`);
+    for (const state of listActiveApprovedPackStatesSync(packRoot)) {
+      try {
+        for (const implementation of loadInstalledPackBlocksSync(packRoot, state.name, state.version)) {
+          if (blocks[implementation.manifest.id]) {
+            throw new Error(`approved pack "${state.name}" conflicts with existing block id "${implementation.manifest.id}"`);
+          }
+          blocks[implementation.manifest.id] = implementation;
+          entries.push({ manifest: implementation.manifest, packName: state.name, examples: [] });
+        }
+      } catch (cause) {
+        if (!(cause instanceof PackSealBrokenError)) throw cause;
       }
-      blocks[implementation.manifest.id] = implementation;
-      entries.push({ manifest: implementation.manifest, packName, examples: [] });
     }
   }
 
@@ -309,10 +319,8 @@ export function createRealEngine(
   trustMode: TrustMode,
   computePackHashes = createComputePackHashes(),
   packBlocksByHash: ReadonlyMap<string, BlockRegistry> = new Map(),
+  activePackBlockIds: ReadonlySet<string> = new Set(),
 ): Engine {
-  const packBlockIds = new Set(
-    [...packBlocksByHash.values()].flatMap((versionBlocks) => Object.keys(versionBlocks)),
-  );
   return createEngine({
     store,
     redact: redactRecord,
@@ -324,7 +332,7 @@ export function createRealEngine(
         const implementation = packBlocksByHash.get(hash)?.[blockId];
         if (implementation) return implementation;
       }
-      if (run.snapshot.capturedAt !== "" && packBlockIds.has(blockId)) {
+      if (run.snapshot.capturedAt !== "" && activePackBlockIds.has(blockId)) {
         throw new Error(
           `Pack block "${blockId}" cannot resume because its snapshotted implementation is unavailable`,
         );

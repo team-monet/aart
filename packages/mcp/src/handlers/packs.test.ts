@@ -230,12 +230,8 @@ workflows: [demo-echo-flow]
       "utf8",
     );
 
-    expect(() => createRealAartContext({ root, trustMode: "governed" })).toThrow(/content seal/);
-    const recovery = createRealAartContext({
-      root,
-      trustMode: "governed",
-      loadInstalledPacks: false,
-    });
+    const recovery = createRealAartContext({ root, trustMode: "governed" });
+    expect(recovery.registry.getBlock("demo.echo")).toBeUndefined();
     expect(await listPacksHandler(recovery, {})).toEqual(
       expect.objectContaining({
         packs: [expect.objectContaining({ name: "demo", sealStatus: "broken" })],

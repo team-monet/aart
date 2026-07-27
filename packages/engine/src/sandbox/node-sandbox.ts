@@ -148,6 +148,21 @@ export function inspectCommonJsBlockSourceSync(
   return validateInspectedCommonJsBlock(result, expectedId);
 }
 
+export async function inspectCommonJsBlockSource(
+  source: string,
+  expectedId: string,
+  options: { memoryLimitMb?: number; timeoutMs?: number } = {},
+): Promise<BlockManifest> {
+  const result = (await evaluateCommonJsBlock({
+    source,
+    expectedId,
+    memoryLimitMb: options.memoryLimitMb,
+    timeoutMs: options.timeoutMs,
+    mode: "inspect",
+  })) as { manifest?: unknown; executeType?: unknown; executeTag?: unknown };
+  return validateInspectedCommonJsBlock(result, expectedId);
+}
+
 function validateInspectedCommonJsBlock(
   result: { manifest?: unknown; executeType?: unknown; executeTag?: unknown },
   expectedId: string,

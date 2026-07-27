@@ -45,6 +45,9 @@ describe("installed Pack enumeration", () => {
     await fs.writeFile(join(base, ".DS_Store"), "noise", "utf8");
     await fs.writeFile(join(base, "demo", "operator-note.txt"), "noise", "utf8");
     await writeState(root, approved("demo", "1.0.0"));
+    const unfinished = join(base, "demo", "2.0.0.tmp-crashed-install");
+    await fs.mkdir(unfinished, { recursive: true });
+    await fs.writeFile(join(unfinished, "state.json"), JSON.stringify(approved("demo", "2.0.0")), "utf8");
 
     expect(listInstalledPackStatesSync(root).map((state) => `${state.name}@${state.version}`)).toEqual([
       "demo@1.0.0",

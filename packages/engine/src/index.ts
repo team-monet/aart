@@ -57,6 +57,7 @@ export { applyRedaction, createTrackingSecretResolver, identityRedactFn, throwin
 // primitive; see sandbox/node-sandbox.ts's module doc comment for how a
 // node-type BlockImplementation's own `execute` is expected to wire this in.
 export {
+  inspectCommonJsBlockSource,
   inspectCommonJsBlockSourceSync,
   runCommonJsBlockSandbox,
   runNodeSandbox,

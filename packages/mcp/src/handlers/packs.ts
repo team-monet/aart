@@ -10,6 +10,7 @@ import {
   fetchRemoteRegistryIndex,
   listActiveApprovedPackStatesSync,
   listInstalledPackStatesSync,
+  loadInstalledPackBlocks,
   loadInstalledPackBlocksSync,
   loadBlockImplementationSourceSync,
   npmPackageNameFor,
@@ -292,7 +293,7 @@ async function approvePackUnlocked(ctx: AartContext, input: ApprovePackInput): P
   // Shape inspection executes the module only inside a zero-ambient-
   // capability V8 isolate. Approval never turns Pack code into trusted host
   // code; runtime dispatch uses a fresh isolate again for every execution.
-  const blocks = loadInstalledPackBlocksSync(ctx.root, input.name, input.version);
+  const blocks = await loadInstalledPackBlocks(ctx.root, input.name, input.version);
   const workflows = raw.workflows.map((id) => {
     const source = installed.files.workflowSources[id];
     if (source === undefined) throw new Error(`pack is missing workflow definition ${id}`);
@@ -351,14 +352,7 @@ async function approvePackUnlocked(ctx: AartContext, input: ApprovePackInput): P
     if (!existing) workflowWrites.push(workflow);
   }
 
-  for (const workflow of workflowWrites) await ctx.store.workflows.put(workflow);
   const decidedAt = ctx.now().toISOString();
-  const approved = await writePackApprovalDecision(ctx.store, {
-    manifest: stored,
-    decision: "approved",
-    reviewer: input.reviewer,
-    decidedAt,
-  });
   await approveInstalledPack(
     ctx.root,
     input.name,
@@ -367,6 +361,16 @@ async function approvePackUnlocked(ctx: AartContext, input: ApprovePackInput): P
     new Date(decidedAt),
     input.contentHash,
   );
+  const approved = await ctx.store.transact(async (tx) => {
+    const decision = await writePackApprovalDecision(tx, {
+      manifest: stored,
+      decision: "approved",
+      reviewer: input.reviewer,
+      decidedAt,
+    });
+    for (const workflow of workflowWrites) await tx.workflows.put(workflow);
+    return decision;
+  });
   return {
     ok: true,
     pack: approved.name,
