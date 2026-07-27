@@ -6,7 +6,7 @@
 import { promises as fs } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   approveInstalledPack,
   listActiveApprovedPackStatesSync,
@@ -190,7 +190,7 @@ describe("readBundleFromDisk / hydrateBundle — round-trip (S12)", () => {
     ).resolves.toEqual({ value: "hello" });
   });
 
-  it("keeps the currently active Pack untouched when the store transaction aborts hydration", async () => {
+  it("restores the currently active Pack when the store transaction aborts and candidate cleanup fails", async () => {
     laptop = await createTestFixture();
     server = await createTestFixture();
     const sourceRoot = await fs.mkdtemp(join(tmpdir(), "aart-bundle-atomic-source-"));
@@ -257,10 +257,29 @@ describe("readBundleFromDisk / hydrateBundle — round-trip (S12)", () => {
         throw new Error("simulated store transaction failure");
       },
     };
-    await expect(hydrateBundle(failingStore, bundle, server.clock, destinationRoot)).rejects.toThrow(
-      /simulated store transaction failure/,
-    );
+    const installedRoot = join(destinationRoot, "packs", "installed");
+    const originalRm = fs.rm.bind(fs);
+    let cleanupFailureInjected = false;
+    const rmSpy = vi.spyOn(fs, "rm").mockImplementation(async (...args: Parameters<typeof fs.rm>) => {
+      const path = String(args[0]);
+      if (
+        !cleanupFailureInjected &&
+        (path === installedRoot || path.includes(".bundle-installed-failed-"))
+      ) {
+        cleanupFailureInjected = true;
+        throw Object.assign(new Error("simulated candidate cleanup failure"), { code: "EBUSY" });
+      }
+      return originalRm(...args);
+    });
+    try {
+      await expect(hydrateBundle(failingStore, bundle, server.clock, destinationRoot)).rejects.toThrow(
+        /simulated store transaction failure/,
+      );
+    } finally {
+      rmSpy.mockRestore();
+    }
 
+    expect(cleanupFailureInjected).toBe(true);
     expect(readInstalledPackSync(destinationRoot, "demo", "1.0.0").state).toMatchObject({
       approvalStatus: "approved",
       reviewer: "existing-reviewer",

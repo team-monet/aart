@@ -625,9 +625,32 @@ async function hydrateBundledPackAssets(
     const installedRoot = join(packRoot, "packs", "installed");
     const stagedInstalledRoot = join(stagingRoot, "packs", "installed");
     const backupInstalledRoot = join(packRoot, "packs", `.bundle-installed-backup-${token}`);
+    const failedInstalledRoot = join(packRoot, "packs", `.bundle-installed-failed-${token}`);
     let previousInstallationMoved = false;
     let stagedInstallationActivated = false;
     let storeRecordsCommitted = false;
+    const restorePreviousInstallation = async (): Promise<void> => {
+      if (stagedInstallationActivated) {
+        try {
+          await fs.rename(installedRoot, failedInstalledRoot);
+          stagedInstallationActivated = false;
+        } catch (moveCause) {
+          try {
+            await fs.rm(installedRoot, { recursive: true, force: true });
+            stagedInstallationActivated = false;
+          } catch (removeCause) {
+            throw new AggregateError(
+              [moveCause, removeCause],
+              "Bundle load: failed to move or remove the uncommitted Pack installation.",
+            );
+          }
+        }
+      }
+      if (previousInstallationMoved) {
+        await fs.rename(backupInstalledRoot, installedRoot);
+        previousInstallationMoved = false;
+      }
+    };
     try {
       await fs.mkdir(join(stagingRoot, "packs"), { recursive: true });
       try {
@@ -692,12 +715,11 @@ async function hydrateBundledPackAssets(
         storeRecordsCommitted = true;
       } catch (storeCause) {
         try {
-          await fs.rm(installedRoot, { recursive: true, force: true });
-          stagedInstallationActivated = false;
-          if (previousInstallationMoved) {
-            await fs.rename(backupInstalledRoot, installedRoot);
-            previousInstallationMoved = false;
-          }
+          // Moving the uncommitted candidate out of the live path is the
+          // critical rollback step. Cleanup is deliberately deferred until
+          // after the prior tree is restored, so a deletion failure cannot
+          // leave executable assets ahead of the authoritative store.
+          await restorePreviousInstallation();
         } catch (rollbackCause) {
           throw new Error(
             "Bundle load: store hydration failed and the previous Pack installation could not be restored.",
@@ -707,12 +729,15 @@ async function hydrateBundledPackAssets(
         throw storeCause;
       }
     } finally {
-      if (!stagedInstallationActivated && previousInstallationMoved) {
-        await fs.rename(backupInstalledRoot, installedRoot).catch(() => undefined);
+      if (!storeRecordsCommitted && (stagedInstallationActivated || previousInstallationMoved)) {
+        await restorePreviousInstallation().catch(() => undefined);
       }
       await fs.rm(stagingRoot, { recursive: true, force: true });
       if (storeRecordsCommitted) {
         await fs.rm(backupInstalledRoot, { recursive: true, force: true }).catch(() => undefined);
+      }
+      if (!stagedInstallationActivated) {
+        await fs.rm(failedInstalledRoot, { recursive: true, force: true }).catch(() => undefined);
       }
     }
   });
