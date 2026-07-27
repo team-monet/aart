@@ -217,7 +217,7 @@ async function dispatchOnce(
   resolveOptions: ResolveOptions,
   resolvedSecretRefs: Set<string>,
 ): Promise<StepTrace> {
-  const impl = config.blocks[step.uses];
+  const impl = config.resolveBlockForRun?.(run, step.uses) ?? config.blocks[step.uses];
   if (!impl) {
     throw new Error(`No BlockImplementation registered for block id "${step.uses}" (step "${step.id}") — register it on EngineConfig.blocks before dispatch.`);
   }
@@ -516,7 +516,7 @@ export async function executeStep(
     return executeWaitDispatch(config, run, workflow, step, resolvedWith, resolvedSecretRefs, ifResult);
   }
 
-  const impl = config.blocks[step.uses];
+  const impl = config.resolveBlockForRun?.(run, step.uses) ?? config.blocks[step.uses];
   if (!impl) {
     throw new Error(`No BlockImplementation registered for block id "${step.uses}" (step "${step.id}") — register it on EngineConfig.blocks before dispatch.`);
   }

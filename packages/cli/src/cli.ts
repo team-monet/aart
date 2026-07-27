@@ -4,10 +4,12 @@
 import { existsSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import path from "node:path";
+import { createFsStore } from "@aart/store";
 import { createSqliteStore } from "@aart/store/sqlite";
+import { hydrateBundleFromDisk } from "@aart/server";
 import { flagString, tokenize, type Tokenized } from "./args.js";
 import { createCliContext, type CliContext, type CreateCliContextOptions } from "./cli-context.js";
-import { initAgentCommand, initCommand, listCommand, registerCommand, runCommand, validateCommand } from "./commands/authoring.js";
+import { findBlocksCommand, findWorkflowsCommand, initAgentCommand, initCommand, listCommand, registerCommand, reportCommand, runCommand, validateCommand } from "./commands/authoring.js";
 import { deployCommand, pushCommand, triggerCommand } from "./commands/deployment.js";
 import { environmentCommand } from "./commands/environment.js";
 import { approveCommand, approveRemoteCommand, correctionCommand, diffCommand, promoteCommand, requestApprovalCommand } from "./commands/governance.js";
@@ -16,12 +18,21 @@ import { bundleCommand, flagCommand, mcpCommand, serverCommand, workerCommand } 
 import { remoteCommand } from "./commands/remote.js";
 import { remoteRunCommand, remoteRunsCommand, remoteStatusCommand, remoteWhyCommand } from "./commands/remote-observability.js";
 import { watchCommand } from "./commands/watch.js";
+import { packCommand } from "./commands/packs.js";
 
 export const USAGE = `AART CLI — usage:
   aart run <workflowId> --input <json> [--version <v>]
+  aart report <runId> [--format model|markdown]
   aart validate <path>
   aart validate <workflowId> --registered [--version <v>]
   aart list
+  aart find-blocks [query] [--category <category>] [--scope local|remote|all] [--index-url <url>]
+  aart find-workflows [query] [--category <category>] [--scope local|remote|all] [--index-url <url>]
+  aart pack search [query] [--index-url <url>]
+  aart pack add <name> [--version <v>] [--from <local-package-dir>]
+  aart pack list [--status unapproved|approved]
+  aart pack approve <name> --version <v> --content-hash <sha256:...> --reviewer <name>
+  aart pack prepare <local-package-dir> [--out <index-entry.json>]
   aart register <path>
   aart init
   aart init-agent
@@ -57,6 +68,16 @@ export const USAGE = `AART CLI — usage:
 
   --root <dir>    (or AART_ROOT) the .aart store directory. Precedence: flag > env > ./.aart. Also honored by every command above, not only the ones listed.
   --store <kind>  fs (default) or sqlite — which @aart/store adapter backs this invocation. sqlite's db file lives at <root>/aart.db.
+`;
+
+export const INIT_AGENT_USAGE = `AART agent setup — usage:
+  aart init-agent [--npx] [--package <name>] [--bin-path <path>]
+                  [--root <dir>] [--store fs|sqlite] [--cwd <dir>]
+                  [--mcp-config-out <path>] [--instructions-out <path>]
+
+Writes a merge-safe MCP config and canonical AART working instructions.
+The generated MCP command pins the resolved absolute --root and store adapter,
+so the agent host cannot accidentally start against a different workspace.
 `;
 
 /**
@@ -126,19 +147,28 @@ function asOutcome(result: { ok?: boolean } & Record<string, unknown>): CliOutco
  */
 async function resolveCliContext(tokens: Tokenized, aartOptions: CreateCliContextOptions | undefined): Promise<CliContext> {
   const root = flagString(tokens.flags, "root") ?? process.env.AART_ROOT ?? aartOptions?.root;
+  const resolvedRoot = root ?? path.join(process.cwd(), ".aart");
   const storeFlag = flagString(tokens.flags, "store");
   if (storeFlag !== undefined && storeFlag !== "fs" && storeFlag !== "sqlite") {
     throw new Error(`--store must be "fs" or "sqlite" (got "${storeFlag}").`);
   }
 
-  if (storeFlag === "sqlite" && !aartOptions?.store) {
-    const resolvedRoot = root ?? path.join(process.cwd(), ".aart");
+  let store = aartOptions?.store;
+  if (storeFlag === "sqlite" && !store) {
     await mkdir(resolvedRoot, { recursive: true });
-    const store = await createSqliteStore(path.join(resolvedRoot, "aart.db"));
-    return createCliContext({ ...aartOptions, root: resolvedRoot, store });
+    store = await createSqliteStore(path.join(resolvedRoot, "aart.db"));
+  } else if (!store) {
+    store = createFsStore(resolvedRoot);
   }
 
-  return createCliContext({ ...aartOptions, root });
+  const bundleDir = flagString(tokens.flags, "bundle");
+  const startupBundle = bundleDir
+    ? await hydrateBundleFromDisk(store, bundleDir, undefined, resolvedRoot)
+    : undefined;
+  return {
+    ...createCliContext({ ...aartOptions, root: resolvedRoot, store }),
+    ...(startupBundle ? { startupBundle } : {}),
+  };
 }
 
 /** Resolves `--root`/`AART_ROOT`/`aartOptions.root` with the exact same precedence `resolveCliContext` applies internally (flag > env > programmatic option > `./.aart` default) — shared so `assertServerRootExists` below and the context construction it gates never disagree about which path is "the" root. */
@@ -187,20 +217,33 @@ function assertServerRootExists(tokens: Tokenized, aartOptions: CreateCliContext
 
 export async function run(argv: readonly string[], options: RunOptions = {}): Promise<CliOutcome> {
   const [command, ...rest] = argv;
+  if (command === "init-agent" && rest.some((arg) => arg === "--help" || arg === "-h" || arg === "help")) {
+    return asOutcome({ ok: true, usage: INIT_AGENT_USAGE });
+  }
   const tokens = tokenize(rest);
 
   try {
     if (!options.cliContext && (command === "server" || command === "worker")) {
       assertServerRootExists(tokens, options.aartOptions);
     }
-    const cli = options.cliContext ?? (await resolveCliContext(tokens, options.aartOptions));
+    const contextOptions =
+      command === "pack"
+        ? { ...options.aartOptions, loadInstalledPacks: false }
+        : options.aartOptions;
+    const cli = options.cliContext ?? (await resolveCliContext(tokens, contextOptions));
     switch (command) {
       case "run":
         return asOutcome(await runCommand(tokens, cli));
+      case "report":
+        return asOutcome(await reportCommand(tokens, cli));
       case "validate":
         return asOutcome(await validateCommand(tokens, cli));
       case "list":
         return asOutcome(await listCommand(tokens, cli));
+      case "find-blocks":
+        return asOutcome(await findBlocksCommand(tokens, cli));
+      case "find-workflows":
+        return asOutcome(await findWorkflowsCommand(tokens, cli));
       case "register":
         return asOutcome(await registerCommand(tokens, cli));
       case "init":
@@ -223,6 +266,8 @@ export async function run(argv: readonly string[], options: RunOptions = {}): Pr
         return asOutcome(await triggerCommand(tokens, cli));
       case "remote":
         return asOutcome(await remoteCommand(tokens, cli));
+      case "pack":
+        return asOutcome(await packCommand(tokens, cli));
       case "push":
         return asOutcome(await pushCommand(tokens, cli));
       case "remote-status":

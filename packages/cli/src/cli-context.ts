@@ -20,6 +20,7 @@
 // in a fast unit test). Pass `real: false` to get it — see test-utils.ts's
 // createTestCli, the one call site that does.
 import path from "node:path";
+import type { HydrateBundleResult } from "@aart/server";
 import {
   createAartContext,
   createRealAartContextWithEngine,
@@ -52,6 +53,8 @@ export interface CliContext {
    * `resolvedRoot` computation below (unchanged, just now also returned).
    */
   root: string;
+  /** Bundle restored before the real engine/catalog was constructed. */
+  startupBundle?: HydrateBundleResult;
 }
 
 export function createCliContext(options: CreateCliContextOptions = {}): CliContext {

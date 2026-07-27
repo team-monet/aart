@@ -731,7 +731,7 @@ export async function startServer(config: ServerConfig): Promise<ServerHandle> {
         return sendJson(ctx.res, 400, { error: err instanceof Error ? err.message : "invalid bundle envelope" });
       }
       try {
-        const result = await hydrateBundle(config.store, bundle, clock);
+        const result = await hydrateBundle(config.store, bundle, clock, config.packRoot);
         return sendJson(ctx.res, 200, result);
       } catch (err) {
         const message = err instanceof Error ? err.message : "hydration failed";

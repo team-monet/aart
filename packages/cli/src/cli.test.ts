@@ -82,6 +82,21 @@ describe("aart run", () => {
   });
 });
 
+describe("aart report", () => {
+  it("closes the CLI run-to-evidence loop without sending the user to an MCP-only tool", async () => {
+    tc = await createTestCli();
+    await tc.cli.aart.store.workflows.put(compileWorkflowInput(sampleWorkflowYaml("wf-cli-report")));
+    const runOutcome = await run(["run", "wf-cli-report"], { cliContext: tc.cli });
+    const runResult = runOutcome.result as { runId: string; next: string };
+    expect(runResult.next).toContain(`\`aart report ${runResult.runId}\``);
+    expect(runResult.next).not.toContain("aart_get_report");
+
+    const reportOutcome = await run(["report", runResult.runId], { cliContext: tc.cli });
+    expect(reportOutcome.ok).toBe(true);
+    expect((reportOutcome.result as { report: { workflowId: string } }).report.workflowId).toBe("wf-cli-report");
+  });
+});
+
 describe("aart validate", () => {
   it("validates a workflow file from disk", async () => {
     tc = await createTestCli();
@@ -175,8 +190,10 @@ describe("aart init / aart init-agent", () => {
     expect(outcome.ok).toBe(true);
     const config = JSON.parse(await readFile(mcpConfigOut, "utf8"));
     expect(config.mcpServers.aart.args).toContain("mcp");
+    expect(config.mcpServers.aart.args).toEqual(expect.arrayContaining(["--root", tc.cli.root, "--store", "fs"]));
     const instructions = await readFile(instructionsOut, "utf8");
     expect(instructions).toContain("Shell runs and is forgotten");
+    expect(instructions).toContain("aart_find_workflows");
   });
 
   describe("aart init-agent's generated MCP config — AMENDMENTS.md A54 (the npx-registry trap)", () => {
@@ -188,8 +205,8 @@ describe("aart init / aart init-agent", () => {
       });
       expect(outcome.ok).toBe(true);
       const config = JSON.parse(await readFile(mcpConfigOut, "utf8"));
-      expect(config.mcpServers.aart.command).toBe("node");
-      expect(config.mcpServers.aart.args).toEqual([process.argv[1], "mcp"]);
+      expect(config.mcpServers.aart.command).toBe(process.execPath);
+      expect(config.mcpServers.aart.args).toEqual([process.argv[1], "mcp", "--root", tc.cli.root, "--store", "fs"]);
     });
 
     it("--bin-path overrides the default explicitly", async () => {
@@ -201,7 +218,7 @@ describe("aart init / aart init-agent", () => {
       );
       expect(outcome.ok).toBe(true);
       const config = JSON.parse(await readFile(mcpConfigOut, "utf8"));
-      expect(config.mcpServers.aart).toEqual({ command: "node", args: ["/opt/aart/dist/bin.js", "mcp"] });
+      expect(config.mcpServers.aart).toEqual({ command: process.execPath, args: ["/opt/aart/dist/bin.js", "mcp", "--root", tc.cli.root, "--store", "fs"] });
     });
 
     it("--npx opts back into the original registry-resolved form (correct once @team-monet/aart is genuinely published at a matching version)", async () => {
@@ -212,7 +229,7 @@ describe("aart init / aart init-agent", () => {
       });
       expect(outcome.ok).toBe(true);
       const config = JSON.parse(await readFile(mcpConfigOut, "utf8"));
-      expect(config.mcpServers.aart).toEqual({ command: "npx", args: ["-y", "@team-monet/aart", "mcp"] });
+      expect(config.mcpServers.aart).toEqual({ command: "npx", args: ["-y", "@team-monet/aart", "mcp", "--root", tc.cli.root, "--store", "fs"] });
     });
 
     it("--npx --package names a different registry package", async () => {
@@ -224,8 +241,36 @@ describe("aart init / aart init-agent", () => {
       );
       expect(outcome.ok).toBe(true);
       const config = JSON.parse(await readFile(mcpConfigOut, "utf8"));
-      expect(config.mcpServers.aart.args).toEqual(["-y", "@custom/aart", "mcp"]);
+      expect(config.mcpServers.aart.args).toEqual(["-y", "@custom/aart", "mcp", "--root", tc.cli.root, "--store", "fs"]);
     });
+
+    it("pins sqlite when init-agent is invoked with --store sqlite", async () => {
+      tc = await createTestCli();
+      const mcpConfigOut = join(tc.cwd, ".mcp.json");
+      const outcome = await run(["init-agent", "--npx", "--store", "sqlite", "--mcp-config-out", mcpConfigOut, "--instructions-out", join(tc.cwd, "AGENTS.md")], {
+        cliContext: tc.cli,
+      });
+      expect(outcome.ok).toBe(true);
+      const config = JSON.parse(await readFile(mcpConfigOut, "utf8"));
+      expect(config.mcpServers.aart.args).toEqual(["-y", "@team-monet/aart", "mcp", "--root", tc.cli.root, "--store", "sqlite"]);
+    });
+  });
+
+  it("aart init-agent --help is read-only and returns command-specific usage", async () => {
+    tc = await createTestCli();
+    const outcome = await run(["init-agent", "--help", "--cwd", tc.cwd], { cliContext: tc.cli });
+    expect(outcome.ok).toBe(true);
+    expect(String((outcome.result as { usage?: string }).usage)).toContain("pins the resolved absolute --root");
+    await expect(stat(join(tc.cwd, ".mcp.json"))).rejects.toThrow();
+    await expect(stat(join(tc.cwd, "AGENTS.md"))).rejects.toThrow();
+  });
+
+  it("aart init-agent rejects misspelled flags before writing", async () => {
+    tc = await createTestCli();
+    const outcome = await run(["init-agent", "--hepl", "--cwd", tc.cwd], { cliContext: tc.cli });
+    expect(outcome.ok).toBe(false);
+    expect(String((outcome.result as { error?: string }).error)).toContain("Unknown init-agent flag");
+    await expect(stat(join(tc.cwd, ".mcp.json"))).rejects.toThrow();
   });
 
   describe("aart init-agent's .mcp.json write is merge-safe, not clobbering (this session's own fix — with-aart/bootstrap/install.md's Phase 3 depends on this)", () => {
@@ -260,7 +305,7 @@ describe("aart init / aart init-agent", () => {
       expect(second.ok).toBe(true);
       const config = JSON.parse(await readFile(mcpConfigOut, "utf8"));
       expect(Object.keys(config.mcpServers).sort()).toEqual(["aart", "monet"]);
-      expect(config.mcpServers.aart).toEqual({ command: "node", args: ["/opt/aart-new/dist/bin.js", "mcp"] });
+      expect(config.mcpServers.aart).toEqual({ command: process.execPath, args: ["/opt/aart-new/dist/bin.js", "mcp", "--root", tc.cli.root, "--store", "fs"] });
       expect(config.mcpServers.monet).toEqual({ command: "monet", args: ["start"] });
     });
 
@@ -321,6 +366,94 @@ steps:
     await run(["register", v2], { cliContext: tc.cli });
     const outcome = await run(["diff", "wf-cli-diff", "--from", "0.1.0", "--to", "0.2.0"], { cliContext: tc.cli });
     expect(outcome.ok).toBe(true);
+  });
+});
+
+describe("aart find-workflows", () => {
+  it("finds a reusable workflow by metadata through the same MCP handler", async () => {
+    tc = await createTestCli();
+    await tc.cli.aart.store.workflows.put(compileWorkflowInput(sampleWorkflowYaml("reusable-release-check")));
+    const outcome = await run(["find-workflows", "release"], { cliContext: tc.cli });
+    expect(outcome.ok).toBe(true);
+    expect((outcome.result as { workflows: Array<{ id: string }> }).workflows).toEqual([
+      expect.objectContaining({ id: "reusable-release-check" }),
+    ]);
+  });
+});
+
+describe("aart find-blocks", () => {
+  it("searches the same local catalog as MCP and keeps the next action executable in the CLI", async () => {
+    tc = await createTestCli();
+    const outcome = await run(["find-blocks", "browser"], { cliContext: tc.cli });
+    expect(outcome.ok).toBe(true);
+    expect((outcome.result as { blocks: Array<{ id: string }> }).blocks.length).toBeGreaterThan(0);
+    expect((outcome.result as { next: string }).next).toContain("`aart find-workflows`");
+    expect((outcome.result as { next: string }).next).not.toContain("aart_find_workflows");
+  });
+
+  it("turns a workflow-search miss into a command the same CLI can actually run", async () => {
+    tc = await createTestCli();
+    const outcome = await run(["find-workflows", "not-present-anywhere"], { cliContext: tc.cli });
+    expect(outcome.ok).toBe(true);
+    expect((outcome.result as { matched: boolean }).matched).toBe(false);
+    expect((outcome.result as { next: string }).next).toContain("`aart find-blocks`");
+    expect((outcome.result as { next: string }).next).not.toContain("aart_find_blocks");
+  });
+
+  it("treats a Block-search miss as a successful search and offers full-catalog browsing", async () => {
+    tc = await createTestCli();
+    const outcome = await run(["find-blocks", "xyzzyqwertycapability"], { cliContext: tc.cli });
+    expect(outcome.ok).toBe(true);
+    expect((outcome.result as { matched: boolean }).matched).toBe(false);
+    expect((outcome.result as { next: string }).next).toContain("`aart find-blocks` without a query");
+  });
+});
+
+describe("aart pack", () => {
+  it("adds a workflow-only Pack inertly, lists it, then registers its workflow only after human approval", async () => {
+    tc = await createTestCli();
+    const packDir = join(tc.cwd, "aart-pack-cli-reuse");
+    await mkdir(join(packDir, "workflows"), { recursive: true });
+    await writeFile(
+      join(packDir, "aart-pack.yaml"),
+      "name: cli-reuse\nversion: 1.0.0\nworkflows: [cli-reusable-flow]\n",
+      "utf8",
+    );
+    await writeFile(
+      join(packDir, "package.json"),
+      JSON.stringify({ name: "aart-pack-cli-reuse", version: "1.0.0" }),
+      "utf8",
+    );
+    await writeFile(join(packDir, "workflows", "cli-reusable-flow.yaml"), sampleWorkflowYaml("cli-reusable-flow", "1.0.0"), "utf8");
+
+    const added = await run(["pack", "add", "cli-reuse", "--from", packDir], { cliContext: tc.cli });
+    expect(added.ok).toBe(true);
+    expect((added.result as { approvalStatus: string }).approvalStatus).toBe("unapproved");
+    expect((added.result as { next: string }).next).toContain("`aart pack list --status unapproved`");
+    expect(await tc.cli.aart.store.workflows.getLatest("cli-reusable-flow")).toBeUndefined();
+
+    const listed = await run(["pack", "list", "--status", "unapproved"], { cliContext: tc.cli });
+    expect((listed.result as { count: number }).count).toBe(1);
+    expect((listed.result as { next: string }).next).toContain(
+      `--content-hash ${(added.result as { contentHash: string }).contentHash}`,
+    );
+
+    const approved = await run(
+      [
+        "pack",
+        "approve",
+        "cli-reuse",
+        "--version",
+        "1.0.0",
+        "--content-hash",
+        (added.result as { contentHash: string }).contentHash,
+        "--reviewer",
+        "alice",
+      ],
+      { cliContext: tc.cli },
+    );
+    expect(approved.ok).toBe(true);
+    expect((await tc.cli.aart.store.workflows.getLatest("cli-reusable-flow"))?.approval).toBe("draft");
   });
 });
 
@@ -1087,6 +1220,90 @@ describe("aart server / aart worker — composition-time root check (AMENDMENTS.
     expect(outcome.ok).toBe(true);
     const list = await run(["list", "--root", freshRoot]);
     expect((list.result as { workflows: { id: string }[] }).workflows.map((w) => w.id)).toContain("wf-bundle-root-check");
+  });
+
+  it("a fresh destination restores bundled Pack code before constructing its runtime catalog", async () => {
+    base = await mkdtemp(join(tmpdir(), "aart-server-pack-bundle-"));
+    const sourceRoot = join(base, "source", ".aart");
+    const packDir = join(base, "aart-pack-demo");
+    await mkdir(join(packDir, "blocks"), { recursive: true });
+    await writeFile(join(packDir, "aart-pack.yaml"), "name: demo\nversion: 1.0.0\nblocks: [demo.echo]\n", "utf8");
+    await writeFile(
+      join(packDir, "package.json"),
+      JSON.stringify({ name: "aart-pack-demo", version: "1.0.0" }),
+      "utf8",
+    );
+    await writeFile(
+      join(packDir, "blocks", "demo.echo.cjs"),
+      `module.exports = {
+        manifest: {
+          id: "demo.echo",
+          version: "1.0.0",
+          capabilities: [],
+          inputSchema: {},
+          outputSchema: {},
+          description: "Echo a value"
+        },
+        execute: (input) => ({ value: input.value })
+      };`,
+      "utf8",
+    );
+    const added = await run(["pack", "add", "demo", "--from", packDir, "--root", sourceRoot]);
+    expect(added.ok).toBe(true);
+    const contentHash = (added.result as { contentHash: string }).contentHash;
+    const approved = await run([
+      "pack",
+      "approve",
+      "demo",
+      "--version",
+      "1.0.0",
+      "--content-hash",
+      contentHash,
+      "--reviewer",
+      "bundle-e2e",
+      "--root",
+      sourceRoot,
+    ]);
+    expect(approved.ok).toBe(true);
+
+    const workflowPath = join(base, "pack-workflow.yaml");
+    await writeFile(
+      workflowPath,
+      `id: bundled-pack-wf
+name: Bundled Pack Workflow
+version: 1.0.0
+inputs:
+  value:
+    type: string
+    required: true
+steps:
+  - id: echo
+    uses: demo.echo
+    with:
+      value: "{{ inputs.value }}"
+`,
+      "utf8",
+    );
+    expect((await run(["register", workflowPath, "--root", sourceRoot])).ok).toBe(true);
+    const outDir = join(base, "bundle-out");
+    expect((await run(["bundle", "bundled-pack-wf", "--out", outDir, "--root", sourceRoot])).ok).toBe(true);
+
+    const destinationRoot = join(base, "fresh", ".aart");
+    const started = await run(
+      ["server", "--port", "0", "--root", destinationRoot, "--bundle", outDir],
+      { blocking: false },
+    );
+    expect(started.ok).toBe(true);
+    const executed = await run([
+      "run",
+      "bundled-pack-wf",
+      "--input",
+      '{"value":"hello"}',
+      "--root",
+      destinationRoot,
+    ]);
+    expect(executed.ok).toBe(true);
+    expect((executed.result as { status: string }).status).toBe("completed");
   });
 
   it("an explicit cliContext override bypasses the check entirely (this package's own fast unit tests, which never point at a real --root)", async () => {

@@ -1,6 +1,10 @@
 # @team-monet/aart
 
-AART — a governed workflow runtime. `@team-monet/aart` is the CLI: a thin command surface over AART's engine, governance, and MCP tool layer. It is the one package in this monorepo published to npm (see `aart_architecture_v1.md` ADR-18); every other `@aart/*` package is internal and workspace-only.
+AART turns one successful agent task into a reusable block or workflow that
+the same or another agent can discover before rebuilding it. Humans co-author
+and govern the asset; an AART server runs the approved version deterministically
+without an agent in the execution loop. `@team-monet/aart` is the CLI over
+that registry, engine, governance, and MCP surface.
 
 AART lets you author, run, and govern multi-step workflows that mix deterministic blocks (HTTP, browser, file, data), LLM calls, and durable human-in-the-loop waits — with approvals, capability-based trust modes, redaction, and evidence capture built in rather than bolted on.
 
@@ -51,12 +55,20 @@ Every command prints a single JSON object (`{"ok": true, ...}` or `{"ok": false,
 
 ```
 aart run <workflowId> --input <json> [--version <v>]
+aart report <runId> [--format model|markdown]
 aart validate <path>
 aart validate <workflowId> --registered [--version <v>]
 aart list
+aart find-blocks [query] [--category <category>] [--scope local|remote|all] [--index-url <url>]
+aart find-workflows [query] [--category <category>] [--scope local|remote|all] [--index-url <url>]
+aart pack search [query] [--index-url <url>]
+aart pack add <name> [--version <v>] [--from <local-package-dir>]
+aart pack list [--status unapproved|approved]
+aart pack approve <name> --version <v> --content-hash <sha256:...> --reviewer <name>
+aart pack prepare <local-package-dir> [--out <index-entry.json>]
 aart register <path>
 aart init
-aart init-agent [--npx] [--package <name>] [--bin-path <path>] [--cwd <dir>]
+aart init-agent [--npx] [--package <name>] [--bin-path <path>] [--root <dir>] [--store fs|sqlite] [--cwd <dir>]
 aart diff <workflowId> [--from <v>] [--to <v>]
 aart correction add <runId> --step <id> --field <path> --observed <json> --corrected <json> --reason <text> --reviewer <name>
 aart correction list [--run <runId>] [--step <id>]
@@ -83,10 +95,24 @@ aart mcp [--store fs|sqlite] [--root <dir>]
 - `aart mcp` starts AART as an MCP (Model Context Protocol) server, exposing the same tool surface the CLI wraps directly to an MCP-speaking agent.
 - `aart init-agent` scaffolds the agent-facing instructions AART ships for coding assistants working against a repo that uses it, plus a ready-to-use `.mcp.json`. By default the generated config invokes this exact `aart` binary directly (`{"command": "node", "args": ["<path to this install's bin.js>", "mcp"]}`) rather than `npx` — correct regardless of exactly which install (npm or from-source) generated it, and avoids a fresh `npx` resolve on every MCP client launch. Pass `--npx` to opt into the registry-resolved `npx -y <package> mcp` form instead, safe as of `0.10.0` (see the install note above). See [`AUTHORING.md`](../../AUTHORING.md) for the full authoring-machine walkthrough.
 - `aart request-approval` creates a human-approval request — for a workflow VERSION (the promotion gate) or, automatically, whenever a running workflow hits a `human.approval` step. `aart approve` records the decision either way.
+- Packs distribute reusable blocks and workflows through ordinary
+  `aart-pack-<name>` npm packages plus a configured static JSON index
+  (`AART_PACK_INDEX_URL`). `pack add` is intentionally inert and records the
+  Pack as unapproved; the separate human `pack approve` step verifies its
+  content seal and requires that exact hash through `--content-hash`, then
+  inspects module shape inside a V8 isolate. Approval never
+  makes Pack code trusted host code: executable Pack blocks run as synchronous
+  pure JSON transforms in a fresh zero-ambient-capability isolate on every
+  dispatch. Imported workflows still land as drafts and pass the normal
+  workflow gates.
 
 ## Status
 
-This is an early (`0.x`) release. The core engine, governance model, and block catalog are built and tested; domain-specific packs (installable third-party block bundles) are not yet part of this release. See this package's `CHANGELOG.md` for release notes.
+This is an early (`0.x`) release. The core engine, governance model, block
+catalog, and public Pack prepare/search/install/approval loop are built and
+tested. A Pack-backed workflow still needs destination-side Pack deployment
+closure before a fresh server bundle can run it unattended; see
+`AMENDMENTS.md` A72. See this package's `CHANGELOG.md` for release notes.
 
 ## License
 

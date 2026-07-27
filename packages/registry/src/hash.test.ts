@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { canonicalize, computePackContentHash } from "./hash.js";
 
@@ -52,6 +53,49 @@ describe("computePackContentHash — architecture §11.1", () => {
       "github.comment_pr": "export function commentPr() { return 2 /* edited */; }",
     });
     expect(edited).not.toBe(original);
+  });
+
+  it("a workflow-definition change invalidates the same Pack seal", () => {
+    const original = computePackContentHash(baseManifest, baseBlockSources, { "release-proof": "version: 1.0.0" });
+    const edited = computePackContentHash(baseManifest, baseBlockSources, { "release-proof": "version: 1.0.1" });
+    expect(edited).not.toBe(original);
+  });
+
+  it("preserves the legacy block-only hash payload across workflow support upgrades", () => {
+    const blocks = Object.keys(baseBlockSources)
+      .sort()
+      .map((name) => ({ name, source: baseBlockSources[name as keyof typeof baseBlockSources] }));
+    const legacyDigest = createHash("sha256")
+      .update(canonicalize({ manifest: baseManifest, blocks }), "utf8")
+      .digest("hex");
+    expect(computePackContentHash(baseManifest, baseBlockSources)).toBe(`sha256:${legacyDigest}`);
+  });
+
+  it("does not let new parser defaults break historical block-only seals", () => {
+    const historicalManifest = {
+      name: "minimal",
+      version: "1.0.0",
+      capabilities: [],
+      secrets: [],
+      blocks: ["minimal.run"],
+    };
+    const parsedWithNewDefaults = {
+      ...historicalManifest,
+      categories: [],
+      tags: [],
+      workflows: [],
+    };
+    expect(computePackContentHash(parsedWithNewDefaults, { "minimal.run": "source" })).toBe(
+      computePackContentHash(historicalManifest, { "minimal.run": "source" }),
+    );
+  });
+
+  it("omits a parser-defaulted empty compatibility runtime list from legacy seals", () => {
+    const withoutDefault = { ...baseManifest, compatibility: { aart: ">=0.10.0" } };
+    const withDefault = { ...baseManifest, compatibility: { aart: ">=0.10.0", runtimes: [] } };
+    expect(computePackContentHash(withDefault, baseBlockSources)).toBe(
+      computePackContentHash(withoutDefault, baseBlockSources),
+    );
   });
 
   it("adding a new block (new key in blockSources) invalidates the hash", () => {

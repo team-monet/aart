@@ -1782,3 +1782,177 @@ Applied the SAME mechanism `cli.ts` uses, not a different one: removed `resolveV
 **Full-repo sweep, zero hits, including this entry's own text.** A case-insensitive full-repo search for the two removed domain names (excluding `.git`/`node_modules`/`dist`) returns nothing — every mention above is deliberately generic; the two removed names appear literally nowhere in this diff, including in the several "this replaces the former workflow" breadcrumb comments this session initially wrote with the literal old names, then caught on a re-sweep and rewrote generically (own-work review, not just brief compliance). The exact search command and its empty output are quoted verbatim in this session's own implementation report, not repeated here — quoting the search pattern inside this file would make the file itself the next hit.
 
 **Commit:** local only, on branch `cleanup/remove-domain-examples`, off `main`. No push, no publish, no LICENSE, no retagging, no package-version or publish-workflow changes, per this task's own explicit boundary.
+
+---
+
+## 2026-07-27 — Reuse-first product realignment
+
+### A71 — Reusable blocks/workflows, discovery, and sharing are the product moat; agent co-authoring and unattended server execution are one lifecycle
+
+**John ratified the authoritative product shape:** an agent and human turn a
+repeatable task into a reusable governed asset; the same or another agent
+must be able to discover that asset before creating a different workflow;
+once approved, the exact pinned artifact moves to an AART server and runs
+without an agent or human unless the workflow explicitly contains a human
+wait. The dashboard is the evidence/governance/operations observer, not the
+primary authoring product.
+
+**Product invariant:** every authoring session starts with search. The closed
+loop is `search → reuse/adapt → create only if missing → validate/evidence →
+approve → share → rediscover`. Repeatedly generating unrelated workflows for
+the same intent is a product failure, even if each individual workflow runs.
+The accumulating searchable asset graph and its validation, correction, eval,
+approval, and usage history are AART's moat.
+
+**Current structural gaps found before implementation:**
+
+1. MCP searches built-in blocks only; registered workflows have no search
+   surface.
+2. `@aart/registry` implements remote-index ranking, but the real MCP port
+   hardcodes local scope and has no configured public index.
+3. `installPack()` exists as a library function, but `aart pack add` has no
+   CLI/MCP composition root.
+4. Installed pack manifests cannot be enumerated by name and installed block
+   implementations never join the runtime catalog; pack hashes consequently
+   remain empty.
+5. Product spec §44 says both blocks and workflows ship in packs, while the
+   architecture/example and `RawPackManifestSchema` accept blocks only.
+6. Registered-workflow-as-block capability recursion remains explicitly
+   unimplemented in `packages/mcp/src/real-context.ts`.
+
+**Slice 1 implemented in this worktree:** `aart_find_workflows` is a core MCP
+tool, with a CLI mirror `aart find-workflows`, searching latest registered
+versions by id, name, category, keywords, and example descriptions.
+`init-agent` pins the resolved absolute store root and adapter into the MCP
+command, enabling an intentional shared asset registry across multiple
+workspaces without launch-cwd drift. Generated agent instructions now state
+the complete reuse-first co-authoring → approval → unattended-server
+lifecycle. `init-agent --help` is read-only and unknown flags fail before
+writes.
+
+**CLI journey closure from the first real installed-package test:** the CLI
+also exposes `aart find-blocks` and `aart report`, so a person or shell-only
+agent can complete search → run → evidence without being told to call an
+MCP-only snake_case tool. An empty search is a successful operation with
+`matched: false`, not a process error; its next action remains search/browse.
+Generic asset words are ignored during ranking so “no such block/workflow”
+does not produce a page of weak false positives.
+
+**Required next slices, same priority—not optional polish:**
+
+1. Close pack enumeration/provenance and load approved installed blocks into
+   the real catalog and execution snapshot hashes.
+2. Reconcile the Pack schema so packs can carry reusable workflow definitions
+   as the product spec promises.
+3. Wire one local/remote search contract over blocks and workflows, backed by
+   the ratified static public JSON index plus npm package distribution; never
+   silently return an empty remote catalog when no index is configured.
+4. Expose agent-first install/publish operations and preserve “install is not
+   trust”: downloaded assets remain unapproved until the existing governance
+   path approves their exact content hash.
+5. Prove the moat loop with two isolated workspaces: agent A produces and
+   shares an asset; agent B receives only a natural-language task, discovers
+   the asset before drafting, reuses it, and runs it successfully.
+
+### A72 — Public Pack loop implemented: prepare → static-index search → inert install → human approval → catalog/workflow reuse
+
+**Implemented contract:** a Pack may carry blocks, workflows, or both, with
+at least one declared asset. The content seal now hashes the canonical
+manifest plus every block module and workflow definition. The on-disk npm
+layout is `aart-pack.yaml`, self-contained CommonJS block bundles under
+`blocks/<id>.cjs`, and workflow YAML under `workflows/<id>.yaml`.
+
+**Production and sharing surface:**
+
+- `aart pack prepare <dir>` / `aart_prepare_pack` validates package name and
+  version alignment, declared assets, block implementation shape, and
+  workflow definitions, then writes a deterministic
+  `aart-index-entry.json`.
+- Publishing remains standard infrastructure: `npm publish` for
+  `aart-pack-<name>` and a merge of the generated entry into the configured
+  static JSON index. AART does not introduce a hosted registry service.
+- `aart pack search` / `aart_find_packs`, plus remote/all scopes on block and
+  workflow search, fetch that configured index. Missing remote configuration
+  is an explicit error, never a fake empty catalog.
+- `aart pack add` / `aart_install_pack` uses npm with lifecycle scripts
+  disabled, or an explicit linked directory for offline/local proof. Exact
+  source bytes and provenance are preserved under the AART root.
+
+**Trust boundary:** installation always records `unapproved`; downloaded
+block code is not evaluated in the host process. `aart pack approve` /
+`aart_approve_pack` is gated exactly like chat approval, checks the content
+seal, then inspects block-module shape inside a zero-ambient-capability V8
+isolate and compiles workflow definitions. Approved blocks enter the real
+runtime catalog only on the next process start, and every dispatch runs the
+module in a fresh isolate with no `require`, `process`, filesystem, network,
+secret resolver, artifact writer, or persistent module state. In this first
+public-Pack contract, executable CJS blocks are synchronous pure JSON
+transforms and must declare no ambient capabilities; reusable workflows may
+still compose capability-bearing built-in blocks. Imported workflows are
+deliberately registered as `draft` with all normal gates pending—a Pack
+approval is not a shortcut around workflow validation/promotion.
+
+**PR review closure:** the first implementation used host `require()` for
+approval-time shape validation and approved-block dispatch. That made
+approval an unintended trust grant and contradicted the sandbox hard ceiling.
+The review cycle removed that path entirely, added adversarial coverage that
+would write a host marker if `process`/`require` leaked, and tightened every
+manifest-derived path segment plus installed-package identity matching.
+Approval is also bound to the exact `contentHash` the human reviewed; a
+same-version reinstall cannot race the decision onto different bytes. Before
+recording approval, AART now rejects Block ids owned by core or another Pack
+and refuses to overwrite a non-identical registered Workflow version. These
+checks happen before the approval record is written so a successful approval
+cannot make the next process start fail or silently replace local work.
+
+**Runtime closure:** the active approved version of each Pack is selected
+deterministically; workflows using its blocks capture the Pack content hash
+in `ExecutionSnapshot.packHashes`. Multiple historical approved versions can
+remain recorded without producing duplicate block-id collisions; only the
+highest active approved version loads.
+
+**Still separate, not claimed complete by this slice:** deployment bundles
+currently carry Pack manifests but not executable Pack files, and bundle
+hydration constructs the process catalog before any destination-side Pack
+installation. Therefore a Pack-backed workflow is proven locally reusable
+after install/approval, but pushing that exact Pack implementation to a
+fresh unattended server remains the next deployment-closure slice.
+
+### A73 — Public Pack catalog is a distinct discovery product over the same canonical index; npm remains replaceable transport
+
+**Product boundary:** npm stores and serves immutable, versioned
+`aart-pack-*` artifacts. AART owns discovery, categories, provenance, trust
+signals, and reuse. The public human surface is one AART Pack Library with
+an individual detail route per Pack—not a separate website per Pack. The
+website, CLI, and MCP consume the same versioned static index document, so
+human browsing and agent search cannot drift into separate catalogs.
+
+**Index contract:** schema version 1 keeps publisher-authored fields
+(`displayName`, description, categories, tags, author, license, repository,
+homepage, compatibility, declared capabilities/secrets) separate from
+registry-owned fields (`verification`, publication timestamps, aggregate
+downloads/installs/reuses). A publisher may propose descriptive metadata
+through `aart-pack.yaml`; it cannot self-assert AART verification or usage
+statistics. `aart pack prepare` derives asset categories, normalizes author
+metadata, and emits only publisher-owned metadata plus the exact content
+hash. The publication/index-maintenance path is responsible for attaching
+registry attestations later.
+
+**Catalog surface:** `packages/catalog` is a separately deployable public
+site, not part of the local governance dashboard's trust boundary. It
+provides full-text Pack/Block/Workflow search, outcome-oriented category
+browsing, Pack detail pages, install commands, exact content seal,
+capability/secret declarations, compatibility, provenance, verification,
+and reuse signals. The checked-in index is explicitly marked `mode:
+"preview"` and contains representative fixtures; it is not evidence that
+those npm packages exist.
+
+**Trust UX:** every install affordance states that download is inert and
+approval is separate. Verification is a discovery signal, never executable
+authority: even an AART-verified public Pack still installs unapproved and
+must pass the same local human approval gate as every other Pack.
+
+**Hosting boundary:** no site project was created or deployed in this
+slice. Production hosting, domain choice, npm publication, and static-index
+publication are external mutations and require explicit authorization. The
+site build and canonical-index validation are ready locally.

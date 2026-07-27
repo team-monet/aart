@@ -19,7 +19,7 @@
 // making S1 own and ship the actual sandboxing mechanism, exactly as the
 // plan specifies.
 import ivm from "isolated-vm";
-import { TimeoutError } from "@aart/types";
+import { BlockManifestSchema, TimeoutError, type BlockManifest } from "@aart/types";
 
 export interface NodeSandboxOptions {
   /**
@@ -37,6 +37,20 @@ export interface NodeSandboxOptions {
   /** Hard memory ceiling in MB. Default 8 (matches the platform smoke test's own isolate — scripts/smoke/isolated-vm.mjs — a `node`-type block is pure JSON-transform logic, not expected to need more). */
   memoryLimitMb?: number;
   /** Hard wall-clock timeout in ms for the script's execution. Default 5000. */
+  timeoutMs?: number;
+}
+
+export interface CommonJsBlockSandboxOptions {
+  /** Complete source of a self-contained CommonJS block module. */
+  source: string;
+  expectedId: string;
+  resolvedInputs: unknown;
+  /** Only non-secret trace correlation metadata crosses the isolate boundary. */
+  executionContext: {
+    runId: string;
+    stepId: string;
+  };
+  memoryLimitMb?: number;
   timeoutMs?: number;
 }
 
@@ -111,6 +125,248 @@ export async function runNodeSandbox(options: NodeSandboxOptions): Promise<unkno
     // heap it reserved for `memoryLimit`.
     isolate.dispose();
   }
+}
+
+/**
+ * Inspects a public Pack's CommonJS module inside a disposable isolate.
+ * Running the module is necessary to obtain its exported manifest, but this
+ * function never evaluates it in the host process: `require`, `process`,
+ * network, filesystem, and host globals are absent.
+ */
+export function inspectCommonJsBlockSourceSync(
+  source: string,
+  expectedId: string,
+  options: { memoryLimitMb?: number; timeoutMs?: number } = {},
+): BlockManifest {
+  const result = evaluateCommonJsBlockSync({
+    source,
+    expectedId,
+    memoryLimitMb: options.memoryLimitMb,
+    timeoutMs: options.timeoutMs,
+    mode: "inspect",
+  }) as { manifest?: unknown; executeType?: unknown; executeTag?: unknown };
+  return validateInspectedCommonJsBlock(result, expectedId);
+}
+
+export async function inspectCommonJsBlockSource(
+  source: string,
+  expectedId: string,
+  options: { memoryLimitMb?: number; timeoutMs?: number } = {},
+): Promise<BlockManifest> {
+  const result = (await evaluateCommonJsBlock({
+    source,
+    expectedId,
+    memoryLimitMb: options.memoryLimitMb,
+    timeoutMs: options.timeoutMs,
+    mode: "inspect",
+  })) as { manifest?: unknown; executeType?: unknown; executeTag?: unknown };
+  return validateInspectedCommonJsBlock(result, expectedId);
+}
+
+function validateInspectedCommonJsBlock(
+  result: { manifest?: unknown; executeType?: unknown; executeTag?: unknown },
+  expectedId: string,
+): BlockManifest {
+  const parsed = BlockManifestSchema.safeParse(result.manifest);
+  if (!parsed.success || result.executeType !== "function") {
+    throw new Error(`block ${expectedId} must export a valid { manifest, execute } implementation`);
+  }
+  if (result.executeTag !== "[object Function]") {
+    throw new Error(`public Pack block ${expectedId} must use a synchronous execute() function`);
+  }
+  if (parsed.data.id !== expectedId) {
+    throw new Error(`block file ${expectedId}.cjs exports manifest id "${parsed.data.id}"`);
+  }
+  if (parsed.data.capabilities.length > 0) {
+    throw new Error(
+      `public Pack block ${expectedId} declares unsupported ambient capabilities (${parsed.data.capabilities.join(", ")}); ` +
+        "Pack block execution is currently limited to pure JSON transforms inside the zero-ambient-capability sandbox",
+    );
+  }
+  return parsed.data;
+}
+
+/**
+ * Executes a previously inspected public Pack block in a fresh isolate.
+ * The source is re-evaluated in the isolate for each dispatch, so neither
+ * module state nor attacker-controlled globals survive between runs.
+ */
+export async function runCommonJsBlockSandbox(options: CommonJsBlockSandboxOptions): Promise<unknown> {
+  // Runtime re-inspection and dispatch both use isolated-vm's asynchronous
+  // evaluation path. A slow Pack transform must not block host timers,
+  // worker lease heartbeats, health checks, or unrelated HTTP requests.
+  const inspection = (await evaluateCommonJsBlock({
+    source: options.source,
+    expectedId: options.expectedId,
+    memoryLimitMb: options.memoryLimitMb,
+    timeoutMs: options.timeoutMs,
+    mode: "inspect",
+  })) as { manifest?: unknown; executeType?: unknown; executeTag?: unknown };
+  validateInspectedCommonJsBlock(inspection, options.expectedId);
+  return evaluateCommonJsBlock({
+    ...options,
+    mode: "execute",
+  });
+}
+
+type CommonJsEvaluationOptions = Omit<CommonJsBlockSandboxOptions, "resolvedInputs" | "executionContext"> &
+  Partial<Pick<CommonJsBlockSandboxOptions, "resolvedInputs" | "executionContext">> & {
+    mode: "inspect" | "execute";
+  };
+
+async function evaluateCommonJsBlock(options: CommonJsEvaluationOptions): Promise<unknown> {
+  const memoryLimit = options.memoryLimitMb ?? 8;
+  const timeout = options.timeoutMs ?? 5_000;
+  const isolate = new ivm.Isolate({ memoryLimit });
+  try {
+    const context = await isolate.createContext();
+    await context.global.set("__AART_INPUT_JSON__", JSON.stringify(options.resolvedInputs ?? null));
+    await context.global.set(
+      "__AART_CONTEXT_JSON__",
+      JSON.stringify(options.executionContext ?? { runId: "", stepId: "" }),
+    );
+    const wrapped = commonJsProgram(options);
+    let resultJson: string;
+    try {
+      resultJson = (await context.eval(wrapped, { timeout })) as string;
+    } catch (err) {
+      throw classifySandboxError(err);
+    }
+    return parseCommonJsResult(resultJson, options.expectedId);
+  } finally {
+    isolate.dispose();
+  }
+}
+
+function evaluateCommonJsBlockSync(options: CommonJsEvaluationOptions): unknown {
+  const memoryLimit = options.memoryLimitMb ?? 8;
+  const timeout = options.timeoutMs ?? 5_000;
+  const isolate = new ivm.Isolate({ memoryLimit });
+  try {
+    const context = isolate.createContextSync();
+    context.global.setSync("__AART_INPUT_JSON__", JSON.stringify(options.resolvedInputs ?? null));
+    context.global.setSync(
+      "__AART_CONTEXT_JSON__",
+      JSON.stringify(options.executionContext ?? { runId: "", stepId: "" }),
+    );
+    const wrapped = commonJsProgram(options);
+    let resultJson: string;
+    try {
+      resultJson = context.evalSync(wrapped, { timeout }) as string;
+    } catch (err) {
+      throw classifySandboxError(err);
+    }
+    return parseCommonJsResult(resultJson, options.expectedId);
+  } finally {
+    isolate.dispose();
+  }
+}
+
+function commonJsProgram(options: CommonJsEvaluationOptions): string {
+  const operation =
+    options.mode === "inspect"
+      ? `return JSON.stringify({
+          manifest: candidate && candidate.manifest,
+          executeType: candidate && typeof candidate.execute,
+          executeTag: candidate && Object.prototype.toString.call(candidate.execute)
+        });`
+      : `
+        if (!candidate || typeof candidate !== "object" || typeof candidate.execute !== "function") {
+          throw new Error("block ${escapeForDoubleQuotedString(options.expectedId)} must export { manifest, execute }");
+        }
+        var result = candidate.execute(
+          JSON.parse(__AART_INPUT_JSON__),
+          JSON.parse(__AART_CONTEXT_JSON__)
+        );
+        if (result && typeof result.then === "function") {
+          throw new Error("public Pack block execute() must return synchronously; asynchronous host capabilities are not available inside the Pack sandbox");
+        }
+        return JSON.stringify(result === undefined ? null : result);
+      `;
+  return `
+      (function () {
+        "use strict";
+        var Date = (function (NativeDate) {
+          var safePrototype = Object.create(null);
+          function DeterministicDate() {
+            if (!new.target || arguments.length === 0) {
+              throw new Error("public Pack blocks cannot read ambient time; pass time as an explicit input");
+            }
+            if (
+              arguments.length !== 1 ||
+              (typeof arguments[0] !== "number" &&
+                (typeof arguments[0] !== "string" || !/(?:Z|[+-]\\d{2}:?\\d{2})$/i.test(arguments[0])))
+            ) {
+              throw new Error("public Pack dates must use an epoch number or a string with an explicit timezone");
+            }
+            var instance = Reflect.construct(NativeDate, Array.from(arguments));
+            Object.setPrototypeOf(instance, safePrototype);
+            return instance;
+          }
+          DeterministicDate.now = function () {
+            throw new Error("public Pack blocks cannot read ambient time; pass time as an explicit input");
+          };
+          DeterministicDate.parse = function (value) {
+            if (typeof value !== "string" || !/(?:Z|[+-]\\d{2}:?\\d{2})$/i.test(value)) {
+              throw new Error("public Pack dates must include an explicit timezone");
+            }
+            return NativeDate.parse(value);
+          };
+          DeterministicDate.UTC = NativeDate.UTC;
+          for (var key of Reflect.ownKeys(NativeDate.prototype)) {
+            if (key !== "constructor") {
+              Object.defineProperty(safePrototype, key, Object.getOwnPropertyDescriptor(NativeDate.prototype, key));
+            }
+          }
+          Object.defineProperty(safePrototype, "constructor", {
+            value: DeterministicDate,
+            writable: false,
+            configurable: false
+          });
+          Object.freeze(safePrototype);
+          DeterministicDate.prototype = safePrototype;
+          Object.freeze(DeterministicDate);
+          return DeterministicDate;
+        })(globalThis.Date);
+        var Math = (function (NativeMath) {
+          var DeterministicMath = Object.create(null);
+          for (var key of Reflect.ownKeys(NativeMath)) {
+            if (key !== "random") {
+              Object.defineProperty(DeterministicMath, key, Object.getOwnPropertyDescriptor(NativeMath, key));
+            }
+          }
+          Object.defineProperty(DeterministicMath, "random", {
+            value: function () {
+              throw new Error("public Pack blocks cannot use ambient randomness; pass a deterministic value as an explicit input");
+            }
+          });
+          return DeterministicMath;
+        })(globalThis.Math);
+        Object.freeze(Math);
+        Object.defineProperty(globalThis, "Date", { value: Date, writable: false, configurable: false });
+        Object.defineProperty(globalThis, "Math", { value: Math, writable: false, configurable: false });
+        var module = { exports: {} };
+        var exports = module.exports;
+        ${options.source}
+        var candidate =
+          module.exports && typeof module.exports === "object" && "default" in module.exports
+            ? module.exports.default
+            : module.exports;
+        ${operation}
+      })();
+    `;
+}
+
+function parseCommonJsResult(resultJson: string, expectedId: string): unknown {
+  try {
+    return JSON.parse(resultJson);
+  } catch {
+    throw new Error(`public Pack block ${expectedId} returned a value that did not round-trip through JSON`);
+  }
+}
+
+function escapeForDoubleQuotedString(value: string): string {
+  return value.replaceAll("\\", "\\\\").replaceAll('"', '\\"').replaceAll("\n", "\\n").replaceAll("\r", "\\r");
 }
 
 /**

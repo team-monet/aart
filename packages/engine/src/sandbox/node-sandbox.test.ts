@@ -1,6 +1,6 @@
 import { TimeoutError } from "@aart/types";
 import { describe, expect, it } from "vitest";
-import { runNodeSandbox } from "./node-sandbox.js";
+import { inspectCommonJsBlockSource, runCommonJsBlockSandbox, runNodeSandbox } from "./node-sandbox.js";
 
 describe("runNodeSandbox — basic execution", () => {
   it("runs a simple function body and returns its result", async () => {
@@ -108,22 +108,26 @@ describe("runNodeSandbox — zero ambient capability (ADR-08, architecture §15 
 });
 
 describe("runNodeSandbox — memory limit", () => {
-  it("a script that tries to allocate far beyond the configured memory limit fails rather than exhausting host memory", async () => {
-    await expect(
-      runNodeSandbox({
-        code: `
-          var chunks = [];
-          for (var i = 0; i < 100000; i++) {
-            chunks.push(new Array(1000000).join("x"));
-          }
-          return { length: chunks.length };
-        `,
-        resolvedInputs: {},
-        memoryLimitMb: 8,
-        timeoutMs: 10_000,
-      }),
-    ).rejects.toThrow();
-  });
+  it(
+    "a script that tries to allocate far beyond the configured memory limit fails rather than exhausting host memory",
+    async () => {
+      await expect(
+        runNodeSandbox({
+          code: `
+            var chunks = [];
+            for (var i = 0; i < 100000; i++) {
+              chunks.push(new Array(1000000).join("x"));
+            }
+            return { length: chunks.length };
+          `,
+          resolvedInputs: {},
+          memoryLimitMb: 8,
+          timeoutMs: 10_000,
+        }),
+      ).rejects.toThrow();
+    },
+    15_000,
+  );
 });
 
 describe("runNodeSandbox — hard timeout", () => {
@@ -143,5 +147,139 @@ describe("runNodeSandbox — hard timeout", () => {
 
   it("a script well within its timeout budget completes normally", async () => {
     await expect(runNodeSandbox({ code: "return { ok: true };", resolvedInputs: {}, timeoutMs: 5_000 })).resolves.toEqual({ ok: true });
+  });
+});
+
+describe("public Pack CommonJS sandbox scheduling", () => {
+  it("inspects a hostile module asynchronously without blocking host timers", async () => {
+    let settled = false;
+    const inspection = inspectCommonJsBlockSource("while (true) {}", "test.hostile", { timeoutMs: 200 }).then(
+      () => {
+        settled = true;
+        return undefined;
+      },
+      (error: unknown) => {
+        settled = true;
+        return error;
+      },
+    );
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(settled).toBe(false);
+    expect(await inspection).toBeInstanceOf(TimeoutError);
+  });
+
+  it("does not block host timers while a CPU-heavy Pack transform runs", async () => {
+    let settled = false;
+    const execution = runCommonJsBlockSandbox({
+      source: `module.exports = {
+        manifest: {
+          id: "test.slow",
+          version: "1.0.0",
+          capabilities: [],
+          inputSchema: {},
+          outputSchema: {},
+          description: "CPU-heavy scheduling probe"
+        },
+        execute() {
+          let total = 0;
+          for (let index = 0; index < 1000000000; index += 1) {
+            total = (total + index) % 1000003;
+          }
+          return { ok: true };
+        }
+      };`,
+      expectedId: "test.slow",
+      resolvedInputs: {},
+      executionContext: { runId: "run-1", stepId: "slow" },
+      timeoutMs: 250,
+    }).then(
+      (result) => {
+        settled = true;
+        return { result };
+      },
+      (error: unknown) => {
+        settled = true;
+        return { error };
+      },
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(settled).toBe(false);
+    const observed = await execution;
+    expect("error" in observed).toBe(true);
+    if ("error" in observed) expect(observed.error).toBeInstanceOf(TimeoutError);
+  });
+
+  it("rejects ambient time and randomness so retries and servers reproduce the same output", async () => {
+    const source = `module.exports = {
+      manifest: {
+        id: "test.nondeterministic",
+        version: "1.0.0",
+        capabilities: [],
+        inputSchema: {},
+        outputSchema: {},
+        description: "Nondeterminism probe"
+      },
+      execute(input) {
+        if (input.kind === "time") return { value: Date.now() };
+        if (input.kind === "global-time") return { value: globalThis.Date.now() };
+        if (input.kind === "constructor-time") return { value: new globalThis.Date() };
+        if (input.kind === "prototype-time") return { value: Date.prototype.constructor.now() };
+        if (input.kind === "instance-time") return { value: new Date("2026-01-01T00:00:00Z").constructor.now() };
+        if (input.kind === "prototype-random") return { value: Object.getPrototypeOf(Math).random() };
+        return { value: globalThis.Math.random() };
+      }
+    };`;
+    const base = {
+      source,
+      expectedId: "test.nondeterministic",
+      executionContext: { runId: "run-1", stepId: "probe" },
+    };
+    await expect(runCommonJsBlockSandbox({ ...base, resolvedInputs: { kind: "time" } })).rejects.toThrow(
+      /cannot read ambient time/,
+    );
+    await expect(runCommonJsBlockSandbox({ ...base, resolvedInputs: { kind: "global-time" } })).rejects.toThrow(
+      /cannot read ambient time/,
+    );
+    await expect(runCommonJsBlockSandbox({ ...base, resolvedInputs: { kind: "constructor-time" } })).rejects.toThrow(
+      /cannot read ambient time/,
+    );
+    await expect(runCommonJsBlockSandbox({ ...base, resolvedInputs: { kind: "prototype-time" } })).rejects.toThrow(
+      /cannot read ambient time/,
+    );
+    await expect(runCommonJsBlockSandbox({ ...base, resolvedInputs: { kind: "instance-time" } })).rejects.toThrow(
+      /cannot read ambient time/,
+    );
+    await expect(runCommonJsBlockSandbox({ ...base, resolvedInputs: { kind: "random" } })).rejects.toThrow(
+      /cannot use ambient randomness/,
+    );
+    await expect(runCommonJsBlockSandbox({ ...base, resolvedInputs: { kind: "prototype-random" } })).rejects.toThrow();
+  });
+
+  it("rejects host-timezone-dependent Date construction while allowing explicit UTC input", async () => {
+    const source = `module.exports = {
+      manifest: {
+        id: "test.date-input",
+        version: "1.0.0",
+        capabilities: [],
+        inputSchema: {},
+        outputSchema: {},
+        description: "Date input probe"
+      },
+      execute(input) {
+        return { value: input.local ? new Date(2026, 0, 1).toISOString() : new Date(input.value).toISOString() };
+      }
+    };`;
+    const base = {
+      source,
+      expectedId: "test.date-input",
+      executionContext: { runId: "run-1", stepId: "date" },
+    };
+    await expect(runCommonJsBlockSandbox({ ...base, resolvedInputs: { local: true } })).rejects.toThrow(
+      /explicit timezone/,
+    );
+    await expect(
+      runCommonJsBlockSandbox({ ...base, resolvedInputs: { local: false, value: "2026-01-01T00:00:00Z" } }),
+    ).resolves.toEqual({ value: "2026-01-01T00:00:00.000Z" });
   });
 });

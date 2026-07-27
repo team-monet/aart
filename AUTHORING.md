@@ -174,7 +174,7 @@ local `.aart` store live), e.g.:
 ```bash
 mkdir -p ~/aart-workflows
 cd ~/aart-workflows
-aart init-agent --npx
+aart init-agent --npx --root "$HOME/.aart" --store fs
 ```
 
 `aart init-agent` is the mechanical writer underneath both paths — it stays
@@ -183,8 +183,9 @@ reasoning above lives in `with-aart`'s playbook, not in this command itself.
 It writes two files here:
 
 - **`AGENTS.md`** — instructions for the coding agent: the verify reflex,
-  the authoring loop (discover → draft → register → validate → run →
-  report), `{{ }}` expression wiring, and how approval works for this
+  the reuse-first authoring loop (search workflows → search blocks → adapt
+  or draft → register → validate → run → report), `{{ }}` expression wiring,
+  and how approval works for this
   project's trust mode. Agents that read `AGENTS.md` (e.g. opencode) pick
   this up automatically; Claude Code reads `CLAUDE.md`, not `AGENTS.md` —
   copy the content into `CLAUDE.md` instead (as the install playbook's
@@ -194,7 +195,7 @@ It writes two files here:
   copies.
 - **`.mcp.json`** — the real MCP server config. `--npx` (as in the example above) makes it read:
   ```json
-  { "mcpServers": { "aart": { "command": "npx", "args": ["-y", "@team-monet/aart", "mcp"] } } }
+  { "mcpServers": { "aart": { "command": "npx", "args": ["-y", "@team-monet/aart", "mcp", "--root", "/absolute/path/to/.aart", "--store", "fs"] } } }
   ```
   **Always pass `--npx`, even with `aart` installed globally — never wire MCP to a resolved absolute binary path.** Without `--npx`, `init-agent` instead self-resolves to wherever the running `aart` process's own entrypoint sits on disk right now (`{"command": "node", "args": ["<absolute path>", "mcp"]}`, resolved from `process.argv[1]`) — under a version manager like `nvm`, that path is pinned to whichever Node version is active at the moment you ran `init-agent`, and it breaks silently, no error, the next time you switch versions (exactly what the 2026-07-16 cold-install trial hit). `--npx` avoids that: the config re-resolves `@team-monet/aart` through `npx` on every launch instead of hardcoding a path. This registry-resolved form used to BE the trap — before A54, it was `init-agent`'s only output, and back then this package name resolved to a stale, unrelated pre-`0.10.0` release on npm — but it's safe again now that `0.10.0` is genuinely published as `latest`, which is why the guidance here flips it back to the default.
 
@@ -555,8 +556,15 @@ Stated plainly, matching this repo's own convention (`TEST-DRIVE.md`'s
   just unregistered ones). `aart environment register <name> --trust-mode
   <mode>` first. Omitting `--environment` entirely still works exactly as
   before — the synthetic `"bundle"` environment fallback.
-- **Pack-delivered blocks aren't real yet.** Only the 56 core built-ins
-  (`@aart/blocks-core` + `@aart/llm`) are dispatchable on a fresh store —
-  same limit `TEST-DRIVE.md`/`DEPLOY.md` already document.
+- **Pack-delivered blocks and workflows are locally reusable now.** Search
+  the configured public index with `aart pack search`, install inertly with
+  `aart pack add`, inspect provenance/hash using `aart pack list`, and only
+  after explicit human review run `aart pack approve` with that exact
+  `--content-hash`. Approved blocks join
+  the catalog on the next AART process start; imported workflows remain
+  drafts and still need validation/promotion. A fresh server bundle does not
+  yet receive executable Pack files (AMENDMENTS.md A72), so Pack-backed
+  unattended deployment is the remaining closure rather than something this
+  guide claims already works.
 - **`isolated-vm` wants Node ≥26; this repo runs on Node ≥22.** Disclosed,
   pre-existing, not addressed by this document (part (b)'s install warning).

@@ -56,7 +56,14 @@ export { applyRedaction, createTrackingSecretResolver, identityRedactFn, throwin
 // isolated-vm sandbox for node-type blocks (ADR-08) — a directly-callable
 // primitive; see sandbox/node-sandbox.ts's module doc comment for how a
 // node-type BlockImplementation's own `execute` is expected to wire this in.
-export { runNodeSandbox, type NodeSandboxOptions } from "./sandbox/node-sandbox.js";
+export {
+  inspectCommonJsBlockSource,
+  inspectCommonJsBlockSourceSync,
+  runCommonJsBlockSandbox,
+  runNodeSandbox,
+  type CommonJsBlockSandboxOptions,
+  type NodeSandboxOptions,
+} from "./sandbox/node-sandbox.js";
 
 // Engine-code schema-version tag (architecture §4.7).
 export {

@@ -22,10 +22,22 @@ describe("generateInitAgentOutputs", () => {
     expect(mcpConfig.mcpServers.aart.args).toEqual(["-y", "@custom/aart", "mcp"]);
   });
 
+  it("pins an explicit store root and adapter into either MCP launch form", () => {
+    const npx = generateInitAgentOutputs({ root: "/work/shared/.aart", store: "sqlite" }).mcpConfig;
+    expect(npx.mcpServers.aart.args).toEqual(["-y", "@team-monet/aart", "mcp", "--root", "/work/shared/.aart", "--store", "sqlite"]);
+    const direct = generateInitAgentOutputs({ binPath: "/opt/aart/dist/bin.js", root: "/work/shared/.aart", store: "fs" }).mcpConfig;
+    expect(direct.mcpServers.aart.args).toEqual(["/opt/aart/dist/bin.js", "mcp", "--root", "/work/shared/.aart", "--store", "fs"]);
+  });
+
   describe("binPath (AMENDMENTS.md A54 — the npx-registry trap)", () => {
     it("given a binPath, points the MCP config straight at it via `node`, not `npx`", () => {
       const { mcpConfig } = generateInitAgentOutputs({ binPath: "/opt/aart/dist/bin.js" });
       expect(mcpConfig.mcpServers.aart).toEqual({ command: "node", args: ["/opt/aart/dist/bin.js", "mcp"] });
+    });
+
+    it("can pin the Node executable that is ABI-compatible with the generating install", () => {
+      const { mcpConfig } = generateInitAgentOutputs({ binPath: "/opt/aart/dist/bin.js", nodePath: "/opt/node-v22/bin/node" });
+      expect(mcpConfig.mcpServers.aart).toEqual({ command: "/opt/node-v22/bin/node", args: ["/opt/aart/dist/bin.js", "mcp"] });
     });
 
     it("without a binPath, still falls back to the original npx/registry form (this function's own default; @team-monet/aart's CLI is the layer that always supplies binPath for real invocations — see init-agent.ts's header comment)", () => {
@@ -58,9 +70,16 @@ describe("generateInitAgentOutputs", () => {
 
   it("instructions describe the authoring loop using real aart_* tool names", () => {
     const { instructions } = generateInitAgentOutputs();
-    for (const tool of ["aart_find_blocks", "aart_register_block", "aart_validate", "aart_run_workflow", "aart_get_report", "aart_verify"]) {
+    for (const tool of ["aart_find_workflows", "aart_find_blocks", "aart_register_block", "aart_validate", "aart_run_workflow", "aart_get_report", "aart_verify"]) {
       expect(instructions).toContain(tool);
     }
+  });
+
+  it("instructions make reuse-first co-authoring and unattended server execution one lifecycle", () => {
+    const { instructions } = generateInitAgentOutputs();
+    expect(instructions).toContain("Search before you build");
+    expect(instructions).toContain("Creating a different workflow every session is a product failure");
+    expect(instructions).toContain("deterministic and unattended");
   });
 
   it("instructions' approval section varies by trust mode (strict/production explicitly say aart_approve is not registered)", () => {

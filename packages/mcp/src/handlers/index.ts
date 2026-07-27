@@ -1,6 +1,6 @@
-// The 27-tool handler registry (21 + D1's aart_deploy, AMENDMENTS.md A56 +
-// D2b's four aart_remote_* read tools, AMENDMENTS.md A62 + Wave 2C's
-// aart_remote_approve, AMENDMENTS.md A65) — one real function per MCP tool
+// The 33-tool handler registry, including reuse-first local/public Pack,
+// workflow, and block discovery plus remote deploy/observation/governance —
+// one real function per MCP tool
 // name, shared verbatim with @aart/cli's commands (architecture's
 // three-clients principle: CLI and MCP calling the same thing for the same
 // thing).
@@ -8,12 +8,13 @@ import type { AartContext } from "../context.js";
 import type { HandlerResult, ToolName } from "../response.js";
 import { validateWorkflowHandler, registerWorkflowHandler } from "./authoring.js";
 import { deployToRemoteHandler, deployWorkflowHandler, listWaitingRunsHandler, resumeRunHandler, triggerWorkflowHandler } from "./deployment.js";
-import { findBlocksHandler, getBlockHandler, getSchemaHandler, listBlocksHandler, proposeWorkflowHandler } from "./discovery.js";
+import { findBlocksHandler, findWorkflowsHandler, getBlockHandler, getSchemaHandler, listBlocksHandler, proposeWorkflowHandler } from "./discovery.js";
 import { createEvalFromCorrectionHandler, runEvalHandler } from "./evals.js";
 import { getReportHandler, runWorkflowHandler, verifyHandler } from "./execution.js";
 import { approveHandler, diffWorkflowHandler, promoteWorkflowHandler, recordCorrectionHandler, requestApprovalHandler } from "./governance.js";
 import { remoteRunHandler, remoteRunsHandler, remoteStatusHandler, remoteWhyHandler } from "./remote-observability.js";
 import { remoteApproveHandler } from "./remote-governance.js";
+import { approvePackHandler, findPacksHandler, installPackHandler, listPacksHandler, preparePackHandler } from "./packs.js";
 
 export * from "./authoring.js";
 export * from "./deployment.js";
@@ -23,13 +24,20 @@ export * from "./execution.js";
 export * from "./governance.js";
 export * from "./remote-observability.js";
 export * from "./remote-governance.js";
+export * from "./packs.js";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export type ToolHandler = (ctx: AartContext, input: any) => Promise<HandlerResult>;
 
-/** Every one of architecture §10.1's 21 tools plus D1's aart_deploy (AMENDMENTS.md A56) plus D2b's four aart_remote_* read tools (AMENDMENTS.md, this session), mapped to its real handler function. Both `tools/server.ts` (MCP dispatch) and `@aart/cli`'s commands call through THIS map, never a re-derived one. */
+/** Every current tool, including A71's reuse-first workflow search, mapped to one real handler function. Both `tools/server.ts` (MCP dispatch) and `@aart/cli`'s commands call through THIS map, never a re-derived one. */
 export const HANDLERS: Readonly<Record<ToolName, ToolHandler>> = {
   aart_find_blocks: findBlocksHandler,
+  aart_find_workflows: findWorkflowsHandler,
+  aart_find_packs: findPacksHandler,
+  aart_install_pack: installPackHandler,
+  aart_list_packs: listPacksHandler,
+  aart_approve_pack: approvePackHandler,
+  aart_prepare_pack: preparePackHandler,
   aart_get_block: getBlockHandler,
   aart_validate: validateWorkflowHandler,
   aart_register_block: registerWorkflowHandler,

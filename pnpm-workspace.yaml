@@ -1,5 +1,6 @@
 packages:
   - "packages/*"
+  - "!packages/catalog"
   - "packages/dashboard/frontend"
 allowBuilds:
   isolated-vm: true

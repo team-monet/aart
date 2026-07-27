@@ -27,6 +27,33 @@ describe("registerWorkflowHandler (aart_register_block)", () => {
     expect(stored?.execution.steps).toHaveLength(2);
   });
 
+  it("keeps registered workflow versions immutable and preserves advanced governance on an idempotent retry", async () => {
+    tc = await createTestContext();
+    const source = sampleWorkflowYaml("wf-register-immutable");
+    await registerWorkflowHandler(tc.ctx, { workflow: source });
+    const existing = await tc.ctx.store.workflows.get("wf-register-immutable", "0.1.0");
+    await tc.ctx.store.workflows.put({
+      ...existing!,
+      approval: "approved",
+      gates: {
+        validate: "passed",
+        readiness: "passed",
+        evals: "passed",
+        riskReview: "passed",
+        humanReview: "passed",
+      },
+    });
+
+    const retry = await registerWorkflowHandler(tc.ctx, { workflow: source });
+    expect(retry).toMatchObject({ ok: true, approval: "approved" });
+    const conflict = await registerWorkflowHandler(tc.ctx, {
+      workflow: source.replace("Sample Workflow", "Different definition"),
+    });
+    expect(conflict).toMatchObject({ ok: false });
+    expect(String(conflict.error)).toMatch(/publish a new workflow version/);
+    expect((await tc.ctx.store.workflows.get("wf-register-immutable", "0.1.0"))?.name).toBe("Sample Workflow");
+  });
+
   // V1 event log foundation (AMENDMENTS.md A61)
   it("emits a workflow.version_registered event carrying workflowId/workflowVersion", async () => {
     tc = await createTestContext();

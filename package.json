@@ -8,9 +8,17 @@
     "node": ">=22"
   },
   "packageManager": "pnpm@10.33.2",
+  "pnpm": {
+    "overrides": {
+      "brace-expansion": "5.0.8",
+      "fast-uri": "3.1.4"
+    }
+  },
   "scripts": {
     "check:tsconfig-refs": "node scripts/check-tsconfig-references.mjs",
     "build": "tsc -b tsconfig.build.json && pnpm --filter @aart/dashboard run build:frontend",
+    "build:catalog": "npm --prefix packages/catalog run build",
+    "test:catalog": "npm --prefix packages/catalog test",
     "typecheck": "tsc -b tsconfig.build.json --force",
     "typecheck:tests": "tsc --noEmit -p tsconfig.test-typecheck.json",
     "test": "vitest run --config vitest.workspace.ts",

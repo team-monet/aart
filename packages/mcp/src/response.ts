@@ -9,7 +9,7 @@
 //
 // NEXT_TABLE below is this session's own design fill for the *exact* prose
 // of each (tool, outcome) pair — neither spec nor architecture enumerates
-// all 42 (21 tools x success/failure) strings, only the single worked
+// every tool's success/failure strings, with the single worked
 // example ("Draft registered. Next: `aart_validate`.", architecture §10.2 /
 // §32.2c) that aart_register_block's own success entry reproduces exactly.
 // Every other entry follows the same "name the next authoring-loop tool by
@@ -20,6 +20,12 @@
 
 export const TOOL_NAMES = [
   "aart_find_blocks",
+  "aart_find_workflows",
+  "aart_find_packs",
+  "aart_install_pack",
+  "aart_list_packs",
+  "aart_approve_pack",
+  "aart_prepare_pack",
   "aart_get_block",
   "aart_validate",
   "aart_register_block",
@@ -63,6 +69,12 @@ export type ToolTier = "core" | "extended";
 // architecture §10.1's verbatim core/extended split (spec Fix C).
 export const TOOL_TIERS: Readonly<Record<ToolName, ToolTier>> = {
   aart_find_blocks: "core",
+  aart_find_workflows: "core",
+  aart_find_packs: "core",
+  aart_install_pack: "core",
+  aart_list_packs: "extended",
+  aart_approve_pack: "core",
+  aart_prepare_pack: "extended",
   aart_get_block: "core",
   aart_validate: "core",
   aart_register_block: "core",
@@ -113,8 +125,32 @@ export type ToolOutcome = "success" | "failure";
 
 const NEXT_TABLE: Readonly<Record<ToolName, Readonly<Record<ToolOutcome, string>>>> = {
   aart_find_blocks: {
-    success: "Review the matching blocks, then draft a workflow using them and call `aart_register_block`.",
-    failure: "No matching blocks found — broaden the query, or call `aart_list_blocks` to see the full catalog.",
+    success: "Review the matching blocks, then check `aart_find_workflows` once more before drafting new workflow logic.",
+    failure: "No matching blocks found — broaden the query, call `aart_list_blocks`, and check `aart_find_workflows` before building from scratch.",
+  },
+  aart_find_workflows: {
+    success: "Reuse or adapt the closest workflow. Call `aart_get_schema` only for the parts you must change, then register a new version rather than rebuilding unrelated steps.",
+    failure: "No reusable workflow matched — call `aart_find_blocks` and `aart_propose_workflow`, then compose the smallest new reusable workflow.",
+  },
+  aart_find_packs: {
+    success: "Choose the closest pack and call `aart_install_pack`; installation is inert and unapproved until a human reviews it.",
+    failure: "No public pack matched — broaden the query or author the smallest new pack, then add it to the static public index.",
+  },
+  aart_install_pack: {
+    success: "Pack installed unapproved. Call `aart_list_packs`, show its capabilities/assets to the user, and only then call `aart_approve_pack` after explicit approval.",
+    failure: "Pack installation failed — verify the pack name/version or linked source path, then retry. Never bypass the unapproved state.",
+  },
+  aart_list_packs: {
+    success: "Review the installed pack's provenance, assets, and exact content hash; after explicit human approval, pass that same hash to `aart_approve_pack`.",
+    failure: "Could not list installed packs — check the configured AART root.",
+  },
+  aart_approve_pack: {
+    success: "Pack approved. Restart/reload AART so approved blocks enter the runtime catalog; imported workflows are registered as drafts and still need normal validation/promotion.",
+    failure: "Pack approval failed — inspect the content seal or module/workflow validation error; do not load or execute it.",
+  },
+  aart_prepare_pack: {
+    success: "Pack validated and its static-index entry generated. Publish the npm package with standard npm tooling, then merge this entry into the configured public index.",
+    failure: "Pack preparation failed — fix the package name/version, block module shape, workflow definition, or declared asset list before publishing.",
   },
   aart_get_block: {
     success: "Use this block's inputSchema/outputSchema to wire it into a step, then call `aart_register_block`.",
@@ -237,5 +273,6 @@ export type HandlerResult = { ok: boolean } & Record<string, unknown>;
  * the CLI's JSON output mode reuses it too — see packages/cli's commands).
  */
 export function wrapResult<T extends HandlerResult>(tool: ToolName, result: T): T & { next: string } {
-  return { ...result, next: computeNext(tool, result.ok ? "success" : "failure") };
+  const outcome = result.ok && result.matched !== false ? "success" : "failure";
+  return { ...result, next: computeNext(tool, outcome) };
 }

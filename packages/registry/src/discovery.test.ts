@@ -1,6 +1,16 @@
-import type { BlockManifest } from "@aart/types";
+import type { BlockManifest, Workflow } from "@aart/types";
+import { readFile } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
-import { findBlocks, searchLocalCatalog, searchRemoteIndex, type BlockCatalogEntry, type RemoteRegistryIndexEntry } from "./discovery.js";
+import {
+  findBlocks,
+  parseRemoteRegistryIndexDocument,
+  searchLocalCatalog,
+  searchRemoteIndex,
+  searchRemotePacks,
+  searchWorkflows,
+  type BlockCatalogEntry,
+  type RemoteRegistryIndexEntry,
+} from "./discovery.js";
 
 function manifest(overrides: Partial<BlockManifest> = {}): BlockManifest {
   return {
@@ -75,6 +85,18 @@ describe("searchLocalCatalog — spec §44.3 'locally... searchable against the 
     expect(results).toEqual([]);
   });
 
+  it("does not claim a missing exact-looking Block id matched because one generic token appears elsewhere", () => {
+    const noisyCatalog = [
+      entry({
+        manifest: manifest({
+          id: "artifact.write",
+          description: "Write a result with a reusable file name",
+        }),
+      }),
+    ];
+    expect(searchLocalCatalog(noisyCatalog, "reuse.normalize-name")).toEqual([]);
+  });
+
   it("ties break alphabetically by block id", () => {
     const tied: BlockCatalogEntry[] = [entry({ manifest: manifest({ id: "z.block", description: "widget" }) }), entry({ manifest: manifest({ id: "a.block", description: "widget" }) })];
     const results = searchLocalCatalog(tied, "widget");
@@ -120,6 +142,50 @@ describe("searchRemoteIndex — spec §44.3 'remotely... the SAME search surface
   });
 });
 
+describe("public Pack catalog index contract", () => {
+  it("validates the catalog site's preview data against the same wire contract used by CLI and MCP", async () => {
+    const source = await readFile(new URL("../../catalog/data/aart-pack-index.json", import.meta.url), "utf8");
+    const document = parseRemoteRegistryIndexDocument(JSON.parse(source), "catalog fixture");
+    expect(document.schemaVersion).toBe(1);
+    expect(document.packs.length).toBeGreaterThanOrEqual(6);
+    expect(document.packs.every((pack) => (pack.categories?.length ?? 0) > 0)).toBe(true);
+  });
+
+  it("searches Pack-level categories, tags, display name and author metadata", () => {
+    const pack: RemoteRegistryIndexEntry = {
+      npmPackageName: "aart-pack-release-proof",
+      packName: "release-proof",
+      displayName: "Release Evidence",
+      version: "1.0.0",
+      description: "Preserve a release record",
+      categories: ["quality"],
+      tags: ["deployment"],
+      author: { name: "Proofplane" },
+      blocks: [],
+    };
+    expect(searchRemotePacks([pack], "quality")[0]?.pack.packName).toBe("release-proof");
+    expect(searchRemotePacks([pack], "deployment")[0]?.pack.packName).toBe("release-proof");
+    expect(searchRemotePacks([pack], "evidence")[0]?.pack.packName).toBe("release-proof");
+    expect(searchRemotePacks([pack], "proofplane")[0]?.pack.packName).toBe("release-proof");
+  });
+
+  it("rejects publisher-authored invalid verification and statistics metadata", () => {
+    expect(() =>
+      parseRemoteRegistryIndexDocument({
+        schemaVersion: 1,
+        packs: [{
+          npmPackageName: "aart-pack-bad",
+          packName: "bad",
+          version: "1.0.0",
+          blocks: [],
+          verification: { status: "self-certified" },
+          stats: { reuses: -10 },
+        }],
+      }),
+    ).toThrow(/failed validation/);
+  });
+});
+
 describe("findBlocks — the aart_find_blocks-shaped entry point, scope: 'local' | 'remote' (architecture §11.4)", () => {
   it("scope 'local' searches localCatalog only", () => {
     const results = findBlocks({ query: "click", scope: "local", localCatalog: catalog });
@@ -152,5 +218,154 @@ describe("findBlocks — the aart_find_blocks-shaped entry point, scope: 'local'
     ];
     const results = findBlocks({ query: "slack", scope: "local", localCatalog: catalog, remoteIndex });
     expect(results).toEqual([]);
+  });
+});
+
+function workflow(overrides: Partial<Workflow> = {}): Workflow {
+  return {
+    id: "verify-checkout",
+    name: "Verify checkout",
+    version: "1.0.0",
+    inputs: [],
+    outputs: [],
+    execution: { type: "workflow", steps: [] },
+    approval: "approved",
+    gates: { validate: "passed", readiness: "passed", evals: "passed", riskReview: "passed", humanReview: "passed" },
+    ...overrides,
+  };
+}
+
+describe("searchWorkflows — reusable workflow discovery", () => {
+  const workflows = [
+    workflow({ id: "verify-checkout", name: "Verify checkout flow", category: "quality", keywords: ["commerce", "browser"] }),
+    workflow({ id: "sync-customers", name: "Synchronize customers", category: "data", keywords: ["crm"] }),
+    workflow({ id: "release-proof", name: "Release verification", examples: [{ description: "Check a production release", inputs: {} }] }),
+  ];
+
+  it("ranks an exact workflow id first", () => {
+    expect(searchWorkflows(workflows, "sync-customers")[0]?.workflow.id).toBe("sync-customers");
+  });
+
+  it("finds by name, category, keyword, and example description", () => {
+    expect(searchWorkflows(workflows, "checkout")[0]?.workflow.id).toBe("verify-checkout");
+    expect(searchWorkflows(workflows, "data")[0]?.workflow.id).toBe("sync-customers");
+    expect(searchWorkflows(workflows, "crm")[0]?.workflow.id).toBe("sync-customers");
+    expect(searchWorkflows(workflows, "production")[0]?.workflow.id).toBe("release-proof");
+  });
+
+  it("returns every workflow for an empty browse query with deterministic ordering", () => {
+    expect(searchWorkflows(workflows, "").map((result) => result.workflow.id)).toEqual(["release-proof", "sync-customers", "verify-checkout"]);
+  });
+
+  it("does not turn generic asset words into noisy false-positive matches", () => {
+    expect(searchLocalCatalog(catalog, "definitely no such block")).toEqual([]);
+    expect(searchWorkflows(workflows, "definitely no such workflow")).toEqual([]);
+  });
+});
+
+describe("parseRemoteRegistryIndexDocument", () => {
+  it("rejects public Pack versions that cannot be installed as SemVer artifacts", () => {
+    expect(() =>
+      parseRemoteRegistryIndexDocument({
+        schemaVersion: 1,
+        packs: [
+          {
+            npmPackageName: "aart-pack-invalid-version",
+            packName: "invalid-version",
+            version: "not-a-version",
+            blocks: [],
+          },
+        ],
+      }),
+    ).toThrow(/valid SemVer/);
+  });
+
+  it("rejects an incomplete Block manifest at the public-index boundary", () => {
+    expect(() =>
+      parseRemoteRegistryIndexDocument({
+        schemaVersion: 1,
+        packs: [
+          {
+            npmPackageName: "aart-pack-incomplete-block",
+            packName: "incomplete-block",
+            version: "1.0.0",
+            blocks: [{ manifest: { id: "bad.example" }, examples: [] }],
+          },
+        ],
+      }),
+    ).toThrow(/failed validation/);
+  });
+
+  it("rejects malformed Block examples at the fetch boundary", () => {
+    expect(() =>
+      parseRemoteRegistryIndexDocument({
+        schemaVersion: 1,
+        packs: [
+          {
+            npmPackageName: "aart-pack-bad-example",
+            packName: "bad-example",
+            version: "1.0.0",
+            blocks: [
+              {
+                manifest: { id: "bad.example" },
+                examples: [null],
+              },
+            ],
+          },
+        ],
+      }),
+    ).toThrow(/failed validation/);
+  });
+
+  it("rejects an index entry whose advertised npm package does not match its Pack identity", () => {
+    expect(() =>
+      parseRemoteRegistryIndexDocument({
+        schemaVersion: 1,
+        packs: [
+          {
+            npmPackageName: "aart-pack-foo",
+            packName: "bar",
+            version: "1.0.0",
+            blocks: [],
+          },
+        ],
+      }),
+    ).toThrow(/aart-pack-bar/);
+  });
+
+  it("rejects malformed workflow keywords and examples at the public-index boundary", () => {
+    expect(() =>
+      parseRemoteRegistryIndexDocument({
+        schemaVersion: 1,
+        packs: [
+          {
+            npmPackageName: "aart-pack-bad-workflow",
+            packName: "bad-workflow",
+            version: "1.0.0",
+            blocks: [],
+            workflows: [
+              {
+                id: "bad",
+                name: "Bad workflow",
+                version: "1.0.0",
+                inputs: [],
+                outputs: [],
+                execution: { type: "workflow", steps: [] },
+                approval: "draft",
+                gates: {
+                  validate: "pending",
+                  readiness: "pending",
+                  evals: "pending",
+                  riskReview: "pending",
+                  humanReview: "pending",
+                },
+                keywords: "not-an-array",
+                examples: {},
+              },
+            ],
+          },
+        ],
+      }),
+    ).toThrow(/failed validation/);
   });
 });

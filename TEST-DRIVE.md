@@ -226,12 +226,12 @@ This writes two files:
   ```
   It's already in the right shape and the right place (`.mcp.json` in your project root) — Claude Code auto-detects it. Open (or restart) Claude Code with `~/aart-test-drive` as the working directory / project root, and it should pick up an `aart` MCP server automatically. (If your `@team-monet/aart` isn't on the real npm registry yet, swap `"command": "npx", "args": ["-y", "@team-monet/aart", "mcp"]` for `"command": "node", "args": ["/Users/johnlee/code/aart/packages/cli/dist/bin.js", "mcp"]` — points straight at this repo's own built binary.)
 
-- **`AGENTS.md`** — instructions for whatever agent connects, in the same "motivation-leading" voice as the tool descriptions: the verify reflex, the authoring loop (discover → draft → register → validate → run → report), how `{{ }}` expression wiring works, and how approval works per trust mode.
+- **`AGENTS.md`** — instructions for whatever agent connects: the verify reflex, the reuse-first loop (search workflows → search blocks → adapt or draft → register → validate → run → report), `{{ }}` expression wiring, and approval semantics.
 
-**What tools appear.** In a brand-new project (no `Environment`, no `EvalSuite` registered yet) you'll see **16 tools** — 5 of the full 21 are gated behind real data existing (`aart_deploy_workflow`/`aart_trigger_workflow` need ≥1 `Environment`; `aart_create_eval_from_correction`/`aart_run_eval`/`aart_promote_workflow` need ≥1 `EvalSuite`) — architecture §10.1's progressive disclosure, not a bug. Verified directly: after `aart deploy <id> --target staging` (creates the Environment even if the deployment itself is refused by unmet gates — see part (b)'s governance note) and `aart eval create <suite>`, `tools/list` genuinely returns all 21:
+**What tools appear.** The exact count is intentionally data- and trust-mode-dependent. A fresh project includes the core reuse loop (`aart_find_workflows`, `aart_find_blocks`, register, validate, run, report); environment, eval, and remote tools appear when their corresponding records exist. Verify named capabilities, not a historical fixed total:
 
 ```
-aart_find_blocks, aart_get_block, aart_validate, aart_register_block, aart_run_workflow,
+aart_find_workflows, aart_find_blocks, aart_get_block, aart_validate, aart_register_block, aart_run_workflow,
 aart_get_report, aart_verify, aart_approve, aart_request_approval, aart_record_correction,
 aart_list_blocks, aart_get_schema, aart_propose_workflow, aart_diff_workflow,
 aart_create_eval_from_correction, aart_run_eval, aart_promote_workflow,
@@ -467,6 +467,12 @@ Stated plainly, not glossed over:
 - **The dashboard's `resumeApproval` (per-run wait continuation) and report rendering** still use `DashboardDeps`'s own local implementations rather than `@aart/engine`'s/`@aart/evidence`'s real ones (see part (e)'s note) — narrower than it sounds: `AMENDMENTS.md` A47 closed the store-divergence class for every OTHER dashboard read/write (including trigger-a-run, which now uses the real `EngineBoundary.startRun`), and neither of these two remaining stubs was ever store-path-dependent, so neither was part of that bug class. Not yet wired to the real composition root.
 - **The dashboard's new SPA (`AMENDMENTS.md` B1) has no Blocks/Packs page** — `GET /api/blocks`, `/api/blocks/:id`, `/api/packs` are still real, live JSON endpoints (the underlying data/logic is untouched), the founder's SPA rewrite just hasn't added a UI page for them yet; `/blocks/...` in a browser silently falls back to the Runs page. Also not yet in the npm CLI artifact at all — `@aart/dashboard` remains private/workspace-only, reachable only from this repo or the deploy kit's container launcher (part (e), `DEPLOY.md`) — an S8-integration follow-up, not built here.
 - **`aart server`'s real trigger wiring never resolved webhook/github/slack HMAC secrets, and `--environment`/`--store`/`--root` didn't exist** — true as of `AMENDMENTS.md` A44; closed A45. See part (f) above for the live webhook proof and the flags.
-- **Pack-delivered blocks** aren't in the real block catalog yet (documented gap, `real-context.ts`) — only the 56 core built-ins (`@aart/blocks-core` + `@aart/llm`) are dispatchable today, on a fresh store with no packs installed.
+- **Pack-delivered blocks/workflows** enter the local catalog through the
+  guarded Pack loop: `aart pack search` → `aart pack add` (unapproved,
+  inert) → `aart pack list` → explicit human `aart pack approve` with the
+  exact listed `--content-hash` → restart AART. Imported
+  workflows remain drafts. Executable Pack files do
+  not yet travel inside a fresh server bundle (AMENDMENTS.md A72), so this
+  local reuse proof must not be mistaken for unattended Pack deployment.
 - **`isolated-vm`'s `engines.node: ">=26.0.0"`** vs. this machine's v22.22.2 (part (a)'s install warning) — pre-existing, not new, not addressed here.
 - **A `schedule`-fired trigger has no environment concept to gate by** — `AMENDMENTS.md` A48's fix threads a deployment's real target environment into every webhook/github/slack/poll/queue/database/email/file/sdk trigger's capability-dispatch gating (architecture §4.6), but `Schedule` store records (architecture §5.3's frozen shape) carry no `environmentId` field at all, unlike `Deployment`. A schedule-fired run today is gated by the hosting worker/server process's own ambient trust mode (`"governed"` in a correctly-configured deployment — not the old A48 bug's unconditional `"dev"` bypass), not the specific environment a human might expect. Closing this fully needs a `Schedule`-schema migration, out of A48's scope — flagged for whichever session next touches scheduling.

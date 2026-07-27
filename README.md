@@ -2,11 +2,12 @@
 
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](./LICENSE)
 
-**AART — a governed workflow runtime for AI agents.** Author, run, and
-govern multi-step workflows that mix deterministic blocks (HTTP, browser,
-file, data), LLM calls, and durable human-in-the-loop waits — with
-approvals, capability-based trust modes, redaction, and evidence capture
-built in rather than bolted on.
+**AART turns work an agent does once into reusable automation another agent
+can discover instead of rebuilding.** A human and agent co-author, validate,
+and approve reusable blocks and workflows; the same pinned artifact can then
+run deterministically on an AART server without an agent or person in the
+execution loop. Governance, redaction, durable waits, and evidence are built
+into that lifecycle rather than bolted on.
 
 > **Status: pre-`1.0.0` beta.** `npm install -g @team-monet/aart` (or `npx
 > @team-monet/aart <cmd>`) installs the real CLI as of `0.10.0` — the npm
@@ -21,6 +22,15 @@ built in rather than bolted on.
 - **Setting up a second machine to author workflows with a coding agent and ship them to a running server?** [`AUTHORING.md`](./AUTHORING.md) — including `aart remote add` + `aart push`, the one-command git-remote-style deploy (part (e)).
 - **Running AART for real, outside a dev laptop?** [`DEPLOY.md`](./DEPLOY.md) — Docker/compose and bare-process paths, secrets, backup/upgrade.
 - **Trying AART locally for the first time?** [`TEST-DRIVE.md`](./TEST-DRIVE.md) — install, author a workflow, watch a governed pause get approved, wire it into Claude Code.
+- **Publishing or reusing blocks/workflows?** Packs are the distribution unit:
+  `aart pack prepare` validates a local `aart-pack-*` package and generates
+  its public-index entry; `aart pack search` → `aart pack add` → explicit
+  human `aart pack approve` closes discovery and trust without executing
+  downloaded code during installation. The separately deployable
+  [`packages/catalog`](./packages/catalog) Pack Library gives people the
+  category/search/detail view over the same canonical index used by CLI and
+  MCP; its checked-in data is clearly marked as preview fixtures until the
+  production index opens.
 - **License:** [Apache License 2.0](./LICENSE).
 
 This README is deliberately minimal — a fuller landing page is planned for

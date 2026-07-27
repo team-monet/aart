@@ -7,7 +7,8 @@
 // existing test-suite hygiene (see context.ts's own doc comment on why
 // createAartContext's DEFAULT stays stub-bound).
 import { afterEach, describe, expect, it } from "vitest";
-import type { Workflow } from "@aart/types";
+import { approveInstalledPack, persistInstalledPack } from "@aart/registry";
+import type { BlockImplementation, Workflow } from "@aart/types";
 import { createRealAartContext, createRealAartContextWithEngine, type AartContext } from "./context.js";
 import { buildRealCatalog, createRealEngine } from "./real-context.js";
 import { makeTempRoot, cleanupTempRoot } from "./test-utils.js";
@@ -57,6 +58,205 @@ describe("buildRealCatalog", () => {
     } finally {
       await cleanupTempRoot(tmpRoot);
     }
+  });
+});
+
+describe("createRealAartContext — Pack catalog refresh", () => {
+  it("can execute a Pack installed after the long-running context was constructed", async () => {
+    ctx = await setup();
+    const installed = await persistInstalledPack(
+      root!,
+      {
+        manifestYaml: "name: hotpack\nversion: 1.0.0\nblocks: [hotpack.echo]\n",
+        blockSources: {
+          "hotpack.echo": `module.exports = {
+            manifest: {
+              id: "hotpack.echo",
+              version: "1.0.0",
+              capabilities: [],
+              inputSchema: {},
+              outputSchema: {},
+              description: "Hot-loaded Pack block"
+            },
+            execute: (input) => ({ value: input.value })
+          };`,
+        },
+      },
+      { kind: "workspace", source: "bundle-test" },
+    );
+    await approveInstalledPack(
+      root!,
+      "hotpack",
+      "1.0.0",
+      "bundle-test",
+      new Date("2026-07-27T00:00:00.000Z"),
+      installed.manifest.contentHash,
+    );
+    await ctx.store.packManifests.put({ ...installed.manifest, approvalStatus: "approved" });
+    await ctx.store.workflows.put({
+      id: "hot-pack-workflow",
+      name: "Hot Pack Workflow",
+      version: "1.0.0",
+      inputs: [{ name: "value", type: "string", required: true }],
+      outputs: [],
+      execution: {
+        type: "workflow",
+        steps: [{ id: "echo", uses: "hotpack.echo", with: { value: "{{ inputs.value }}" } }],
+      },
+      approval: "approved",
+      gates: { validate: "passed", readiness: "passed", evals: "passed", riskReview: "passed", humanReview: "passed" },
+    });
+
+    const result = await runWorkflowHandler(ctx, {
+      workflowId: "hot-pack-workflow",
+      workflowVersion: "1.0.0",
+      input: { value: "hello" },
+    });
+    expect(result).toMatchObject({ ok: true, status: "completed" });
+    expect(typeof result.runId).toBe("string");
+    const run = await ctx.store.runs.get(result.runId as string);
+    expect(run?.snapshot.packHashes).toEqual({ hotpack: installed.manifest.contentHash });
+  });
+});
+
+describe("createRealEngine — Pack version pinning", () => {
+  it("resumes a waiting run with the Pack implementation captured in its snapshot", async () => {
+    root = await makeTempRoot("aart-mcp-pack-snapshot-");
+    const { createFsStore } = await import("@aart/store");
+    const store = createFsStore(root);
+    const coreBlocks = buildRealCatalog(store).blocks;
+    const packBlock = (version: string): BlockImplementation => ({
+      manifest: {
+        id: "demo.echo",
+        version,
+        capabilities: [],
+        inputSchema: { type: "object" },
+        outputSchema: { type: "object" },
+        description: `Demo Pack ${version}`,
+      },
+      execute: async () => ({ version }),
+    });
+    const v1 = packBlock("1.0.0");
+    const v2 = packBlock("2.0.0");
+    const v1Hash = "sha256:v1";
+    const v2Hash = "sha256:v2";
+    const workflow: Workflow = {
+      id: "pack-snapshot-resume",
+      name: "Pack snapshot resume",
+      version: "1.0.0",
+      inputs: [],
+      outputs: [],
+      execution: {
+        type: "workflow",
+        steps: [
+          { id: "review", uses: "wait.manual" },
+          { id: "pack_step", uses: "demo.echo" },
+        ],
+      },
+      approval: "approved",
+      gates: { validate: "passed", readiness: "passed", evals: "passed", riskReview: "passed", humanReview: "passed" },
+    };
+    await store.workflows.put(workflow);
+
+    const firstProcess = createRealEngine(
+      store,
+      { ...coreBlocks, "demo.echo": v1 },
+      "dev",
+      async () => ({ demo: v1Hash }),
+      new Map([[v1Hash, { "demo.echo": v1 }]]),
+    );
+    const created = await firstProcess.triggerRun({
+      workflow,
+      trigger: { id: "pack-v1", type: "manual", source: "test", payload: null, receivedAt: new Date().toISOString() },
+      inputs: {},
+    });
+    const waiting = await firstProcess.executeRun(created.runId);
+    expect(waiting.status).toBe("waiting");
+    expect(waiting.snapshot.packHashes).toEqual({ demo: v1Hash });
+
+    const restartedProcess = createRealEngine(
+      store,
+      { ...coreBlocks, "demo.echo": v2 },
+      "dev",
+      async () => ({ demo: v2Hash }),
+      new Map([
+        [v1Hash, { "demo.echo": v1 }],
+        [v2Hash, { "demo.echo": v2 }],
+      ]),
+    );
+    const resumed = await restartedProcess.resumeManual(created.runId, "review", { reviewer: "operator" });
+    expect(resumed.kind).toBe("resumed");
+    if (resumed.kind !== "resumed") throw new Error("expected the waiting run to resume");
+    expect(resumed.run.status).toBe("completed");
+    expect(resumed.run.trace.find((step) => step.stepId === "pack_step")?.outputs).toEqual({ version: "1.0.0" });
+  });
+
+  it("fails closed when a snapshotted Pack seal disappears instead of falling back to a same-id core block", async () => {
+    root = await makeTempRoot("aart-mcp-pack-missing-snapshot-");
+    const { createFsStore } = await import("@aart/store");
+    const store = createFsStore(root);
+    const coreBlocks = buildRealCatalog(store).blocks;
+    const packBlock: BlockImplementation = {
+      manifest: {
+        id: "demo.echo",
+        version: "1.0.0",
+        capabilities: [],
+        inputSchema: { type: "object" },
+        outputSchema: { type: "object" },
+        description: "Pack implementation",
+      },
+      execute: async () => ({ source: "pack" }),
+    };
+    const coreReplacement: BlockImplementation = {
+      ...packBlock,
+      manifest: { ...packBlock.manifest, version: "9.0.0", description: "Core replacement" },
+      execute: async () => ({ source: "core" }),
+    };
+    const workflow: Workflow = {
+      id: "missing-pack-snapshot",
+      name: "Missing Pack snapshot",
+      version: "1.0.0",
+      inputs: [],
+      outputs: [],
+      execution: {
+        type: "workflow",
+        steps: [
+          { id: "review", uses: "wait.manual" },
+          { id: "pack_step", uses: "demo.echo" },
+        ],
+      },
+      approval: "approved",
+      gates: { validate: "passed", readiness: "passed", evals: "passed", riskReview: "passed", humanReview: "passed" },
+    };
+    await store.workflows.put(workflow);
+    const v1Hash = "sha256:missing-v1";
+    const firstProcess = createRealEngine(
+      store,
+      { ...coreBlocks, "demo.echo": packBlock },
+      "dev",
+      async () => ({ demo: v1Hash }),
+      new Map([[v1Hash, { "demo.echo": packBlock }]]),
+    );
+    const created = await firstProcess.triggerRun({
+      workflow,
+      trigger: { id: "missing-pack", type: "manual", source: "test", payload: null, receivedAt: new Date().toISOString() },
+      inputs: {},
+    });
+    expect((await firstProcess.executeRun(created.runId)).status).toBe("waiting");
+
+    const restartedProcess = createRealEngine(
+      store,
+      { ...coreBlocks, "demo.echo": coreReplacement },
+      "dev",
+      async () => ({}),
+      new Map(),
+    );
+    const resumed = await restartedProcess.resumeManual(created.runId, "review", { reviewer: "operator" });
+    expect(resumed.kind).toBe("resumed");
+    if (resumed.kind !== "resumed") throw new Error("expected the waiting run to resume");
+    expect(resumed.run.status).toBe("failed");
+    expect(resumed.run.error).toMatch(/snapshotted implementation is unavailable/);
+    expect(resumed.run.trace.find((step) => step.stepId === "pack_step")?.outputs).not.toEqual({ source: "core" });
   });
 });
 

@@ -104,6 +104,8 @@ export interface EngineConfig {
   /** See `GetGrantedCapabilities` above. Defaults to `alwaysEmptyGrantedCapabilities` (capability.ts), which — paired with the default `alwaysAllowCapabilityCheck` — makes the out-of-the-box engine behavior "allow everything," matching "engine's own tests don't block on governance's real policy logic landing." */
   getGrantedCapabilities?: GetGrantedCapabilities;
   blocks: BlockRegistry;
+  /** Optional per-run resolver used to dispatch a Pack implementation pinned by the run snapshot instead of the process-global active version. */
+  resolveBlockForRun?: (run: RunRecord, blockId: string) => BlockImplementation | undefined;
   /**
    * Engine/deployment-level config, NOT a per-workflow declaration (architecture
    * §4.2) — this is what keeps a workflow author from raising their own bound.

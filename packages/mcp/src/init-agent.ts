@@ -98,6 +98,12 @@ export interface GenerateInitAgentOptions {
    * published at a version matching the running build.
    */
   binPath?: string;
+  /** Node executable paired with binPath. The CLI passes process.execPath so version-manager cwd changes cannot switch ABI underneath native dependencies. */
+  nodePath?: string;
+  /** Absolute store path pinned into the generated MCP command so host launch cwd can never select a different workspace by accident. */
+  root?: string;
+  /** Store adapter pinned alongside root. Defaults to the CLI's fs adapter when omitted. */
+  store?: "fs" | "sqlite";
 }
 
 const APPROVAL_SECTION_BY_MODE: Record<TrustMode, string> = {
@@ -122,9 +128,12 @@ export function generateInitAgentOutputs(options: GenerateInitAgentOptions = {})
   // `mcpServers.<name>` envelope real MCP clients (Claude Code / Claude
   // Desktop `.mcp.json`) expect either way, so the generated file is
   // directly usable, not just illustrative.
+  const runtimeArgs = ["mcp"];
+  if (options.root) runtimeArgs.push("--root", options.root);
+  if (options.store) runtimeArgs.push("--store", options.store);
   const mcpConfig: McpConfig = {
     mcpServers: {
-      aart: options.binPath ? { command: "node", args: [options.binPath, "mcp"] } : { command: "npx", args: ["-y", packageName, "mcp"] },
+      aart: options.binPath ? { command: options.nodePath ?? "node", args: [options.binPath, ...runtimeArgs] } : { command: "npx", args: ["-y", packageName, ...runtimeArgs] },
     },
   };
 
@@ -133,6 +142,17 @@ export function generateInitAgentOutputs(options: GenerateInitAgentOptions = {})
 > Shell runs and is forgotten. AART runs and is kept.
 
 AART does not call an LLM on your behalf. **You** (the calling agent) author the workflow; AART validates it, governs it, runs it deterministically, and hands back an evidence report you can trust.
+
+## The product lifecycle
+
+The user should not have to design YAML or know AART's internals. Co-author the automation in conversation:
+
+1. Understand the repeatable outcome and the evidence that would prove it worked.
+2. **Search before you build:** call \`aart_find_workflows\` for a reusable workflow, then \`aart_find_blocks\` and \`aart_propose_workflow\`. If the local catalog has no close match, search the configured public Pack index with \`aart_find_packs\` or the discovery tools' remote scope. Creating a different workflow every session is a product failure when a reusable asset already exists.
+3. If something close exists, adapt or version it. If nothing exists, propose the smallest reusable workflow and show the user its inputs, effects, capabilities, and approval points before registering it.
+4. Validate, run, and read the evidence report with the user. Corrections become evals; successful drafts become approved reusable assets.
+5. Once approved, the same pinned workflow version can be bundled or pushed to an AART server and attached to a trigger. Server execution is deterministic and unattended: no agent or person remains in the execution loop unless the workflow explicitly contains a human wait.
+6. A newly useful workflow or block should be prepared for sharing so another agent can discover it before rebuilding it.
 
 ## The verify reflex
 
@@ -156,7 +176,7 @@ A truly one-off probe is still fine as a raw command. But anything you or the us
 
 ## The authoring loop
 
-1. **Discover.** \`aart_find_blocks\` (by query) or \`aart_list_blocks\` (the full catalog) to see what you can compose. \`aart_propose_workflow\` returns a ready-made recipe skeleton if your request matches one of the built-in patterns (verify a page, check API health, wait for approval, ...) — check this before composing from scratch.
+1. **Discover reusable assets.** Call \`aart_find_workflows\` first. Then use \`aart_find_blocks\` (by query) or \`aart_list_blocks\` (the full catalog) to see what you can compose. If local search misses, call \`aart_find_packs\`; \`aart_install_pack\` downloads a match inertly as **unapproved**, and \`aart_list_packs\` shows its exact provenance/hash before you ask the user to approve it. Never call \`aart_approve_pack\` without explicit human approval, and pass the exact \`contentHash\` the human reviewed so approval cannot drift to replaced bytes. \`aart_propose_workflow\` returns a ready-made recipe skeleton if your request matches one of the built-in patterns (verify a page, check API health, wait for approval, ...) — check these before composing from scratch.
 2. **Draft.** Compose blocks into steps using the \`uses\`/\`with\` shape (the same shape as GitHub Actions — if you know \`steps: - uses: ... with: ...\`, you already know this). \`aart_get_schema\` gives the exact input/output shape for a block or for the \`Workflow\` type itself.
 3. **Register.** Call \`aart_register_block\` with your draft. It saves as a **draft** version. *Next: \`aart_validate\`.*
 4. **Validate.** Call \`aart_validate\`. Fix every reported finding — errors block, warnings don't; a finding may include a \`didYouMean\`/\`correctedSnippet\` you can apply directly and re-validate.
@@ -179,7 +199,7 @@ ${APPROVAL_SECTION_BY_MODE[trustMode]}
 
 ## When a block doesn't exist yet
 
-Climb the ladder, stopping at the first rung that works: compose existing blocks (\`aart_find_blocks\` first, always) -> a \`node\`/\`command\` block for custom logic or a host CLI you'd otherwise shell out to -> a workspace pack for a reusable family of blocks. Don't fake a missing capability with a brittle workaround.
+Climb the ladder, stopping at the first rung that works: reuse a registered workflow (\`aart_find_workflows\`) -> compose existing blocks (\`aart_find_blocks\`) -> a \`node\`/\`command\` block for custom logic or a host CLI you'd otherwise shell out to -> a workspace pack for a reusable family of blocks. Don't fake a missing capability with a brittle workaround.
 
 ## Rules
 

@@ -54,8 +54,36 @@ describe("parsePackManifestYaml — architecture §11.1's literal example", () =
     expect(() => parsePackManifestYaml("version: 0.1.0\nblocks: [x]\n")).toThrow(PackManifestParseError);
   });
 
-  it("rejects a manifest with an empty blocks list", () => {
-    expect(() => parsePackManifestYaml("name: x\nversion: 0.1.0\nblocks: []\n")).toThrow(PackManifestParseError);
+  it("rejects a manifest with no block or workflow assets", () => {
+    expect(() => parsePackManifestYaml("name: x\nversion: 0.1.0\nblocks: []\nworkflows: []\n")).toThrow(PackManifestParseError);
+  });
+
+  it("rejects path traversal in every manifest field used as an on-disk path", () => {
+    expect(() => parsePackManifestYaml("name: ..\nversion: 1.0.0\nblocks: [safe.block]\n")).toThrow(PackManifestParseError);
+    expect(() => parsePackManifestYaml("name: safe\nversion: ..\nblocks: [safe.block]\n")).toThrow(PackManifestParseError);
+    expect(() => parsePackManifestYaml("name: safe\nversion: 1.0.0\nblocks: [..]\n")).toThrow(PackManifestParseError);
+    expect(() => parsePackManifestYaml("name: safe\nversion: 1.0.0\nworkflows: [../escape]\n")).toThrow(PackManifestParseError);
+  });
+
+  it("accepts a workflow-only Pack and defaults blocks to empty", () => {
+    const raw = parsePackManifestYaml("name: reusable\nversion: 1.0.0\nworkflows: [release-proof]\n");
+    expect(raw.blocks).toEqual([]);
+    expect(raw.workflows).toEqual(["release-proof"]);
+  });
+
+  it("rejects duplicate Block or Workflow declarations before preparation can certify the Pack", () => {
+    expect(() =>
+      parsePackManifestYaml("name: duplicate\nversion: 1.0.0\nblocks: [demo.echo, demo.echo]\n"),
+    ).toThrow(/block ids must be unique/);
+    expect(() =>
+      parsePackManifestYaml("name: duplicate\nversion: 1.0.0\nworkflows: [demo-flow, demo-flow]\n"),
+    ).toThrow(/workflow ids must be unique/);
+    expect(() =>
+      parsePackManifestYaml("name: duplicate\nversion: 1.0.0\nblocks: [Echo, echo]\n"),
+    ).toThrow(/block ids must be unique/);
+    expect(() =>
+      parsePackManifestYaml("name: duplicate\nversion: 1.0.0\nworkflows: [Demo-Flow, demo-flow]\n"),
+    ).toThrow(/workflow ids must be unique/);
   });
 });
 
@@ -71,6 +99,12 @@ describe("npm naming convention — ADR-12/ADR-18 (unscoped, unrelated to @team-
   it("packNameFromNpmPackage rejects a non-conforming package name", () => {
     expect(() => packNameFromNpmPackage("@team-monet/aart")).toThrow(InvalidPackNameError);
     expect(() => packNameFromNpmPackage("some-other-package")).toThrow(InvalidPackNameError);
+  });
+
+  it("rejects unsafe or option-shaped logical pack names before invoking npm", () => {
+    expect(() => npmPackageNameFor("../demo")).toThrow(InvalidPackNameError);
+    expect(() => npmPackageNameFor("--ignore-scripts")).toThrow(InvalidPackNameError);
+    expect(() => npmPackageNameFor("Demo")).toThrow(InvalidPackNameError);
   });
 
   it("round-trips", () => {

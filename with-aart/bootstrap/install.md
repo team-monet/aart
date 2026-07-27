@@ -100,7 +100,8 @@ npm install -g @team-monet/aart
 
 **Sanity-check whichever binary you're about to rely on** — confirm `aart --version` (or `npx -y @team-monet/aart --version`) prints `0.10.0` or later before trusting it.
 
-**Never probe `init-agent` with `--help`.** On `0.10.0`, unrecognized flags are silently ignored and `init-agent` still runs its real write action — `aart init-agent --help` writes `.mcp.json`/`AGENTS.md` into the current directory and returns a normal-looking `{"ok":true,...}` (a CLI fix is filed for `0.10.1`). This playbook is the authoritative flag reference: `--npx`, `--mcp-config-out`, `--instructions-out`.
+`aart init-agent --help` is read-only and prints the command-specific flags.
+Misspelled flags fail before either output file is written.
 
 **If npm isn't reachable, or the user wants to pin an exact commit:** install from source instead. Follow `AUTHORING.md` part (b)'s "Installing from source" steps verbatim (clone, `corepack enable`, `corepack prepare pnpm@<pinned version> --activate`, `pnpm install --frozen-lockfile`, `pnpm run build`, `pnpm --filter @team-monet/aart run build:publish`, `pnpm run build:dashboard-launcher`, `cd packages/cli`, `pnpm pack`, `npm install -g <tarball>`) — execute from that file rather than re-deriving them here. Same version sanity-check applies afterward.
 
@@ -114,17 +115,17 @@ For **each** such workspace:
 
 1. ```bash
    cd <workspace>
-   npx -y @team-monet/aart init-agent --npx
+   npx -y @team-monet/aart init-agent --npx --root "<the store path from Phase 2>" --store fs
    ```
-   (The outer `npx` runs the CLI itself; the inner `--npx` flag controls what `init-agent` *writes* into the generated MCP config — two different things, both needed, don't drop either.) Or, if global install was chosen: `aart init-agent --npx` — still with `--npx`, per Phase 3's rule.
+   (The outer `npx` runs the CLI itself; the inner `--npx` flag controls what `init-agent` *writes* into the generated MCP config — two different things, both needed, don't drop either.) Or, if global install was chosen: `aart init-agent --npx --root "<the store path from Phase 2>" --store fs` — still with the same pinned store arguments and `--npx`, per Phase 3's rule.
 
    This always writes two files: `.mcp.json` (merge-safe — replaces only its own `aart` key if the file already has other servers registered, e.g. a `monet` entry from a `with-monet` install; leaves an unparseable existing file alone and reports an error rather than clobbering it) and `AGENTS.md` (this workspace's copy of AART's working instructions — the one canonical source, never hand-copied or paraphrased).
 
-2. **Apply Phase 2's store decision.** `init-agent` has no flag for this — edit `.mcp.json`'s `args` array (the file it just wrote), appending:
-   ```
-   "--root", "<the store path from Phase 2>"
-   ```
-   Use the exact string Phase 2 settled on, unchanged — it already ends in `.aart`; don't append anything further. Every workspace's config gets this appended — both the shared and the isolated choice are explicit paths, never an unset `--root`.
+2. **Verify Phase 2's store decision was pinned by the writer.** Read the
+   generated `.mcp.json` and confirm its AART `args` end with
+   `--root "<the store path from Phase 2>" --store fs`. No hand edit is
+   required. The absolute path is deliberately part of the generated command
+   so different MCP-host launch directories cannot select different stores.
 
 3. **Per-host finishing step:**
    - **Claude Code:** copy `AGENTS.md`'s content into this workspace's `CLAUDE.md`, wrapped in idempotent markers (Phase 5 uses this same convention for the global copy):
@@ -137,7 +138,9 @@ For **each** such workspace:
    - **opencode:** transcribe `.mcp.json` into `opencode.json` per Phase 1's shape (carrying over the `--root` args from step 2), then delete the now-redundant `.mcp.json`. `AGENTS.md` needs no further step.
    - **Other hosts:** whichever of the two files from Phase 1 didn't already come out right, fix by hand — the mechanism is the same either way.
 
-4. **Re-running is safe** — the documented way to refresh both files after an AART upgrade. Remember steps 2 and 3 are yours, not `init-agent`'s: a bare re-run regenerates `.mcp.json`/`AGENTS.md` fresh, which means the `--root` append and (Claude Code) the `CLAUDE.md` copy need redoing too, every time.
+4. **Re-running is safe** — use the same `--root` and `--store` arguments to
+   refresh both files after an AART upgrade. Repeat the host-specific
+   instructions copy in step 3; the MCP entry itself is replaced merge-safely.
 
 ## Phase 5 — Install the working instructions globally (ask first)
 
@@ -183,13 +186,13 @@ Don't claim success from a write succeeding alone — confirm both halves actual
 
    **Expect two JSON-RPC lines back, then a shutdown notice (~6 lines total):**
    - First line contains `"serverInfo":{"name":"aart"`.
-   - Second line contains `"aart_find_blocks"` inside the `tools` array (one of 17 tools on a bare project in the default governed mode — the exact count varies with trust mode and what's already in the store, so treat `aart_find_blocks`'s presence as the check, not a specific total).
+   - Second line contains `"aart_find_workflows"`, `"aart_find_blocks"`, and `"aart_find_packs"` inside the `tools` array. The exact count varies with trust mode and existing data, so verify capabilities rather than a fixed total.
    - After those two, a pretty-printed `{"ok": true, "message": "MCP server stopped."}` — the clean-EOF shutdown notice firing. Its presence is positive proof the pipe closed cleanly, not an error.
 
    A stray `ExperimentalWarning: SQLite is an experimental feature` line on stderr is expected noise, not a failure. If there's no output at all after a few seconds (and this isn't the first-ever npx warm-up from Phase 3), something is actually wrong — check what's literally at the other end of the MCP config's `command`/`args` before assuming AART itself is broken.
 
 2. **The host actually sees it.** Reload the host first if it only loads MCP config / global instructions at launch. Then:
-   - List registered tools (Claude Code: `/mcp`, or call a tool directly) and confirm `aart` is connected and `aart_find_blocks` is offered.
+   - List registered tools (Claude Code: `/mcp`, or call a tool directly) and confirm `aart` is connected and the three reuse-first discovery tools are offered.
    - Actually **call** `aart_find_blocks` (empty query, or something like `"http"`) and report a compact summary of what came back — a tool appearing in a list only proves registration, not that the server behind it runs.
    - If Phase 5 ran: in a *new* session, confirm the host's own context includes the `with-aart:agent` block — e.g. ask the agent to describe AART's verify reflex without being told anything first. If it can't after a reload, the write likely landed in the wrong file for this host — recheck Phase 1 rather than rewriting blindly.
 
@@ -199,7 +202,7 @@ Close the loop with the user in one message:
 
 - **What got installed, and where** — exact files written (per workspace, and the global file if Phase 5 ran), the store path(s) decided in Phase 2/written in Phase 4, and the install mode (npx-only, or global and why).
 - **How to undo all of it** — remove the `aart` entry from `.mcp.json`/`opencode.json` (or delete the whole file if AART was the only entry); delete this workspace's `AGENTS.md` and, on Claude Code, the `with-aart:agent` block from its `CLAUDE.md`; delete the same block from the global instruction file (restore from the `.bak` Phase 5 made, if nothing else has touched it since); `npm uninstall -g @team-monet/aart` if it was installed; delete the store directory/directories only if the user also wants that data gone — say plainly that step is destructive.
-- **One suggested first action** — e.g. call `aart_find_blocks` to see what's already composable, or ask the user what they'd like to automate first.
+- **One suggested first action** — ask what the user wants to automate, then search local workflows/blocks before the configured public Pack index so reuse wins over rebuilding.
 - **One line, no pressure:** *"If this was useful: https://github.com/team-monet/aart — a star helps."*
 
 ---

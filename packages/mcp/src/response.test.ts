@@ -1,6 +1,6 @@
 // Result-affordance envelope tests — architecture §10.2/§32.2c. DoD: "every
 // tool's result includes a correct next field for both success AND failure
-// paths" — tested here as a completeness sweep over all 27 tools (the
+// paths" — tested here as a completeness sweep over all 33 tools (the
 // original 21 + D1's aart_deploy, AMENDMENTS.md A56 + D2b's four
 // aart_remote_* read tools, AMENDMENTS.md A62 + Wave 2C's aart_remote_approve,
 // AMENDMENTS.md A65) x 2 outcomes (54 checks), plus the exact worked example
@@ -8,16 +8,16 @@
 import { describe, expect, it } from "vitest";
 import { computeNext, TOOL_NAMES, TOOL_TIERS, wrapResult } from "./response.js";
 
-describe("TOOL_NAMES / TOOL_TIERS — architecture §10.1's 21-tool catalog + D1's aart_deploy (AMENDMENTS.md A56) + D2b's four aart_remote_* tools (AMENDMENTS.md A62) + Wave 2C's aart_remote_approve (AMENDMENTS.md A65)", () => {
-  it("has exactly 27 tools", () => {
-    expect(TOOL_NAMES).toHaveLength(27);
+describe("TOOL_NAMES / TOOL_TIERS — architecture catalog plus reuse-first workflow discovery and remote/deploy additions", () => {
+  it("has exactly 33 tools", () => {
+    expect(TOOL_NAMES).toHaveLength(33);
   });
 
-  it("has exactly 10 core and 17 extended tools (spec Fix C's 10/11 split, +1 extended for D1's aart_deploy, +4 extended for D2b's aart_remote_* tools, +1 extended for Wave 2C's aart_remote_approve)", () => {
+  it("has exactly 14 core and 19 extended tools", () => {
     const core = TOOL_NAMES.filter((t) => TOOL_TIERS[t] === "core");
     const extended = TOOL_NAMES.filter((t) => TOOL_TIERS[t] === "extended");
-    expect(core).toHaveLength(10);
-    expect(extended).toHaveLength(17);
+    expect(core).toHaveLength(14);
+    expect(extended).toHaveLength(19);
   });
 
   it("marks aart_approve as core", () => {
@@ -27,6 +27,12 @@ describe("TOOL_NAMES / TOOL_TIERS — architecture §10.1's 21-tool catalog + D1
   it("contains every tool name from architecture §34's flat list plus D1's aart_deploy plus D2b's four aart_remote_* tools plus Wave 2C's aart_remote_approve, no more no less", () => {
     const expected = [
       "aart_find_blocks",
+      "aart_find_workflows",
+      "aart_find_packs",
+      "aart_install_pack",
+      "aart_list_packs",
+      "aart_approve_pack",
+      "aart_prepare_pack",
       "aart_get_block",
       "aart_validate",
       "aart_register_block",
@@ -93,6 +99,13 @@ describe("wrapResult — the shared envelope (architecture §10.2's [DECISION])"
   it("picks the success branch when ok is true", () => {
     const wrapped = wrapResult("aart_validate", { ok: true, valid: true, findings: [] });
     expect(wrapped.next).toBe(computeNext("aart_validate", "success"));
+  });
+
+  it("uses the no-match next step without misreporting a successful search as an error", () => {
+    const wrapped = wrapResult("aart_find_blocks", { ok: true, matched: false, blocks: [] });
+    expect(wrapped.ok).toBe(true);
+    expect(wrapped.matched).toBe(false);
+    expect(wrapped.next).toContain("No matching blocks found");
   });
 
   it("never mutates the input result object", () => {

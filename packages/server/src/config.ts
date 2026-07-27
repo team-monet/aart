@@ -86,6 +86,8 @@ export interface ServerHttpConfig {
 }
 
 export interface ServerConfig extends SharedRuntimeConfig, TickerConfig, PoisonGuardConfig, BackpressureConfig, ServerHttpConfig {
+  /** AART root used to restore executable Pack assets carried by deployment bundles. */
+  packRoot?: string;
   /** Runs the ticker loop in-process alongside the HTTP API — true for `aart server`, also true for `aart dev` (one process, architecture §0.2). Set false if a caller wants to host the HTTP API without also owning the (single-instance, architecture §4.4.3) ticker — e.g. a test harness. Defaults to true. */
   runTicker?: boolean;
   /** architecture §7.2's PR-merge-as-approval ingestion — see triggers/adapters.ts's `ingestGithubPrMergeApproval` doc comment for why this mapping is a documented integration point rather than a guessed convention. Omit to leave PR-merge ingestion a no-op. */
