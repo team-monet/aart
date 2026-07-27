@@ -96,9 +96,12 @@ aart mcp [--store fs|sqlite] [--root <dir>]
 - Packs distribute reusable blocks and workflows through ordinary
   `aart-pack-<name>` npm packages plus a configured static JSON index
   (`AART_PACK_INDEX_URL`). `pack add` is intentionally inert and records the
-  Pack as unapproved; only the separate human `pack approve` step evaluates
-  its block modules. Imported workflows still land as drafts and pass the
-  normal workflow gates.
+  Pack as unapproved; the separate human `pack approve` step verifies its
+  content seal and inspects module shape inside a V8 isolate. Approval never
+  makes Pack code trusted host code: executable Pack blocks run as synchronous
+  pure JSON transforms in a fresh zero-ambient-capability isolate on every
+  dispatch. Imported workflows still land as drafts and pass the normal
+  workflow gates.
 
 ## Status
 

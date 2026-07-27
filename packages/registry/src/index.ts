@@ -55,6 +55,7 @@ export {
   listActiveApprovedPackStatesSync,
   loadApprovedPackBlocksSync,
   loadBlockImplementationFileSync,
+  loadBlockImplementationSourceSync,
   loadInstalledPackBlocksSync,
   persistInstalledPack,
   readInstalledPackState,

@@ -1871,12 +1871,25 @@ layout is `aart-pack.yaml`, self-contained CommonJS block bundles under
   source bytes and provenance are preserved under the AART root.
 
 **Trust boundary:** installation always records `unapproved`; downloaded
-block code is not evaluated. `aart pack approve` / `aart_approve_pack` is
-gated exactly like chat approval, checks the content seal, then evaluates
-block-module shape and compiles workflow definitions. Approved blocks enter
-the real runtime catalog only on the next process start. Imported workflows
-are deliberately registered as `draft` with all normal gates pending—a Pack
+block code is not evaluated in the host process. `aart pack approve` /
+`aart_approve_pack` is gated exactly like chat approval, checks the content
+seal, then inspects block-module shape inside a zero-ambient-capability V8
+isolate and compiles workflow definitions. Approved blocks enter the real
+runtime catalog only on the next process start, and every dispatch runs the
+module in a fresh isolate with no `require`, `process`, filesystem, network,
+secret resolver, artifact writer, or persistent module state. In this first
+public-Pack contract, executable CJS blocks are synchronous pure JSON
+transforms and must declare no ambient capabilities; reusable workflows may
+still compose capability-bearing built-in blocks. Imported workflows are
+deliberately registered as `draft` with all normal gates pending—a Pack
 approval is not a shortcut around workflow validation/promotion.
+
+**PR review closure:** the first implementation used host `require()` for
+approval-time shape validation and approved-block dispatch. That made
+approval an unintended trust grant and contradicted the sandbox hard ceiling.
+The review cycle removed that path entirely, added adversarial coverage that
+would write a host marker if `process`/`require` leaked, and tightened every
+manifest-derived path segment plus installed-package identity matching.
 
 **Runtime closure:** the active approved version of each Pack is selected
 deterministically; workflows using its blocks capture the Pack content hash

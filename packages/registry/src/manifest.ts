@@ -4,6 +4,14 @@ import { parse as parseYaml } from "yaml";
 import { z } from "zod";
 import { computePackContentHash } from "./hash.js";
 
+const PACK_NAME_PATTERN = /^[a-z0-9][a-z0-9._-]*$/;
+const SAFE_ASSET_SEGMENT_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+const safeAssetSegment = (kind: string) =>
+  z
+    .string()
+    .regex(SAFE_ASSET_SEGMENT_PATTERN, `${kind} must start with a letter or number and contain only letters, numbers, dot, underscore, or hyphen`)
+    .refine((value) => value !== "." && value !== "..", `${kind} cannot be "." or ".."`);
+
 // Raw manifest shape — architecture §11.1's literal YAML example (name,
 // version, capabilities, secrets, blocks) plus spec §16.3's fuller
 // connector-capabilities list (auth method, scopes, read/write risk,
@@ -18,8 +26,13 @@ import { computePackContentHash } from "./hash.js";
 // do its own job (hashing, approval-status wiring, discovery).
 export const RawPackManifestSchema = z
   .object({
-    name: z.string().min(1, "pack manifest must declare a name"),
-    version: z.string().min(1, "pack manifest must declare a version"),
+    name: z
+      .string()
+      .regex(
+        PACK_NAME_PATTERN,
+        "pack name must start with a lowercase letter or number and contain only lowercase letters, numbers, dot, underscore, or hyphen",
+      ),
+    version: safeAssetSegment("pack version"),
     displayName: z.string().min(1).optional(),
     description: z.string().min(1).optional(),
     categories: z.array(z.string().min(1)).default([]),
@@ -45,8 +58,8 @@ export const RawPackManifestSchema = z
       .optional(),
     capabilities: z.array(z.string()).default([]),
     secrets: z.array(z.string()).default([]),
-    blocks: z.array(z.string()).default([]),
-    workflows: z.array(z.string()).default([]),
+    blocks: z.array(safeAssetSegment("block id")).default([]),
+    workflows: z.array(safeAssetSegment("workflow id")).default([]),
   })
   .passthrough()
   .refine((manifest) => manifest.blocks.length + manifest.workflows.length > 0, {
@@ -76,7 +89,6 @@ export function parsePackManifestYaml(yamlText: string): RawPackManifest {
 // `name` field (spec §16.3's example: `name: github`) is the SHORT logical
 // name; the npm PACKAGE that carries it is the prefixed form.
 export const PACK_NPM_PREFIX = "aart-pack-";
-const PACK_NAME_PATTERN = /^[a-z0-9][a-z0-9._-]*$/;
 
 export function npmPackageNameFor(packName: string): string {
   if (!PACK_NAME_PATTERN.test(packName)) {

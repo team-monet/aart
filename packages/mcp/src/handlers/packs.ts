@@ -8,7 +8,7 @@ import {
   fetchRemoteRegistryIndex,
   listInstalledPackStatesSync,
   loadInstalledPackBlocksSync,
-  loadBlockImplementationFileSync,
+  loadBlockImplementationSourceSync,
   npmPackageNameFor,
   parsePackManifestYaml,
   persistInstalledPack,
@@ -50,7 +50,7 @@ export async function preparePackHandler(_ctx: AartContext, input: PreparePackIn
   }
   const manifest = buildPackManifest(raw, files.blockSources, files.workflowSources);
   const blocks = raw.blocks.map((id) => ({
-    manifest: loadBlockImplementationFileSync(resolve(sourcePath, "blocks", `${id}.cjs`), id).manifest,
+    manifest: loadBlockImplementationSourceSync(files.blockSources[id]!, id).manifest,
     packName: raw.name,
     examples: [],
   }));
@@ -148,6 +148,9 @@ export async function installPackHandler(ctx: AartContext, input: InstallPackInp
   const npmPackageName = npmPackageNameFor(input.name);
   const files = await packageManager.install(npmPackageName);
   const raw = parsePackManifestYaml(files.manifestYaml);
+  if (raw.name !== input.name) {
+    throw new Error(`installed npm package ${npmPackageName} declares pack name "${raw.name}", expected "${input.name}"`);
+  }
   if (input.version && raw.version !== input.version) {
     throw new Error(`installed pack ${input.name} declares version ${raw.version}, expected ${input.version}`);
   }
@@ -208,8 +211,9 @@ export async function approvePackHandler(ctx: AartContext, input: ApprovePackInp
     throw new Error(`pack ${input.name}@${input.version} changed after installation; approval seal cannot be created`);
   }
 
-  // This is the first point downloaded block code is evaluated, and this
-  // handler is available only on the same human-authorized modes as approve.
+  // Shape inspection executes the module only inside a zero-ambient-
+  // capability V8 isolate. Approval never turns Pack code into trusted host
+  // code; runtime dispatch uses a fresh isolate again for every execution.
   const blocks = loadInstalledPackBlocksSync(ctx.root, input.name, input.version);
   const workflows = raw.workflows.map((id) => {
     const source = installed.files.workflowSources[id];

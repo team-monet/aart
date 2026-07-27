@@ -58,6 +58,13 @@ describe("parsePackManifestYaml — architecture §11.1's literal example", () =
     expect(() => parsePackManifestYaml("name: x\nversion: 0.1.0\nblocks: []\nworkflows: []\n")).toThrow(PackManifestParseError);
   });
 
+  it("rejects path traversal in every manifest field used as an on-disk path", () => {
+    expect(() => parsePackManifestYaml("name: ..\nversion: 1.0.0\nblocks: [safe.block]\n")).toThrow(PackManifestParseError);
+    expect(() => parsePackManifestYaml("name: safe\nversion: ..\nblocks: [safe.block]\n")).toThrow(PackManifestParseError);
+    expect(() => parsePackManifestYaml("name: safe\nversion: 1.0.0\nblocks: [..]\n")).toThrow(PackManifestParseError);
+    expect(() => parsePackManifestYaml("name: safe\nversion: 1.0.0\nworkflows: [../escape]\n")).toThrow(PackManifestParseError);
+  });
+
   it("accepts a workflow-only Pack and defaults blocks to empty", () => {
     const raw = parsePackManifestYaml("name: reusable\nversion: 1.0.0\nworkflows: [release-proof]\n");
     expect(raw.blocks).toEqual([]);

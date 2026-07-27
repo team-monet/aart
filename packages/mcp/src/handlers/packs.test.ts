@@ -22,7 +22,7 @@ const blockSource = `module.exports = {
     description: "Return a reusable greeting",
     category: "demo"
   },
-  async execute() {
+  execute() {
     return { message: "hello from public pack" };
   }
 };
@@ -195,6 +195,75 @@ workflows: [demo-echo-flow]
     await expect(installPackHandler(ctx, { name: "demo", sourcePath: packageRoot })).rejects.toThrow(
       /refusing to replace approved pack/,
     );
+  });
+
+  it("never evaluates Pack modules in the host process during prepare, approval, startup, or execution", async () => {
+    const marker = join(publisherRoot, "host-code-ran.txt");
+    const guardedSource = `
+if (typeof process !== "undefined") {
+  require("node:fs").writeFileSync(${JSON.stringify(marker)}, "host escape");
+}
+module.exports = {
+  manifest: {
+    id: "demo.echo",
+    version: "1.0.0",
+    capabilities: [],
+    inputSchema: { type: "object", properties: {} },
+    outputSchema: { type: "object", properties: {} },
+    description: "Prove the public Pack sandbox boundary"
+  },
+  execute(_input, ctx) {
+    return {
+      processType: typeof process,
+      requireType: typeof require,
+      contextKeys: Object.keys(ctx).sort()
+    };
+  }
+};
+`;
+    await fs.writeFile(join(packageRoot, "blocks", "demo.echo.cjs"), guardedSource, "utf8");
+    const ctx = createAartContext({ root, trustMode: "governed" });
+
+    await preparePackHandler(ctx, { sourcePath: packageRoot });
+    await installPackHandler(ctx, { name: "demo", sourcePath: packageRoot });
+    await approvePackHandler(ctx, { name: "demo", version: "1.0.0", reviewer: "human-reviewer" });
+    const consumer = createRealAartContext({ root, trustMode: "dev" });
+    const run = await runWorkflowHandler(consumer, { workflowId: "demo-echo-flow" });
+    const storedRun = await consumer.store.runs.get(run.runId as string);
+
+    await expect(fs.stat(marker)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(run.status).toBe("completed");
+    expect(storedRun?.trace[0]?.outputs).toEqual({
+      processType: "undefined",
+      requireType: "undefined",
+      contextKeys: ["runId", "stepId"],
+    });
+  });
+
+  it("rejects public Pack blocks that request ambient capabilities before publication", async () => {
+    await fs.writeFile(
+      join(packageRoot, "blocks", "demo.echo.cjs"),
+      blockSource.replace("capabilities: []", 'capabilities: ["filesystem"]'),
+      "utf8",
+    );
+    const ctx = createAartContext({ root: publisherRoot });
+    await expect(preparePackHandler(ctx, { sourcePath: packageRoot })).rejects.toThrow(/pure JSON transforms/);
+  });
+
+  it("rejects a package whose manifest claims a different Pack identity before persisting it", async () => {
+    await fs.writeFile(
+      join(packageRoot, "aart-pack.yaml"),
+      `name: impostor
+version: 1.0.0
+blocks: [demo.echo]
+`,
+      "utf8",
+    );
+    const ctx = createAartContext({ root, trustMode: "governed" });
+    await expect(installPackHandler(ctx, { name: "demo", sourcePath: packageRoot })).rejects.toThrow(
+      /declares pack name "impostor", expected "demo"/,
+    );
+    await expect(fs.stat(join(root, "packs", "installed", "impostor"))).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("prepares a deterministic static-index entry before standard npm publication", async () => {

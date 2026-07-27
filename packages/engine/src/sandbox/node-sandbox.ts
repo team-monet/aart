@@ -19,7 +19,7 @@
 // making S1 own and ship the actual sandboxing mechanism, exactly as the
 // plan specifies.
 import ivm from "isolated-vm";
-import { TimeoutError } from "@aart/types";
+import { BlockManifestSchema, TimeoutError, type BlockManifest } from "@aart/types";
 
 export interface NodeSandboxOptions {
   /**
@@ -37,6 +37,20 @@ export interface NodeSandboxOptions {
   /** Hard memory ceiling in MB. Default 8 (matches the platform smoke test's own isolate — scripts/smoke/isolated-vm.mjs — a `node`-type block is pure JSON-transform logic, not expected to need more). */
   memoryLimitMb?: number;
   /** Hard wall-clock timeout in ms for the script's execution. Default 5000. */
+  timeoutMs?: number;
+}
+
+export interface CommonJsBlockSandboxOptions {
+  /** Complete source of a self-contained CommonJS block module. */
+  source: string;
+  expectedId: string;
+  resolvedInputs: unknown;
+  /** Only non-secret trace correlation metadata crosses the isolate boundary. */
+  executionContext: {
+    runId: string;
+    stepId: string;
+  };
+  memoryLimitMb?: number;
   timeoutMs?: number;
 }
 
@@ -111,6 +125,127 @@ export async function runNodeSandbox(options: NodeSandboxOptions): Promise<unkno
     // heap it reserved for `memoryLimit`.
     isolate.dispose();
   }
+}
+
+/**
+ * Inspects a public Pack's CommonJS module inside a disposable isolate.
+ * Running the module is necessary to obtain its exported manifest, but this
+ * function never evaluates it in the host process: `require`, `process`,
+ * network, filesystem, and host globals are absent.
+ */
+export function inspectCommonJsBlockSourceSync(
+  source: string,
+  expectedId: string,
+  options: { memoryLimitMb?: number; timeoutMs?: number } = {},
+): BlockManifest {
+  const result = evaluateCommonJsBlockSync({
+    source,
+    expectedId,
+    memoryLimitMb: options.memoryLimitMb,
+    timeoutMs: options.timeoutMs,
+    mode: "inspect",
+  }) as { manifest?: unknown; executeType?: unknown; executeTag?: unknown };
+  const parsed = BlockManifestSchema.safeParse(result.manifest);
+  if (!parsed.success || result.executeType !== "function") {
+    throw new Error(`block ${expectedId} must export a valid { manifest, execute } implementation`);
+  }
+  if (result.executeTag !== "[object Function]") {
+    throw new Error(`public Pack block ${expectedId} must use a synchronous execute() function`);
+  }
+  if (parsed.data.id !== expectedId) {
+    throw new Error(`block file ${expectedId}.cjs exports manifest id "${parsed.data.id}"`);
+  }
+  if (parsed.data.capabilities.length > 0) {
+    throw new Error(
+      `public Pack block ${expectedId} declares unsupported ambient capabilities (${parsed.data.capabilities.join(", ")}); ` +
+        "Pack block execution is currently limited to pure JSON transforms inside the zero-ambient-capability sandbox",
+    );
+  }
+  return parsed.data;
+}
+
+/**
+ * Executes a previously inspected public Pack block in a fresh isolate.
+ * The source is re-evaluated in the isolate for each dispatch, so neither
+ * module state nor attacker-controlled globals survive between runs.
+ */
+export async function runCommonJsBlockSandbox(options: CommonJsBlockSandboxOptions): Promise<unknown> {
+  // Re-inspection also pins the runtime export to the same constrained
+  // contract used by prepare/approval/startup.
+  inspectCommonJsBlockSourceSync(options.source, options.expectedId, options);
+  return evaluateCommonJsBlockSync({
+    ...options,
+    mode: "execute",
+  });
+}
+
+type CommonJsEvaluationOptions = Omit<CommonJsBlockSandboxOptions, "resolvedInputs" | "executionContext"> &
+  Partial<Pick<CommonJsBlockSandboxOptions, "resolvedInputs" | "executionContext">> & {
+    mode: "inspect" | "execute";
+  };
+
+function evaluateCommonJsBlockSync(options: CommonJsEvaluationOptions): unknown {
+  const memoryLimit = options.memoryLimitMb ?? 8;
+  const timeout = options.timeoutMs ?? 5_000;
+  const isolate = new ivm.Isolate({ memoryLimit });
+  try {
+    const context = isolate.createContextSync();
+    context.global.setSync("__AART_INPUT_JSON__", JSON.stringify(options.resolvedInputs ?? null));
+    context.global.setSync(
+      "__AART_CONTEXT_JSON__",
+      JSON.stringify(options.executionContext ?? { runId: "", stepId: "" }),
+    );
+    const operation =
+      options.mode === "inspect"
+        ? `return JSON.stringify({
+            manifest: candidate && candidate.manifest,
+            executeType: candidate && typeof candidate.execute,
+            executeTag: candidate && Object.prototype.toString.call(candidate.execute)
+          });`
+        : `
+          if (!candidate || typeof candidate !== "object" || typeof candidate.execute !== "function") {
+            throw new Error("block ${escapeForDoubleQuotedString(options.expectedId)} must export { manifest, execute }");
+          }
+          var result = candidate.execute(
+            JSON.parse(__AART_INPUT_JSON__),
+            JSON.parse(__AART_CONTEXT_JSON__)
+          );
+          if (result && typeof result.then === "function") {
+            throw new Error("public Pack block execute() must return synchronously; asynchronous host capabilities are not available inside the Pack sandbox");
+          }
+          return JSON.stringify(result === undefined ? null : result);
+        `;
+    const wrapped = `
+      (function () {
+        "use strict";
+        var module = { exports: {} };
+        var exports = module.exports;
+        ${options.source}
+        var candidate =
+          module.exports && typeof module.exports === "object" && "default" in module.exports
+            ? module.exports.default
+            : module.exports;
+        ${operation}
+      })();
+    `;
+    let resultJson: string;
+    try {
+      resultJson = context.evalSync(wrapped, { timeout }) as string;
+    } catch (err) {
+      throw classifySandboxError(err);
+    }
+    try {
+      return JSON.parse(resultJson);
+    } catch {
+      throw new Error(`public Pack block ${options.expectedId} returned a value that did not round-trip through JSON`);
+    }
+  } finally {
+    isolate.dispose();
+  }
+}
+
+function escapeForDoubleQuotedString(value: string): string {
+  return value.replaceAll("\\", "\\\\").replaceAll('"', '\\"').replaceAll("\n", "\\n").replaceAll("\r", "\\r");
 }
 
 /**

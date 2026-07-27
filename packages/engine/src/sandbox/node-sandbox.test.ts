@@ -108,22 +108,26 @@ describe("runNodeSandbox — zero ambient capability (ADR-08, architecture §15 
 });
 
 describe("runNodeSandbox — memory limit", () => {
-  it("a script that tries to allocate far beyond the configured memory limit fails rather than exhausting host memory", async () => {
-    await expect(
-      runNodeSandbox({
-        code: `
-          var chunks = [];
-          for (var i = 0; i < 100000; i++) {
-            chunks.push(new Array(1000000).join("x"));
-          }
-          return { length: chunks.length };
-        `,
-        resolvedInputs: {},
-        memoryLimitMb: 8,
-        timeoutMs: 10_000,
-      }),
-    ).rejects.toThrow();
-  });
+  it(
+    "a script that tries to allocate far beyond the configured memory limit fails rather than exhausting host memory",
+    async () => {
+      await expect(
+        runNodeSandbox({
+          code: `
+            var chunks = [];
+            for (var i = 0; i < 100000; i++) {
+              chunks.push(new Array(1000000).join("x"));
+            }
+            return { length: chunks.length };
+          `,
+          resolvedInputs: {},
+          memoryLimitMb: 8,
+          timeoutMs: 10_000,
+        }),
+      ).rejects.toThrow();
+    },
+    15_000,
+  );
 });
 
 describe("runNodeSandbox — hard timeout", () => {

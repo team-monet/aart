@@ -1,13 +1,11 @@
-import { createRequire } from "node:module";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { inspectCommonJsBlockSourceSync, runCommonJsBlockSandbox } from "@aart/engine";
 import type { BlockImplementation, PackManifest } from "@aart/types";
-import { BlockManifestSchema } from "@aart/types";
 import { buildPackManifest, parsePackManifestYaml } from "./manifest.js";
 import type { InstalledPackageFiles } from "./package-manager.js";
 
-const require = createRequire(import.meta.url);
 const SAFE_SEGMENT = /^[A-Za-z0-9._-]+$/;
 
 export type PackProvenance =
@@ -37,7 +35,7 @@ export class PackSealBrokenError extends Error {}
 export class PackBlockLoadError extends Error {}
 
 function assertSafeSegment(value: string, kind: string): void {
-  if (!SAFE_SEGMENT.test(value)) {
+  if (!SAFE_SEGMENT.test(value) || value === "." || value === "..") {
     throw new InvalidPackAssetNameError(`${kind} "${value}" must contain only letters, numbers, dot, underscore, or hyphen`);
   }
 }
@@ -193,32 +191,30 @@ export async function approveInstalledPack(
   return { ...installed, state };
 }
 
-function assertBlockImplementation(value: unknown, expectedId: string): BlockImplementation {
-  const candidate =
-    value && typeof value === "object" && "default" in value
-      ? (value as { default: unknown }).default
-      : value;
-  if (!candidate || typeof candidate !== "object") {
-    throw new PackBlockLoadError(`block ${expectedId} must export { manifest, execute }`);
+export function loadBlockImplementationSourceSync(source: string, expectedId: string): BlockImplementation {
+  let manifest: BlockImplementation["manifest"];
+  try {
+    manifest = inspectCommonJsBlockSourceSync(source, expectedId);
+  } catch (cause) {
+    throw new PackBlockLoadError(`could not inspect public Pack block ${expectedId}: ${(cause as Error).message}`, { cause });
   }
-  const record = candidate as { manifest?: unknown; execute?: unknown };
-  const parsed = BlockManifestSchema.safeParse(record.manifest);
-  if (!parsed.success || typeof record.execute !== "function") {
-    throw new PackBlockLoadError(`block ${expectedId} must export a valid BlockImplementation`);
-  }
-  if (parsed.data.id !== expectedId) {
-    throw new PackBlockLoadError(`block file ${expectedId}.cjs exports manifest id "${parsed.data.id}"`);
-  }
-  return { manifest: parsed.data, execute: record.execute as BlockImplementation["execute"] };
+  return {
+    manifest,
+    execute: async (resolvedInputs, ctx) =>
+      runCommonJsBlockSandbox({
+        source,
+        expectedId,
+        resolvedInputs,
+        executionContext: { runId: ctx.runId, stepId: ctx.stepId },
+      }),
+  };
 }
 
 export function loadBlockImplementationFileSync(file: string, expectedId: string): BlockImplementation {
-  const resolved = require.resolve(file);
-  delete require.cache[resolved];
-  return assertBlockImplementation(require(resolved), expectedId);
+  return loadBlockImplementationSourceSync(readFileSync(file, "utf8"), expectedId);
 }
 
-/** Loads only approved, still-sealed CJS blocks. Unapproved code is never evaluated. */
+/** Loads only approved, still-sealed CJS blocks; module code stays inside a disposable isolate. */
 export function loadApprovedPackBlocksSync(root: string): Array<{ implementation: BlockImplementation; packName: string }> {
   const loaded: Array<{ implementation: BlockImplementation; packName: string }> = [];
   for (const state of listActiveApprovedPackStatesSync(root)) {
@@ -236,7 +232,7 @@ export function loadApprovedPackBlocksSync(root: string): Array<{ implementation
   return loaded;
 }
 
-/** Evaluates one installed pack's block modules for approval-time shape validation. */
+/** Inspects one installed Pack's block modules in a zero-ambient-capability isolate. */
 export function loadInstalledPackBlocksSync(root: string, name: string, version: string): BlockImplementation[] {
   const installed = readInstalledPackSync(root, name, version);
   const raw = parsePackManifestYaml(installed.files.manifestYaml);
@@ -244,8 +240,5 @@ export function loadInstalledPackBlocksSync(root: string, name: string, version:
   if (current.contentHash !== installed.state.contentHash) {
     throw new PackSealBrokenError(`pack ${name}@${version} failed its content seal`);
   }
-  return raw.blocks.map((id) => {
-    const file = join(packDir(root, name, version), "blocks", `${id}.cjs`);
-    return loadBlockImplementationFileSync(file, id);
-  });
+  return raw.blocks.map((id) => loadBlockImplementationSourceSync(installed.files.blockSources[id]!, id));
 }

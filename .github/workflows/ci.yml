@@ -41,6 +41,21 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      # The public catalog is intentionally outside the pnpm workspace: it
+      # is a separately deployable Sites/npm project with its own lockfile.
+      # Root `pnpm install` therefore cannot provide vinext or its build
+      # dependencies.
+      - name: Cache catalog npm downloads
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-node-${{ env.NODE_VERSION }}-catalog-npm-${{ hashFiles('packages/catalog/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-node-${{ env.NODE_VERSION }}-catalog-npm-
+
+      - name: Install catalog dependencies
+        run: npm ci --prefix packages/catalog
+
       # --- Platform smoke tests (implementation plan §2 / §6 Risk 3) ---
       # Deliberately an EARLY, explicit step, before build/typecheck/test:
       # Playwright and isolated-vm are both real cross-platform-friction
