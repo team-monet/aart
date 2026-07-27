@@ -22,6 +22,7 @@
 // distinct failure mode this ordering also surfaces correctly, with its own
 // clear error rather than a confusing hash mismatch.)
 import { promises as fs } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { z } from "zod";
 import {
@@ -617,30 +618,79 @@ async function hydrateBundledPackAssets(
     throw new Error("Bundle load: this bundle contains executable Pack assets, but no Pack root was configured for hydration.");
   }
   await withPackMutationLock(packRoot, async () => {
-    for (const [key, assets] of Object.entries(bundle.packAssets!)) {
-      const manifest = bundle.packs[key];
-      if (!manifest) throw new Error(`Bundle load: Pack assets "${key}" have no matching Pack manifest.`);
-      const installed = await persistInstalledPack(
-        packRoot,
-        assets,
-        { kind: "workspace", source: `bundle:${bundle.manifest.bundleHash}` },
-        new Date(clock.nowIso()),
-      );
-      if (installed.manifest.contentHash !== manifest.contentHash) {
-        throw new Error(`Bundle load: persisted Pack assets "${key}" no longer match the bundle seal.`);
+    const token = randomUUID();
+    const stagingRoot = join(packRoot, "packs", `.bundle-hydration-${token}`);
+    const installedRoot = join(packRoot, "packs", "installed");
+    const stagedInstalledRoot = join(stagingRoot, "packs", "installed");
+    const backupInstalledRoot = join(packRoot, "packs", `.bundle-installed-backup-${token}`);
+    let previousInstallationMoved = false;
+    let stagedInstallationActivated = false;
+    try {
+      await fs.mkdir(join(stagingRoot, "packs"), { recursive: true });
+      try {
+        await fs.cp(installedRoot, stagedInstalledRoot, { recursive: true });
+      } catch (cause) {
+        if ((cause as NodeJS.ErrnoException).code !== "ENOENT") throw cause;
       }
-    }
-    await persistStoreRecords();
-    for (const [key] of Object.entries(bundle.packAssets!)) {
-      const manifest = bundle.packs[key]!;
-      await approveInstalledPack(
-        packRoot,
-        manifest.name,
-        manifest.version,
-        `bundle:${bundle.manifest.bundleHash}`,
-        new Date(clock.nowIso()),
-        manifest.contentHash,
-      );
+
+      // Build and approve the complete candidate installation away from the
+      // live Pack root. Any malformed asset, seal mismatch, or approval
+      // failure leaves the currently active installation byte-for-byte
+      // untouched.
+      for (const [key, assets] of Object.entries(bundle.packAssets!)) {
+        const manifest = bundle.packs[key];
+        if (!manifest) throw new Error(`Bundle load: Pack assets "${key}" have no matching Pack manifest.`);
+        const installed = await persistInstalledPack(
+          stagingRoot,
+          assets,
+          { kind: "workspace", source: `bundle:${bundle.manifest.bundleHash}` },
+          new Date(clock.nowIso()),
+        );
+        if (installed.manifest.contentHash !== manifest.contentHash) {
+          throw new Error(`Bundle load: persisted Pack assets "${key}" no longer match the bundle seal.`);
+        }
+        await approveInstalledPack(
+          stagingRoot,
+          manifest.name,
+          manifest.version,
+          `bundle:${bundle.manifest.bundleHash}`,
+          new Date(clock.nowIso()),
+          manifest.contentHash,
+        );
+      }
+
+      // The store transaction is still the authority for whether hydration
+      // commits. Only after it succeeds do we atomically swap the prepared
+      // Pack tree into place.
+      await persistStoreRecords();
+      try {
+        await fs.rename(installedRoot, backupInstalledRoot);
+        previousInstallationMoved = true;
+      } catch (cause) {
+        if ((cause as NodeJS.ErrnoException).code !== "ENOENT") throw cause;
+      }
+      try {
+        await fs.rename(stagedInstalledRoot, installedRoot);
+        stagedInstallationActivated = true;
+      } catch (cause) {
+        if (previousInstallationMoved) {
+          await fs.rename(backupInstalledRoot, installedRoot);
+          previousInstallationMoved = false;
+        }
+        throw cause;
+      }
+      if (previousInstallationMoved) {
+        await fs.rm(backupInstalledRoot, { recursive: true, force: true });
+        previousInstallationMoved = false;
+      }
+    } finally {
+      if (!stagedInstallationActivated && previousInstallationMoved) {
+        await fs.rename(backupInstalledRoot, installedRoot).catch(() => undefined);
+      }
+      await fs.rm(stagingRoot, { recursive: true, force: true });
+      if (stagedInstallationActivated) {
+        await fs.rm(backupInstalledRoot, { recursive: true, force: true });
+      }
     }
   });
 }

@@ -41,6 +41,7 @@ describe("findBlocksHandler (aart_find_blocks)", () => {
         id: "public.demo",
         packName: "public-demo",
         source: "public",
+        catalogMode: "preview",
         examples: [{ description: "Reuse the public Block", inputs: { value: "demo" } }],
       }),
     ]);
@@ -85,7 +86,12 @@ describe("findWorkflowsHandler (aart_find_workflows)", () => {
       indexUrl: publicIndexUrl(),
     });
     expect(result.workflows).toEqual([
-      expect.objectContaining({ id: "public-demo-flow", packName: "public-demo", source: "public" }),
+      expect.objectContaining({
+        id: "public-demo-flow",
+        packName: "public-demo",
+        source: "public",
+        catalogMode: "preview",
+      }),
     ]);
   });
 });
@@ -108,6 +114,7 @@ function publicIndexUrl(): string {
     },
   };
   const index = {
+    mode: "preview",
     packs: [
       {
         npmPackageName: "aart-pack-public-demo",

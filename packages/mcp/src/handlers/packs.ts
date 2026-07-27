@@ -4,6 +4,7 @@ import { open, readFile } from "node:fs/promises";
 import { isDeepStrictEqual } from "node:util";
 import {
   approveInstalledPack,
+  assertPackCompatibility,
   buildPackManifest,
   createLinkedPackageManager,
   createNpmPackageManager,
@@ -26,6 +27,7 @@ import type { Workflow } from "@aart/types";
 import type { AartContext } from "../context.js";
 import type { HandlerResult } from "../response.js";
 import { compileYamlWorkflow } from "../yaml-compiler.js";
+import { AART_VERSION } from "../version.js";
 
 export interface FindPacksInput {
   query: string;
@@ -144,7 +146,7 @@ function publicIndexUrl(input?: string): string {
 export async function findPacksHandler(_ctx: AartContext, input: FindPacksInput): Promise<HandlerResult> {
   const indexUrl = publicIndexUrl(input.indexUrl);
   const index = await fetchRemoteRegistryIndex(indexUrl);
-  const packs = searchRemotePacks(index, input.query).map(({ pack, score }) => ({
+  const packs = searchRemotePacks(index.packs, input.query).map(({ pack, score }) => ({
     name: pack.packName,
     npmPackageName: pack.npmPackageName,
     version: pack.version,
@@ -160,9 +162,17 @@ export async function findPacksHandler(_ctx: AartContext, input: FindPacksInput)
     stats: pack.stats,
     blocks: pack.blocks.map((entry) => entry.manifest.id),
     workflows: (pack.workflows ?? []).map((workflow) => ({ id: workflow.id, name: workflow.name })),
+    installable: index.mode === "production",
     score,
   }));
-  return { ok: true, matched: packs.length > 0, query: input.query, indexUrl, packs };
+  return {
+    ok: true,
+    matched: packs.length > 0,
+    query: input.query,
+    indexUrl,
+    indexMode: index.mode,
+    packs,
+  };
 }
 
 export interface InstallPackInput {
@@ -294,6 +304,10 @@ async function approvePackUnlocked(ctx: AartContext, input: ApprovePackInput): P
       `reviewed content hash does not match installed pack ${input.name}@${input.version}; list the Pack again and review the current seal`,
     );
   }
+  assertPackCompatibility(raw.compatibility, {
+    aart: AART_VERSION,
+    node: process.versions.node,
+  });
 
   // Shape inspection executes the module only inside a zero-ambient-
   // capability V8 isolate. Approval never turns Pack code into trusted host

@@ -15,12 +15,14 @@
 // verbatim.
 import type { AartStore } from "@aart/store";
 import type { PackManifest, PromptRegistryEntry, SchemaRegistryEntry, Workflow } from "@aart/types";
+import { listActiveApprovedPackStatesSync } from "@aart/registry";
 import { highestVersion } from "../version-compare.js";
 
 export interface ClosureResult {
   /** Keyed by `${workflowId}@${version}` — the root plus every nested workflow reachable via `flow.subworkflow` steps. */
   workflows: Map<string, Workflow>;
-  packNamespaces: Set<string>;
+  /** Exact block ids referenced by the workflow closure. Pack ownership is resolved from manifests, never inferred from an id prefix. */
+  blockIds: Set<string>;
   /** `name` (unversioned — always resolved to the latest version present in the store at bundle-production time, then pinned into the manifest, matching ExecutionSnapshot's own "resolvedVersions" pattern, architecture §4.5). */
   promptRefNames: Set<string>;
   schemaRefNames: Set<string>;
@@ -42,7 +44,7 @@ export async function computeClosure(store: AartStore, workflowId: string, reque
   const version = await resolveVersion(store, workflowId, requestedVersion);
   const key = workflowKey(workflowId, version);
 
-  const result: ClosureResult = { workflows: new Map(), packNamespaces: new Set(), promptRefNames: new Set(), schemaRefNames: new Set() };
+  const result: ClosureResult = { workflows: new Map(), blockIds: new Set(), promptRefNames: new Set(), schemaRefNames: new Set() };
   if (visited.has(key)) return result; // cycle guard — already in this walk
   visited.add(key);
 
@@ -54,7 +56,7 @@ export async function computeClosure(store: AartStore, workflowId: string, reque
 
   for (const step of workflow.execution.steps) {
     const namespace = step.uses.split(".")[0];
-    if (namespace) result.packNamespaces.add(namespace);
+    result.blockIds.add(step.uses);
 
     if (step.uses === "flow.subworkflow") {
       const nestedId = step.with?.["workflowId"];
@@ -78,7 +80,7 @@ export async function computeClosure(store: AartStore, workflowId: string, reque
 
 function mergeClosureInto(target: ClosureResult, source: ClosureResult): void {
   for (const [k, v] of source.workflows) target.workflows.set(k, v);
-  for (const ns of source.packNamespaces) target.packNamespaces.add(ns);
+  for (const blockId of source.blockIds) target.blockIds.add(blockId);
   for (const p of source.promptRefNames) target.promptRefNames.add(p);
   for (const s of source.schemaRefNames) target.schemaRefNames.add(s);
 }
@@ -90,15 +92,37 @@ export interface ResolvedClosure {
   schemas: Map<string, SchemaRegistryEntry>;
 }
 
-/** Resolves `packNamespaces`/`promptRefNames`/`schemaRefNames` against the store's registries. A namespace with no registered `PackManifest` versions is treated as a core built-in (ships with the runtime binary itself, architecture §0.3 — nothing to bundle) rather than an error, since most namespaces (`browser`, `http`, `assert`, ...) are exactly that. */
-export async function resolveClosureRegistryEntries(store: AartStore, closure: ClosureResult): Promise<ResolvedClosure> {
+/**
+ * Resolves exact referenced block ids against the active approved Pack
+ * manifests. A block with no Pack owner is a core built-in and needs no
+ * bundled manifest.
+ */
+export async function resolveClosureRegistryEntries(
+  store: AartStore,
+  closure: ClosureResult,
+  options: { packRoot?: string } = {},
+): Promise<ResolvedClosure> {
   const packs = new Map<string, PackManifest>();
-  for (const namespace of closure.packNamespaces) {
-    const versions = await store.packManifests.listVersions(namespace);
-    const latest = highestVersion(versions);
-    if (!latest) continue; // core built-in — not pack-delivered
-    const manifest = await store.packManifests.get(namespace, latest);
-    if (manifest) packs.set(`${namespace}@${latest}`, manifest);
+  const activeManifests = await resolveActivePackManifests(store, options.packRoot);
+  const ownerByBlockId = new Map<string, PackManifest>();
+  for (const manifest of activeManifests) {
+    const blockIds = Array.isArray(manifest.manifest["blocks"])
+      ? manifest.manifest["blocks"].filter((id): id is string => typeof id === "string")
+      : [];
+    for (const blockId of blockIds) {
+      const existing = ownerByBlockId.get(blockId);
+      if (existing && existing.name !== manifest.name) {
+        throw new Error(
+          `Bundle closure: block "${blockId}" is claimed by multiple active approved Packs ` +
+            `("${existing.name}" and "${manifest.name}").`,
+        );
+      }
+      ownerByBlockId.set(blockId, manifest);
+    }
+  }
+  for (const blockId of closure.blockIds) {
+    const owner = ownerByBlockId.get(blockId);
+    if (owner) packs.set(`${owner.name}@${owner.version}`, owner);
   }
 
   const prompts = new Map<string, PromptRegistryEntry>();
@@ -120,4 +144,37 @@ export async function resolveClosureRegistryEntries(store: AartStore, closure: C
   }
 
   return { workflows: closure.workflows, packs, prompts, schemas };
+}
+
+async function resolveActivePackManifests(store: AartStore, packRoot: string | undefined): Promise<PackManifest[]> {
+  if (packRoot) {
+    const manifests: PackManifest[] = [];
+    for (const state of listActiveApprovedPackStatesSync(packRoot)) {
+      const manifest = await store.packManifests.get(state.name, state.version);
+      if (
+        !manifest ||
+        manifest.approvalStatus !== "approved" ||
+        manifest.contentHash !== state.contentHash
+      ) {
+        throw new Error(
+          `Bundle closure: active Pack "${state.name}@${state.version}" does not match an approved store manifest.`,
+        );
+      }
+      manifests.push(manifest);
+    }
+    return manifests;
+  }
+
+  const manifests: PackManifest[] = [];
+  for (const name of await store.packManifests.listNames()) {
+    const approved: PackManifest[] = [];
+    for (const version of await store.packManifests.listVersions(name)) {
+      const manifest = await store.packManifests.get(name, version);
+      if (manifest?.approvalStatus === "approved") approved.push(manifest);
+    }
+    const latestApprovedVersion = highestVersion(approved.map((manifest) => manifest.version));
+    const latestApproved = approved.find((manifest) => manifest.version === latestApprovedVersion);
+    if (latestApproved) manifests.push(latestApproved);
+  }
+  return manifests;
 }

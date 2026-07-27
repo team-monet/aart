@@ -9,11 +9,13 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   approveInstalledPack,
+  listActiveApprovedPackStatesSync,
   loadInstalledPackBlocksSync,
   persistInstalledPack,
   readInstalledPackSync,
 } from "@aart/registry";
 import type { Workflow } from "@aart/types";
+import type { AartStore } from "@aart/store";
 import { loadTriggerBindingsFromDeployments } from "../triggers/registry.js";
 import { createTestFixture, type TestFixture } from "../test-helpers.js";
 import { produceBundle, sanitizeFilename, writeBundleToDisk, type Bundle } from "./bundle.js";
@@ -75,7 +77,7 @@ async function setUpTwoLevelFixture(fx: TestFixture): Promise<void> {
       },
     }),
   );
-  await fx.store.packManifests.put({ name: "github", version: "2.0.0", contentHash: "hash-gh-2", manifest: { blocks: ["create_comment"] }, approvalStatus: "approved" });
+  await fx.store.packManifests.put({ name: "github", version: "2.0.0", contentHash: "hash-gh-2", manifest: { blocks: ["github.create_comment"] }, approvalStatus: "approved" });
   await fx.store.promptRegistry.put({ name: "extract-prompt", version: "3", contentHash: "hash-p3", body: "Extract the fields." });
   await fx.store.schemaRegistry.put({ name: "extract-schema", version: "2", contentHash: "hash-s2", jsonSchema: { type: "object" } });
 }
@@ -186,6 +188,87 @@ describe("readBundleFromDisk / hydrateBundle — round-trip (S12)", () => {
         },
       ),
     ).resolves.toEqual({ value: "hello" });
+  });
+
+  it("keeps the currently active Pack untouched when the store transaction aborts hydration", async () => {
+    laptop = await createTestFixture();
+    server = await createTestFixture();
+    const sourceRoot = await fs.mkdtemp(join(tmpdir(), "aart-bundle-atomic-source-"));
+    const destinationRoot = await fs.mkdtemp(join(tmpdir(), "aart-bundle-atomic-destination-"));
+    packRoots.push(sourceRoot, destinationRoot);
+    const source = `module.exports = {
+      manifest: {
+        id: "demo.echo",
+        version: "1.0.0",
+        capabilities: [],
+        inputSchema: {},
+        outputSchema: {},
+        description: "Echo a value"
+      },
+      execute: (input) => input
+    };`;
+    const files = {
+      manifestYaml: "name: demo\nversion: 1.0.0\nblocks: [demo.echo]\n",
+      blockSources: { "demo.echo": source },
+    };
+    const sourcePack = await persistInstalledPack(
+      sourceRoot,
+      files,
+      { kind: "workspace", source: "source" },
+    );
+    await approveInstalledPack(
+      sourceRoot,
+      "demo",
+      "1.0.0",
+      "source-reviewer",
+      new Date("2026-07-28T00:00:00.000Z"),
+      sourcePack.manifest.contentHash,
+    );
+    await laptop.store.packManifests.put({ ...sourcePack.manifest, approvalStatus: "approved" });
+    await laptop.store.workflows.put(
+      baseWorkflow({
+        id: "atomic-pack-wf",
+        version: "1",
+        execution: { type: "workflow", steps: [{ id: "echo", uses: "demo.echo", with: {} }] },
+      }),
+    );
+    const destinationPack = await persistInstalledPack(
+      destinationRoot,
+      files,
+      { kind: "workspace", source: "existing" },
+    );
+    await approveInstalledPack(
+      destinationRoot,
+      "demo",
+      "1.0.0",
+      "existing-reviewer",
+      new Date("2026-07-28T00:00:00.000Z"),
+      destinationPack.manifest.contentHash,
+    );
+
+    const bundle = await produceBundle(laptop.store, {
+      workflowId: "atomic-pack-wf",
+      workflowVersion: "1",
+      packRoot: sourceRoot,
+    });
+    const failingStore: AartStore = {
+      ...server.store,
+      transact: async () => {
+        throw new Error("simulated store transaction failure");
+      },
+    };
+    await expect(hydrateBundle(failingStore, bundle, server.clock, destinationRoot)).rejects.toThrow(
+      /simulated store transaction failure/,
+    );
+
+    expect(readInstalledPackSync(destinationRoot, "demo", "1.0.0").state).toMatchObject({
+      approvalStatus: "approved",
+      reviewer: "existing-reviewer",
+      contentHash: destinationPack.manifest.contentHash,
+    });
+    expect(listActiveApprovedPackStatesSync(destinationRoot)).toEqual([
+      expect.objectContaining({ name: "demo", version: "1.0.0", approvalStatus: "approved" }),
+    ]);
   });
 
   it("a bundle produced on one store hydrates every definition category into a completely different store, verbatim", async () => {

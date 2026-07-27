@@ -7,6 +7,7 @@ import { promises as fs } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { approveInstalledPack, persistInstalledPack } from "@aart/registry";
 import type { Workflow } from "@aart/types";
 import { produceBundle, writeBundleToDisk } from "./bundle.js";
 import { createTestFixture, type TestFixture } from "../test-helpers.js";
@@ -61,7 +62,7 @@ async function setUpTwoLevelFixture(fx: TestFixture): Promise<void> {
       },
     }),
   );
-  await fx.store.packManifests.put({ name: "github", version: "2.0.0", contentHash: "hash-gh-2", manifest: { blocks: ["create_comment"] }, approvalStatus: "approved" });
+  await fx.store.packManifests.put({ name: "github", version: "2.0.0", contentHash: "hash-gh-2", manifest: { blocks: ["github.create_comment"] }, approvalStatus: "approved" });
   await fx.store.promptRegistry.put({ name: "extract-prompt", version: "3", contentHash: "hash-p3", body: "Extract the fields." });
   await fx.store.schemaRegistry.put({ name: "extract-schema", version: "2", contentHash: "hash-s2", jsonSchema: { type: "object" } });
 }
@@ -83,6 +84,79 @@ describe("produceBundle — transitive closure (architecture §0.3, ADR-04)", ()
     // pack dependency entirely.
     expect(bundle.packs["github@2.0.0"]).toBeDefined();
     expect(bundle.manifest.packs).toContainEqual({ name: "github", version: "2.0.0", contentHash: "hash-gh-2" });
+  });
+
+  it("resolves Pack ownership from the exact block id and bundles the active approved version", async () => {
+    fx = await createTestFixture();
+    const packRoot = await fs.mkdtemp(join(tmpdir(), "aart-bundle-owner-pack-"));
+    const blockSource = `module.exports = {
+      manifest: {
+        id: "browser.assert_journey",
+        version: "1.0.0",
+        capabilities: [],
+        inputSchema: {},
+        outputSchema: {},
+        description: "Assert a browser journey"
+      },
+      execute: (input) => input
+    };`;
+    try {
+      const active = await persistInstalledPack(
+        packRoot,
+        {
+          manifestYaml: "name: browser-checks\nversion: 1.0.0\nblocks: [browser.assert_journey]\n",
+          blockSources: { "browser.assert_journey": blockSource },
+        },
+        { kind: "workspace", source: "test" },
+      );
+      await approveInstalledPack(
+        packRoot,
+        "browser-checks",
+        "1.0.0",
+        "reviewer",
+        new Date("2026-07-28T00:00:00.000Z"),
+        active.manifest.contentHash,
+      );
+      await fx.store.packManifests.put({ ...active.manifest, approvalStatus: "approved" });
+
+      const candidate = await persistInstalledPack(
+        packRoot,
+        {
+          manifestYaml: "name: browser-checks\nversion: 2.0.0\nblocks: [browser.assert_journey]\n",
+          blockSources: {
+            "browser.assert_journey": blockSource.replace('version: "1.0.0"', 'version: "2.0.0"'),
+          },
+        },
+        { kind: "workspace", source: "test" },
+      );
+      await fx.store.packManifests.put(candidate.manifest);
+      await fx.store.workflows.put(
+        baseWorkflow({
+          id: "journey-wf",
+          version: "1",
+          execution: {
+            type: "workflow",
+            steps: [{ id: "assert", uses: "browser.assert_journey", with: {} }],
+          },
+        }),
+      );
+
+      const bundle = await produceBundle(fx.store, {
+        workflowId: "journey-wf",
+        workflowVersion: "1",
+        packRoot,
+      });
+      expect(bundle.packs["browser-checks@1.0.0"]).toBeDefined();
+      expect(bundle.packs["browser-checks@2.0.0"]).toBeUndefined();
+      expect(bundle.manifest.packs).toContainEqual({
+        name: "browser-checks",
+        version: "1.0.0",
+        contentHash: active.manifest.contentHash,
+        assets: true,
+      });
+    } finally {
+      await fs.rm(packRoot, { recursive: true, force: true });
+    }
   });
 
   it("does NOT include a pack manifest for a core built-in namespace (browser.*) with no registered PackManifest", async () => {

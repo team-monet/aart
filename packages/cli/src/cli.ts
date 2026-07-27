@@ -7,6 +7,7 @@ import path from "node:path";
 import { createFsStore } from "@aart/store";
 import { createSqliteStore } from "@aart/store/sqlite";
 import { hydrateBundleFromDisk } from "@aart/server";
+import { AART_VERSION } from "@aart/mcp";
 import { flagString, tokenize, type Tokenized } from "./args.js";
 import { createCliContext, type CliContext, type CreateCliContextOptions } from "./cli-context.js";
 import { findBlocksCommand, findWorkflowsCommand, initAgentCommand, initCommand, listCommand, registerCommand, reportCommand, runCommand, validateCommand } from "./commands/authoring.js";
@@ -95,7 +96,7 @@ so the agent host cannot accidentally start against a different workspace.
  * prep because the release's own tarball-verification step requires a
  * working `aart --version`.
  */
-export const VERSION = "0.10.0";
+export const VERSION = AART_VERSION;
 
 export interface RunOptions {
   /** Reuse an already-constructed CLI context (tests: an isolated tmp-dir store). */

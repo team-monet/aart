@@ -343,8 +343,15 @@ function commonJsProgram(options: CommonJsEvaluationOptions): string {
           return DeterministicMath;
         })(globalThis.Math);
         Object.freeze(Math);
+        // Intl's formatter methods use the current instant when format()
+        // is called without a value, and inherit host locale/timezone
+        // defaults. Until the Pack contract can require and verify every
+        // locale/timezone/time input explicitly, exposing Intl would reopen
+        // ambient time and host-dependent output through a side door.
+        var Intl = undefined;
         Object.defineProperty(globalThis, "Date", { value: Date, writable: false, configurable: false });
         Object.defineProperty(globalThis, "Math", { value: Math, writable: false, configurable: false });
+        Object.defineProperty(globalThis, "Intl", { value: undefined, writable: false, configurable: false });
         var module = { exports: {} };
         var exports = module.exports;
         ${options.source}

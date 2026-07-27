@@ -226,6 +226,8 @@ describe("public Pack CommonJS sandbox scheduling", () => {
         if (input.kind === "constructor-time") return { value: new globalThis.Date() };
         if (input.kind === "prototype-time") return { value: Date.prototype.constructor.now() };
         if (input.kind === "instance-time") return { value: new Date("2026-01-01T00:00:00Z").constructor.now() };
+        if (input.kind === "intl-time") return { value: new Intl.DateTimeFormat().format() };
+        if (input.kind === "global-intl-time") return { value: new globalThis.Intl.DateTimeFormat().format() };
         if (input.kind === "prototype-random") return { value: Object.getPrototypeOf(Math).random() };
         return { value: globalThis.Math.random() };
       }
@@ -250,6 +252,8 @@ describe("public Pack CommonJS sandbox scheduling", () => {
     await expect(runCommonJsBlockSandbox({ ...base, resolvedInputs: { kind: "instance-time" } })).rejects.toThrow(
       /cannot read ambient time/,
     );
+    await expect(runCommonJsBlockSandbox({ ...base, resolvedInputs: { kind: "intl-time" } })).rejects.toThrow();
+    await expect(runCommonJsBlockSandbox({ ...base, resolvedInputs: { kind: "global-intl-time" } })).rejects.toThrow();
     await expect(runCommonJsBlockSandbox({ ...base, resolvedInputs: { kind: "random" } })).rejects.toThrow(
       /cannot use ambient randomness/,
     );
