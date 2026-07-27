@@ -167,6 +167,7 @@ workflows: [demo-echo-flow]
       expect.objectContaining({
         name: "demo",
         contentHash: installed.contentHash,
+        active: false,
         sealStatus: "verified",
         displayName: "Demo Pack",
         description: "Reusable demo assets",
@@ -195,6 +196,11 @@ workflows: [demo-echo-flow]
         approvalStatus: "approved",
         loadedOnNextProcessStart: ["demo.echo"],
         registeredDraftWorkflows: [{ id: "demo-echo-flow", version: "1.0.0" }],
+      }),
+    );
+    expect(await listPacksHandler(ctx, { status: "approved" })).toEqual(
+      expect.objectContaining({
+        packs: [expect.objectContaining({ name: "demo", active: true })],
       }),
     );
 
@@ -277,7 +283,7 @@ workflows: [demo-echo-flow]
     expect((await listPacksHandler(ctx, { status: "unapproved" })).count).toBe(1);
   });
 
-  it("checks collisions against only the active approved version of another Pack", async () => {
+  it("uses only the explicitly active version and never revives a dormant conflicting version", async () => {
     const ctx = createAartContext({ root, trustMode: "governed" });
     const otherRoot = join(publisherRoot, "aart-pack-other");
     await fs.mkdir(join(otherRoot, "blocks"), { recursive: true });
@@ -333,6 +339,14 @@ workflows: [demo-echo-flow]
         reviewer: "human-reviewer",
       }),
     ).resolves.toEqual(expect.objectContaining({ approvalStatus: "approved" }));
+
+    // Reinstalling the active other@2 makes that exact version unapproved.
+    // The explicit active selection must not fall back to approved other@1,
+    // whose old demo.echo id now belongs to the Demo Pack.
+    await installPackHandler(ctx, { name: "other", sourcePath: otherRoot });
+    const restarted = createRealAartContext({ root, trustMode: "dev" });
+    expect(restarted.registry.getBlock("demo.echo")?.packName).toBe("demo");
+    expect(restarted.registry.getBlock("other.current")).toBeUndefined();
   });
 
   it("rejects a Pack block that would make the next process fail on an existing Block id", async () => {

@@ -272,26 +272,49 @@ function commonJsProgram(options: CommonJsEvaluationOptions): string {
       (function () {
         "use strict";
         var Date = (function (NativeDate) {
+          var safePrototype = Object.create(null);
           function DeterministicDate() {
             if (!new.target || arguments.length === 0) {
               throw new Error("public Pack blocks cannot read ambient time; pass time as an explicit input");
             }
-            return Reflect.construct(NativeDate, Array.from(arguments));
+            var instance = Reflect.construct(NativeDate, Array.from(arguments));
+            Object.setPrototypeOf(instance, safePrototype);
+            return instance;
           }
           DeterministicDate.now = function () {
             throw new Error("public Pack blocks cannot read ambient time; pass time as an explicit input");
           };
           DeterministicDate.parse = NativeDate.parse;
           DeterministicDate.UTC = NativeDate.UTC;
-          DeterministicDate.prototype = NativeDate.prototype;
+          for (var key of Reflect.ownKeys(NativeDate.prototype)) {
+            if (key !== "constructor") {
+              Object.defineProperty(safePrototype, key, Object.getOwnPropertyDescriptor(NativeDate.prototype, key));
+            }
+          }
+          Object.defineProperty(safePrototype, "constructor", {
+            value: DeterministicDate,
+            writable: false,
+            configurable: false
+          });
+          Object.freeze(safePrototype);
+          DeterministicDate.prototype = safePrototype;
+          Object.freeze(DeterministicDate);
           return DeterministicDate;
         })(globalThis.Date);
-        var Math = Object.create(globalThis.Math);
-        Object.defineProperty(Math, "random", {
-          value: function () {
-            throw new Error("public Pack blocks cannot use ambient randomness; pass a deterministic value as an explicit input");
+        var Math = (function (NativeMath) {
+          var DeterministicMath = Object.create(null);
+          for (var key of Reflect.ownKeys(NativeMath)) {
+            if (key !== "random") {
+              Object.defineProperty(DeterministicMath, key, Object.getOwnPropertyDescriptor(NativeMath, key));
+            }
           }
-        });
+          Object.defineProperty(DeterministicMath, "random", {
+            value: function () {
+              throw new Error("public Pack blocks cannot use ambient randomness; pass a deterministic value as an explicit input");
+            }
+          });
+          return DeterministicMath;
+        })(globalThis.Math);
         Object.freeze(Math);
         Object.defineProperty(globalThis, "Date", { value: Date, writable: false, configurable: false });
         Object.defineProperty(globalThis, "Math", { value: Math, writable: false, configurable: false });

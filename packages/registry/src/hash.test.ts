@@ -71,6 +71,25 @@ describe("computePackContentHash — architecture §11.1", () => {
     expect(computePackContentHash(baseManifest, baseBlockSources)).toBe(`sha256:${legacyDigest}`);
   });
 
+  it("does not let new parser defaults break historical block-only seals", () => {
+    const historicalManifest = {
+      name: "minimal",
+      version: "1.0.0",
+      capabilities: [],
+      secrets: [],
+      blocks: ["minimal.run"],
+    };
+    const parsedWithNewDefaults = {
+      ...historicalManifest,
+      categories: [],
+      tags: [],
+      workflows: [],
+    };
+    expect(computePackContentHash(parsedWithNewDefaults, { "minimal.run": "source" })).toBe(
+      computePackContentHash(historicalManifest, { "minimal.run": "source" }),
+    );
+  });
+
   it("adding a new block (new key in blockSources) invalidates the hash", () => {
     const original = computePackContentHash(baseManifest, baseBlockSources);
     const edited = computePackContentHash(baseManifest, {

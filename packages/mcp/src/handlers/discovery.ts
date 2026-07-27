@@ -54,6 +54,7 @@ export async function findBlocksHandler(ctx: AartContext, input: FindBlocksInput
       description: r.entry.manifest.description,
       category: r.entry.manifest.category,
       packName: r.entry.packName,
+      examples: r.entry.examples,
       source: r.source,
       score: r.score,
     })),

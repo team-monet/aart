@@ -214,6 +214,9 @@ export interface ListPacksInput {
 }
 
 export async function listPacksHandler(ctx: AartContext, input: ListPacksInput): Promise<HandlerResult> {
+  const active = new Set(
+    listActiveApprovedPackStatesSync(ctx.root).map((state) => `${state.name}@${state.version}:${state.contentHash}`),
+  );
   const packs = listInstalledPackStatesSync(ctx.root)
     .filter((state) => (input.status ? state.approvalStatus === input.status : true))
     .map((state) => {
@@ -223,6 +226,7 @@ export async function listPacksHandler(ctx: AartContext, input: ListPacksInput):
         const current = buildPackManifest(raw, installed.files.blockSources, installed.files.workflowSources);
         return {
           ...state,
+          active: active.has(`${state.name}@${state.version}:${state.contentHash}`),
           sealStatus: current.contentHash === state.contentHash ? "verified" : "broken",
           displayName: raw.displayName,
           description: raw.description,
@@ -236,6 +240,7 @@ export async function listPacksHandler(ctx: AartContext, input: ListPacksInput):
       } catch {
         return {
           ...state,
+          active: active.has(`${state.name}@${state.version}:${state.contentHash}`),
           sealStatus: "broken",
           reviewUnavailable: true,
         };

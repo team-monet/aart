@@ -37,7 +37,12 @@ describe("findBlocksHandler (aart_find_blocks)", () => {
     expect(local.blocks).toEqual([]);
     const remote = await findBlocksHandler(tc.ctx, { query: "public.demo", scope: "remote", indexUrl });
     expect(remote.blocks).toEqual([
-      expect.objectContaining({ id: "public.demo", packName: "public-demo", source: "public" }),
+      expect.objectContaining({
+        id: "public.demo",
+        packName: "public-demo",
+        source: "public",
+        examples: [{ description: "Reuse the public Block", inputs: { value: "demo" } }],
+      }),
     ]);
   });
 });
@@ -118,7 +123,7 @@ function publicIndexUrl(): string {
               outputSchema: {},
               description: "Public demo block",
             },
-            examples: [],
+            examples: [{ description: "Reuse the public Block", inputs: { value: "demo" } }],
           },
         ],
         workflows: [workflow],

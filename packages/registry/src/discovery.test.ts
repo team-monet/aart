@@ -264,6 +264,22 @@ describe("searchWorkflows — reusable workflow discovery", () => {
 });
 
 describe("parseRemoteRegistryIndexDocument", () => {
+  it("rejects an incomplete Block manifest at the public-index boundary", () => {
+    expect(() =>
+      parseRemoteRegistryIndexDocument({
+        schemaVersion: 1,
+        packs: [
+          {
+            npmPackageName: "aart-pack-incomplete-block",
+            packName: "incomplete-block",
+            version: "1.0.0",
+            blocks: [{ manifest: { id: "bad.example" }, examples: [] }],
+          },
+        ],
+      }),
+    ).toThrow(/failed validation/);
+  });
+
   it("rejects malformed Block examples at the fetch boundary", () => {
     expect(() =>
       parseRemoteRegistryIndexDocument({

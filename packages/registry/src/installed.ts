@@ -34,6 +34,11 @@ export interface InstalledPack {
   };
 }
 
+interface ActivePackSelection {
+  readonly version: string;
+  readonly contentHash: string;
+}
+
 export class InvalidPackAssetNameError extends Error {}
 export class PackInstallConflictError extends Error {}
 export class PackSealBrokenError extends Error {}
@@ -97,6 +102,11 @@ function packDir(root: string, name: string, version: string): string {
 
 function statePath(root: string, name: string, version: string): string {
   return join(packDir(root, name, version), "state.json");
+}
+
+function activeSelectionPath(root: string, name: string): string {
+  assertSafeSegment(name, "pack name");
+  return join(installedRoot(root), name, "active.json");
 }
 
 function normalizeFiles(files: InstalledPackageFiles): InstalledPack["files"] {
@@ -217,15 +227,34 @@ export function listInstalledPackStatesSync(root: string): InstalledPackState[] 
 }
 
 export function listActiveApprovedPackStatesSync(root: string): InstalledPackState[] {
-  const byName = new Map<string, InstalledPackState>();
+  const byName = new Map<string, InstalledPackState[]>();
   for (const state of listInstalledPackStatesSync(root)) {
     if (state.approvalStatus !== "approved") continue;
-    const current = byName.get(state.name);
-    if (!current || compareSemver(state.version, current.version) > 0) {
-      byName.set(state.name, state);
-    }
+    const versions = byName.get(state.name) ?? [];
+    versions.push(state);
+    byName.set(state.name, versions);
   }
-  return [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
+  const active: InstalledPackState[] = [];
+  for (const [name, versions] of byName) {
+    const selectionFile = activeSelectionPath(root, name);
+    if (existsSync(selectionFile)) {
+      const selection = JSON.parse(readFileSync(selectionFile, "utf8")) as ActivePackSelection;
+      const selected = versions.find(
+        (state) => state.version === selection.version && state.contentHash === selection.contentHash,
+      );
+      if (selected) active.push(selected);
+      // An explicit selection that no longer points at an approved state
+      // means this Pack is inactive. Never revive a dormant older version.
+      continue;
+    }
+    // Compatibility for installations created before active.json existed.
+    active.push(
+      versions.reduce((current, state) =>
+        compareSemver(state.version, current.version) > 0 ? state : current,
+      ),
+    );
+  }
+  return active.sort((a, b) => a.name.localeCompare(b.name));
 }
 
 export async function approveInstalledPack(
@@ -257,6 +286,10 @@ export async function approveInstalledPack(
     reviewer,
   };
   await atomicWriteFile(statePath(root, name, version), JSON.stringify(state, null, 2));
+  await atomicWriteFile(
+    activeSelectionPath(root, name),
+    JSON.stringify({ version, contentHash: state.contentHash } satisfies ActivePackSelection, null, 2),
+  );
   return { ...installed, state };
 }
 

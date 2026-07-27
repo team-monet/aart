@@ -64,6 +64,15 @@ export function computePackContentHash(
   blockSources: Readonly<Record<string, string>>,
   workflowSources: Readonly<Record<string, string>> = {},
 ): string {
+  const hashManifest = { ...manifest };
+  // These fields were introduced after block-only Pack seals existed.
+  // Parser-supplied empty defaults must not alter the historical wire
+  // representation of YAML that omitted them.
+  for (const key of ["categories", "tags", "workflows"] as const) {
+    if (Array.isArray(hashManifest[key]) && hashManifest[key].length === 0) {
+      delete hashManifest[key];
+    }
+  }
   const blocks = Object.keys(blockSources)
     .sort()
     .map((name) => ({ name, source: blockSources[name] }));
@@ -74,7 +83,7 @@ export function computePackContentHash(
   // Packs. Workflow Packs extend the payload only when workflow bytes are
   // actually present, so an upgrade cannot invalidate an unchanged
   // historical block-only approval.
-  const payload = canonicalize(workflows.length > 0 ? { manifest, blocks, workflows } : { manifest, blocks });
+  const payload = canonicalize(workflows.length > 0 ? { manifest: hashManifest, blocks, workflows } : { manifest: hashManifest, blocks });
   const digest = createHash("sha256").update(payload, "utf8").digest("hex");
   return `sha256:${digest}`;
 }

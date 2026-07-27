@@ -62,6 +62,24 @@ describe("installed Pack enumeration", () => {
       expect.objectContaining({ name: "demo", version: "1.0.0" }),
     ]);
   });
+
+  it("uses an explicit active selection and never revives an older approval when that selection becomes unapproved", async () => {
+    const root = await fs.mkdtemp(join(tmpdir(), "aart-installed-active-"));
+    roots.push(root);
+    const v1 = approved("demo", "1.0.0");
+    const v2 = approved("demo", "2.0.0");
+    await writeState(root, v1);
+    await writeState(root, v2);
+    await fs.writeFile(
+      join(root, "packs", "installed", "demo", "active.json"),
+      JSON.stringify({ version: v2.version, contentHash: v2.contentHash }),
+      "utf8",
+    );
+    expect(listActiveApprovedPackStatesSync(root)).toEqual([expect.objectContaining({ version: "2.0.0" })]);
+
+    await writeState(root, { ...v2, approvalStatus: "unapproved", approvedAt: undefined, reviewer: undefined });
+    expect(listActiveApprovedPackStatesSync(root)).toEqual([]);
+  });
 });
 
 describe("installed Pack approval", () => {
