@@ -73,6 +73,12 @@ export function computePackContentHash(
       delete hashManifest[key];
     }
   }
+  const compatibility = hashManifest["compatibility"];
+  if (compatibility && typeof compatibility === "object" && !Array.isArray(compatibility)) {
+    const normalized = { ...(compatibility as Record<string, unknown>) };
+    if (Array.isArray(normalized["runtimes"]) && normalized["runtimes"].length === 0) delete normalized["runtimes"];
+    hashManifest["compatibility"] = normalized;
+  }
   const blocks = Object.keys(blockSources)
     .sort()
     .map((name) => ({ name, source: blockSources[name] }));

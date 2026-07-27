@@ -65,11 +65,11 @@ export const RawPackManifestSchema = z
     workflows: z.array(safeAssetSegment("workflow id")).default([]),
   })
   .passthrough()
-  .refine((manifest) => new Set(manifest.blocks).size === manifest.blocks.length, {
+  .refine((manifest) => new Set(manifest.blocks.map((id) => id.toLocaleLowerCase("en-US"))).size === manifest.blocks.length, {
     path: ["blocks"],
     message: "block ids must be unique",
   })
-  .refine((manifest) => new Set(manifest.workflows).size === manifest.workflows.length, {
+  .refine((manifest) => new Set(manifest.workflows.map((id) => id.toLocaleLowerCase("en-US"))).size === manifest.workflows.length, {
     path: ["workflows"],
     message: "workflow ids must be unique",
   })

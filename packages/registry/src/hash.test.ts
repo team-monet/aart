@@ -90,6 +90,14 @@ describe("computePackContentHash — architecture §11.1", () => {
     );
   });
 
+  it("omits a parser-defaulted empty compatibility runtime list from legacy seals", () => {
+    const withoutDefault = { ...baseManifest, compatibility: { aart: ">=0.10.0" } };
+    const withDefault = { ...baseManifest, compatibility: { aart: ">=0.10.0", runtimes: [] } };
+    expect(computePackContentHash(withDefault, baseBlockSources)).toBe(
+      computePackContentHash(withoutDefault, baseBlockSources),
+    );
+  });
+
   it("adding a new block (new key in blockSources) invalidates the hash", () => {
     const original = computePackContentHash(baseManifest, baseBlockSources);
     const edited = computePackContentHash(baseManifest, {

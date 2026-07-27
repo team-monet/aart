@@ -78,7 +78,6 @@ import {
   listActiveApprovedPackStatesSync,
   listInstalledPackStatesSync,
   loadInstalledPackBlocksSync,
-  PackSealBrokenError,
   type BlockCatalogEntry,
 } from "@aart/registry";
 import { produceBundle as produceRealBundle, type Bundle } from "@aart/server";
@@ -136,21 +135,21 @@ export function buildRealCatalog(store: AartStore, llmOptions?: RealCatalogLlmOp
           versionBlocks[implementation.manifest.id] = implementation;
         }
         packBlocksByHash.set(state.contentHash, versionBlocks);
-      } catch (cause) {
-        if (!(cause instanceof PackSealBrokenError)) throw cause;
-      }
+      } catch {}
     }
     for (const state of listActiveApprovedPackStatesSync(packRoot)) {
+      let implementations: ReturnType<typeof loadInstalledPackBlocksSync>;
       try {
-        for (const implementation of loadInstalledPackBlocksSync(packRoot, state.name, state.version)) {
-          if (blocks[implementation.manifest.id]) {
-            throw new Error(`approved pack "${state.name}" conflicts with existing block id "${implementation.manifest.id}"`);
-          }
-          blocks[implementation.manifest.id] = implementation;
-          entries.push({ manifest: implementation.manifest, packName: state.name, examples: [] });
+        implementations = loadInstalledPackBlocksSync(packRoot, state.name, state.version);
+      } catch {
+        continue;
+      }
+      for (const implementation of implementations) {
+        if (blocks[implementation.manifest.id]) {
+          throw new Error(`approved pack "${state.name}" conflicts with existing block id "${implementation.manifest.id}"`);
         }
-      } catch (cause) {
-        if (!(cause instanceof PackSealBrokenError)) throw cause;
+        blocks[implementation.manifest.id] = implementation;
+        entries.push({ manifest: implementation.manifest, packName: state.name, examples: [] });
       }
     }
   }

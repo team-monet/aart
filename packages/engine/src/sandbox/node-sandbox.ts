@@ -292,6 +292,13 @@ function commonJsProgram(options: CommonJsEvaluationOptions): string {
             if (!new.target || arguments.length === 0) {
               throw new Error("public Pack blocks cannot read ambient time; pass time as an explicit input");
             }
+            if (
+              arguments.length !== 1 ||
+              (typeof arguments[0] !== "number" &&
+                (typeof arguments[0] !== "string" || !/(?:Z|[+-]\\d{2}:?\\d{2})$/i.test(arguments[0])))
+            ) {
+              throw new Error("public Pack dates must use an epoch number or a string with an explicit timezone");
+            }
             var instance = Reflect.construct(NativeDate, Array.from(arguments));
             Object.setPrototypeOf(instance, safePrototype);
             return instance;
@@ -299,7 +306,12 @@ function commonJsProgram(options: CommonJsEvaluationOptions): string {
           DeterministicDate.now = function () {
             throw new Error("public Pack blocks cannot read ambient time; pass time as an explicit input");
           };
-          DeterministicDate.parse = NativeDate.parse;
+          DeterministicDate.parse = function (value) {
+            if (typeof value !== "string" || !/(?:Z|[+-]\\d{2}:?\\d{2})$/i.test(value)) {
+              throw new Error("public Pack dates must include an explicit timezone");
+            }
+            return NativeDate.parse(value);
+          };
           DeterministicDate.UTC = NativeDate.UTC;
           for (var key of Reflect.ownKeys(NativeDate.prototype)) {
             if (key !== "constructor") {

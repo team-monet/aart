@@ -353,14 +353,6 @@ async function approvePackUnlocked(ctx: AartContext, input: ApprovePackInput): P
   }
 
   const decidedAt = ctx.now().toISOString();
-  await approveInstalledPack(
-    ctx.root,
-    input.name,
-    input.version,
-    input.reviewer,
-    new Date(decidedAt),
-    input.contentHash,
-  );
   const approved = await ctx.store.transact(async (tx) => {
     const decision = await writePackApprovalDecision(tx, {
       manifest: stored,
@@ -371,6 +363,14 @@ async function approvePackUnlocked(ctx: AartContext, input: ApprovePackInput): P
     for (const workflow of workflowWrites) await tx.workflows.put(workflow);
     return decision;
   });
+  await approveInstalledPack(
+    ctx.root,
+    input.name,
+    input.version,
+    input.reviewer,
+    new Date(decidedAt),
+    input.contentHash,
+  );
   return {
     ok: true,
     pack: approved.name,

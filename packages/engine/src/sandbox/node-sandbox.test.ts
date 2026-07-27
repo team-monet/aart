@@ -225,7 +225,7 @@ describe("public Pack CommonJS sandbox scheduling", () => {
         if (input.kind === "global-time") return { value: globalThis.Date.now() };
         if (input.kind === "constructor-time") return { value: new globalThis.Date() };
         if (input.kind === "prototype-time") return { value: Date.prototype.constructor.now() };
-        if (input.kind === "instance-time") return { value: new Date("2026-01-01").constructor.now() };
+        if (input.kind === "instance-time") return { value: new Date("2026-01-01T00:00:00Z").constructor.now() };
         if (input.kind === "prototype-random") return { value: Object.getPrototypeOf(Math).random() };
         return { value: globalThis.Math.random() };
       }
@@ -254,5 +254,32 @@ describe("public Pack CommonJS sandbox scheduling", () => {
       /cannot use ambient randomness/,
     );
     await expect(runCommonJsBlockSandbox({ ...base, resolvedInputs: { kind: "prototype-random" } })).rejects.toThrow();
+  });
+
+  it("rejects host-timezone-dependent Date construction while allowing explicit UTC input", async () => {
+    const source = `module.exports = {
+      manifest: {
+        id: "test.date-input",
+        version: "1.0.0",
+        capabilities: [],
+        inputSchema: {},
+        outputSchema: {},
+        description: "Date input probe"
+      },
+      execute(input) {
+        return { value: input.local ? new Date(2026, 0, 1).toISOString() : new Date(input.value).toISOString() };
+      }
+    };`;
+    const base = {
+      source,
+      expectedId: "test.date-input",
+      executionContext: { runId: "run-1", stepId: "date" },
+    };
+    await expect(runCommonJsBlockSandbox({ ...base, resolvedInputs: { local: true } })).rejects.toThrow(
+      /explicit timezone/,
+    );
+    await expect(
+      runCommonJsBlockSandbox({ ...base, resolvedInputs: { local: false, value: "2026-01-01T00:00:00Z" } }),
+    ).resolves.toEqual({ value: "2026-01-01T00:00:00.000Z" });
   });
 });

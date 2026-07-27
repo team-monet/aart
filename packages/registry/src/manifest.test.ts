@@ -78,6 +78,12 @@ describe("parsePackManifestYaml — architecture §11.1's literal example", () =
     expect(() =>
       parsePackManifestYaml("name: duplicate\nversion: 1.0.0\nworkflows: [demo-flow, demo-flow]\n"),
     ).toThrow(/workflow ids must be unique/);
+    expect(() =>
+      parsePackManifestYaml("name: duplicate\nversion: 1.0.0\nblocks: [Echo, echo]\n"),
+    ).toThrow(/block ids must be unique/);
+    expect(() =>
+      parsePackManifestYaml("name: duplicate\nversion: 1.0.0\nworkflows: [Demo-Flow, demo-flow]\n"),
+    ).toThrow(/workflow ids must be unique/);
   });
 });
 
