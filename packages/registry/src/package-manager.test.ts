@@ -36,6 +36,11 @@ describe("createLinkedPackageManager — reads a real on-disk fixture, never the
   async function writeFixturePack(dir: string): Promise<void> {
     await fs.mkdir(join(dir, "blocks"), { recursive: true });
     await fs.writeFile(join(dir, "aart-pack.yaml"), "name: github\nversion: 0.1.0\nblocks: [github.create_issue, github.comment_pr]\n", "utf8");
+    await fs.writeFile(
+      join(dir, "package.json"),
+      JSON.stringify({ name: "aart-pack-github", version: "0.1.0" }),
+      "utf8",
+    );
     await fs.writeFile(join(dir, "blocks", "github.create_issue.js"), "export function createIssue() {}\n", "utf8");
     await fs.writeFile(join(dir, "blocks", "github.comment_pr.js"), "export function commentPr() {}\n", "utf8");
   }
@@ -50,6 +55,7 @@ describe("createLinkedPackageManager — reads a real on-disk fixture, never the
     expect(files.manifestYaml).toContain("name: github");
     expect(files.blockSources["github.create_issue"]).toBe("export function createIssue() {}\n");
     expect(files.blockSources["github.comment_pr"]).toBe("export function commentPr() {}\n");
+    expect(files.packageJson).toEqual({ name: "aart-pack-github", version: "0.1.0" });
   });
 
   it("the result is usable directly by buildPackManifest/computePackContentHash — round-trips through the real hashing path", async () => {

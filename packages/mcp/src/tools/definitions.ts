@@ -112,7 +112,12 @@ const inputSchemas: Record<ToolName, z.ZodType> = {
   aart_find_packs: z.object({ query: z.string(), indexUrl: z.string().url().optional() }),
   aart_install_pack: z.object({ name: z.string(), version: z.string().optional(), sourcePath: z.string().optional() }),
   aart_list_packs: z.object({ status: z.enum(["unapproved", "approved"]).optional() }),
-  aart_approve_pack: z.object({ name: z.string(), version: z.string(), reviewer: z.string() }),
+  aart_approve_pack: z.object({
+    name: z.string(),
+    version: z.string(),
+    contentHash: z.string().regex(/^sha256:[a-f0-9]{64}$/),
+    reviewer: z.string(),
+  }),
   aart_prepare_pack: z.object({ sourcePath: z.string(), outputPath: z.string().optional() }),
   aart_get_block: z.object({ id: z.string() }),
   aart_validate: z.object({

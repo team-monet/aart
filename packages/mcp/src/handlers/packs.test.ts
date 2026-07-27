@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createAartContext, createRealAartContext } from "../context.js";
+import { compileWorkflowInput } from "../yaml-compiler.js";
 import { runWorkflowHandler } from "./execution.js";
 import {
   approvePackHandler,
@@ -166,7 +167,12 @@ workflows: [demo-echo-flow]
     expect(beforeApproval.registry.getBlock("demo.echo")).toBeUndefined();
     expect(await beforeApproval.store.workflows.getLatest("demo-echo-flow")).toBeUndefined();
 
-    const approved = await approvePackHandler(ctx, { name: "demo", version: "1.0.0", reviewer: "human-reviewer" });
+    const approved = await approvePackHandler(ctx, {
+      name: "demo",
+      version: "1.0.0",
+      contentHash: installed.contentHash as string,
+      reviewer: "human-reviewer",
+    });
     expect(approved).toEqual(
       expect.objectContaining({
         ok: true,
@@ -189,12 +195,94 @@ workflows: [demo-echo-flow]
 
   it("keeps a changed approved version sealed instead of silently replacing it", async () => {
     const ctx = createAartContext({ root, trustMode: "governed" });
-    await installPackHandler(ctx, { name: "demo", sourcePath: packageRoot });
-    await approvePackHandler(ctx, { name: "demo", version: "1.0.0", reviewer: "human-reviewer" });
+    const installed = await installPackHandler(ctx, { name: "demo", sourcePath: packageRoot });
+    await approvePackHandler(ctx, {
+      name: "demo",
+      version: "1.0.0",
+      contentHash: installed.contentHash as string,
+      reviewer: "human-reviewer",
+    });
     await fs.writeFile(join(packageRoot, "blocks", "demo.echo.cjs"), `${blockSource}\n// changed`, "utf8");
     await expect(installPackHandler(ctx, { name: "demo", sourcePath: packageRoot })).rejects.toThrow(
       /refusing to replace approved pack/,
     );
+  });
+
+  it("binds approval to the exact content hash the human reviewed", async () => {
+    const ctx = createAartContext({ root, trustMode: "governed" });
+    const first = await installPackHandler(ctx, { name: "demo", sourcePath: packageRoot });
+    await fs.writeFile(join(packageRoot, "blocks", "demo.echo.cjs"), `${blockSource}\n// replacement`, "utf8");
+    const replacement = await installPackHandler(ctx, { name: "demo", sourcePath: packageRoot });
+
+    expect(replacement.contentHash).not.toBe(first.contentHash);
+    await expect(
+      approvePackHandler(ctx, {
+        name: "demo",
+        version: "1.0.0",
+        contentHash: first.contentHash as string,
+        reviewer: "human-reviewer",
+      }),
+    ).rejects.toThrow(/reviewed content hash does not match/);
+    expect((await listPacksHandler(ctx, { status: "unapproved" })).count).toBe(1);
+  });
+
+  it("rejects a Pack block that would make the next process fail on an existing Block id", async () => {
+    await fs.writeFile(
+      join(packageRoot, "aart-pack.yaml"),
+      "name: demo\nversion: 1.0.0\nblocks: [data.stringify]\n",
+      "utf8",
+    );
+    await fs.rm(join(packageRoot, "workflows"), { recursive: true, force: true });
+    await fs.rm(join(packageRoot, "blocks"), { recursive: true, force: true });
+    await fs.mkdir(join(packageRoot, "blocks"), { recursive: true });
+    await fs.writeFile(
+      join(packageRoot, "blocks", "data.stringify.cjs"),
+      blockSource.replaceAll("demo.echo", "data.stringify"),
+      "utf8",
+    );
+
+    const ctx = createAartContext({ root, trustMode: "governed" });
+    const installed = await installPackHandler(ctx, { name: "demo", sourcePath: packageRoot });
+    await expect(
+      approvePackHandler(ctx, {
+        name: "demo",
+        version: "1.0.0",
+        contentHash: installed.contentHash as string,
+        reviewer: "human-reviewer",
+      }),
+    ).rejects.toThrow(/conflicts with AART core/);
+    expect((await listPacksHandler(ctx, { status: "unapproved" })).count).toBe(1);
+  });
+
+  it("preserves an existing local workflow version instead of replacing it during Pack approval", async () => {
+    const localWorkflow = compileWorkflowInput(workflowSource.replace("Demo echo flow", "Locally authored flow"));
+    const ctx = createAartContext({ root, trustMode: "governed" });
+    await ctx.store.workflows.put(localWorkflow);
+    const installed = await installPackHandler(ctx, { name: "demo", sourcePath: packageRoot });
+
+    await expect(
+      approvePackHandler(ctx, {
+        name: "demo",
+        version: "1.0.0",
+        contentHash: installed.contentHash as string,
+        reviewer: "human-reviewer",
+      }),
+    ).rejects.toThrow(/conflicts with an existing registered version/);
+    expect((await ctx.store.workflows.get("demo-echo-flow", "1.0.0"))?.name).toBe("Locally authored flow");
+    expect((await listPacksHandler(ctx, { status: "unapproved" })).count).toBe(1);
+  });
+
+  it("checks the installed artifact version even when the user did not request a version", async () => {
+    await fs.writeFile(
+      join(packageRoot, "package.json"),
+      JSON.stringify({ name: "aart-pack-demo", version: "9.9.9" }),
+      "utf8",
+    );
+    const ctx = createAartContext({ root, trustMode: "governed" });
+    await expect(installPackHandler(ctx, { name: "demo", sourcePath: packageRoot })).rejects.toThrow(
+      /package\.json version 9\.9\.9 does not match manifest version 1\.0\.0/,
+    );
+    expect((await listPacksHandler(ctx, {})).count).toBe(0);
   });
 
   it("never evaluates Pack modules in the host process during prepare, approval, startup, or execution", async () => {
@@ -225,8 +313,13 @@ module.exports = {
     const ctx = createAartContext({ root, trustMode: "governed" });
 
     await preparePackHandler(ctx, { sourcePath: packageRoot });
-    await installPackHandler(ctx, { name: "demo", sourcePath: packageRoot });
-    await approvePackHandler(ctx, { name: "demo", version: "1.0.0", reviewer: "human-reviewer" });
+    const installed = await installPackHandler(ctx, { name: "demo", sourcePath: packageRoot });
+    await approvePackHandler(ctx, {
+      name: "demo",
+      version: "1.0.0",
+      contentHash: installed.contentHash as string,
+      reviewer: "human-reviewer",
+    });
     const consumer = createRealAartContext({ root, trustMode: "dev" });
     const run = await runWorkflowHandler(consumer, { workflowId: "demo-echo-flow" });
     const storedRun = await consumer.store.runs.get(run.runId as string);

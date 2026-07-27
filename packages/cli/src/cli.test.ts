@@ -82,6 +82,21 @@ describe("aart run", () => {
   });
 });
 
+describe("aart report", () => {
+  it("closes the CLI run-to-evidence loop without sending the user to an MCP-only tool", async () => {
+    tc = await createTestCli();
+    await tc.cli.aart.store.workflows.put(compileWorkflowInput(sampleWorkflowYaml("wf-cli-report")));
+    const runOutcome = await run(["run", "wf-cli-report"], { cliContext: tc.cli });
+    const runResult = runOutcome.result as { runId: string; next: string };
+    expect(runResult.next).toContain(`\`aart report ${runResult.runId}\``);
+    expect(runResult.next).not.toContain("aart_get_report");
+
+    const reportOutcome = await run(["report", runResult.runId], { cliContext: tc.cli });
+    expect(reportOutcome.ok).toBe(true);
+    expect((reportOutcome.result as { report: { workflowId: string } }).report.workflowId).toBe("wf-cli-report");
+  });
+});
+
 describe("aart validate", () => {
   it("validates a workflow file from disk", async () => {
     tc = await createTestCli();
@@ -366,6 +381,34 @@ describe("aart find-workflows", () => {
   });
 });
 
+describe("aart find-blocks", () => {
+  it("searches the same local catalog as MCP and keeps the next action executable in the CLI", async () => {
+    tc = await createTestCli();
+    const outcome = await run(["find-blocks", "browser"], { cliContext: tc.cli });
+    expect(outcome.ok).toBe(true);
+    expect((outcome.result as { blocks: Array<{ id: string }> }).blocks.length).toBeGreaterThan(0);
+    expect((outcome.result as { next: string }).next).toContain("`aart find-workflows`");
+    expect((outcome.result as { next: string }).next).not.toContain("aart_find_workflows");
+  });
+
+  it("turns a workflow-search miss into a command the same CLI can actually run", async () => {
+    tc = await createTestCli();
+    const outcome = await run(["find-workflows", "not-present-anywhere"], { cliContext: tc.cli });
+    expect(outcome.ok).toBe(true);
+    expect((outcome.result as { matched: boolean }).matched).toBe(false);
+    expect((outcome.result as { next: string }).next).toContain("`aart find-blocks`");
+    expect((outcome.result as { next: string }).next).not.toContain("aart_find_blocks");
+  });
+
+  it("treats a Block-search miss as a successful search and offers full-catalog browsing", async () => {
+    tc = await createTestCli();
+    const outcome = await run(["find-blocks", "xyzzyqwertycapability"], { cliContext: tc.cli });
+    expect(outcome.ok).toBe(true);
+    expect((outcome.result as { matched: boolean }).matched).toBe(false);
+    expect((outcome.result as { next: string }).next).toContain("`aart find-blocks` without a query");
+  });
+});
+
 describe("aart pack", () => {
   it("adds a workflow-only Pack inertly, lists it, then registers its workflow only after human approval", async () => {
     tc = await createTestCli();
@@ -376,18 +419,37 @@ describe("aart pack", () => {
       "name: cli-reuse\nversion: 1.0.0\nworkflows: [cli-reusable-flow]\n",
       "utf8",
     );
+    await writeFile(
+      join(packDir, "package.json"),
+      JSON.stringify({ name: "aart-pack-cli-reuse", version: "1.0.0" }),
+      "utf8",
+    );
     await writeFile(join(packDir, "workflows", "cli-reusable-flow.yaml"), sampleWorkflowYaml("cli-reusable-flow", "1.0.0"), "utf8");
 
     const added = await run(["pack", "add", "cli-reuse", "--from", packDir], { cliContext: tc.cli });
     expect(added.ok).toBe(true);
     expect((added.result as { approvalStatus: string }).approvalStatus).toBe("unapproved");
+    expect((added.result as { next: string }).next).toContain("`aart pack list --status unapproved`");
     expect(await tc.cli.aart.store.workflows.getLatest("cli-reusable-flow")).toBeUndefined();
 
     const listed = await run(["pack", "list", "--status", "unapproved"], { cliContext: tc.cli });
     expect((listed.result as { count: number }).count).toBe(1);
+    expect((listed.result as { next: string }).next).toContain(
+      `--content-hash ${(added.result as { contentHash: string }).contentHash}`,
+    );
 
     const approved = await run(
-      ["pack", "approve", "cli-reuse", "--version", "1.0.0", "--reviewer", "alice"],
+      [
+        "pack",
+        "approve",
+        "cli-reuse",
+        "--version",
+        "1.0.0",
+        "--content-hash",
+        (added.result as { contentHash: string }).contentHash,
+        "--reviewer",
+        "alice",
+      ],
       { cliContext: tc.cli },
     );
     expect(approved.ok).toBe(true);

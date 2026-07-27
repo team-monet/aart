@@ -16,6 +16,7 @@ export {
   deployToRemoteHandler,
   deployWorkflowHandler,
   diffWorkflowHandler,
+  getReportHandler,
   promoteWorkflowHandler,
   recordCorrectionHandler,
   registerWorkflowHandler,

@@ -3,10 +3,11 @@ import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { inspectCommonJsBlockSourceSync, runCommonJsBlockSandbox } from "@aart/engine";
 import type { BlockImplementation, PackManifest } from "@aart/types";
+import { compare as compareSemver } from "semver";
 import { buildPackManifest, parsePackManifestYaml } from "./manifest.js";
 import type { InstalledPackageFiles } from "./package-manager.js";
 
-const SAFE_SEGMENT = /^[A-Za-z0-9._-]+$/;
+const SAFE_SEGMENT = /^[A-Za-z0-9._+-]+$/;
 
 export type PackProvenance =
   | { readonly kind: "npm"; readonly source: string; readonly npmPackageName: string }
@@ -26,7 +27,11 @@ export interface InstalledPackState {
 
 export interface InstalledPack {
   readonly state: InstalledPackState;
-  readonly files: Required<InstalledPackageFiles>;
+  readonly files: {
+    readonly manifestYaml: string;
+    readonly blockSources: Readonly<Record<string, string>>;
+    readonly workflowSources: Readonly<Record<string, string>>;
+  };
 }
 
 export class InvalidPackAssetNameError extends Error {}
@@ -54,7 +59,7 @@ function statePath(root: string, name: string, version: string): string {
   return join(packDir(root, name, version), "state.json");
 }
 
-function normalizeFiles(files: InstalledPackageFiles): Required<InstalledPackageFiles> {
+function normalizeFiles(files: InstalledPackageFiles): InstalledPack["files"] {
   return {
     manifestYaml: files.manifestYaml,
     blockSources: files.blockSources,
@@ -62,7 +67,7 @@ function normalizeFiles(files: InstalledPackageFiles): Required<InstalledPackage
   };
 }
 
-async function writePackFiles(dir: string, files: Required<InstalledPackageFiles>, state: InstalledPackState): Promise<void> {
+async function writePackFiles(dir: string, files: InstalledPack["files"], state: InstalledPackState): Promise<void> {
   await mkdir(join(dir, "blocks"), { recursive: true });
   await mkdir(join(dir, "workflows"), { recursive: true });
   await writeFile(join(dir, "aart-pack.yaml"), files.manifestYaml, "utf8");
@@ -146,10 +151,12 @@ export function listInstalledPackStatesSync(root: string): InstalledPackState[] 
   const base = installedRoot(root);
   if (!existsSync(base)) return [];
   const states: InstalledPackState[] = [];
-  for (const name of readdirSync(base)) {
-    const nameDir = join(base, name);
-    for (const version of readdirSync(nameDir)) {
-      const file = join(nameDir, version, "state.json");
+  for (const nameEntry of readdirSync(base, { withFileTypes: true })) {
+    if (!nameEntry.isDirectory()) continue;
+    const nameDir = join(base, nameEntry.name);
+    for (const versionEntry of readdirSync(nameDir, { withFileTypes: true })) {
+      if (!versionEntry.isDirectory()) continue;
+      const file = join(nameDir, versionEntry.name, "state.json");
       if (existsSync(file)) states.push(JSON.parse(readFileSync(file, "utf8")) as InstalledPackState);
     }
   }
@@ -161,7 +168,7 @@ export function listActiveApprovedPackStatesSync(root: string): InstalledPackSta
   for (const state of listInstalledPackStatesSync(root)) {
     if (state.approvalStatus !== "approved") continue;
     const current = byName.get(state.name);
-    if (!current || state.version.localeCompare(current.version, undefined, { numeric: true }) > 0) {
+    if (!current || compareSemver(state.version, current.version) > 0) {
       byName.set(state.name, state);
     }
   }

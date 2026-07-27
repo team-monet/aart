@@ -7,7 +7,7 @@ import path from "node:path";
 import { createSqliteStore } from "@aart/store/sqlite";
 import { flagString, tokenize, type Tokenized } from "./args.js";
 import { createCliContext, type CliContext, type CreateCliContextOptions } from "./cli-context.js";
-import { findWorkflowsCommand, initAgentCommand, initCommand, listCommand, registerCommand, runCommand, validateCommand } from "./commands/authoring.js";
+import { findBlocksCommand, findWorkflowsCommand, initAgentCommand, initCommand, listCommand, registerCommand, reportCommand, runCommand, validateCommand } from "./commands/authoring.js";
 import { deployCommand, pushCommand, triggerCommand } from "./commands/deployment.js";
 import { environmentCommand } from "./commands/environment.js";
 import { approveCommand, approveRemoteCommand, correctionCommand, diffCommand, promoteCommand, requestApprovalCommand } from "./commands/governance.js";
@@ -20,14 +20,16 @@ import { packCommand } from "./commands/packs.js";
 
 export const USAGE = `AART CLI — usage:
   aart run <workflowId> --input <json> [--version <v>]
+  aart report <runId> [--format model|markdown]
   aart validate <path>
   aart validate <workflowId> --registered [--version <v>]
   aart list
+  aart find-blocks [query] [--category <category>] [--scope local|remote|all] [--index-url <url>]
   aart find-workflows [query] [--category <category>] [--scope local|remote|all] [--index-url <url>]
   aart pack search [query] [--index-url <url>]
   aart pack add <name> [--version <v>] [--from <local-package-dir>]
   aart pack list [--status unapproved|approved]
-  aart pack approve <name> --version <v> --reviewer <name>
+  aart pack approve <name> --version <v> --content-hash <sha256:...> --reviewer <name>
   aart pack prepare <local-package-dir> [--out <index-entry.json>]
   aart register <path>
   aart init
@@ -217,10 +219,14 @@ export async function run(argv: readonly string[], options: RunOptions = {}): Pr
     switch (command) {
       case "run":
         return asOutcome(await runCommand(tokens, cli));
+      case "report":
+        return asOutcome(await reportCommand(tokens, cli));
       case "validate":
         return asOutcome(await validateCommand(tokens, cli));
       case "list":
         return asOutcome(await listCommand(tokens, cli));
+      case "find-blocks":
+        return asOutcome(await findBlocksCommand(tokens, cli));
       case "find-workflows":
         return asOutcome(await findWorkflowsCommand(tokens, cli));
       case "register":

@@ -50,6 +50,13 @@ test("server-renders an individual Pack detail route", async () => {
   assert.match(html, /Install is not trust/);
 });
 
+test("returns a real 404 for an unknown Pack detail route", async () => {
+  const response = await request("/packs/not-a-real-pack");
+  assert.equal(response.status, 404);
+  const html = await response.text();
+  assert.doesNotMatch(html, /Explore the library/);
+});
+
 test("preview index exposes the canonical versioned Pack document and public CLI/MCP route", async () => {
   const raw = await readFile(new URL("../data/aart-pack-index.json", import.meta.url), "utf8");
   const index = JSON.parse(raw);

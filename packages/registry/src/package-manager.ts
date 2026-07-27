@@ -32,6 +32,15 @@ export interface InstalledPackageFiles {
   readonly manifestYaml: string;
   readonly blockSources: Readonly<Record<string, string>>;
   readonly workflowSources?: Readonly<Record<string, string>>;
+  /**
+   * Identity read from the installed artifact's package.json. Production
+   * install/approval flows require this instead of trusting the Pack
+   * manifest to describe the npm artifact that carried it.
+   */
+  readonly packageJson?: {
+    readonly name?: string;
+    readonly version?: string;
+  };
 }
 
 export interface PackageManagerAdapter {
@@ -110,7 +119,18 @@ export function createLinkedPackageManager(options: { resolveRoot: (npmPackageNa
       for (const workflowId of raw.workflows) {
         workflowSources[workflowId] = await fs.readFile(join(root, "workflows", `${workflowId}.yaml`), "utf8");
       }
-      return { manifestYaml, blockSources, workflowSources };
+      let packageJson: InstalledPackageFiles["packageJson"];
+      try {
+        packageJson = JSON.parse(await fs.readFile(join(root, "package.json"), "utf8")) as {
+          name?: string;
+          version?: string;
+        };
+      } catch (cause) {
+        throw new PackageNotFoundError(
+          `installed package "${npmPackageName}" at ${root} has no readable package.json: ${(cause as Error).message}`,
+        );
+      }
+      return { manifestYaml, blockSources, workflowSources, packageJson };
     },
   };
 }

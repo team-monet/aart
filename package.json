@@ -8,6 +8,12 @@
     "node": ">=22"
   },
   "packageManager": "pnpm@10.33.2",
+  "pnpm": {
+    "overrides": {
+      "brace-expansion": "5.0.8",
+      "fast-uri": "3.1.4"
+    }
+  },
   "scripts": {
     "check:tsconfig-refs": "node scripts/check-tsconfig-references.mjs",
     "build": "tsc -b tsconfig.build.json && pnpm --filter @aart/dashboard run build:frontend && npm --prefix packages/catalog run build",

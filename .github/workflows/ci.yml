@@ -106,6 +106,9 @@ jobs:
       - name: Test
         run: pnpm run test
 
+      - name: Test catalog routes and rendered HTML
+        run: pnpm run test:catalog
+
       # S9 integration, reconciliation ledger item 14 (root AMENDMENTS.md
       # A29 -> A41). BLOCKING: A29 flagged 187 untriaged findings and left
       # this step informational (continue-on-error) until a follow-up

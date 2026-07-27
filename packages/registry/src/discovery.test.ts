@@ -244,4 +244,32 @@ describe("searchWorkflows — reusable workflow discovery", () => {
   it("returns every workflow for an empty browse query with deterministic ordering", () => {
     expect(searchWorkflows(workflows, "").map((result) => result.workflow.id)).toEqual(["release-proof", "sync-customers", "verify-checkout"]);
   });
+
+  it("does not turn generic asset words into noisy false-positive matches", () => {
+    expect(searchLocalCatalog(catalog, "definitely no such block")).toEqual([]);
+    expect(searchWorkflows(workflows, "definitely no such workflow")).toEqual([]);
+  });
+});
+
+describe("parseRemoteRegistryIndexDocument", () => {
+  it("rejects malformed Block examples at the fetch boundary", () => {
+    expect(() =>
+      parseRemoteRegistryIndexDocument({
+        schemaVersion: 1,
+        packs: [
+          {
+            npmPackageName: "aart-pack-bad-example",
+            packName: "bad-example",
+            version: "1.0.0",
+            blocks: [
+              {
+                manifest: { id: "bad.example" },
+                examples: [null],
+              },
+            ],
+          },
+        ],
+      }),
+    ).toThrow(/failed validation/);
+  });
 });

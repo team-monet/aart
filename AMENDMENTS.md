@@ -1830,6 +1830,14 @@ the complete reuse-first co-authoring → approval → unattended-server
 lifecycle. `init-agent --help` is read-only and unknown flags fail before
 writes.
 
+**CLI journey closure from the first real installed-package test:** the CLI
+also exposes `aart find-blocks` and `aart report`, so a person or shell-only
+agent can complete search → run → evidence without being told to call an
+MCP-only snake_case tool. An empty search is a successful operation with
+`matched: false`, not a process error; its next action remains search/browse.
+Generic asset words are ignored during ranking so “no such block/workflow”
+does not produce a page of weak false positives.
+
 **Required next slices, same priority—not optional polish:**
 
 1. Close pack enumeration/provenance and load approved installed blocks into
@@ -1890,6 +1898,12 @@ approval an unintended trust grant and contradicted the sandbox hard ceiling.
 The review cycle removed that path entirely, added adversarial coverage that
 would write a host marker if `process`/`require` leaked, and tightened every
 manifest-derived path segment plus installed-package identity matching.
+Approval is also bound to the exact `contentHash` the human reviewed; a
+same-version reinstall cannot race the decision onto different bytes. Before
+recording approval, AART now rejects Block ids owned by core or another Pack
+and refuses to overwrite a non-identical registered Workflow version. These
+checks happen before the approval record is written so a successful approval
+cannot make the next process start fail or silently replace local work.
 
 **Runtime closure:** the active approved version of each Pack is selected
 deterministically; workflows using its blocks capture the Pack content hash

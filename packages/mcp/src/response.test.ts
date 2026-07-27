@@ -101,6 +101,13 @@ describe("wrapResult — the shared envelope (architecture §10.2's [DECISION])"
     expect(wrapped.next).toBe(computeNext("aart_validate", "success"));
   });
 
+  it("uses the no-match next step without misreporting a successful search as an error", () => {
+    const wrapped = wrapResult("aart_find_blocks", { ok: true, matched: false, blocks: [] });
+    expect(wrapped.ok).toBe(true);
+    expect(wrapped.matched).toBe(false);
+    expect(wrapped.next).toContain("No matching blocks found");
+  });
+
   it("never mutates the input result object", () => {
     const input = { ok: true as const };
     const wrapped = wrapResult("aart_verify", input);

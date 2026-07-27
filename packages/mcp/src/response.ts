@@ -141,7 +141,7 @@ const NEXT_TABLE: Readonly<Record<ToolName, Readonly<Record<ToolOutcome, string>
     failure: "Pack installation failed — verify the pack name/version or linked source path, then retry. Never bypass the unapproved state.",
   },
   aart_list_packs: {
-    success: "Review the installed pack's provenance, content hash, and approval status; use `aart_approve_pack` only after explicit human approval.",
+    success: "Review the installed pack's provenance, assets, and exact content hash; after explicit human approval, pass that same hash to `aart_approve_pack`.",
     failure: "Could not list installed packs — check the configured AART root.",
   },
   aart_approve_pack: {
@@ -273,5 +273,6 @@ export type HandlerResult = { ok: boolean } & Record<string, unknown>;
  * the CLI's JSON output mode reuses it too — see packages/cli's commands).
  */
 export function wrapResult<T extends HandlerResult>(tool: ToolName, result: T): T & { next: string } {
-  return { ...result, next: computeNext(tool, result.ok ? "success" : "failure") };
+  const outcome = result.ok && result.matched !== false ? "success" : "failure";
+  return { ...result, next: computeNext(tool, outcome) };
 }

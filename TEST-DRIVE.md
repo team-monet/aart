@@ -469,8 +469,9 @@ Stated plainly, not glossed over:
 - **`aart server`'s real trigger wiring never resolved webhook/github/slack HMAC secrets, and `--environment`/`--store`/`--root` didn't exist** — true as of `AMENDMENTS.md` A44; closed A45. See part (f) above for the live webhook proof and the flags.
 - **Pack-delivered blocks/workflows** enter the local catalog through the
   guarded Pack loop: `aart pack search` → `aart pack add` (unapproved,
-  inert) → `aart pack list` → explicit human `aart pack approve`, then
-  restart AART. Imported workflows remain drafts. Executable Pack files do
+  inert) → `aart pack list` → explicit human `aart pack approve` with the
+  exact listed `--content-hash` → restart AART. Imported
+  workflows remain drafts. Executable Pack files do
   not yet travel inside a fresh server bundle (AMENDMENTS.md A72), so this
   local reuse proof must not be mistaken for unattended Pack deployment.
 - **`isolated-vm`'s `engines.node: ">=26.0.0"`** vs. this machine's v22.22.2 (part (a)'s install warning) — pre-existing, not new, not addressed here.

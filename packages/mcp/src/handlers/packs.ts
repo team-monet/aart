@@ -1,5 +1,6 @@
 import { resolve } from "node:path";
 import { readFile, writeFile } from "node:fs/promises";
+import { isDeepStrictEqual } from "node:util";
 import {
   approveInstalledPack,
   buildPackManifest,
@@ -131,7 +132,7 @@ export async function findPacksHandler(_ctx: AartContext, input: FindPacksInput)
     workflows: (pack.workflows ?? []).map((workflow) => ({ id: workflow.id, name: workflow.name })),
     score,
   }));
-  return { ok: packs.length > 0, query: input.query, indexUrl, packs };
+  return { ok: true, matched: packs.length > 0, query: input.query, indexUrl, packs };
 }
 
 export interface InstallPackInput {
@@ -148,6 +149,16 @@ export async function installPackHandler(ctx: AartContext, input: InstallPackInp
   const npmPackageName = npmPackageNameFor(input.name);
   const files = await packageManager.install(npmPackageName);
   const raw = parsePackManifestYaml(files.manifestYaml);
+  if (files.packageJson?.name !== npmPackageName) {
+    throw new Error(
+      `installed package.json name must be "${npmPackageName}", got "${files.packageJson?.name ?? ""}"`,
+    );
+  }
+  if (files.packageJson.version !== raw.version) {
+    throw new Error(
+      `installed package.json version ${files.packageJson.version ?? ""} does not match manifest version ${raw.version}`,
+    );
+  }
   if (raw.name !== input.name) {
     throw new Error(`installed npm package ${npmPackageName} declares pack name "${raw.name}", expected "${input.name}"`);
   }
@@ -184,6 +195,7 @@ export async function listPacksHandler(ctx: AartContext, input: ListPacksInput):
 export interface ApprovePackInput {
   name: string;
   version: string;
+  contentHash: string;
   reviewer: string;
 }
 
@@ -210,6 +222,11 @@ export async function approvePackHandler(ctx: AartContext, input: ApprovePackInp
   if (stored.contentHash !== current.contentHash || installed.state.contentHash !== current.contentHash) {
     throw new Error(`pack ${input.name}@${input.version} changed after installation; approval seal cannot be created`);
   }
+  if (input.contentHash !== current.contentHash) {
+    throw new Error(
+      `reviewed content hash does not match installed pack ${input.name}@${input.version}; list the Pack again and review the current seal`,
+    );
+  }
 
   // Shape inspection executes the module only inside a zero-ambient-
   // capability V8 isolate. Approval never turns Pack code into trusted host
@@ -223,7 +240,32 @@ export async function approvePackHandler(ctx: AartContext, input: ApprovePackInp
     return importedDraft(workflow);
   });
 
-  for (const workflow of workflows) await ctx.store.workflows.put(workflow);
+  const seenBlockIds = new Set<string>();
+  for (const block of blocks) {
+    const id = block.manifest.id;
+    if (seenBlockIds.has(id)) {
+      throw new Error(`pack ${input.name}@${input.version} declares duplicate block id "${id}"`);
+    }
+    seenBlockIds.add(id);
+    const existing = ctx.registry.getBlock(id);
+    if (existing && existing.packName !== input.name) {
+      const owner = existing.packName ? `approved pack "${existing.packName}"` : "AART core";
+      throw new Error(`pack block id "${id}" conflicts with ${owner}; approval was not recorded`);
+    }
+  }
+
+  const workflowWrites: Workflow[] = [];
+  for (const workflow of workflows) {
+    const existing = await ctx.store.workflows.get(workflow.id, workflow.version);
+    if (existing && !isDeepStrictEqual(existing, workflow)) {
+      throw new Error(
+        `pack workflow ${workflow.id}@${workflow.version} conflicts with an existing registered version; publish a new workflow version`,
+      );
+    }
+    if (!existing) workflowWrites.push(workflow);
+  }
+
+  for (const workflow of workflowWrites) await ctx.store.workflows.put(workflow);
   const decidedAt = ctx.now().toISOString();
   const approved = await writePackApprovalDecision(ctx.store, {
     manifest: stored,

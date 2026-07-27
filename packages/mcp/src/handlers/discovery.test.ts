@@ -16,10 +16,11 @@ describe("findBlocksHandler (aart_find_blocks)", () => {
     expect((result.blocks as { id: string }[]).some((b) => b.id === "browser.goto")).toBe(true);
   });
 
-  it("returns ok:false with an empty list when nothing matches", async () => {
+  it("treats an empty result as a successful search with no match", async () => {
     tc = await createTestContext();
     const result = await findBlocksHandler(tc.ctx, { query: "xyzzy-nonexistent-capability" });
-    expect(result.ok).toBe(false);
+    expect(result.ok).toBe(true);
+    expect(result.matched).toBe(false);
     expect(result.blocks).toEqual([]);
   });
 
@@ -66,7 +67,8 @@ describe("findWorkflowsHandler (aart_find_workflows)", () => {
   it("returns an honest empty result instead of implying a reusable workflow exists", async () => {
     tc = await createTestContext();
     const result = await findWorkflowsHandler(tc.ctx, { query: "nothing-here" });
-    expect(result.ok).toBe(false);
+    expect(result.ok).toBe(true);
+    expect(result.matched).toBe(false);
     expect(result.workflows).toEqual([]);
   });
 

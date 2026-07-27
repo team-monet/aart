@@ -117,7 +117,7 @@ For **each** such workspace:
    cd <workspace>
    npx -y @team-monet/aart init-agent --npx --root "<the store path from Phase 2>" --store fs
    ```
-   (The outer `npx` runs the CLI itself; the inner `--npx` flag controls what `init-agent` *writes* into the generated MCP config — two different things, both needed, don't drop either.) Or, if global install was chosen: `aart init-agent --npx` — still with `--npx`, per Phase 3's rule.
+   (The outer `npx` runs the CLI itself; the inner `--npx` flag controls what `init-agent` *writes* into the generated MCP config — two different things, both needed, don't drop either.) Or, if global install was chosen: `aart init-agent --npx --root "<the store path from Phase 2>" --store fs` — still with the same pinned store arguments and `--npx`, per Phase 3's rule.
 
    This always writes two files: `.mcp.json` (merge-safe — replaces only its own `aart` key if the file already has other servers registered, e.g. a `monet` entry from a `with-monet` install; leaves an unparseable existing file alone and reports an error rather than clobbering it) and `AGENTS.md` (this workspace's copy of AART's working instructions — the one canonical source, never hand-copied or paraphrased).
 

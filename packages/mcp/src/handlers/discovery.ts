@@ -45,7 +45,8 @@ export async function findBlocksHandler(ctx: AartContext, input: FindBlocksInput
     (a, b) => b.score - a.score || a.entry.manifest.id.localeCompare(b.entry.manifest.id),
   );
   return {
-    ok: results.length > 0,
+    ok: true,
+    matched: results.length > 0,
     query: input.query,
     scope,
     blocks: results.map((r) => ({
@@ -95,7 +96,8 @@ export async function findWorkflowsHandler(ctx: AartContext, input: FindWorkflow
     (a, b) => b.score - a.score || a.workflow.id.localeCompare(b.workflow.id),
   );
   return {
-    ok: results.length > 0,
+    ok: true,
+    matched: results.length > 0,
     query: input.query,
     scope,
     workflows: results.map(({ workflow, score, source, packName }) => ({

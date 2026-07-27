@@ -55,14 +55,16 @@ Every command prints a single JSON object (`{"ok": true, ...}` or `{"ok": false,
 
 ```
 aart run <workflowId> --input <json> [--version <v>]
+aart report <runId> [--format model|markdown]
 aart validate <path>
 aart validate <workflowId> --registered [--version <v>]
 aart list
+aart find-blocks [query] [--category <category>] [--scope local|remote|all] [--index-url <url>]
 aart find-workflows [query] [--category <category>] [--scope local|remote|all] [--index-url <url>]
 aart pack search [query] [--index-url <url>]
 aart pack add <name> [--version <v>] [--from <local-package-dir>]
 aart pack list [--status unapproved|approved]
-aart pack approve <name> --version <v> --reviewer <name>
+aart pack approve <name> --version <v> --content-hash <sha256:...> --reviewer <name>
 aart pack prepare <local-package-dir> [--out <index-entry.json>]
 aart register <path>
 aart init
@@ -97,7 +99,8 @@ aart mcp [--store fs|sqlite] [--root <dir>]
   `aart-pack-<name>` npm packages plus a configured static JSON index
   (`AART_PACK_INDEX_URL`). `pack add` is intentionally inert and records the
   Pack as unapproved; the separate human `pack approve` step verifies its
-  content seal and inspects module shape inside a V8 isolate. Approval never
+  content seal and requires that exact hash through `--content-hash`, then
+  inspects module shape inside a V8 isolate. Approval never
   makes Pack code trusted host code: executable Pack blocks run as synchronous
   pure JSON transforms in a fresh zero-ambient-capability isolate on every
   dispatch. Imported workflows still land as drafts and pass the normal

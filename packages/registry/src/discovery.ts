@@ -10,7 +10,7 @@
 // (AMENDMENTS.md A1) — `@aart/mcp` (S5)'s actual `aart_find_blocks` MCP
 // tool is expected to be a thin caller of `findBlocks` below, not a
 // reimplementation of the search itself.
-import type { BlockManifest, Example, Workflow } from "@aart/types";
+import { ExampleSchema, type BlockManifest, type Example, type Workflow } from "@aart/types";
 import { z } from "zod";
 
 /**
@@ -103,11 +103,32 @@ export interface PackSearchResult {
   readonly score: number;
 }
 
+const SEARCH_STOP_WORDS = new Set([
+  "a",
+  "an",
+  "and",
+  "block",
+  "blocks",
+  "find",
+  "for",
+  "no",
+  "of",
+  "or",
+  "pack",
+  "packs",
+  "please",
+  "such",
+  "the",
+  "to",
+  "workflow",
+  "workflows",
+]);
+
 function tokenize(query: string): string[] {
   return query
     .toLowerCase()
     .split(/[\s._-]+/)
-    .filter(Boolean);
+    .filter((token) => token.length > 0 && !SEARCH_STOP_WORDS.has(token));
 }
 
 function scoreEntry(entry: BlockCatalogEntry, tokens: string[]): number {
@@ -231,7 +252,7 @@ const RemoteRegistryIndexEntrySchema = z
       z
         .object({
           manifest: z.object({ id: z.string().min(1) }).passthrough(),
-          examples: z.array(z.unknown()),
+          examples: z.array(ExampleSchema),
           packName: z.string().min(1).optional(),
         })
         .passthrough(),

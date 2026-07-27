@@ -1,5 +1,6 @@
 // Pack manifest format + construction — architecture §11.1, spec §16.1-16.3.
 import type { PackManifest } from "@aart/types";
+import { valid as validSemver } from "semver";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
 import { computePackContentHash } from "./hash.js";
@@ -32,7 +33,9 @@ export const RawPackManifestSchema = z
         PACK_NAME_PATTERN,
         "pack name must start with a lowercase letter or number and contain only lowercase letters, numbers, dot, underscore, or hyphen",
       ),
-    version: safeAssetSegment("pack version"),
+    version: z
+      .string()
+      .refine((version) => validSemver(version) !== null, "pack version must be valid SemVer"),
     displayName: z.string().min(1).optional(),
     description: z.string().min(1).optional(),
     categories: z.array(z.string().min(1)).default([]),

@@ -559,7 +559,8 @@ Stated plainly, matching this repo's own convention (`TEST-DRIVE.md`'s
 - **Pack-delivered blocks and workflows are locally reusable now.** Search
   the configured public index with `aart pack search`, install inertly with
   `aart pack add`, inspect provenance/hash using `aart pack list`, and only
-  after explicit human review run `aart pack approve`. Approved blocks join
+  after explicit human review run `aart pack approve` with that exact
+  `--content-hash`. Approved blocks join
   the catalog on the next AART process start; imported workflows remain
   drafts and still need validation/promotion. A fresh server bundle does not
   yet receive executable Pack files (AMENDMENTS.md A72), so Pack-backed

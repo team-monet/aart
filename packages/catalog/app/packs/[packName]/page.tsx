@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { notFound } from "next/navigation";
 import { CatalogApp } from "../../catalog-app";
 import { catalogDocument, packLabel } from "../../../lib/catalog";
 
@@ -21,5 +22,8 @@ export default async function PackPage({
   params: Promise<{ packName: string }>;
 }) {
   const { packName } = await params;
+  if (!catalogDocument.packs.some((candidate) => candidate.packName === packName)) {
+    notFound();
+  }
   return <CatalogApp initialPackName={packName} />;
 }
