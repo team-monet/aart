@@ -13,6 +13,15 @@ function validationProblem(field: Field, value: unknown): string {
 }
 
 describe("workflow output validation diagnostics", () => {
+  it("rejects a backtracking-unsafe pattern without evaluating it", () => {
+    const problem = validationProblem(
+      { name: "document", type: "string", pattern: "^(a+)+$" },
+      `${"a".repeat(100)}!`,
+    );
+
+    expect(problem).toMatch(/unsafe pattern.*nested quantified groups/i);
+  });
+
   it("bounds a large pattern-mismatch value while reporting its total size", () => {
     const value = `${"a".repeat(200_000)}-UNBOUNDED-TAIL`;
     const problem = validationProblem({ name: "document", type: "string", pattern: "^accepted$" }, value);

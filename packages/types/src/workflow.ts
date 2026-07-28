@@ -18,6 +18,103 @@ export function isPatternCompatibleFieldType(type: string): boolean {
   return !isSupportedFieldType(type) || type === "string" || type === "any" || type === "json" || type === "unknown";
 }
 
+export interface RegexSafetyAnalysis {
+  safe: boolean;
+  reason?: string;
+}
+
+const MAX_WORKFLOW_REGEX_CHARS = 1_024;
+
+function quantifierEnd(pattern: string, index: number): number | undefined {
+  const char = pattern[index];
+  if (char === "*" || char === "+" || char === "?") return index + 1;
+  if (char !== "{") return undefined;
+  const match = /^\{\d+(?:,\d*)?\}/.exec(pattern.slice(index));
+  return match ? index + match[0].length : undefined;
+}
+
+/**
+ * Conservative ReDoS guard for workflow-authored patterns.
+ *
+ * AART accepts the JavaScript RegExp vocabulary, but rejects constructs
+ * whose backtracking cost cannot be safely bounded at terminal run
+ * finalization: oversized patterns, backreferences, and repeated groups
+ * that themselves contain repetition or alternation. This intentionally
+ * favors a smaller predictable subset over synchronously evaluating a
+ * potentially hostile expression on the worker event loop.
+ */
+export function analyzeWorkflowRegexSafety(pattern: string): RegexSafetyAnalysis {
+  if (pattern.length > MAX_WORKFLOW_REGEX_CHARS) {
+    return { safe: false, reason: `pattern exceeds ${MAX_WORKFLOW_REGEX_CHARS} characters` };
+  }
+
+  const groups: Array<{ containsQuantifier: boolean; containsAlternation: boolean }> = [];
+  let inCharacterClass = false;
+
+  for (let i = 0; i < pattern.length; i++) {
+    const char = pattern[i]!;
+    if (char === "\\") {
+      const escaped = pattern[i + 1];
+      if (
+        !inCharacterClass &&
+        escaped !== undefined &&
+        (/[1-9]/.test(escaped) || (escaped === "k" && pattern[i + 2] === "<"))
+      ) {
+        return { safe: false, reason: "backreferences are not allowed" };
+      }
+      i += 1;
+      continue;
+    }
+    if (char === "[") {
+      inCharacterClass = true;
+      continue;
+    }
+    if (char === "]" && inCharacterClass) {
+      inCharacterClass = false;
+      continue;
+    }
+    if (inCharacterClass) continue;
+
+    if (char === "(") {
+      groups.push({ containsQuantifier: false, containsAlternation: false });
+      continue;
+    }
+    if (char === "|") {
+      const current = groups.at(-1);
+      if (current) current.containsAlternation = true;
+      continue;
+    }
+    if (char === ")") {
+      const closed = groups.pop();
+      if (!closed) continue;
+      const repeated = quantifierEnd(pattern, i + 1) !== undefined;
+      if (repeated && closed.containsQuantifier) {
+        return { safe: false, reason: "nested quantified groups are not allowed" };
+      }
+      if (repeated && closed.containsAlternation) {
+        return { safe: false, reason: "repeated alternation groups are not allowed" };
+      }
+      const parent = groups.at(-1);
+      if (parent) {
+        parent.containsQuantifier ||= closed.containsQuantifier || repeated;
+        parent.containsAlternation ||= closed.containsAlternation;
+      }
+      continue;
+    }
+
+    if (
+      quantifierEnd(pattern, i) !== undefined &&
+      !(char === "?" && pattern[i - 1] === "(") &&
+      !(char === "?" && (pattern[i - 1] === "*" || pattern[i - 1] === "+" || pattern[i - 1] === "?" || pattern[i - 1] === "}"))
+    ) {
+      const current = groups.at(-1);
+      if (current) current.containsQuantifier = true;
+    }
+  }
+
+  return { safe: true };
+}
+
 export const FieldSchema = z.object({
   name: z.string(),
   // Field types were intentionally extensible before workflow-output

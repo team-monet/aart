@@ -4,3 +4,4 @@
 // isolated-vm-backed node sandbox.
 export { materializeWorkflowOutputs } from "./workflow-outputs.js";
 export { validateWorkflowOutputs, WorkflowOutputValidationError } from "./output-validation.js";
+export { resolveWorkflowForRun } from "./snapshot.js";

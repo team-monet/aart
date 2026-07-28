@@ -3,7 +3,13 @@
 // secrets referenced correctly." Plus architecture §4.2/§7.7's
 // effectful-capability-without-idempotencyKey WARNING (advisory, never
 // blocking).
-import { isPatternCompatibleFieldType, type Field, type Workflow, type WorkflowStep } from "@aart/types";
+import {
+  analyzeWorkflowRegexSafety,
+  isPatternCompatibleFieldType,
+  type Field,
+  type Workflow,
+  type WorkflowStep,
+} from "@aart/types";
 import type { CapabilityClosureLookup } from "../capability.js";
 import type { ValidationFinding } from "./types.js";
 
@@ -33,15 +39,25 @@ function validateFieldConsistency(field: Field, path: string, findings: Validati
       });
     }
     let regex: RegExp | undefined;
-    try {
-      regex = new RegExp(field.pattern);
-    } catch {
+    const safety = analyzeWorkflowRegexSafety(field.pattern);
+    if (!safety.safe) {
       findings.push({
         class: "input-safety",
         path: `${path}.pattern`,
-        message: `Field "${field.name}"'s pattern "${field.pattern}" is not a valid regular expression`,
+        message: `Field "${field.name}"'s pattern is unsafe to evaluate: ${safety.reason ?? "unbounded backtracking risk"}`,
         severity: "error",
       });
+    } else {
+      try {
+        regex = new RegExp(field.pattern);
+      } catch {
+        findings.push({
+          class: "input-safety",
+          path: `${path}.pattern`,
+          message: `Field "${field.name}"'s pattern "${field.pattern}" is not a valid regular expression`,
+          severity: "error",
+        });
+      }
     }
     if (regex && typeof field.default === "string" && !regex.test(field.default)) {
       findings.push({

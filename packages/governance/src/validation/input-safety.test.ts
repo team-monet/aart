@@ -61,6 +61,21 @@ describe("validateInputSafety — enum/regex/default consistency (spec §18.4)",
     expect(findings.some((f) => f.message.includes("not a valid regular expression"))).toBe(true);
   });
 
+  it("rejects a catastrophically backtracking output pattern before execution", () => {
+    const findings = validateInputSafety(
+      wf([], [], [field({ name: "result", pattern: "^(a+)+$" })], { result: "{{ inputs.value }}" }),
+      lookup,
+    );
+
+    expect(findings).toContainEqual(
+      expect.objectContaining({
+        path: "outputs[0].pattern",
+        severity: "error",
+        message: expect.stringContaining("unsafe to evaluate"),
+      }),
+    );
+  });
+
   it("validates output field patterns as part of the public result contract", () => {
     const findings = validateInputSafety(wf([], [], [field({ name: "result", pattern: "(unterminated" })]), lookup);
     expect(findings).toContainEqual(expect.objectContaining({ path: "outputs[0].pattern", severity: "error" }));

@@ -211,6 +211,35 @@ describe("executeRun — fresh execution", () => {
     expect(finished.outputs).toEqual({});
   });
 
+  it("omits an optional interpolation when the unresolved token belongs to a skipped valid source", async () => {
+    const { store, config } = await setup();
+    const workflow = fixtureWorkflow({
+      inputs: [{ name: "includeDetail", type: "boolean", required: true }],
+      outputs: [{ name: "optionalResult", type: "string" }],
+      execution: {
+        type: "workflow",
+        steps: [
+          { id: "base", uses: "test.echo", with: { value: "prefix-" } },
+          { id: "detail", uses: "test.echo", with: { value: "detail" }, if: "{{ inputs.includeDetail }}" },
+        ],
+        outputMapping: {
+          optionalResult:
+            "{{ steps.base.outputs.echoed.value }}{{ steps.detail.outputs.echoed.value }}",
+        },
+      },
+    });
+    await store.workflows.put(workflow);
+    const run = await triggerRun(config, {
+      workflow,
+      trigger: fixtureTrigger(),
+      inputs: { includeDetail: false },
+    });
+    const finished = await executeRun(config, run.runId);
+
+    expect(finished.status).toBe("completed");
+    expect(finished.outputs).toEqual({});
+  });
+
   it("fails a structurally malformed optional mapping even when its source step was skipped", async () => {
     const { store, config } = await setup();
     const workflow = fixtureWorkflow({
@@ -228,6 +257,25 @@ describe("executeRun — fresh execution", () => {
 
     expect(finished.status).toBe("failed");
     expect(finished.error).toMatch(/workflow output mapping failed/i);
+  });
+
+  it("rejects an unmatched output expression even when a canonical workflow bypasses authoring validation", async () => {
+    const { store, config } = await setup();
+    const workflow = fixtureWorkflow({
+      outputs: [{ name: "result", type: "string", required: true }],
+      execution: {
+        type: "workflow",
+        steps: [{ id: "read", uses: "test.echo" }],
+        outputMapping: { result: "{{ steps.read.outputs.echoed" },
+      },
+    });
+    await store.workflows.put(workflow);
+    const run = await triggerRun(config, { workflow, trigger: fixtureTrigger(), inputs: {} });
+    const finished = await executeRun(config, run.runId);
+
+    expect(finished.status).toBe("failed");
+    expect(finished.outputs).toBeUndefined();
+    expect(finished.error).toMatch(/unmatched expression delimiter/i);
   });
 
   it("fails an optional mapping whose source step ran but did not produce the referenced field", async () => {

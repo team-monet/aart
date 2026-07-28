@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { EXPR_ROOTS, ExprSyntaxError, findExpressionTokens, parseExpression } from "./parser.js";
+import {
+  EXPR_ROOTS,
+  assertExpressionDelimiters,
+  ExprSyntaxError,
+  findExpressionTokens,
+  findUnmatchedExpressionDelimiters,
+  parseExpression,
+} from "./parser.js";
 
 describe("parseExpression — roots (architecture §3.1 Root production)", () => {
   it.each(EXPR_ROOTS)("parses the bare root %s", (root) => {
@@ -135,5 +142,21 @@ describe("findExpressionTokens", () => {
 
   it("returns an empty array for a string with no expression", () => {
     expect(findExpressionTokens("just literal text")).toEqual([]);
+  });
+});
+
+describe("expression delimiter validation", () => {
+  it("reports unmatched opening and closing delimiters outside complete tokens", () => {
+    expect(findUnmatchedExpressionDelimiters("{{ inputs.a }} then {{ inputs.b")).toEqual(["{{"]);
+    expect(findUnmatchedExpressionDelimiters("prefix }} {{ inputs.a }}")).toEqual(["}}"]);
+  });
+
+  it("rejects incomplete expression-looking text", () => {
+    expect(() => assertExpressionDelimiters("{{ inputs.a")).toThrow(ExprSyntaxError);
+    expect(() => assertExpressionDelimiters("inputs.a }}")).toThrow(/unmatched expression delimiter/i);
+  });
+
+  it("accepts literals and any number of complete expression tokens", () => {
+    expect(() => assertExpressionDelimiters("literal {{ inputs.a }} and {{ inputs.b }}")).not.toThrow();
   });
 });

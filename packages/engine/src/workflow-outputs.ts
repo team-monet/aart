@@ -2,7 +2,14 @@
 // both when a run completes and when a post-hoc correction changes a mapped
 // StepTrace field. Keeping this projection shared prevents RunRecord.outputs
 // from drifting away from the trace it claims to summarize.
-import { ExprResolutionError, findExpressionTokens, parseExpression, resolveExpression, type ResolveOptions } from "@aart/expr";
+import {
+  assertExpressionDelimiters,
+  ExprResolutionError,
+  findExpressionTokens,
+  parseExpression,
+  resolveExpression,
+  type ResolveOptions,
+} from "@aart/expr";
 import type { RunRecord, Workflow } from "@aart/types";
 import { buildExprContext } from "./expr-context.js";
 
@@ -22,38 +29,45 @@ function defineOutput(outputs: Record<string, unknown>, name: string, value: unk
   });
 }
 
-function referencesOnlyUnexecutedWorkflowStepSources(
+function isValidWorkflowStepSource(expression: string, declaredStepIds: ReadonlySet<string>): string | undefined {
+  const parsed = parseExpression(expression);
+  const first = parsed.path[0];
+  const second = parsed.path[1];
+  const hasValidStepShape =
+    second?.kind === "property" &&
+    (second.name === "outputs" || (second.name === "status" && parsed.path.length === 2));
+  if (parsed.root !== "steps" || first?.kind !== "property" || !hasValidStepShape || !declaredStepIds.has(first.name)) {
+    return undefined;
+  }
+  return first.name;
+}
+
+function assertValidWorkflowStepSources(expression: string, workflow: Pick<Workflow, "execution">): void {
+  const declaredStepIds = new Set(workflow.execution.steps.map((step) => step.id));
+  for (const token of findExpressionTokens(expression)) {
+    const parsed = parseExpression(token[0]);
+    if (parsed.root === "steps" && isValidWorkflowStepSource(token[0], declaredStepIds) === undefined) {
+      throw new Error(
+        `public output mapping step references must use a declared steps.<id>.outputs[.<field>] or steps.<id>.status source`,
+      );
+    }
+  }
+}
+
+function resolutionFailedForSkippedWorkflowStep(
+  error: ExprResolutionError,
   expression: string,
   workflow: Pick<Workflow, "execution">,
   run: RunRecord,
 ): boolean {
-  const tokens = findExpressionTokens(expression);
-  const stepIds: string[] = [];
-  for (const token of tokens) {
-    const parsed = parseExpression(token[0]);
-    const first = parsed.path[0];
-    const second = parsed.path[1];
-    const hasValidStepShape =
-      second?.kind === "property" &&
-      (second.name === "outputs" || (second.name === "status" && parsed.path.length === 2));
-    // Optional omission is only meaningful for a valid public step-output
-    // source (or the step status exposed by buildExprContext). A misspelling
-    // such as `steps.read.outptus.value` must fail consistently whether or
-    // not that branch happened to execute.
-    if (parsed.root !== "steps" || first?.kind !== "property" || !hasValidStepShape) {
-      return false;
-    }
-    stepIds.push(first.name);
-  }
-  if (stepIds.length === 0) return false;
-
   const declaredStepIds = new Set(workflow.execution.steps.map((step) => step.id));
-  return stepIds.every((stepId) => {
-    if (!declaredStepIds.has(stepId)) return false;
-    const traces = run.trace.filter((trace) => trace.stepId === stepId);
-    const latest = traces.at(-1);
-    return latest === undefined || latest.status === "skipped";
-  });
+  // Confirm the failing token belongs to this mapping before using it to
+  // decide optional omission.
+  if (!findExpressionTokens(expression).some((token) => token[0] === error.expression)) return false;
+  const stepId = isValidWorkflowStepSource(error.expression, declaredStepIds);
+  if (stepId === undefined) return false;
+  const latest = run.trace.filter((trace) => trace.stepId === stepId).at(-1);
+  return latest === undefined || latest.status === "skipped";
 }
 
 /**
@@ -76,6 +90,8 @@ export async function materializeWorkflowOutputs(
   const outputs: Record<string, unknown> = {};
 
   for (const [name, expression] of Object.entries(workflow.execution.outputMapping)) {
+    assertExpressionDelimiters(expression);
+    assertValidWorkflowStepSources(expression, workflow);
     if (referencesSecret(expression)) {
       throw new Error(`public outputMapping "${name}" may not reference secrets.*; expose a non-secret derived value instead`);
     }
@@ -87,7 +103,7 @@ export async function materializeWorkflowOutputs(
         err instanceof ExprResolutionError &&
         field !== undefined &&
         field.required !== true &&
-        referencesOnlyUnexecutedWorkflowStepSources(expression, workflow, run)
+        resolutionFailedForSkippedWorkflowStep(err, expression, workflow, run)
       ) {
         continue;
       }

@@ -4,7 +4,13 @@
 // boundary independently so a block-version or mapping change cannot persist
 // a completed run whose advertised result shape is false.
 import { isDeepStrictEqual } from "node:util";
-import { isSupportedFieldType, type Field, type SupportedFieldType, type Workflow } from "@aart/types";
+import {
+  analyzeWorkflowRegexSafety,
+  isSupportedFieldType,
+  type Field,
+  type SupportedFieldType,
+  type Workflow,
+} from "@aart/types";
 
 const MAX_DIAGNOSTIC_VALUE_CHARS = 512;
 
@@ -77,6 +83,13 @@ function validateValue(field: Field, value: unknown, problems: string[]): void {
   if (field.pattern) {
     if (typeof value !== "string") {
       problems.push(`output "${field.name}" declares pattern ${diagnosticValue(field.pattern)} but its value is not a string`);
+      return;
+    }
+    const safety = analyzeWorkflowRegexSafety(field.pattern);
+    if (!safety.safe) {
+      problems.push(
+        `output "${field.name}" declares unsafe pattern ${diagnosticValue(field.pattern)}: ${safety.reason ?? "unbounded backtracking risk"}`,
+      );
       return;
     }
     let pattern: RegExp;

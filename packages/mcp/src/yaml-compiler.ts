@@ -15,7 +15,12 @@
 // (spec §14.2's own example has no `outputs:` block to confirm this against,
 // but nothing about the keyed-object convention is inputs-specific, and
 // `Field[]` — the compiled target — is the exact same type for both).
-import { findExpressionTokens, parseExpression, ExprSyntaxError } from "@aart/expr";
+import {
+  assertExpressionDelimiters,
+  findExpressionTokens,
+  parseExpression,
+  ExprSyntaxError,
+} from "@aart/expr";
 import { isPatternCompatibleFieldType, WorkflowSchema, type Field, type Workflow } from "@aart/types";
 import yaml from "js-yaml";
 
@@ -67,13 +72,11 @@ function validateExpressionCandidate(
   options: { allowSecrets?: boolean; knownStepIds?: ReadonlySet<string> } = {},
 ): void {
   const tokens = findExpressionTokens(candidate);
-  const unmatchedRemainder = candidate.replace(/\{\{[\s\S]*?\}\}/g, "");
-  const unmatchedOpen = unmatchedRemainder.includes("{{");
-  const unmatchedClose = unmatchedRemainder.includes("}}");
-
-  if (unmatchedOpen || unmatchedClose) {
-    const delimiters = [unmatchedOpen ? '"{{"' : "", unmatchedClose ? '"}}"' : ""].filter(Boolean).join(" and ");
-    problems.push(`${label}: unmatched expression delimiter ${delimiters}; every "{{" must have a matching "}}"`);
+  try {
+    assertExpressionDelimiters(candidate);
+  } catch (err) {
+    if (err instanceof ExprSyntaxError) problems.push(`${label}: ${err.message}`);
+    else throw err;
   }
 
   for (const match of tokens) {

@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { ExampleSchema, FieldSchema, WorkflowSchema, WorkflowStepSchema } from "./workflow.js";
+import {
+  analyzeWorkflowRegexSafety,
+  ExampleSchema,
+  FieldSchema,
+  WorkflowSchema,
+  WorkflowStepSchema,
+} from "./workflow.js";
 
 describe("FieldSchema", () => {
   it("round-trips a Field", () => {
@@ -22,6 +28,19 @@ describe("FieldSchema", () => {
   it("preserves custom field types for backward-compatible Pack-defined semantics", () => {
     const result = FieldSchema.safeParse({ name: "publishedAt", type: "date" });
     expect(result.success).toBe(true);
+  });
+});
+
+describe("analyzeWorkflowRegexSafety", () => {
+  it("accepts ordinary anchored validation patterns", () => {
+    expect(analyzeWorkflowRegexSafety("^\\d{4}-\\d{2}-\\d{2}$")).toEqual({ safe: true });
+    expect(analyzeWorkflowRegexSafety("^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$")).toEqual({ safe: true });
+  });
+
+  it("rejects nested quantifiers, repeated alternation, and backreferences", () => {
+    expect(analyzeWorkflowRegexSafety("^(a+)+$")).toMatchObject({ safe: false });
+    expect(analyzeWorkflowRegexSafety("^(a|aa)+$")).toMatchObject({ safe: false });
+    expect(analyzeWorkflowRegexSafety("^(a+)\\1$")).toMatchObject({ safe: false });
   });
 });
 

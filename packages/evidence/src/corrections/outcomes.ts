@@ -6,7 +6,11 @@
 // (correction.ts) never triggers any of these automatically.
 import type { AartStore } from "@aart/store";
 import type { Correction, EvalExample, ImprovementBrief, RunRecord, StepTrace, Workflow } from "@aart/types";
-import { materializeWorkflowOutputs, validateWorkflowOutputs } from "@aart/engine/workflow-output-contract";
+import {
+  materializeWorkflowOutputs,
+  resolveWorkflowForRun,
+  validateWorkflowOutputs,
+} from "@aart/engine/workflow-output-contract";
 import { generateImprovementBrief } from "../improvement-brief.js";
 import { correctionKey } from "./correction.js";
 
@@ -35,7 +39,10 @@ function setByPath(target: Record<string, unknown>, path: string, value: unknown
 export async function updateRunOutput(store: AartStore, correction: Correction): Promise<RunRecord> {
   const run = await store.runs.get(correction.runId);
   if (!run) throw new Error(`updateRunOutput: no such run "${correction.runId}"`);
-  const traceIndex = run.trace.findIndex((t) => t.stepId === correction.stepId);
+  // A step may have more than one trace after a loop/back-edge or reclaim.
+  // Expression projection uses the latest matching trace, so corrections
+  // without an explicit sequence target that same observable occurrence.
+  const traceIndex = run.trace.findLastIndex((t) => t.stepId === correction.stepId);
   if (traceIndex === -1) throw new Error(`updateRunOutput: run "${correction.runId}" has no step "${correction.stepId}"`);
 
   const original = run.trace[traceIndex]!;
@@ -43,12 +50,17 @@ export async function updateRunOutput(store: AartStore, correction: Correction):
   setByPath(updatedTrace as unknown as Record<string, unknown>, correction.fieldPath, correction.corrected);
 
   const trace = run.trace.map((t, i) => (i === traceIndex ? updatedTrace : t));
-  const workflow = await store.workflows.get(run.workflowId, run.workflowVersion);
   let outputs = run.outputs;
-  if (workflow?.execution.outputMapping) {
+  // Failed/cancelled runs are intentionally partial evidence: correcting a
+  // trace must remain possible even when required output sources never ran.
+  // Only a completed run promises a fully materialized public contract.
+  if (run.status === "completed") {
+    const workflow = await resolveWorkflowForRun(store, run);
     const correctedProjection = { ...run, trace };
-    outputs = await materializeWorkflowOutputs(workflow, correctedProjection);
-    validateWorkflowOutputs(workflow, outputs);
+    if (workflow.execution.outputMapping) {
+      outputs = await materializeWorkflowOutputs(workflow, correctedProjection);
+      validateWorkflowOutputs(workflow, outputs);
+    }
   }
 
   const updatedRun: RunRecord = {
