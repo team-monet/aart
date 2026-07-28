@@ -428,27 +428,49 @@ async function appendTracesAndPersist(config: EngineConfig, run: RunRecord, newT
 }
 
 function stepReferencesSecretTaintedTrace(step: WorkflowStep, run: RunRecord): boolean {
-  const expressions = [
-    ...Object.values(step.with ?? {}),
-    step.if,
-    step.forEach,
-    step.until,
-    step.idempotencyKey,
-  ].filter((candidate): candidate is string => typeof candidate === "string");
-
-  for (const expression of expressions) {
+  const expressionReferencesTaint = (
+    expression: unknown,
+    shadowedStepId?: string,
+  ): boolean => {
+    if (typeof expression !== "string") return false;
     for (const token of findExpressionTokens(expression)) {
       const parsed = parseExpression(token[0]);
       const first = parsed.path[0];
       if (parsed.root !== "steps") continue;
       if (first === undefined) {
-        if (run.trace.some((trace) => trace.secretTainted === true)) return true;
+        if (
+          run.trace.some(
+            (trace) =>
+              trace.secretTainted === true && trace.stepId !== shadowedStepId,
+          )
+        ) {
+          return true;
+        }
         continue;
       }
       if (first.kind !== "property") continue;
+      if (first.name === shadowedStepId) continue;
       const source = run.trace.filter((trace) => trace.stepId === first.name).at(-1);
       if (source?.secretTainted === true) return true;
     }
+    return false;
+  };
+
+  if (
+    [step.if, step.forEach, step.until].some((expression) =>
+      expressionReferencesTaint(expression),
+    )
+  ) {
+    return true;
+  }
+
+  const iterationBinding =
+    step.forEach === undefined ? undefined : (step.as ?? "item");
+  for (const expression of [
+    ...Object.values(step.with ?? {}),
+    step.idempotencyKey,
+  ]) {
+    if (expressionReferencesTaint(expression, iterationBinding)) return true;
   }
   return false;
 }
@@ -497,12 +519,19 @@ async function assertPubliclyMappedTraceValuesSurviveRedaction(
   if (completedTraces.size === 0) return;
   if (
     resolvedSecretRefs.size === 0 &&
+    !run.trace.some((trace) => trace.secretTainted === true) &&
     ![...completedTraces.values()].some((trace) => trace.secretTainted === true)
   ) {
     return;
   }
 
-  const candidateRun: RunRecord = { ...run, trace: [...run.trace, ...newTraces] };
+  const candidateTrace = annotateSecretTaint(
+    config,
+    [...run.trace, ...newTraces],
+    resolvedSecretRefs,
+    false,
+  );
+  const candidateRun: RunRecord = { ...run, trace: candidateTrace };
   assertNoSecretTaintedOutputSources(workflow, candidateRun);
   const context = buildExprContext(candidateRun);
   for (const [outputName, expression] of Object.entries(outputMapping)) {

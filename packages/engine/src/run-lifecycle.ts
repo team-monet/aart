@@ -185,7 +185,7 @@ export async function finalizeTerminal(
     updated = { ...updated, snapshot: await captureExecutionSnapshot(workflow, config.blocks, now, config.computePackHashes) };
   }
   updated = { ...updated, status: terminalStatus, outputs, error: terminalError, endedAt: now.toISOString(), updatedAt: now.toISOString() };
-  const redacted = applyRedaction(config.redact, updated, resolvedSecretRefs);
+  const redacted = applyRunRedaction(config.redact, updated, resolvedSecretRefs);
   await config.store.runs.put(redacted);
 
   if (typeof concurrencyKey === "string") {
@@ -392,7 +392,7 @@ export async function cancelRun(config: EngineConfig, runId: string): Promise<Ru
     updatedAt: now,
     snapshot: isSnapshotCaptured(run.snapshot) ? run.snapshot : await captureExecutionSnapshot(workflow, config.blocks, nowDate, config.computePackHashes),
   };
-  const redacted = applyRedaction(config.redact, updated, resolvedSecretRefs);
+  const redacted = applyRunRedaction(config.redact, updated, resolvedSecretRefs);
   await config.store.runs.put(redacted);
 
   if (typeof concurrencyKey === "string") {

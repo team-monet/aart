@@ -7,6 +7,7 @@
 import type { SecretResolver } from "@aart/expr";
 import type { RedactFn, RunRecord, StepTrace } from "@aart/types";
 import { SecretResolutionError } from "@aart/types";
+import { jsonValuesEqual } from "./output-validation.js";
 
 /**
  * Identity `RedactFn` — this session's own tests wire this by default
@@ -138,7 +139,6 @@ export function applyRunRedaction(redact: RedactFn, run: RunRecord, resolvedSecr
   // outside value-based redaction entirely: a secret equal to "secret"
   // could rewrite the key, while a boolean secret `true` could rewrite the
   // value. Reattach only the trusted original booleans afterward.
-  const secretTaintByTrace = run.trace.map((trace) => trace.secretTainted === true);
   const redactableTrace = run.trace.map((trace): StepTrace => {
     const copy = { ...trace };
     delete copy.secretTainted;
@@ -149,6 +149,11 @@ export function applyRunRedaction(redact: RedactFn, run: RunRecord, resolvedSecr
     { ...run, trace: redactableTrace },
     resolvedSecretRefs,
   );
+  const secretTaintByTrace = run.trace.map((trace, index) => {
+    if (trace.secretTainted === true) return true;
+    if (trace.outputs === undefined) return false;
+    return !jsonValuesEqual(trace.outputs, redactedPayload.trace[index]?.outputs);
+  });
   const redacted: RunRecord = {
     ...redactedPayload,
     trace: redactedPayload.trace.map((trace, index) => {
