@@ -42,6 +42,16 @@ describe("analyzeWorkflowRegexSafety", () => {
     expect(analyzeWorkflowRegexSafety("^(a|aa)+$")).toMatchObject({ safe: false });
     expect(analyzeWorkflowRegexSafety("^(a+)\\1$")).toMatchObject({ safe: false });
   });
+
+  it("rejects overlapping sequential quantifiers at the top level", () => {
+    expect(analyzeWorkflowRegexSafety("a*a*a*a*a*a*a*a*a*b")).toMatchObject({
+      safe: false,
+      reason: expect.stringMatching(/overlapping sequential quantifiers/i),
+    });
+    expect(analyzeWorkflowRegexSafety("[ab]*[bc]*tail")).toMatchObject({ safe: false });
+    expect(analyzeWorkflowRegexSafety("(a)*(a)*tail")).toMatchObject({ safe: false });
+    expect(analyzeWorkflowRegexSafety("a*b*c*tail")).toEqual({ safe: true });
+  });
 });
 
 describe("ExampleSchema", () => {

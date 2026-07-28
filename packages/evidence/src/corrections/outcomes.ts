@@ -53,8 +53,11 @@ export async function updateRunOutput(store: AartStore, correction: Correction):
   let outputs = run.outputs;
   // Failed/cancelled runs are intentionally partial evidence: correcting a
   // trace must remain possible even when required output sources never ran.
-  // Only a completed run promises a fully materialized public contract.
-  if (run.status === "completed") {
+  // Modern completed runs with a public projection promise a fully
+  // materialized contract. Legacy completed records may predate that field
+  // and carry no parseable workflow definition in their old snapshots; in
+  // that case the trace correction remains valid without inventing outputs.
+  if (run.status === "completed" && run.outputs !== undefined) {
     const workflow = await resolveWorkflowForRun(store, run);
     const correctedProjection = { ...run, trace };
     if (workflow.execution.outputMapping) {

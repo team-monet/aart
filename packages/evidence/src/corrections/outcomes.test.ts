@@ -60,6 +60,21 @@ describe("outcome 1/6 — updateRunOutput (spec §23.4 'update current run outpu
     await expect(store.runs.get("run_1")).resolves.toMatchObject({ trace: [{ outputs: { nmi: "6401234568" }, postHocCorrected: true }] });
   });
 
+  it("preserves corrections on legacy completed runs without materialized public outputs", async () => {
+    const run = fixtureRunRecord({
+      runId: "run_1",
+      outputs: undefined,
+      trace: [{ seq: 0, stepId: "extract", block: "llm.extract", status: "completed", inputs: {}, outputs: { nmi: "wrong" }, startedAt: "t" }],
+      snapshot: { definitions: {}, resolvedVersions: {}, packHashes: {}, capturedAt: "2026-01-01T00:00:00.000Z" },
+    });
+    await store.runs.put(run);
+
+    const updated = await updateRunOutput(store, fixtureCorrection());
+
+    expect(updated.outputs).toBeUndefined();
+    expect(updated.trace[0]).toMatchObject({ outputs: { nmi: "6401234568" }, postHocCorrected: true });
+  });
+
   it("recomputes materialized workflow outputs after correcting a mapped step field", async () => {
     const workflow = fixtureWorkflow({
       id: "meter-reading",

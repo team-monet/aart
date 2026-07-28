@@ -33,6 +33,125 @@ function quantifierEnd(pattern: string, index: number): number | undefined {
   return match ? index + match[0].length : undefined;
 }
 
+interface QuantifiedAtom {
+  source: string;
+  asciiDecidable: boolean;
+}
+
+function atomsMayOverlap(left: QuantifiedAtom, right: QuantifiedAtom): boolean {
+  if (left.source === "." || right.source === "." || left.source === right.source) return true;
+
+  // A single atom cannot itself cause catastrophic evaluation, so testing
+  // their intersection over ASCII is bounded. Non-ASCII/property escapes
+  // remain conservatively overlapping when ASCII cannot decide the result.
+  try {
+    const leftRegex = new RegExp(`^(?:${left.source})$`, "u");
+    const rightRegex = new RegExp(`^(?:${right.source})$`, "u");
+    for (let code = 0; code <= 0x7f; code++) {
+      const candidate = String.fromCharCode(code);
+      if (leftRegex.test(candidate) && rightRegex.test(candidate)) return true;
+    }
+  } catch {
+    return true;
+  }
+  return !(left.asciiDecidable && right.asciiDecidable);
+}
+
+function sequentialQuantifierProblem(pattern: string): string | undefined {
+  const previousByDepth: Array<QuantifiedAtom | undefined> = [undefined];
+  const groupStartByDepth: Array<number | undefined> = [undefined];
+  let depth = 0;
+
+  for (let i = 0; i < pattern.length; i++) {
+    const char = pattern[i]!;
+    if (char === "(") {
+      depth += 1;
+      previousByDepth[depth] = undefined;
+      groupStartByDepth[depth] = i;
+      continue;
+    }
+    if (char === ")") {
+      const groupStart = groupStartByDepth[depth];
+      previousByDepth[depth] = undefined;
+      depth = Math.max(0, depth - 1);
+      const end = quantifierEnd(pattern, i + 1);
+      if (groupStart !== undefined && end !== undefined) {
+        const source = pattern.slice(groupStart, i + 1);
+        const atom = {
+          source,
+          asciiDecidable: /^[\x00-\x7f]*$/.test(source) && !/\\(?:[pP]\{|u|x)/.test(source),
+        };
+        const previous = previousByDepth[depth];
+        if (previous && atomsMayOverlap(previous, atom)) {
+          return "overlapping sequential quantifiers are not allowed";
+        }
+        previousByDepth[depth] = atom;
+        i = end - 1;
+        if (pattern[i + 1] === "?") i += 1;
+      } else {
+        previousByDepth[depth] = undefined;
+      }
+      continue;
+    }
+    if (char === "|") {
+      previousByDepth[depth] = undefined;
+      continue;
+    }
+    if (char === "^" || char === "$") continue;
+
+    let atomEnd = i + 1;
+    let atom: QuantifiedAtom;
+    if (char === "\\") {
+      if ((pattern[i + 1] === "p" || pattern[i + 1] === "P") && pattern[i + 2] === "{") {
+        const propertyEnd = pattern.indexOf("}", i + 3);
+        atomEnd = propertyEnd === -1 ? pattern.length : propertyEnd + 1;
+      } else {
+        atomEnd = Math.min(pattern.length, i + 2);
+      }
+      const source = pattern.slice(i, atomEnd);
+      atom = {
+        source,
+        asciiDecidable: !/^\\(?:[pP]\{|u|x)/.test(source),
+      };
+    } else if (char === "[") {
+      let escaped = false;
+      let classEnd = i + 1;
+      for (; classEnd < pattern.length; classEnd++) {
+        const classChar = pattern[classEnd]!;
+        if (!escaped && classChar === "]") {
+          classEnd += 1;
+          break;
+        }
+        escaped = !escaped && classChar === "\\";
+        if (classChar !== "\\") escaped = false;
+      }
+      atomEnd = classEnd;
+      const source = pattern.slice(i, atomEnd);
+      atom = {
+        source,
+        asciiDecidable: /^[\x00-\x7f]*$/.test(source) && !/\\(?:[pP]\{|u|x)/.test(source),
+      };
+    } else {
+      atom = { source: char, asciiDecidable: char.charCodeAt(0) <= 0x7f };
+    }
+
+    const end = quantifierEnd(pattern, atomEnd);
+    if (end !== undefined) {
+      const previous = previousByDepth[depth];
+      if (previous && atomsMayOverlap(previous, atom)) {
+        return "overlapping sequential quantifiers are not allowed";
+      }
+      previousByDepth[depth] = atom;
+      i = end - 1;
+      if (pattern[i + 1] === "?") i += 1;
+    } else {
+      previousByDepth[depth] = undefined;
+      i = atomEnd - 1;
+    }
+  }
+  return undefined;
+}
+
 /**
  * Conservative ReDoS guard for workflow-authored patterns.
  *
@@ -47,6 +166,9 @@ export function analyzeWorkflowRegexSafety(pattern: string): RegexSafetyAnalysis
   if (pattern.length > MAX_WORKFLOW_REGEX_CHARS) {
     return { safe: false, reason: `pattern exceeds ${MAX_WORKFLOW_REGEX_CHARS} characters` };
   }
+
+  const sequentialProblem = sequentialQuantifierProblem(pattern);
+  if (sequentialProblem) return { safe: false, reason: sequentialProblem };
 
   const groups: Array<{ containsQuantifier: boolean; containsAlternation: boolean }> = [];
   let inCharacterClass = false;
