@@ -62,6 +62,14 @@ describe("analyzeWorkflowRegexSafety", () => {
     expect(analyzeWorkflowRegexSafety("^a+(?<=a+)a+b$")).toMatchObject({ safe: false });
     expect(analyzeWorkflowRegexSafety("^a+(?<!b+)a+b$")).toMatchObject({ safe: false });
   });
+
+  it("preserves overlap detection across empty capturing and noncapturing groups", () => {
+    expect(analyzeWorkflowRegexSafety("^a*()a*$")).toMatchObject({
+      safe: false,
+      reason: expect.stringMatching(/overlapping sequential quantifiers/i),
+    });
+    expect(analyzeWorkflowRegexSafety("^a*(?:)a*$")).toMatchObject({ safe: false });
+  });
 });
 
 describe("ExampleSchema", () => {

@@ -40,6 +40,15 @@ describe("workflow output validation diagnostics", () => {
     expect(problem).toMatch(/unsafe pattern.*overlapping sequential quantifiers/i);
   });
 
+  it("rejects overlapping quantifiers separated by an empty group without evaluating them", () => {
+    const problem = validationProblem(
+      { name: "document", type: "string", pattern: "^a*(?:)a*$" },
+      `${"a".repeat(1_000)}!`,
+    );
+
+    expect(problem).toMatch(/unsafe pattern.*overlapping sequential quantifiers/i);
+  });
+
   it("bounds a large pattern-mismatch value while reporting its total size", () => {
     const value = `${"a".repeat(200_000)}-UNBOUNDED-TAIL`;
     const problem = validationProblem({ name: "document", type: "string", pattern: "^accepted$" }, value);

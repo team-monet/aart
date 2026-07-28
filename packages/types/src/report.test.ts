@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ModelFacingReportSchema } from "./report.js";
+import { compactModelFacingOutputs, ModelFacingReportSchema } from "./report.js";
 
 describe("ModelFacingReportSchema", () => {
   it.each(["passed", "failed", "waiting"] as const)("round-trips a %s-headline report", (headline) => {
@@ -26,5 +26,20 @@ describe("ModelFacingReportSchema", () => {
       next: "none",
     });
     expect(result.success).toBe(false);
+  });
+
+  it("compacts outputs whose pretty-printed form exceeds the report budget", () => {
+    let nested: unknown = "leaf";
+    for (let depth = 0; depth < 1_000; depth++) nested = [nested];
+
+    const compacted = compactModelFacingOutputs("run-deep", { nested });
+
+    expect(compacted).toMatchObject({
+      $aart: {
+        kind: "truncated-workflow-outputs",
+        fullResultRef: { runId: "run-deep", field: "outputs" },
+      },
+    });
+    expect(JSON.stringify(compacted, null, 2).length).toBeLessThan(10_000);
   });
 });

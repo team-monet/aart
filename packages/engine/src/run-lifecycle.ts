@@ -22,6 +22,14 @@ import { materializeWorkflowOutputs } from "./workflow-outputs.js";
 // Run intake (architecture §4.3) — S2's trigger adapters call this.
 // ---------------------------------------------------------------------------
 
+function withoutConcurrencyBookkeeping(params: Record<string, unknown> | undefined): Record<string, unknown> {
+  const callerParams = { ...params };
+  delete callerParams.concurrencyKey;
+  delete callerParams.concurrencyKeyFormat;
+  delete callerParams.waitingOnConcurrency;
+  return callerParams;
+}
+
 /**
  * The engine's trigger-intake function (implementation plan S2's consumed-
  * interfaces note: "trigger adapters call into the engine's run-intake
@@ -81,7 +89,7 @@ export async function triggerRun(config: EngineConfig, input: TriggerRunInput): 
     // decision #12 for the `waitingOnConcurrency` precedent ("Internal...
     // bookkeeping flag... not a spec-visible WaitCondition member").
     params: {
-      ...input.params,
+      ...withoutConcurrencyBookkeeping(input.params),
       ...(input.environment !== undefined ? { environment: input.environment } : {}),
       ...(resolvedKey !== undefined ? { concurrencyKey: resolvedKey } : {}),
       ...(waitingOnConcurrency ? { waitingOnConcurrency: true } : {}),

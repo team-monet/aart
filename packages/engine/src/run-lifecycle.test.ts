@@ -93,6 +93,40 @@ describe("triggerRun — run intake (architecture §4.3)", () => {
     expect(claimable.map((c) => c.runId)).not.toContain(second.runId);
   });
 
+  it("ignores caller-supplied concurrency bookkeeping and enforces the workflow policy", async () => {
+    const { store, config } = await setup();
+    const workflow = fixtureWorkflow({ id: "wf-reserved-params", concurrency: { key: "{{ inputs.caseId }}", policy: "queue" } });
+    const injectedParams = {
+      concurrencyKey: "attacker-key",
+      concurrencyKeyFormat: "sha256-v1",
+      waitingOnConcurrency: true,
+      keep: "caller-value",
+    };
+
+    const first = await triggerRun(config, {
+      workflow,
+      trigger: fixtureTrigger(),
+      inputs: { caseId: "case-1" },
+      params: injectedParams,
+    });
+    const second = await triggerRun(config, {
+      workflow,
+      trigger: fixtureTrigger(),
+      inputs: { caseId: "case-1" },
+      params: injectedParams,
+    });
+
+    expect(first.params).toMatchObject({ concurrencyKey: "case-1", keep: "caller-value" });
+    expect(first.params?.concurrencyKeyFormat).toBeUndefined();
+    expect(first.params?.waitingOnConcurrency).toBeUndefined();
+    expect(second.params).toMatchObject({ concurrencyKey: "case-1", waitingOnConcurrency: true, keep: "caller-value" });
+    expect(second.params?.concurrencyKeyFormat).toBeUndefined();
+
+    const claimable = await store.jobQueue.listClaimable(new Date().toISOString());
+    expect(claimable.map((entry) => entry.runId)).toContain(first.runId);
+    expect(claimable.map((entry) => entry.runId)).not.toContain(second.runId);
+  });
+
   it("keeps newly created runs visible to pre-fingerprint intake during a rolling upgrade", async () => {
     const { store, config } = await setup();
     const workflow = fixtureWorkflow({

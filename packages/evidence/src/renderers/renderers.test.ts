@@ -151,6 +151,18 @@ describe("renderPrComment — spec §26.3 format", () => {
     expect(comment).toContain(`"runId": "${run.runId}"`);
     expect(comment).not.toContain("-end");
   });
+
+  it("bounds deeply nested outputs whose pretty-printed form expands beyond the PR-comment budget", () => {
+    let nested: unknown = "leaf";
+    for (let depth = 0; depth < 1_000; depth++) nested = [nested];
+    const run = fixtureRunRecord({ outputs: { nested } });
+
+    const comment = renderPrComment(run, identityRedact);
+
+    expect(comment.length).toBeLessThan(10_000);
+    expect(comment).toContain("truncated-workflow-outputs");
+    expect(comment).toContain(`"runId": "${run.runId}"`);
+  });
 });
 
 describe("renderJson — full-fidelity dump", () => {

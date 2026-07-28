@@ -57,6 +57,18 @@ function atomsMayOverlap(left: QuantifiedAtom, right: QuantifiedAtom): boolean {
   return !(left.asciiDecidable && right.asciiDecidable);
 }
 
+function isZeroWidthGroup(pattern: string, groupStart: number, groupEnd: number): boolean {
+  const source = pattern.slice(groupStart, groupEnd + 1);
+  return (
+    source === "()" ||
+    source === "(?:)" ||
+    pattern.startsWith("(?=", groupStart) ||
+    pattern.startsWith("(?!", groupStart) ||
+    pattern.startsWith("(?<=", groupStart) ||
+    pattern.startsWith("(?<!", groupStart)
+  );
+}
+
 function sequentialQuantifierProblem(pattern: string): string | undefined {
   const previousByDepth: Array<QuantifiedAtom | undefined> = [undefined];
   const groupStartByDepth: Array<number | undefined> = [undefined];
@@ -88,15 +100,7 @@ function sequentialQuantifierProblem(pattern: string): string | undefined {
         previousByDepth[depth] = atom;
         i = end - 1;
         if (pattern[i + 1] === "?") i += 1;
-      } else if (
-        groupStart === undefined ||
-        !(
-          pattern.startsWith("(?=", groupStart) ||
-          pattern.startsWith("(?!", groupStart) ||
-          pattern.startsWith("(?<=", groupStart) ||
-          pattern.startsWith("(?<!", groupStart)
-        )
-      ) {
+      } else if (groupStart === undefined || !isZeroWidthGroup(pattern, groupStart, i)) {
         previousByDepth[depth] = undefined;
       }
       continue;

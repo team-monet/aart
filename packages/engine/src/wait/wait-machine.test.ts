@@ -4,7 +4,7 @@
 // hand-rolled mock, per this session's DoD ("it should pass its own tests
 // against the fs adapter from S0").
 import type { AartStore } from "@aart/store";
-import { CorrelationError } from "@aart/types";
+import { CorrelationError, type RedactFn } from "@aart/types";
 import { afterEach, describe, expect, it } from "vitest";
 import { identityRedactFn } from "../redaction.js";
 import { CURRENT_ENGINE_SCHEMA_VERSION } from "../schema-version.js";
@@ -20,6 +20,10 @@ async function setup(): Promise<{ store: AartStore; config: WaitMachineConfig }>
   const { store, cleanup } = await createTestStore();
   cleanups.push(cleanup);
   return { store, config: { store, redact: identityRedactFn, now: () => new Date() } };
+}
+
+function redactLiteral(secret: string): RedactFn {
+  return (record) => JSON.parse(JSON.stringify(record).replaceAll(secret, "[REDACTED]"));
 }
 
 describe("enterWait — no early match (architecture §4.4 steps 1-4)", () => {
@@ -68,6 +72,29 @@ describe("enterWait — no early match (architecture §4.4 steps 1-4)", () => {
     expect(result.suspended).toBe(true);
     expect(result.run.status).toBe("waiting");
   });
+
+  it("preserves the active concurrency key when wait-entry redaction sees the same secret value", async () => {
+    const { store, config } = await setup();
+    const concurrencyKey = "case-secret";
+    const run = fixtureRun({ status: "running", params: { concurrencyKey } });
+    await store.runs.put(run);
+
+    const result = await enterWait(
+      { ...config, redact: redactLiteral(concurrencyKey) },
+      {
+        run,
+        stepId: "manual_step",
+        blockId: "wait.manual",
+        resolvedInputs: {},
+        wait: { type: "manual", schemaVersion: CURRENT_ENGINE_SCHEMA_VERSION },
+        resolvedSecretRefs: new Set([concurrencyKey]),
+      },
+    );
+
+    expect(result.run.status).toBe("waiting");
+    expect(result.run.params?.concurrencyKey).toBe(concurrencyKey);
+    await expect(store.runs.get(run.runId)).resolves.toMatchObject({ params: { concurrencyKey } });
+  });
 });
 
 describe("enterWait — early-arrival resolution (architecture §4.4 step 3 / §5.6)", () => {
@@ -104,6 +131,36 @@ describe("enterWait — early-arrival resolution (architecture §4.4 step 3 / §
     await enterWait(config, { run, stepId: "wait_step", blockId: "wait.for_signal", resolvedInputs: {}, wait, resolvedSecretRefs: new Set() });
 
     await expect(store.signals.findUnconsumedMatch("quote.received", "corr1")).resolves.toBeUndefined();
+  });
+
+  it("preserves the active concurrency key across early-arrival resolution redaction", async () => {
+    const { store, config } = await setup();
+    const concurrencyKey = "case-secret";
+    const run = fixtureRun({ status: "running", params: { concurrencyKey } });
+    await store.runs.put(run);
+    await store.signals.append({
+      id: uniqueId("sig"),
+      name: "quote.received",
+      correlationId: "corr1",
+      payload: { price: 42 },
+      receivedAt: new Date().toISOString(),
+    });
+
+    const result = await enterWait(
+      { ...config, redact: redactLiteral(concurrencyKey) },
+      {
+        run,
+        stepId: "wait_step",
+        blockId: "wait.for_signal",
+        resolvedInputs: {},
+        wait: { type: "signal", name: "quote.received", correlationId: "corr1", schemaVersion: CURRENT_ENGINE_SCHEMA_VERSION },
+        resolvedSecretRefs: new Set([concurrencyKey]),
+      },
+    );
+
+    expect(result.suspended).toBe(false);
+    expect(result.run.params?.concurrencyKey).toBe(concurrencyKey);
+    await expect(store.runs.get(run.runId)).resolves.toMatchObject({ params: { concurrencyKey } });
   });
 
   it("THE EARLY-ARRIVAL RACE TEST: the SignalStore check and the WaitStore/RunRecord writes happen inside ONE store.transact() call (architecture §4.4 step 3) — a simulated crash after the check but before the wait row commits leaves NEITHER a resolved-immediately outcome NOR a persisted outstanding wait", async () => {
@@ -269,6 +326,30 @@ describe("resumeManual — direct-lookup mechanism", () => {
     await resumeManual(config, run.runId, "manual_step");
     const second = await resumeManual(config, run.runId, "manual_step");
     expect(second.kind).toBe("duplicate");
+  });
+
+  it("preserves the active concurrency key across resume redaction", async () => {
+    const { store, config } = await setup();
+    const concurrencyKey = "case-secret";
+    const run = fixtureRun({ status: "running", params: { concurrencyKey } });
+    await store.runs.put(run);
+    const redactingConfig = { ...config, redact: redactLiteral(concurrencyKey) };
+    const resolvedSecretRefs = new Set([concurrencyKey]);
+    await enterWait(redactingConfig, {
+      run,
+      stepId: "manual_step",
+      blockId: "wait.manual",
+      resolvedInputs: {},
+      wait: { type: "manual", schemaVersion: CURRENT_ENGINE_SCHEMA_VERSION },
+      resolvedSecretRefs,
+    });
+
+    const outcome = await resumeManual(redactingConfig, run.runId, "manual_step", undefined, resolvedSecretRefs);
+
+    expect(outcome.kind).toBe("resumed");
+    if (outcome.kind !== "resumed") throw new Error("unreachable");
+    expect(outcome.run.params?.concurrencyKey).toBe(concurrencyKey);
+    await expect(store.runs.get(run.runId)).resolves.toMatchObject({ params: { concurrencyKey } });
   });
 
   it("resuming a step that was never waited on is unmatched", async () => {
