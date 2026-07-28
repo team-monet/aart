@@ -543,7 +543,41 @@ describe("executeRun — fresh execution", () => {
 
     expect(finished.status).toBe("failed");
     expect(finished.outputs).toBeUndefined();
-    expect(finished.error).toMatch(/changed by secret redaction/);
+    expect(finished.error).toMatch(/secret-tainted|changed by secret redaction/);
+    expect(JSON.stringify(await store.runs.get(run.runId))).not.toContain("secret-value");
+  });
+
+  it("preserves secret taint across an intermediate persisted step", async () => {
+    const { store, config } = await setup({
+      redact: redactResolvedValues,
+      resolveSecret: () => "secret-value",
+    });
+    const workflow = fixtureWorkflow({
+      outputs: [{ name: "result", type: "string", required: true }],
+      execution: {
+        type: "workflow",
+        steps: [
+          { id: "source", uses: "test.echo", with: { secret: "{{ secrets.API_KEY }}" } },
+          {
+            id: "relay",
+            uses: "test.echo",
+            with: { value: "{{ steps.source.outputs.echoed.secret }}" },
+          },
+        ],
+        outputMapping: { result: "{{ steps.relay.outputs.echoed.value }}" },
+      },
+    });
+    await store.workflows.put(workflow);
+    const run = await triggerRun(config, { workflow, trigger: fixtureTrigger(), inputs: {} });
+
+    const finished = await executeRun(config, run.runId);
+
+    expect(finished.status).toBe("failed");
+    expect(finished.outputs).toBeUndefined();
+    expect(finished.error).toMatch(/secret-tainted step "relay"/);
+    expect(finished.trace.find((trace) => trace.stepId === "source")).toMatchObject({
+      secretTainted: true,
+    });
     expect(JSON.stringify(await store.runs.get(run.runId))).not.toContain("secret-value");
   });
 

@@ -50,6 +50,11 @@ export const StepTraceSchema = z.object({
   // (architecture §5.3 `step_traces.post_hoc_corrected`, F5 fix; spec §23.4
   // "update current run output" correction outcome). See AMENDMENTS.md.
   postHocCorrected: z.boolean().optional(),
+  // Persistence-safe taint bit: true when this step's observable behavior
+  // depends on a value removed by secret redaction. The value itself is
+  // never retained; the bit survives store reloads so downstream steps
+  // cannot launder a redaction marker into a public workflow output.
+  secretTainted: z.boolean().optional(),
 });
 export type StepTrace = z.infer<typeof StepTraceSchema>;
 

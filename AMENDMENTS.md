@@ -2020,3 +2020,20 @@ remote-discovery configuration error, the checked-in Pack catalog remains
 preview data rather than a fake production registry, and npm publication was
 not performed. Those are launch/configuration boundaries, not failures of
 the isolated reuse-and-execute acceptance loop above.
+
+### A75 — Secret taint survives trace persistence without retaining secret values
+
+Step traces are redacted before they are persisted. A downstream step can
+therefore receive a redaction marker instead of the original value, and
+ordinary value comparison alone cannot later distinguish that marker from an
+authored string. `StepTrace.secretTainted` is a persistence-safe boolean that
+records this loss of semantic fidelity without storing a secret, a secret
+name, or a redacted path. A trace is marked when redaction changes its raw
+outputs, and the bit propagates conservatively when a later step references
+that trace in an execution expression.
+
+Public workflow outputs reject a mapping sourced from a secret-tainted step.
+This prevents an intermediate block from laundering a persisted redaction
+marker into a successful public result. A block may still publish a genuinely
+non-secret derived value: when its raw output survives redaction unchanged
+and it did not consume an already-tainted trace, no taint bit is added.
