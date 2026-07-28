@@ -8,8 +8,24 @@
 import { resolveExpression } from "@aart/expr";
 import type { AartStore } from "@aart/store";
 import type { RunRecord, Workflow } from "@aart/types";
+import { createHash } from "node:crypto";
 
 const NON_TERMINAL_STATUSES = new Set<RunRecord["status"]>(["pending", "running", "waiting"]);
+const SHA256_FINGERPRINT = /^sha256:[a-f0-9]{64}$/;
+
+/** Stable, non-reversible persisted representation of an authored key. */
+export function fingerprintConcurrencyKey(key: string | undefined): string | undefined {
+  return key === undefined ? undefined : `sha256:${createHash("sha256").update(key).digest("hex")}`;
+}
+
+function normalizePersistedKey(key: string | undefined): string | undefined {
+  if (key === undefined || SHA256_FINGERPRINT.test(key)) return key;
+  return fingerprintConcurrencyKey(key);
+}
+
+function concurrencyKeysEqual(left: string | undefined, right: string | undefined): boolean {
+  return normalizePersistedKey(left) === normalizePersistedKey(right);
+}
 
 /** Resolves `workflow.concurrency.key` (architecture §4.3, `{{ }}` against `inputs.*`) — `undefined` if the workflow declares no `concurrency` block at all (the "no constraint" default, equivalent to `policy: "allow"`). */
 export async function resolveConcurrencyKey(workflow: Workflow, inputs: Record<string, unknown>): Promise<string | undefined> {
@@ -27,9 +43,8 @@ export type ConcurrencyDecision =
 /**
  * The trigger-intake decision (architecture §4.3's four policies). Looks up
  * every non-terminal run of `workflow.id` and compares `params.concurrencyKey`
- * (this package's own bookkeeping — see `run-lifecycle.ts`'s doc comment on
- * why the resolved key is stashed there rather than needing a new `RunRecord`
- * field) against the newly-resolved `key`. Returns `{ action: "allow" }`
+ * (a persisted fingerprint; legacy raw values are normalized on read) against
+ * the newly-resolved key/fingerprint. Returns `{ action: "allow" }`
  * when the workflow declares no `concurrency` block, or when no other
  * non-terminal run shares this exact key.
  */
@@ -38,7 +53,9 @@ export async function decideConcurrency(store: AartStore, workflow: Workflow, ke
     return { action: "allow" };
   }
   const candidates = await store.runs.list({ workflowId: workflow.id });
-  const existing = candidates.find((r) => NON_TERMINAL_STATUSES.has(r.status) && r.params?.concurrencyKey === key);
+  const existing = candidates.find(
+    (r) => NON_TERMINAL_STATUSES.has(r.status) && concurrencyKeysEqual(r.params?.concurrencyKey as string | undefined, key),
+  );
   if (!existing) {
     return { action: "allow" };
   }
@@ -72,7 +89,9 @@ export async function decideConcurrency(store: AartStore, workflow: Workflow, ke
 export async function releaseQueuedRuns(store: AartStore, workflowId: string, key: string): Promise<RunRecord | undefined> {
   const candidates = await store.runs.list({ workflowId, status: "pending" });
   const queued = candidates
-    .filter((r) => r.params?.waitingOnConcurrency === true && r.params?.concurrencyKey === key)
+    .filter(
+      (r) => r.params?.waitingOnConcurrency === true && concurrencyKeysEqual(r.params?.concurrencyKey as string | undefined, key),
+    )
     .sort((a, b) => a.startedAt.localeCompare(b.startedAt));
   const next = queued[0];
   if (!next) return undefined;

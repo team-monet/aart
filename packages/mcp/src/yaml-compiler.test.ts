@@ -221,6 +221,40 @@ outputMapping:
     ).toThrow(/outputMapping "result" is not declared in outputs/);
   });
 
+  it("rejects an unsupported public output type before registration", () => {
+    expect(() =>
+      compileYamlWorkflow(`id: unsupported-output-type
+name: Unsupported Output Type
+version: 0.1.0
+outputs:
+  publishedAt:
+    type: date
+steps:
+  - id: read
+    uses: web.read
+outputMapping:
+  publishedAt: "{{ steps.read.outputs.text }}"
+`),
+    ).toThrow(/outputs\.0\.type.*Invalid option.*string/s);
+  });
+
+  it("rejects a secret-dependent public output before effectful execution can occur", () => {
+    expect(() =>
+      compileYamlWorkflow(`id: secret-output
+name: Secret Output
+version: 0.1.0
+outputs:
+  token:
+    type: string
+steps:
+  - id: send
+    uses: email.send
+outputMapping:
+  token: "{{ secrets.API_TOKEN }}"
+`),
+    ).toThrow(/outputMapping "token".*may not reference secrets/s);
+  });
+
   it("accepts a well-formed secrets.* expression", () => {
     const yamlSource = `id: with-secret
 name: With Secret

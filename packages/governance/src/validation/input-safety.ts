@@ -23,7 +23,7 @@ function validateFieldConsistency(field: Field, path: string, findings: Validati
       });
     }
   }
-  if (field.pattern && typeof field.default === "string") {
+  if (field.pattern) {
     let regex: RegExp | undefined;
     try {
       regex = new RegExp(field.pattern);
@@ -35,7 +35,7 @@ function validateFieldConsistency(field: Field, path: string, findings: Validati
         severity: "error",
       });
     }
-    if (regex && !regex.test(field.default)) {
+    if (regex && typeof field.default === "string" && !regex.test(field.default)) {
       findings.push({
         class: "input-safety",
         path: `${path}.default`,
@@ -157,10 +157,11 @@ export function findEffectfulStepsWithoutIdempotencyKey(
 // orchestrator
 // ---------------------------------------------------------------------------
 
-export function validateInputSafety(workflow: Pick<Workflow, "inputs" | "execution">, blockCatalog: CapabilityClosureLookup): ValidationFinding[] {
+export function validateInputSafety(workflow: Pick<Workflow, "inputs" | "outputs" | "execution">, blockCatalog: CapabilityClosureLookup): ValidationFinding[] {
   const findings: ValidationFinding[] = [];
 
   workflow.inputs.forEach((field, i) => validateFieldConsistency(field, `inputs[${i}]`, findings));
+  workflow.outputs.forEach((field, i) => validateFieldConsistency(field, `outputs[${i}]`, findings));
 
   workflow.execution.steps.forEach((step, i) => {
     const path = `steps[${i}]`;

@@ -55,6 +55,13 @@ describe("createFallbackReportRenderers", () => {
     }
   });
 
+  it("bounds oversized outputs in the fallback model-facing renderer", () => {
+    const run = fakeRunRecord({ outputs: { document: "x".repeat(200_000) } });
+    const report = renderers.modelFacing(run);
+    expect(JSON.stringify(report).length).toBeLessThan(8_000);
+    expect(report.outputs).toMatchObject({ $aart: { kind: "truncated-workflow-outputs", fullResultRef: { runId: run.runId, field: "outputs" } } });
+  });
+
   it("surfaces a run-level output failure in every fallback renderer when no trace step failed", () => {
     const error = 'Workflow output validation failed: output "result" expected type "string" but received "object"';
     const run = fakeRunRecord({ status: "failed", error });

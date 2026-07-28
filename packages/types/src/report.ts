@@ -17,8 +17,8 @@ export const ModelFacingReportSchema = z.object({
     }),
   ),
   // The workflow's declared outputMapping resolved into its public result.
-  // This is intentionally the compact workflow-level contract, not the
-  // potentially much larger per-step trace.
+  // Oversized results use compactModelFacingOutputs' bounded summary and
+  // RunRecord pointer instead of consuming the model's context window.
   outputs: z.record(z.string(), z.unknown()),
   artifactRefs: z.array(
     z.object({
@@ -30,3 +30,25 @@ export const ModelFacingReportSchema = z.object({
   next: z.string(),
 });
 export type ModelFacingReport = z.infer<typeof ModelFacingReportSchema>;
+
+const MAX_INLINE_MODEL_OUTPUT_CHARS = 4_096;
+const MODEL_OUTPUT_PREVIEW_CHARS = 512;
+
+/**
+ * Keeps model-facing reports bounded while preserving full-fidelity
+ * RunRecord.outputs in storage/human reports. Small public results retain
+ * their authored shape; oversized results become a compact pointer-shaped
+ * summary that tells the consumer exactly where the full value lives.
+ */
+export function compactModelFacingOutputs(runId: string, outputs: Record<string, unknown>): Record<string, unknown> {
+  const serialized = JSON.stringify(outputs);
+  if (serialized.length <= MAX_INLINE_MODEL_OUTPUT_CHARS) return outputs;
+  return {
+    $aart: {
+      kind: "truncated-workflow-outputs",
+      originalChars: serialized.length,
+      preview: serialized.slice(0, MODEL_OUTPUT_PREVIEW_CHARS),
+      fullResultRef: { runId, field: "outputs" },
+    },
+  };
+}

@@ -237,7 +237,7 @@ describe("dashboard HTTP server — JSON REST API & SPA fallback routing", () =>
 
   describe("v1 read-only API", () => {
     it("GET /api/runs lists runs; GET /api/runs/:id returns run JSON & report HTML", async () => {
-      await fixture.store.runs.put(makeRun({ runId: "run-1", status: "completed" }));
+      await fixture.store.runs.put(makeRun({ runId: "run-1", status: "completed", outputs: { reusable: ["alpha", "beta"] } }));
 
       const list = await fetch(`${baseUrl}/api/runs`);
       expect(list.status).toBe(200);
@@ -250,6 +250,7 @@ describe("dashboard HTTP server — JSON REST API & SPA fallback routing", () =>
       const detailJson = await detail.json() as any;
       expect(detailJson.run.runId).toBe("run-1");
       expect(detailJson.reportHtml).toContain('class="run-report"'); // S6 report-renderer seam output
+      expect(detailJson.reportHtml).toContain("alpha");
 
       const missing = await fetch(`${baseUrl}/api/runs/does-not-exist`);
       expect(missing.status).toBe(404);

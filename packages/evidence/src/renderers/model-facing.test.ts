@@ -111,4 +111,20 @@ describe("renderModelFacing", () => {
     // (here: zero of each) drive its size.
     expect(JSON.stringify(report).length).toBeLessThan(2000);
   });
+
+  it("summarizes an oversized workflow output and points to the full RunRecord value", () => {
+    const run = fixtureRunRecord({ status: "completed", outputs: { document: "x".repeat(200_000) } });
+    const report = renderModelFacing(run, identityRedact);
+
+    expect(JSON.stringify(report).length).toBeLessThan(8_000);
+    expect(report.outputs).toEqual({
+      $aart: {
+        kind: "truncated-workflow-outputs",
+        originalChars: expect.any(Number),
+        preview: expect.any(String),
+        fullResultRef: { runId: run.runId, field: "outputs" },
+      },
+    });
+    expect((report.outputs["$aart"] as { preview: string }).preview.length).toBeLessThanOrEqual(512);
+  });
 });

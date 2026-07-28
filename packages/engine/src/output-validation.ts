@@ -20,8 +20,8 @@ function actualType(value: unknown): string {
   return typeof value;
 }
 
-function matchesDeclaredType(value: unknown, declaredType: string): boolean {
-  switch (declaredType.toLowerCase()) {
+function matchesDeclaredType(value: unknown, declaredType: Field["type"]): boolean {
+  switch (declaredType) {
     case "any":
     case "json":
     case "unknown":
@@ -38,9 +38,11 @@ function matchesDeclaredType(value: unknown, declaredType: string): boolean {
       return typeof value === "number" && Number.isFinite(value);
     case "string":
     case "boolean":
-      return typeof value === declaredType.toLowerCase();
-    default:
-      return false;
+      return typeof value === declaredType;
+    default: {
+      const exhaustive: never = declaredType;
+      return exhaustive;
+    }
   }
 }
 

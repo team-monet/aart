@@ -7,8 +7,8 @@ function field(overrides: Partial<Field>): Field {
   return { name: "f", type: "string", ...overrides };
 }
 
-function wf(inputs: Field[], steps: WorkflowStep[]): Pick<Workflow, "inputs" | "execution"> {
-  return { inputs, execution: { type: "workflow", steps } };
+function wf(inputs: Field[], steps: WorkflowStep[], outputs: Field[] = []): Pick<Workflow, "inputs" | "outputs" | "execution"> {
+  return { inputs, outputs, execution: { type: "workflow", steps } };
 }
 
 const lookup: CapabilityClosureLookup = {
@@ -54,6 +54,11 @@ describe("validateInputSafety — enum/regex/default consistency (spec §18.4)",
   it("flags an invalid regex pattern itself", () => {
     const findings = validateInputSafety(wf([field({ pattern: "(unterminated", default: "x" })], []), lookup);
     expect(findings.some((f) => f.message.includes("not a valid regular expression"))).toBe(true);
+  });
+
+  it("validates output field patterns as part of the public result contract", () => {
+    const findings = validateInputSafety(wf([], [], [field({ name: "result", pattern: "(unterminated" })]), lookup);
+    expect(findings).toContainEqual(expect.objectContaining({ path: "outputs[0].pattern", severity: "error" }));
   });
 });
 

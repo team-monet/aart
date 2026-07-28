@@ -2,9 +2,12 @@
 import { z } from "zod";
 import { ApprovalStateSchema, ConcurrencyPolicySchema, GatesSchema, RetryPolicySchema } from "./governance.js";
 
+/** Closed vocabulary understood by workflow input/output contract validation. */
+export const SUPPORTED_FIELD_TYPES = ["any", "array", "boolean", "integer", "json", "null", "number", "object", "string", "unknown"] as const;
+
 export const FieldSchema = z.object({
   name: z.string(),
-  type: z.string(),
+  type: z.enum(SUPPORTED_FIELD_TYPES),
   description: z.string().optional(),
   required: z.boolean().optional(),
   default: z.unknown().optional(),

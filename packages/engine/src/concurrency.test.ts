@@ -1,6 +1,6 @@
 import type { AartStore } from "@aart/store";
 import { afterEach, describe, expect, it } from "vitest";
-import { decideConcurrency, releaseQueuedRuns, resolveConcurrencyKey } from "./concurrency.js";
+import { decideConcurrency, fingerprintConcurrencyKey, releaseQueuedRuns, resolveConcurrencyKey } from "./concurrency.js";
 import { createTestStore, fixtureRun, fixtureWorkflow } from "./test-utils/fixtures.js";
 
 const cleanups: Array<() => Promise<void>> = [];
@@ -62,6 +62,17 @@ describe("decideConcurrency — all four policies (architecture §4.3)", () => {
     expect(decision.blockingRun.runId).toBe(existing.runId);
   });
 
+  it("matches a legacy raw stored key against the new persisted fingerprint", async () => {
+    const store = await setup();
+    const workflow = fixtureWorkflow({ id: "wf-legacy-key", concurrency: { key: "{{ inputs.caseId }}", policy: "queue" } });
+    const existing = fixtureRun({ workflowId: "wf-legacy-key", status: "running", params: { concurrencyKey: "case-1" } });
+    await store.runs.put(existing);
+
+    const decision = await decideConcurrency(store, workflow, fingerprintConcurrencyKey("case-1"));
+
+    expect(decision).toEqual({ action: "queue", blockingRun: existing });
+  });
+
   it("queue: only matches non-terminal statuses (pending/running/waiting) — a completed run with the same key does not block", async () => {
     const store = await setup();
     const workflow = fixtureWorkflow({ id: "wf-queue2", concurrency: { key: "{{ inputs.caseId }}", policy: "queue" } });
@@ -113,6 +124,20 @@ describe("releaseQueuedRuns", () => {
   it("does nothing (returns undefined) when no run is queued for that workflow+key", async () => {
     const store = await setup();
     expect(await releaseQueuedRuns(store, "wf-none", "case-none")).toBeUndefined();
+  });
+
+  it("releases a legacy raw-key queued run when the completing run carries the new fingerprint", async () => {
+    const store = await setup();
+    const queued = fixtureRun({
+      workflowId: "wf-legacy-release",
+      status: "pending",
+      params: { concurrencyKey: "case-1", waitingOnConcurrency: true },
+    });
+    await store.runs.put(queued);
+
+    const released = await releaseQueuedRuns(store, "wf-legacy-release", fingerprintConcurrencyKey("case-1")!);
+
+    expect(released?.runId).toBe(queued.runId);
   });
 
   it("ignores runs not marked waitingOnConcurrency (e.g. a plain pending run that hasn't been claimed yet for an unrelated reason)", async () => {

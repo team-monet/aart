@@ -58,6 +58,33 @@ describe("outcome 1/6 — updateRunOutput (spec §23.4 'update current run outpu
     await expect(store.runs.get("run_1")).resolves.toMatchObject({ trace: [{ outputs: { nmi: "6401234568" }, postHocCorrected: true }] });
   });
 
+  it("recomputes materialized workflow outputs after correcting a mapped step field", async () => {
+    const workflow = fixtureWorkflow({
+      id: "meter-reading",
+      version: "1.0.0",
+      outputs: [{ name: "nmi", type: "string", required: true }],
+      execution: {
+        type: "workflow",
+        steps: [{ id: "extract", uses: "llm.extract" }],
+        outputMapping: { nmi: "{{ steps.extract.outputs.nmi }}" },
+      },
+    });
+    const run = fixtureRunRecord({
+      runId: "run_1",
+      workflowId: workflow.id,
+      workflowVersion: workflow.version,
+      outputs: { nmi: "6401234567" },
+      trace: [{ seq: 0, stepId: "extract", block: "llm.extract", status: "completed", inputs: {}, outputs: { nmi: "6401234567" }, startedAt: "t" }],
+    });
+    await store.workflows.put(workflow);
+    await store.runs.put(run);
+
+    const updated = await updateRunOutput(store, fixtureCorrection());
+
+    expect(updated.outputs).toEqual({ nmi: "6401234568" });
+    await expect(store.runs.get("run_1")).resolves.toMatchObject({ outputs: { nmi: "6401234568" } });
+  });
+
   it("throws when the run does not exist", async () => {
     await expect(updateRunOutput(store, fixtureCorrection({ runId: "no-such-run" }))).rejects.toThrow(/no such run/);
   });

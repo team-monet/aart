@@ -4,7 +4,7 @@
 // reading RunRecord directly, because its ordering/field constraints
 // (headline+failures first, artifact refs not payloads, token-budgeted)
 // are a different optimization target (a model's context window)."
-import type { ModelFacingReport, RunRecord } from "@aart/types";
+import { compactModelFacingOutputs, type ModelFacingReport, type RunRecord } from "@aart/types";
 import { applyRedaction, type RedactFn } from "../redact.js";
 
 const HEADLINE_MAP: Record<RunRecord["status"], ModelFacingReport["headline"]> = {
@@ -70,7 +70,7 @@ export function renderModelFacing(run: RunRecord, redact: RedactFn, resolvedSecr
     workflowId: clean.workflowId,
     workflowVersion: clean.workflowVersion,
     failures,
-    outputs: clean.outputs ?? {},
+    outputs: compactModelFacingOutputs(clean.runId, clean.outputs ?? {}),
     artifactRefs,
     next: nextAffordance(clean.status),
   };

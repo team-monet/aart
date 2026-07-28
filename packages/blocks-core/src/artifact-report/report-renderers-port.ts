@@ -25,7 +25,7 @@
 // unused) — a composition root that wants real redaction must inject the
 // real `@aart/evidence` renderers (wired to S4's real `redactRecord`)
 // via `createBlockCatalog({ reportRenderers })`.
-import type { ModelFacingReport, RunRecord, RunStatus, StepStatus } from "@aart/types";
+import { compactModelFacingOutputs, type ModelFacingReport, type RunRecord, type RunStatus, type StepStatus } from "@aart/types";
 
 export interface ReportRenderersPort {
   modelFacing(run: RunRecord, resolvedSecretRefs?: ReadonlySet<string>): ModelFacingReport;
@@ -72,7 +72,7 @@ function buildModelFacing(run: RunRecord): ModelFacingReport {
     workflowId: run.workflowId,
     workflowVersion: run.workflowVersion,
     failures,
-    outputs: run.outputs ?? {},
+    outputs: compactModelFacingOutputs(run.runId, run.outputs ?? {}),
     artifactRefs: run.artifacts.map((artifact) => ({ id: artifact.id, kind: artifact.kind, uri: artifact.path })),
     next: failures.length > 0 ? `Review ${failures.length} failed step(s): ${failures.map((f) => f.stepId).join(", ")}` : "No action needed.",
   };

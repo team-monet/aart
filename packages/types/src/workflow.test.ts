@@ -18,6 +18,11 @@ describe("FieldSchema", () => {
     };
     expect(FieldSchema.parse(input)).toEqual(input);
   });
+
+  it("rejects a field type the runtime cannot validate", () => {
+    const result = FieldSchema.safeParse({ name: "publishedAt", type: "date" });
+    expect(result.success).toBe(false);
+  });
 });
 
 describe("ExampleSchema", () => {

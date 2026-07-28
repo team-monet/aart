@@ -17,6 +17,24 @@ async function setup(configOverrides: Partial<EngineConfig> = {}): Promise<{ sto
   return { store, config: testEngineConfig(store, configOverrides) };
 }
 
+function redactResolvedValues(record: unknown, resolvedSecretRefs: ReadonlySet<string>): unknown {
+  const replacements = [...resolvedSecretRefs];
+  const redactString = (value: string): string =>
+    replacements.reduce((current, secret, index) => current.replaceAll(secret, `[REDACTED:secret-${index + 1}]`), value);
+  const visit = (value: unknown): unknown => {
+    if (typeof value === "string") return redactString(value);
+    if ((typeof value === "number" || typeof value === "boolean") && replacements.includes(String(value))) {
+      return `[REDACTED:secret-${replacements.indexOf(String(value)) + 1}]`;
+    }
+    if (Array.isArray(value)) return value.map(visit);
+    if (value !== null && typeof value === "object") {
+      return Object.fromEntries(Object.entries(value).map(([key, nested]) => [redactString(key), visit(nested)]));
+    }
+    return value;
+  };
+  return visit(record);
+}
+
 describe("triggerRun — run intake (architecture §4.3)", () => {
   it("creates a pending RunRecord and enqueues it to job_queue", async () => {
     const { store, config } = await setup();
@@ -154,6 +172,42 @@ describe("executeRun — fresh execution", () => {
     expect(finished.error).toMatch(/workflow output mapping failed/i);
   });
 
+  it("omits an unresolved optional mapped output instead of failing a successful branch", async () => {
+    const { store, config } = await setup();
+    const workflow = fixtureWorkflow({
+      outputs: [{ name: "optionalResult", type: "string" }],
+      execution: {
+        type: "workflow",
+        steps: [{ id: "s1", uses: "test.echo" }],
+        outputMapping: { optionalResult: "{{ steps.s1.outputs.missing }}" },
+      },
+    });
+    await store.workflows.put(workflow);
+    const run = await triggerRun(config, { workflow, trigger: fixtureTrigger(), inputs: {} });
+    const finished = await executeRun(config, run.runId);
+
+    expect(finished.status).toBe("completed");
+    expect(finished.outputs).toEqual({});
+  });
+
+  it('stores "__proto__" as an own public output without changing the output map prototype', async () => {
+    const { store, config } = await setup();
+    const outputMapping = JSON.parse('{"__proto__":"{{ inputs.value }}"}') as Record<string, string>;
+    const workflow = fixtureWorkflow({
+      inputs: [{ name: "value", type: "string", required: true }],
+      outputs: [{ name: "__proto__", type: "string", required: true }],
+      execution: { type: "workflow", steps: [{ id: "s1", uses: "test.echo" }], outputMapping },
+    });
+    await store.workflows.put(workflow);
+    const run = await triggerRun(config, { workflow, trigger: fixtureTrigger(), inputs: { value: "safe-value" } });
+    const finished = await executeRun(config, run.runId);
+
+    expect(finished.status).toBe("completed");
+    expect(Object.prototype.hasOwnProperty.call(finished.outputs, "__proto__")).toBe(true);
+    expect(finished.outputs?.["__proto__"]).toBe("safe-value");
+    expect(Object.getPrototypeOf(finished.outputs)).toBe(Object.prototype);
+  });
+
   it.each([
     {
       contract: "type",
@@ -210,6 +264,47 @@ describe("executeRun — fresh execution", () => {
     expect(finished.status).toBe("failed");
     expect(finished.outputs).toBeUndefined();
     expect(finished.error).toMatch(/required output "result" is missing/i);
+  });
+
+  it("validates the redacted value that will be persisted, not only the raw mapped output", async () => {
+    const { store, config } = await setup({
+      resolveSecret: () => 42,
+      redact: (record, refs) => redactResolvedValues(record, refs),
+    });
+    const workflow = fixtureWorkflow({
+      inputs: [{ name: "pin", type: "integer", required: true }],
+      outputs: [{ name: "pin", type: "integer", required: true }],
+      execution: {
+        type: "workflow",
+        steps: [{ id: "resolve", uses: "test.echo", with: { secret: "{{ secrets.PIN }}" } }],
+        outputMapping: { pin: "{{ inputs.pin }}" },
+      },
+    });
+    await store.workflows.put(workflow);
+    const run = await triggerRun(config, { workflow, trigger: fixtureTrigger(), inputs: { pin: 42 } });
+    const finished = await executeRun(config, run.runId);
+
+    expect(finished.status).toBe("failed");
+    expect(finished.outputs).toBeUndefined();
+    expect(finished.error).toMatch(/expected type "integer" but received "string"/);
+  });
+
+  it("rejects a public outputMapping that reads a secret directly", async () => {
+    const { store, config } = await setup({ resolveSecret: () => "secret-value" });
+    const workflow = fixtureWorkflow({
+      outputs: [{ name: "secret", type: "string" }],
+      execution: {
+        type: "workflow",
+        steps: [{ id: "s1", uses: "test.echo" }],
+        outputMapping: { secret: "{{ secrets.API_KEY }}" },
+      },
+    });
+    await store.workflows.put(workflow);
+    const run = await triggerRun(config, { workflow, trigger: fixtureTrigger(), inputs: {} });
+    const finished = await executeRun(config, run.runId);
+
+    expect(finished.status).toBe("failed");
+    expect(finished.error).toMatch(/public outputMapping "secret" may not reference secrets/);
   });
 
   it("captures ExecutionSnapshot at completion for a run that never waits", async () => {
@@ -297,6 +392,34 @@ describe("executeRun — fresh execution", () => {
     expect(claimableAfter.map((c) => c.runId)).toContain(second.runId);
     const reloadedSecond = await store.runs.get(second.runId);
     expect(reloadedSecond?.params?.waitingOnConcurrency).toBe(false);
+  });
+
+  it("releases a queued run with the original concurrency key even when redaction rewrites that key in the terminal record", async () => {
+    const secret = "queue-secret";
+    const { store, config } = await setup({
+      resolveSecret: () => secret,
+      redact: (record, refs) => redactResolvedValues(record, refs),
+    });
+    const workflow = fixtureWorkflow({
+      id: "wf-secret-key-release",
+      inputs: [{ name: "caseId", type: "string", required: true }],
+      outputs: [{ name: "result", type: "string", required: true }],
+      concurrency: { key: "{{ inputs.caseId }}", policy: "queue" },
+      execution: {
+        type: "workflow",
+        steps: [{ id: "resolve", uses: "test.echo", with: { secret: "{{ secrets.PIN }}" } }],
+        outputMapping: { result: "{{ inputs.caseId }}" },
+      },
+    });
+    await store.workflows.put(workflow);
+    const first = await triggerRun(config, { workflow, trigger: fixtureTrigger(), inputs: { caseId: secret } });
+    const second = await triggerRun(config, { workflow, trigger: fixtureTrigger(), inputs: { caseId: secret } });
+
+    const finished = await executeRun(config, first.runId);
+
+    expect(finished.params?.concurrencyKey).not.toContain(secret);
+    expect((await store.jobQueue.listClaimable(new Date().toISOString())).map((job) => job.runId)).toContain(second.runId);
+    await expect(store.runs.get(second.runId)).resolves.toMatchObject({ params: { waitingOnConcurrency: false } });
   });
 });
 

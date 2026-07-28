@@ -5,5 +5,5 @@
     "rootDir": "src"
   },
   "include": ["src"],
-  "references": [{ "path": "../types" }, { "path": "../store" }]
+  "references": [{ "path": "../types" }, { "path": "../store" }, { "path": "../engine" }]
 }

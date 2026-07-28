@@ -6,6 +6,7 @@
 // (correction.ts) never triggers any of these automatically.
 import type { AartStore } from "@aart/store";
 import type { Correction, EvalExample, ImprovementBrief, RunRecord, StepTrace, Workflow } from "@aart/types";
+import { materializeWorkflowOutputs, validateWorkflowOutputs } from "@aart/engine";
 import { generateImprovementBrief } from "../improvement-brief.js";
 import { correctionKey } from "./correction.js";
 
@@ -41,9 +42,19 @@ export async function updateRunOutput(store: AartStore, correction: Correction):
   const updatedTrace: StepTrace = { ...original, postHocCorrected: true };
   setByPath(updatedTrace as unknown as Record<string, unknown>, correction.fieldPath, correction.corrected);
 
+  const trace = run.trace.map((t, i) => (i === traceIndex ? updatedTrace : t));
+  const workflow = await store.workflows.get(run.workflowId, run.workflowVersion);
+  let outputs = run.outputs;
+  if (workflow?.execution.outputMapping) {
+    const correctedProjection = { ...run, trace };
+    outputs = await materializeWorkflowOutputs(workflow, correctedProjection);
+    validateWorkflowOutputs(workflow, outputs);
+  }
+
   const updatedRun: RunRecord = {
     ...run,
-    trace: run.trace.map((t, i) => (i === traceIndex ? updatedTrace : t)),
+    trace,
+    outputs,
     updatedAt: new Date().toISOString(),
   };
   await store.runs.put(updatedRun);

@@ -77,7 +77,12 @@ export {
 export { captureExecutionSnapshot, isSnapshotCaptured, resolveWorkflowForRun, uncapturedSnapshot } from "./snapshot.js";
 
 // Concurrency policies (architecture §4.3, spec §30.1).
-export { decideConcurrency, releaseQueuedRuns, resolveConcurrencyKey, type ConcurrencyDecision } from "./concurrency.js";
+export { decideConcurrency, fingerprintConcurrencyKey, releaseQueuedRuns, resolveConcurrencyKey, type ConcurrencyDecision } from "./concurrency.js";
+
+// Public workflow-result projection shared with @aart/evidence's post-hoc
+// correction outcome so materialized RunRecord.outputs never goes stale.
+export { materializeWorkflowOutputs } from "./workflow-outputs.js";
+export { validateWorkflowOutputs, WorkflowOutputValidationError } from "./output-validation.js";
 
 // Duration-string parsing (`step.timeout`/`WaitCondition.timeout`).
 export { parseDurationMs } from "./duration.js";

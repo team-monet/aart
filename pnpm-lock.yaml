@@ -251,6 +251,9 @@ importers:
 
   packages/evidence:
     dependencies:
+      '@aart/engine':
+        specifier: workspace:*
+        version: link:../engine
       '@aart/store':
         specifier: workspace:*
         version: link:../store

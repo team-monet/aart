@@ -5,12 +5,11 @@
 // what a worker calls after claiming a run from `job_queue` (job_queue
 // claim/lease/reclaim itself is explicitly S2/`@aart/server`'s scope,
 // architecture §4.7 — this package never touches claim/lease/release).
-import { resolveExpression } from "@aart/expr";
 import type { RunRecord, StepTrace, Workflow, WorkflowStep } from "@aart/types";
 import { ConcurrencyRejectedError } from "@aart/types";
 import { buildExprContext, resolveBooleanExpression } from "./expr-context.js";
 import { createTrackingSecretResolver, throwingSecretResolver } from "./redaction.js";
-import { decideConcurrency, releaseQueuedRuns, resolveConcurrencyKey } from "./concurrency.js";
+import { decideConcurrency, fingerprintConcurrencyKey, releaseQueuedRuns, resolveConcurrencyKey } from "./concurrency.js";
 import { applyRedaction } from "./redaction.js";
 import { assertSchemaVersionCompatible, CURRENT_ENGINE_SCHEMA_VERSION } from "./schema-version.js";
 import { captureExecutionSnapshot, isSnapshotCaptured, resolveWorkflowForRun, uncapturedSnapshot } from "./snapshot.js";
@@ -18,6 +17,7 @@ import { validateWorkflowOutputs, WorkflowOutputValidationError } from "./output
 import { determineNextStepId, executeStep, type StepOutcome } from "./step-executor.js";
 import type { EngineConfig, TriggerRunInput } from "./types.js";
 import { isWaitBlockId } from "./wait/wait-blocks.js";
+import { materializeWorkflowOutputs } from "./workflow-outputs.js";
 
 // ---------------------------------------------------------------------------
 // Run intake (architecture §4.3) — S2's trigger adapters call this.
@@ -46,12 +46,16 @@ import { isWaitBlockId } from "./wait/wait-blocks.js";
 export async function triggerRun(config: EngineConfig, input: TriggerRunInput): Promise<RunRecord> {
   const now = config.now?.() ?? new Date();
   const schemaVersion = config.schemaVersion ?? CURRENT_ENGINE_SCHEMA_VERSION;
-  const key = await resolveConcurrencyKey(input.workflow, input.inputs);
+  // Equality is the only operation concurrency enforcement needs. Persist a
+  // deterministic fingerprint instead of the author-provided value so a key
+  // that is also a secret never leaks into RunRecord.params and cannot be
+  // rewritten by later whole-record redaction.
+  const key = fingerprintConcurrencyKey(await resolveConcurrencyKey(input.workflow, input.inputs));
   const decision = await decideConcurrency(config.store, input.workflow, key);
 
   if (decision.action === "reject") {
     throw new ConcurrencyRejectedError({
-      message: `Trigger for workflow "${input.workflow.id}" rejected — an existing non-terminal run already holds concurrency key "${key}" under policy "reject_new" (architecture §4.3).`,
+      message: `Trigger for workflow "${input.workflow.id}" rejected — an existing non-terminal run already holds the same concurrency key under policy "reject_new" (architecture §4.3).`,
       detail: { kind: "concurrencyRejected", workflowId: input.workflow.id, key },
     });
   }
@@ -130,6 +134,10 @@ export async function finalizeTerminal(
   let terminalStatus = status;
   let terminalError = errorMessage;
   let outputs = updated.outputs;
+  // Queue bookkeeping is operational state, not a report surface. Preserve
+  // the exact key before whole-record redaction so a secret value that also
+  // occurs in the key cannot prevent the next queued run from being released.
+  const concurrencyKey = updated.params?.concurrencyKey;
 
   // A workflow's declared outputMapping is its public result contract. Step
   // traces are execution evidence; callers should not have to reverse-engineer
@@ -138,15 +146,14 @@ export async function finalizeTerminal(
   // same expression context and tracked secret resolver used by step inputs.
   if (status === "completed") {
     try {
-      if (workflow.execution.outputMapping) {
-        const context = buildExprContext(updated);
-        const secretResolver = createTrackingSecretResolver(config.resolveSecret ?? throwingSecretResolver, resolvedSecretRefs);
-        outputs = {};
-        for (const [name, expression] of Object.entries(workflow.execution.outputMapping)) {
-          outputs[name] = await resolveExpression(expression, context, { secretResolver });
-        }
-      }
-      validateWorkflowOutputs(workflow, outputs ?? {});
+      const secretResolver = createTrackingSecretResolver(config.resolveSecret ?? throwingSecretResolver, resolvedSecretRefs);
+      outputs = await materializeWorkflowOutputs(workflow, updated, { secretResolver });
+      // Validate what callers will actually observe after the persistence
+      // redaction boundary. A raw number that becomes a string marker, or an
+      // enum/pattern value changed by redaction, is not a valid completed
+      // public result.
+      const observableOutputs = applyRedaction(config.redact, outputs, resolvedSecretRefs);
+      validateWorkflowOutputs(workflow, observableOutputs);
     } catch (err) {
       // A declared result that cannot be produced is a failed workflow, even
       // when every individual block completed. Persist a terminal failure
@@ -173,7 +180,6 @@ export async function finalizeTerminal(
   const redacted = applyRedaction(config.redact, updated, resolvedSecretRefs);
   await config.store.runs.put(redacted);
 
-  const concurrencyKey = redacted.params?.concurrencyKey;
   if (typeof concurrencyKey === "string") {
     await releaseQueuedRuns(config.store, redacted.workflowId, concurrencyKey);
   }

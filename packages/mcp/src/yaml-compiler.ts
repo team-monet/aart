@@ -61,7 +61,7 @@ function collectStrings(value: unknown, out: string[] = []): string[] {
   return out;
 }
 
-function validateExpressionCandidate(candidate: string, label: string, problems: string[]): void {
+function validateExpressionCandidate(candidate: string, label: string, problems: string[], options: { allowSecrets?: boolean } = {}): void {
   const tokens = findExpressionTokens(candidate);
   const unmatchedRemainder = candidate.replace(/\{\{[\s\S]*?\}\}/g, "");
   const unmatchedOpen = unmatchedRemainder.includes("{{");
@@ -74,7 +74,10 @@ function validateExpressionCandidate(candidate: string, label: string, problems:
 
   for (const match of tokens) {
     try {
-      parseExpression(match[0]);
+      const parsed = parseExpression(match[0]);
+      if (options.allowSecrets === false && parsed.root === "secrets") {
+        problems.push(`${label}: public workflow outputs may not reference secrets.*; expose a non-secret derived value instead`);
+      }
     } catch (err) {
       if (err instanceof ExprSyntaxError) {
         problems.push(`${label}: ${err.message}`);
@@ -102,7 +105,7 @@ function validateExpressions(steps: readonly Record<string, unknown>[], outputMa
   if (isPlainObject(outputMapping)) {
     for (const [outputName, candidate] of Object.entries(outputMapping)) {
       if (typeof candidate !== "string") continue;
-      validateExpressionCandidate(candidate, `outputMapping "${outputName}"`, problems);
+      validateExpressionCandidate(candidate, `outputMapping "${outputName}"`, problems, { allowSecrets: false });
     }
   }
   if (problems.length > 0) {
