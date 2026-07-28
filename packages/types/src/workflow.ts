@@ -57,16 +57,72 @@ function atomsMayOverlap(left: QuantifiedAtom, right: QuantifiedAtom): boolean {
   return !(left.asciiDecidable && right.asciiDecidable);
 }
 
+function matchingGroupEnd(source: string, groupStart: number): number | undefined {
+  let depth = 0;
+  let inCharacterClass = false;
+  for (let index = groupStart; index < source.length; index++) {
+    const char = source[index]!;
+    if (char === "\\") {
+      index += 1;
+      continue;
+    }
+    if (char === "[") {
+      inCharacterClass = true;
+      continue;
+    }
+    if (char === "]" && inCharacterClass) {
+      inCharacterClass = false;
+      continue;
+    }
+    if (inCharacterClass) continue;
+    if (char === "(") depth += 1;
+    if (char === ")" && --depth === 0) return index;
+  }
+  return undefined;
+}
+
+function isZeroWidthFragment(source: string): boolean {
+  for (let index = 0; index < source.length; ) {
+    const char = source[index]!;
+    if (char === "^" || char === "$" || char === "|") {
+      index += 1;
+      continue;
+    }
+    if (char === "\\" && (source[index + 1] === "b" || source[index + 1] === "B")) {
+      index += 2;
+      continue;
+    }
+    if (char === "(") {
+      const groupEnd = matchingGroupEnd(source, index);
+      if (groupEnd === undefined || !isZeroWidthGroup(source, index, groupEnd)) return false;
+      index = groupEnd + 1;
+      continue;
+    }
+    return false;
+  }
+  return true;
+}
+
 function isZeroWidthGroup(pattern: string, groupStart: number, groupEnd: number): boolean {
   const source = pattern.slice(groupStart, groupEnd + 1);
-  return (
-    source === "()" ||
-    source === "(?:)" ||
-    pattern.startsWith("(?=", groupStart) ||
-    pattern.startsWith("(?!", groupStart) ||
-    pattern.startsWith("(?<=", groupStart) ||
-    pattern.startsWith("(?<!", groupStart)
-  );
+  if (
+    source.startsWith("(?=") ||
+    source.startsWith("(?!") ||
+    source.startsWith("(?<=") ||
+    source.startsWith("(?<!")
+  ) {
+    return true;
+  }
+  let contentStart: number | undefined;
+  if (source.startsWith("(?:")) {
+    contentStart = 3;
+  } else if (source.startsWith("(?<")) {
+    const nameEnd = source.indexOf(">", 3);
+    contentStart = nameEnd === -1 ? undefined : nameEnd + 1;
+  } else {
+    contentStart = source.startsWith("(?") ? undefined : 1;
+  }
+  return contentStart !== undefined && isZeroWidthFragment(source.slice(contentStart, -1));
 }
 
 function sequentialQuantifierProblem(pattern: string): string | undefined {
@@ -87,7 +143,13 @@ function sequentialQuantifierProblem(pattern: string): string | undefined {
       previousByDepth[depth] = undefined;
       depth = Math.max(0, depth - 1);
       const end = quantifierEnd(pattern, i + 1);
-      if (groupStart !== undefined && end !== undefined) {
+      const zeroWidthGroup = groupStart !== undefined && isZeroWidthGroup(pattern, groupStart, i);
+      if (zeroWidthGroup) {
+        if (end !== undefined) {
+          i = end - 1;
+          if (pattern[i + 1] === "?") i += 1;
+        }
+      } else if (groupStart !== undefined && end !== undefined) {
         const source = pattern.slice(groupStart, i + 1);
         const atom = {
           source,
@@ -100,7 +162,7 @@ function sequentialQuantifierProblem(pattern: string): string | undefined {
         previousByDepth[depth] = atom;
         i = end - 1;
         if (pattern[i + 1] === "?") i += 1;
-      } else if (groupStart === undefined || !isZeroWidthGroup(pattern, groupStart, i)) {
+      } else {
         previousByDepth[depth] = undefined;
       }
       continue;

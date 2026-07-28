@@ -95,4 +95,15 @@ describe("workflow output validation diagnostics", () => {
       stringify.mockRestore();
     }
   });
+
+  it.each([
+    ["Date", new Date("2026-07-28T00:00:00.000Z")],
+    ["Map", new Map([["answer", 42]])],
+    ["class instance", new (class Result { answer = 42; })()],
+    ["nested non-JSON value", { items: [new Date("2026-07-28T00:00:00.000Z")] }],
+  ])("rejects %s outputs whose persisted JSON value would differ", (_label, value) => {
+    const problem = validationProblem({ name: "result", type: "json" }, value);
+
+    expect(problem).toMatch(/plain JSON objects/);
+  });
 });

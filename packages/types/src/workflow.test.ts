@@ -78,6 +78,16 @@ describe("analyzeWorkflowRegexSafety", () => {
     });
     expect(analyzeWorkflowRegexSafety("^a+\\Ba+$")).toMatchObject({ safe: false });
   });
+
+  it("preserves overlap detection through grouped zero-width fragments", () => {
+    expect(analyzeWorkflowRegexSafety("^a+(\\B)a+$")).toMatchObject({
+      safe: false,
+      reason: expect.stringMatching(/overlapping sequential quantifiers/i),
+    });
+    expect(analyzeWorkflowRegexSafety("^a+(?:(\\b|^))a+$")).toMatchObject({ safe: false });
+    expect(analyzeWorkflowRegexSafety("^a+(?<boundary>\\B)a+$")).toMatchObject({ safe: false });
+    expect(analyzeWorkflowRegexSafety("^a+(\\B)*a+$")).toMatchObject({ safe: false });
+  });
 });
 
 describe("ExampleSchema", () => {

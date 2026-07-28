@@ -1,6 +1,6 @@
 import type { AartStore } from "@aart/store";
 import { ConcurrencyRejectedError } from "@aart/types";
-import type { Field } from "@aart/types";
+import type { BlockImplementation, Field } from "@aart/types";
 import { afterEach, describe, expect, it } from "vitest";
 import { cancelRun, executeRun, triggerRun } from "./run-lifecycle.js";
 import { createTestStore, failingBlock, fixtureTrigger, testEngineConfig, fixtureWorkflow } from "./test-utils/fixtures.js";
@@ -221,6 +221,42 @@ describe("executeRun — fresh execution", () => {
 
     expect(finished.status).toBe("completed");
     expect(finished.outputs).toEqual({ publishedAt: "2026-07-28" });
+  });
+
+  it("fails before completion when a mapped output would change during JSON persistence", async () => {
+    const nonJsonBlock: BlockImplementation = {
+      manifest: {
+        id: "test.non-json",
+        version: "1.0.0",
+        capabilities: [],
+        inputSchema: {},
+        outputSchema: {},
+        description: "Returns a Date for persistence-boundary testing.",
+      },
+      execute: async () => ({ value: new Date("2026-07-28T00:00:00.000Z") }),
+    };
+    const { store, config } = await setup({
+      blocks: { [nonJsonBlock.manifest.id]: nonJsonBlock },
+    });
+    const workflow = fixtureWorkflow({
+      outputs: [{ name: "result", type: "json", required: true }],
+      execution: {
+        type: "workflow",
+        steps: [{ id: "produce", uses: nonJsonBlock.manifest.id }],
+        outputMapping: { result: "{{ steps.produce.outputs.value }}" },
+      },
+    });
+    await store.workflows.put(workflow);
+    const run = await triggerRun(config, { workflow, trigger: fixtureTrigger(), inputs: {} });
+
+    const finished = await executeRun(config, run.runId);
+
+    expect(finished.status).toBe("failed");
+    expect(finished.outputs).toBeUndefined();
+    expect(finished.error).toMatch(/plain JSON objects/);
+    const persisted = await store.runs.get(run.runId);
+    expect(persisted?.status).toBe("failed");
+    expect(persisted).not.toHaveProperty("outputs");
   });
 
   it("fails terminally when a declared workflow output cannot be resolved", async () => {

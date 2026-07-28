@@ -20,3 +20,4 @@ export * from "./event-log.js";
 export * from "./errors.js";
 export * from "./json-schema.js";
 export * from "./dry-run.js";
+export * from "./json-serialization.js";

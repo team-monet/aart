@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { compactModelFacingOutputs, ModelFacingReportSchema } from "./report.js";
 
 describe("ModelFacingReportSchema", () => {
@@ -41,5 +41,25 @@ describe("ModelFacingReportSchema", () => {
       },
     });
     expect(JSON.stringify(compacted, null, 2).length).toBeLessThan(10_000);
+  });
+
+  it("does not stringify or parse a complete large output while compacting it", () => {
+    const stringify = vi.spyOn(JSON, "stringify");
+    const parse = vi.spyOn(JSON, "parse");
+    try {
+      const compacted = compactModelFacingOutputs("run-large", {
+        document: `${"x".repeat(200_000)}-UNBOUNDED-TAIL`,
+      });
+
+      expect(compacted).toMatchObject({ $aart: { kind: "truncated-workflow-outputs" } });
+      const stringArguments = stringify.mock.calls
+        .map(([value]) => value)
+        .filter((value): value is string => typeof value === "string");
+      expect(Math.max(...stringArguments.map((value) => value.length))).toBeLessThanOrEqual(256);
+      expect(parse).not.toHaveBeenCalled();
+    } finally {
+      stringify.mockRestore();
+      parse.mockRestore();
+    }
   });
 });
