@@ -46,6 +46,25 @@ describe("createFallbackReportRenderers", () => {
     expect(renderers.modelFacing(run).artifactRefs).toEqual([{ id: "art-1", kind: "screenshot", uri: "/artifacts/shot.png" }]);
   });
 
+  it("includes workflow outputs in every fallback renderer", () => {
+    const run = fakeRunRecord({ outputs: { items: ["alpha", "beta"], count: 2 } });
+    expect(renderers.modelFacing(run).outputs).toEqual({ items: ["alpha", "beta"], count: 2 });
+    for (const rendered of [renderers.markdown(run), renderers.cliText(run), renderers.html(run), renderers.prComment(run)]) {
+      expect(rendered).toContain("alpha");
+      expect(rendered).toContain("count");
+    }
+  });
+
+  it("surfaces a run-level output failure in every fallback renderer when no trace step failed", () => {
+    const error = 'Workflow output validation failed: output "result" expected type "string" but received "object"';
+    const run = fakeRunRecord({ status: "failed", error });
+    expect(renderers.modelFacing(run).failures).toEqual([{ stepId: "$workflow", block: "workflow.outputMapping", error }]);
+    for (const rendered of [renderers.markdown(run), renderers.cliText(run), renderers.html(run), renderers.prComment(run)]) {
+      expect(rendered).toContain("Workflow output validation failed");
+      expect(rendered).toContain("workflow.outputMapping");
+    }
+  });
+
   it("markdown: includes the run id, status, and every step", () => {
     const run = fakeRunRecord();
     const md = renderers.markdown(run);
@@ -64,6 +83,7 @@ describe("createFallbackReportRenderers", () => {
   it("cliText: leads with a bracketed headline and the workflow id", () => {
     const text = renderers.cliText(fakeRunRecord({ status: "completed" }));
     expect(text).toMatch(/^\[PASSED\]/);
+    expect(text).toContain('outputs: {"result":"ok"}');
   });
 
   it("html: embeds the run id and a row per step", () => {
@@ -76,5 +96,6 @@ describe("createFallbackReportRenderers", () => {
     const comment = renderers.prComment(fakeRunRecord({ status: "completed" }));
     expect(comment).toContain("wf-example@1.0.0");
     expect(comment).toContain("✅");
+    expect(comment).toContain("**Outputs**");
   });
 });

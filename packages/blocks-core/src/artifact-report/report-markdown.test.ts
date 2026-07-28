@@ -26,9 +26,11 @@ describe("report.markdown", () => {
   });
 
   it("falls back to the local renderer (does not throw) when nothing is injected and @aart/evidence is still a stub", async () => {
-    const run = fakeRunRecord({ runId: "run-fallback-test" });
+    const run = fakeRunRecord({ runId: "run-fallback-test", outputs: { reusable: ["alpha", "beta"] } });
     const result = await reportMarkdownBlock.execute({ run }, fakeExecutionContext());
     expect((result as { markdown: string }).markdown).toContain("run-fallback-test");
+    expect((result as { markdown: string }).markdown).toContain('"reusable"');
+    expect((result as { markdown: string }).markdown).toContain('"alpha"');
   });
 
   it("rejects a run input that doesn't match the frozen RunRecord shape", async () => {

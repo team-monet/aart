@@ -51,7 +51,10 @@ export function renderModelFacing(run: RunRecord, redact: RedactFn, resolvedSecr
   if (clean.status === "failed" && clean.error && failures.length === 0) {
     failures.push({
       stepId: "$workflow",
-      block: clean.error.startsWith("Workflow output mapping failed:") ? "workflow.outputMapping" : "workflow",
+      block:
+        clean.error.startsWith("Workflow output mapping failed:") || clean.error.startsWith("Workflow output validation failed:")
+          ? "workflow.outputMapping"
+          : "workflow",
       error: clean.error,
     });
   }

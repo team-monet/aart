@@ -83,7 +83,10 @@ export function buildReportModel(run: RunRecord): ReportModel {
   if (run.status === "failed" && run.error && failures.length === 0) {
     failures.push({
       stepId: "$workflow",
-      block: run.error.startsWith("Workflow output mapping failed:") ? "workflow.outputMapping" : "workflow",
+      block:
+        run.error.startsWith("Workflow output mapping failed:") || run.error.startsWith("Workflow output validation failed:")
+          ? "workflow.outputMapping"
+          : "workflow",
       error: run.error,
     });
   }

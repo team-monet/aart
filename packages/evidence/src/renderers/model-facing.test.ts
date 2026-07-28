@@ -47,6 +47,12 @@ describe("renderModelFacing", () => {
     ]);
   });
 
+  it("surfaces a run-level output validation failure when no individual step failed", () => {
+    const error = 'Workflow output validation failed: output "result" expected type "string" but received "object"';
+    const report = renderModelFacing(fixtureRunRecord({ status: "failed", error }), identityRedact);
+    expect(report.failures).toEqual([{ stepId: "$workflow", block: "workflow.outputMapping", error }]);
+  });
+
   it("maps artifacts to references carrying a uri (path), never bytes/payload", () => {
     const run = fixtureRunRecord({
       artifacts: [{ id: "a1", runId: "r", name: "shot.png", kind: "screenshot", mime: "image/png", path: "artifacts/a1.png", bytes: 999, createdAt: "t" }],

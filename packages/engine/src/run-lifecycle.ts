@@ -14,6 +14,7 @@ import { decideConcurrency, releaseQueuedRuns, resolveConcurrencyKey } from "./c
 import { applyRedaction } from "./redaction.js";
 import { assertSchemaVersionCompatible, CURRENT_ENGINE_SCHEMA_VERSION } from "./schema-version.js";
 import { captureExecutionSnapshot, isSnapshotCaptured, resolveWorkflowForRun, uncapturedSnapshot } from "./snapshot.js";
+import { validateWorkflowOutputs, WorkflowOutputValidationError } from "./output-validation.js";
 import { determineNextStepId, executeStep, type StepOutcome } from "./step-executor.js";
 import type { EngineConfig, TriggerRunInput } from "./types.js";
 import { isWaitBlockId } from "./wait/wait-blocks.js";
@@ -135,21 +136,27 @@ export async function finalizeTerminal(
   // the last step (or know the workflow's internal graph) to obtain the actual
   // result. Resolve the mapping only on successful completion, against the
   // same expression context and tracked secret resolver used by step inputs.
-  if (status === "completed" && workflow.execution.outputMapping) {
+  if (status === "completed") {
     try {
-      const context = buildExprContext(updated);
-      const secretResolver = createTrackingSecretResolver(config.resolveSecret ?? throwingSecretResolver, resolvedSecretRefs);
-      outputs = {};
-      for (const [name, expression] of Object.entries(workflow.execution.outputMapping)) {
-        outputs[name] = await resolveExpression(expression, context, { secretResolver });
+      if (workflow.execution.outputMapping) {
+        const context = buildExprContext(updated);
+        const secretResolver = createTrackingSecretResolver(config.resolveSecret ?? throwingSecretResolver, resolvedSecretRefs);
+        outputs = {};
+        for (const [name, expression] of Object.entries(workflow.execution.outputMapping)) {
+          outputs[name] = await resolveExpression(expression, context, { secretResolver });
+        }
       }
+      validateWorkflowOutputs(workflow, outputs ?? {});
     } catch (err) {
       // A declared result that cannot be produced is a failed workflow, even
       // when every individual block completed. Persist a terminal failure
       // instead of leaving the run stuck in "running" or reporting success
       // with an absent result.
       terminalStatus = "failed";
-      terminalError = `Workflow output mapping failed: ${err instanceof Error ? err.message : String(err)}`;
+      terminalError =
+        err instanceof WorkflowOutputValidationError
+          ? err.message
+          : `Workflow output mapping failed: ${err instanceof Error ? err.message : String(err)}`;
       outputs = undefined;
     }
   }

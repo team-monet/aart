@@ -44,6 +44,12 @@ describe("buildReportModel", () => {
     ]);
   });
 
+  it("classifies a run-level output validation error as a workflow output failure", () => {
+    const error = 'Workflow output validation failed: output "result" expected type "string" but received "object"';
+    const model = buildReportModel(fixtureRunRecord({ status: "failed", error }));
+    expect(model.failures).toEqual([{ stepId: "$workflow", block: "workflow.outputMapping", error }]);
+  });
+
   it("splits screenshots out of artifacts by kind", () => {
     const run = fixtureRunRecord({
       artifacts: [

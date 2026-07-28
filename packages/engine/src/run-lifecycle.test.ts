@@ -1,5 +1,6 @@
 import type { AartStore } from "@aart/store";
 import { ConcurrencyRejectedError } from "@aart/types";
+import type { Field } from "@aart/types";
 import { afterEach, describe, expect, it } from "vitest";
 import { cancelRun, executeRun, triggerRun } from "./run-lifecycle.js";
 import { createTestStore, failingBlock, fixtureTrigger, testEngineConfig, fixtureWorkflow } from "./test-utils/fixtures.js";
@@ -151,6 +152,64 @@ describe("executeRun — fresh execution", () => {
     expect(finished.status).toBe("failed");
     expect(finished.outputs).toBeUndefined();
     expect(finished.error).toMatch(/workflow output mapping failed/i);
+  });
+
+  it.each([
+    {
+      contract: "type",
+      field: { name: "result", type: "string", required: true },
+      value: { nested: true },
+      error: /expected type "string"/,
+    },
+    {
+      contract: "enum",
+      field: { name: "result", type: "string", required: true, enum: ["alpha", "beta"] },
+      value: "gamma",
+      error: /not one of its declared enum values/,
+    },
+    {
+      contract: "pattern",
+      field: { name: "result", type: "string", required: true, pattern: "^[A-Z]+$" },
+      value: "lowercase",
+      error: /does not match declared pattern/,
+    },
+  ] satisfies Array<{ contract: string; field: Field; value: unknown; error: RegExp }>)(
+    "fails terminally when a mapped output violates its declared $contract contract",
+    async ({ field, value, error }) => {
+      const { store, config } = await setup();
+      const workflow = fixtureWorkflow({
+        inputs: [{ name: "value", type: "unknown", required: true }],
+        outputs: [field],
+        execution: {
+          type: "workflow",
+          steps: [{ id: "s1", uses: "test.echo" }],
+          outputMapping: { result: "{{ inputs.value }}" },
+        },
+      });
+      await store.workflows.put(workflow);
+      const run = await triggerRun(config, { workflow, trigger: fixtureTrigger(), inputs: { value } });
+      const finished = await executeRun(config, run.runId);
+
+      expect(finished.status).toBe("failed");
+      expect(finished.outputs).toBeUndefined();
+      expect(finished.error).toMatch(/workflow output validation failed/i);
+      expect(finished.error).toMatch(error);
+    },
+  );
+
+  it("fails terminally when a required output is absent even if a canonical workflow bypasses authoring validation", async () => {
+    const { store, config } = await setup();
+    const workflow = fixtureWorkflow({
+      outputs: [{ name: "result", type: "string", required: true }],
+      execution: { type: "workflow", steps: [{ id: "s1", uses: "test.echo" }] },
+    });
+    await store.workflows.put(workflow);
+    const run = await triggerRun(config, { workflow, trigger: fixtureTrigger(), inputs: {} });
+    const finished = await executeRun(config, run.runId);
+
+    expect(finished.status).toBe("failed");
+    expect(finished.outputs).toBeUndefined();
+    expect(finished.error).toMatch(/required output "result" is missing/i);
   });
 
   it("captures ExecutionSnapshot at completion for a run that never waits", async () => {

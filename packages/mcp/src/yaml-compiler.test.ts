@@ -161,6 +161,36 @@ outputMapping:
     expect(() => compileYamlWorkflow(badYaml)).toThrow(/outputMapping "result".*operators are not supported/s);
   });
 
+  it("rejects an unmatched public outputMapping delimiter before registration", () => {
+    const badYaml = `id: bad-output-delimiter
+name: Bad Output Delimiter
+version: 0.1.0
+outputs:
+  result:
+    type: string
+    required: true
+steps:
+  - id: read
+    uses: web.read
+outputMapping:
+  result: "{{ steps.read.outputs.text"
+`;
+    expect(() => compileYamlWorkflow(badYaml)).toThrow(/outputMapping "result".*unmatched expression delimiter.*"\{\{"/s);
+  });
+
+  it("rejects an unmatched expression delimiter inside a step value", () => {
+    const badYaml = `id: bad-step-delimiter
+name: Bad Step Delimiter
+version: 0.1.0
+steps:
+  - id: read
+    uses: web.read
+    with:
+      url: "https://example.com/}}"
+`;
+    expect(() => compileYamlWorkflow(badYaml)).toThrow(/step "read".*unmatched expression delimiter.*"\}\}"/s);
+  });
+
   it("rejects a required declared output with no outputMapping entry", () => {
     expect(() =>
       compileYamlWorkflow(`id: missing-output

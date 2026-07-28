@@ -61,7 +61,31 @@ function collectStrings(value: unknown, out: string[] = []): string[] {
   return out;
 }
 
-/** Syntactically validates every `{{ }}` token found in compiled steps and the workflow's public outputMapping via @aart/expr's real parser (architecture §3.1) — fails loudly, matching AART's "errors are few-shot corrections" design goal (spec §32.2b) rather than silently registering a workflow with a `{{ }}` token that can never resolve at run time. */
+function validateExpressionCandidate(candidate: string, label: string, problems: string[]): void {
+  const tokens = findExpressionTokens(candidate);
+  const unmatchedRemainder = candidate.replace(/\{\{[\s\S]*?\}\}/g, "");
+  const unmatchedOpen = unmatchedRemainder.includes("{{");
+  const unmatchedClose = unmatchedRemainder.includes("}}");
+
+  if (unmatchedOpen || unmatchedClose) {
+    const delimiters = [unmatchedOpen ? '"{{"' : "", unmatchedClose ? '"}}"' : ""].filter(Boolean).join(" and ");
+    problems.push(`${label}: unmatched expression delimiter ${delimiters}; every "{{" must have a matching "}}"`);
+  }
+
+  for (const match of tokens) {
+    try {
+      parseExpression(match[0]);
+    } catch (err) {
+      if (err instanceof ExprSyntaxError) {
+        problems.push(`${label}: ${err.message}`);
+      } else {
+        throw err;
+      }
+    }
+  }
+}
+
+/** Syntactically validates every `{{ }}` token found in compiled steps and the workflow's public outputMapping via @aart/expr's real parser (architecture §3.1) — including unmatched delimiters that cannot form a parser token — and fails loudly rather than registering an expression that can never resolve at run time. */
 function validateExpressions(steps: readonly Record<string, unknown>[], outputMapping: unknown): void {
   const problems: string[] = [];
   for (const step of steps) {
@@ -72,33 +96,13 @@ function validateExpressions(steps: readonly Record<string, unknown>[], outputMa
     }
     collectStrings(step.with, candidates);
     for (const candidate of candidates) {
-      for (const match of findExpressionTokens(candidate)) {
-        try {
-          parseExpression(match[0]);
-        } catch (err) {
-          if (err instanceof ExprSyntaxError) {
-            problems.push(`step "${String(step.id ?? "?")}": ${err.message}`);
-          } else {
-            throw err;
-          }
-        }
-      }
+      validateExpressionCandidate(candidate, `step "${String(step.id ?? "?")}"`, problems);
     }
   }
   if (isPlainObject(outputMapping)) {
     for (const [outputName, candidate] of Object.entries(outputMapping)) {
       if (typeof candidate !== "string") continue;
-      for (const match of findExpressionTokens(candidate)) {
-        try {
-          parseExpression(match[0]);
-        } catch (err) {
-          if (err instanceof ExprSyntaxError) {
-            problems.push(`outputMapping "${outputName}": ${err.message}`);
-          } else {
-            throw err;
-          }
-        }
-      }
+      validateExpressionCandidate(candidate, `outputMapping "${outputName}"`, problems);
     }
   }
   if (problems.length > 0) {
