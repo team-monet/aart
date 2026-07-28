@@ -3,7 +3,7 @@ import { ConcurrencyRejectedError } from "@aart/types";
 import type { BlockImplementation, Field } from "@aart/types";
 import { afterEach, describe, expect, it } from "vitest";
 import { cancelRun, executeRun, triggerRun } from "./run-lifecycle.js";
-import { createTestStore, failingBlock, fixtureTrigger, testEngineConfig, fixtureWorkflow } from "./test-utils/fixtures.js";
+import { createTestStore, echoBlock, failingBlock, fixtureTrigger, testEngineConfig, fixtureWorkflow } from "./test-utils/fixtures.js";
 import type { EngineConfig } from "./types.js";
 
 const cleanups: Array<() => Promise<void>> = [];
@@ -631,6 +631,112 @@ describe("executeRun — fresh execution", () => {
     expect(finished.status).toBe("failed");
     expect(finished.error).toMatch(/secret-tainted step "earlier"/);
     expect(JSON.stringify(await store.runs.get(run.runId))).not.toContain("secret-value");
+  });
+
+  it("recomputes current-step inheritance after that step discovers a matching secret", async () => {
+    const deriveLength: BlockImplementation = {
+      manifest: {
+        id: "test.derive-length",
+        version: "1.0.0",
+        capabilities: [],
+        inputSchema: {},
+        outputSchema: {},
+        description: "Returns a non-literal derivative of an input.",
+      },
+      execute: async (inputs) => ({
+        length: String((inputs as Record<string, unknown>)["source"]).length,
+      }),
+    };
+    const { store, config } = await setup({
+      blocks: {
+        [echoBlock.manifest.id]: echoBlock,
+        [deriveLength.manifest.id]: deriveLength,
+      },
+      redact: redactResolvedValues,
+      resolveSecret: () => "secret-value",
+    });
+    const workflow = fixtureWorkflow({
+      outputs: [{ name: "result", type: "integer", required: true }],
+      execution: {
+        type: "workflow",
+        steps: [
+          { id: "earlier", uses: "test.echo", with: { value: "secret-value" } },
+          {
+            id: "derive",
+            uses: deriveLength.manifest.id,
+            with: {
+              source: "{{ steps.earlier.outputs.echoed.value }}",
+              discover: "{{ secrets.API_KEY }}",
+            },
+          },
+        ],
+        outputMapping: { result: "{{ steps.derive.outputs.length }}" },
+      },
+    });
+    await store.workflows.put(workflow);
+    const run = await triggerRun(config, { workflow, trigger: fixtureTrigger(), inputs: {} });
+
+    const finished = await executeRun(config, run.runId);
+
+    expect(finished.status).toBe("failed");
+    expect(finished.error).toMatch(/secret-tainted step "derive"/);
+  });
+
+  it("uses the latest clean guarded-loop occurrence for public output", async () => {
+    let attempts = 0;
+    const pollingBlock: BlockImplementation = {
+      manifest: {
+        id: "test.poll-secret-then-clean",
+        version: "1.0.0",
+        capabilities: [],
+        inputSchema: {},
+        outputSchema: {},
+        description: "Returns one tainted intermediate value, then a clean final value.",
+      },
+      execute: async () => {
+        attempts += 1;
+        return attempts === 1
+          ? { done: false, value: "secret-value" }
+          : { done: true, value: "clean-result" };
+      },
+    };
+    const { store, config } = await setup({
+      blocks: {
+        [echoBlock.manifest.id]: echoBlock,
+        [pollingBlock.manifest.id]: pollingBlock,
+      },
+      redact: redactResolvedValues,
+      resolveSecret: () => "secret-value",
+    });
+    const workflow = fixtureWorkflow({
+      outputs: [{ name: "result", type: "string", required: true }],
+      execution: {
+        type: "workflow",
+        steps: [
+          { id: "seed", uses: "test.echo", with: { secret: "{{ secrets.API_KEY }}" } },
+          {
+            id: "poll",
+            uses: pollingBlock.manifest.id,
+            next: "poll",
+            maxIterations: 2,
+            until: "{{ steps.poll.outputs.done }}",
+          },
+        ],
+        outputMapping: { result: "{{ steps.poll.outputs.value }}" },
+      },
+    });
+    await store.workflows.put(workflow);
+    const run = await triggerRun(config, { workflow, trigger: fixtureTrigger(), inputs: {} });
+
+    const finished = await executeRun(config, run.runId);
+
+    expect(finished.status).toBe("completed");
+    expect(finished.outputs).toEqual({ result: "clean-result" });
+    expect(finished.trace.filter((trace) => trace.stepId === "poll")).toMatchObject([
+      { secretTainted: true },
+      { outputs: { value: "clean-result" } },
+    ]);
+    expect(finished.trace.filter((trace) => trace.stepId === "poll")[1]?.secretTainted).toBeUndefined();
   });
 
   it("respects a forEach binding that shadows a tainted real step id", async () => {

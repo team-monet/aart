@@ -3,7 +3,7 @@
 // retry/timeout -> idempotency -> redact -> record StepTrace -> determine
 // next. Wait-type block ids (wait/wait-blocks.ts) are intercepted before
 // normal dispatch and handed to wait/wait-machine.ts instead.
-import { findExpressionTokens, parseExpression, resolveExpression, type ExprContext, type ResolveOptions } from "@aart/expr";
+import { findExpressionTokens, parseExpression, type ExprContext, type ResolveOptions } from "@aart/expr";
 import type { ApprovalTask, LlmCallMetadata, RetryPolicy, RunRecord, StepTrace, WaitCondition, Workflow, WorkflowStep } from "@aart/types";
 import { AartError, DEFAULT_EFFECTFUL_CAPABILITIES, isEffectfulCapability, IterationLimitExceededError, TimeoutError } from "@aart/types";
 import { checkCapabilityDispatch, alwaysEmptyGrantedCapabilities } from "./capability.js";
@@ -16,7 +16,6 @@ import { CURRENT_ENGINE_SCHEMA_VERSION } from "./schema-version.js";
 import type { EngineBlockExecutionContext, EngineConfig } from "./types.js";
 import { enterWait, type WaitMachineConfig } from "./wait/wait-machine.js";
 import { buildWaitConditionFromBlock, isWaitBlockId, type WaitBlockId } from "./wait/wait-blocks.js";
-import { assertNoSecretTaintedOutputSources } from "./workflow-outputs.js";
 
 export type StepOutcome =
   | { kind: "continue"; run: RunRecord; nextStepId: string | undefined }
@@ -457,7 +456,7 @@ function stepReferencesSecretTaintedTrace(step: WorkflowStep, run: RunRecord): b
   };
 
   if (
-    [step.if, step.forEach, step.until].some((expression) =>
+    [step.if, step.forEach].some((expression) =>
       expressionReferencesTaint(expression),
     )
   ) {
@@ -494,66 +493,19 @@ function annotateSecretTaint(
   });
 }
 
-/**
- * A trace is redacted before it is persisted, so a later terminal output
- * projection cannot tell whether a marker was authored by the block or
- * substituted for a secret. Check newly available mapped values while the
- * raw trace still exists and reject only values that the persistence
- * redactor would alter.
- */
-async function assertPubliclyMappedTraceValuesSurviveRedaction(
+function recomputeInheritedSecretTaint(
   config: EngineConfig,
-  workflow: Workflow,
+  step: WorkflowStep,
   run: RunRecord,
-  newTraces: StepTrace[],
   resolvedSecretRefs: ReadonlySet<string>,
-): Promise<void> {
-  const outputMapping = workflow.execution.outputMapping;
-  if (!outputMapping) return;
-
-  const completedTraces = new Map(
-    newTraces
-      .filter((trace) => trace.status === "completed")
-      .map((trace) => [trace.stepId, trace]),
-  );
-  if (completedTraces.size === 0) return;
-  if (
-    resolvedSecretRefs.size === 0 &&
-    !run.trace.some((trace) => trace.secretTainted === true) &&
-    ![...completedTraces.values()].some((trace) => trace.secretTainted === true)
-  ) {
-    return;
-  }
-
-  const candidateTrace = annotateSecretTaint(
+): boolean {
+  const taintAwareTrace = annotateSecretTaint(
     config,
-    [...run.trace, ...newTraces],
+    run.trace,
     resolvedSecretRefs,
     false,
   );
-  const candidateRun: RunRecord = { ...run, trace: candidateTrace };
-  assertNoSecretTaintedOutputSources(workflow, candidateRun);
-  const context = buildExprContext(candidateRun);
-  for (const [outputName, expression] of Object.entries(outputMapping)) {
-    for (const token of findExpressionTokens(expression)) {
-      const parsed = parseExpression(token[0]);
-      const first = parsed.path[0];
-      if (
-        parsed.root !== "steps" ||
-        first?.kind !== "property" ||
-        !completedTraces.has(first.name)
-      ) {
-        continue;
-      }
-      const rawValue = await resolveExpression(token[0], context);
-      const observableValue = applyRedaction(config.redact, rawValue, resolvedSecretRefs);
-      if (!jsonValuesEqual(rawValue, observableValue)) {
-        throw new Error(
-          `public outputMapping "${outputName}" resolves from step "${first.name}" to a value changed by secret redaction; expose a non-secret derived value instead`,
-        );
-      }
-    }
-  }
+  return stepReferencesSecretTaintedTrace(step, { ...run, trace: taintAwareTrace });
 }
 
 /**
@@ -610,7 +562,7 @@ export async function executeStep(
   const secretResolver = createTrackingSecretResolver(config.resolveSecret ?? throwingSecretResolver, resolvedSecretRefs);
   const resolveOptions: ResolveOptions = { secretResolver };
   const exprContextBeforeDispatch = buildExprContext(run);
-  const inheritedSecretTaint = stepReferencesSecretTaintedTrace(step, run);
+  let inheritedSecretTaint = stepReferencesSecretTaintedTrace(step, run);
 
   // 1. resolve step.with — EXCEPT for a forEach step, whose `with:` is
   // resolved per-iteration instead (executeForEachStep, below), with the
@@ -620,12 +572,24 @@ export async function executeStep(
   // work, it's a genuine bug: `{{ steps.item }}` has no meaning until a
   // specific iteration's context exists.
   const resolvedWith = step.forEach === undefined ? await resolveWithRecord(step.with, exprContextBeforeDispatch, resolveOptions) : {};
+  inheritedSecretTaint ||= recomputeInheritedSecretTaint(
+    config,
+    step,
+    run,
+    resolvedSecretRefs,
+  );
 
   // 2. check step.if — architecture micro-decision #7: absent `if` always
   // falls through; `then`/`else` only consulted when `if` is present.
   let ifResult: boolean | undefined;
   if (step.if !== undefined) {
     ifResult = await resolveBooleanExpression(step.if, exprContextBeforeDispatch, resolveOptions);
+    inheritedSecretTaint ||= recomputeInheritedSecretTaint(
+      config,
+      step,
+      run,
+      resolvedSecretRefs,
+    );
     if (!ifResult) {
       const now = (config.now?.() ?? new Date()).toISOString();
       const skippedTrace: StepTrace = {
@@ -719,21 +683,18 @@ export async function executeStep(
     stepFailed = trace.status === "failed";
   }
 
+  inheritedSecretTaint ||= recomputeInheritedSecretTaint(
+    config,
+    step,
+    run,
+    resolvedSecretRefs,
+  );
   const taintAnnotatedTraces = annotateSecretTaint(
     config,
     newTraces,
     resolvedSecretRefs,
     inheritedSecretTaint,
   );
-  if (!stepFailed) {
-    await assertPubliclyMappedTraceValuesSurviveRedaction(
-      config,
-      workflow,
-      run,
-      taintAnnotatedTraces,
-      resolvedSecretRefs,
-    );
-  }
   const updatedRun = await appendTracesAndPersist(
     config,
     run,
