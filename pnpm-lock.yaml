@@ -307,6 +307,9 @@ importers:
 
   packages/governance:
     dependencies:
+      '@aart/expr':
+        specifier: workspace:*
+        version: link:../expr
       '@aart/store':
         specifier: workspace:*
         version: link:../store

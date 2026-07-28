@@ -203,4 +203,41 @@ describe("validateWorkflowHandler — validate gate against REAL governance (dis
     expect(events).toContainEqual(expect.objectContaining({ type: "workflow.validated", workflowId: "wf-validate-gate-error", workflowVersion: "0.1.0" }));
     expect(events).toContainEqual(expect.objectContaining({ type: "workflow.gate_failed", workflowId: "wf-validate-gate-error", workflowVersion: "0.1.0" }));
   });
+
+  it("rejects an unsafe outputMapping expression on the stored workflow-id path and fails the validate gate", async () => {
+    root = await makeTempRoot("aart-mcp-validate-output-mapping-");
+    const ctx = createRealAartContext({ root });
+    const workflow: Workflow = {
+      id: "wf-validate-output-mapping",
+      name: "Stored unsafe output mapping",
+      version: "0.1.0",
+      inputs: [],
+      outputs: [{ name: "result", type: "string", required: true }],
+      execution: {
+        type: "workflow",
+        steps: [{ id: "known", uses: "assert.contains", with: { actual: "x", expected: "x" } }],
+        outputMapping: { result: "{{ secrets.API_KEY }}" },
+      },
+      approval: "draft",
+      gates: { validate: "pending", readiness: "pending", evals: "pending", riskReview: "pending", humanReview: "pending" },
+    };
+    await ctx.store.workflows.put(workflow);
+
+    const result = await validateWorkflowHandler(ctx, {
+      workflowId: workflow.id,
+      workflowVersion: workflow.version,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.findings).toContainEqual(
+      expect.objectContaining({
+        class: "input-safety",
+        path: "execution.outputMapping.result",
+        severity: "error",
+        message: expect.stringContaining("may not reference secrets"),
+      }),
+    );
+    const stored = await ctx.store.workflows.get(workflow.id, workflow.version);
+    expect(stored?.gates.validate).toBe("failed");
+  });
 });

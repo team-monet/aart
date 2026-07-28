@@ -113,6 +113,7 @@ function sequentialQuantifierProblem(pattern: string): string | undefined {
 
     let atomEnd = i + 1;
     let atom: QuantifiedAtom;
+    const zeroWidthEscape = char === "\\" && (pattern[i + 1] === "b" || pattern[i + 1] === "B");
     if (char === "\\") {
       if ((pattern[i + 1] === "p" || pattern[i + 1] === "P") && pattern[i + 2] === "{") {
         const propertyEnd = pattern.indexOf("}", i + 3);
@@ -157,7 +158,7 @@ function sequentialQuantifierProblem(pattern: string): string | undefined {
       i = end - 1;
       if (pattern[i + 1] === "?") i += 1;
     } else {
-      previousByDepth[depth] = undefined;
+      if (!zeroWidthEscape) previousByDepth[depth] = undefined;
       i = atomEnd - 1;
     }
   }

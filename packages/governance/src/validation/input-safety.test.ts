@@ -132,6 +132,31 @@ describe("validateInputSafety — enum/regex/default consistency (spec §18.4)",
       }),
     );
   });
+
+  it.each([
+    ["an operator expression", "{{ inputs.value + 1 }}", "operators are not supported"],
+    ["an unknown step source", "{{ steps.missing.outputs.value }}", 'references unknown step "missing"'],
+    ["a malformed delimiter", "{{ inputs.value", "unmatched expression delimiter"],
+    ["a direct secret reference", "{{ secrets.API_KEY }}", "may not reference secrets"],
+  ])("rejects %s in outputMapping through the canonical governance gate", (_label, expression, expectedMessage) => {
+    const findings = validateInputSafety(
+      wf(
+        [],
+        [{ id: "known", uses: "assert.contains" }],
+        [field({ name: "result" })],
+        { result: expression },
+      ),
+      lookup,
+    );
+
+    expect(findings).toContainEqual(
+      expect.objectContaining({
+        path: "execution.outputMapping.result",
+        severity: "error",
+        message: expect.stringContaining(expectedMessage),
+      }),
+    );
+  });
 });
 
 describe("validateInputSafety — no unsafe interpolation into command binaries (spec §18.4, command.run specifically)", () => {

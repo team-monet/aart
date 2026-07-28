@@ -13,6 +13,18 @@ import {
 } from "@aart/types";
 
 const MAX_DIAGNOSTIC_VALUE_CHARS = 512;
+const DIAGNOSTIC_STRING_CHUNK_CHARS = 256;
+const OMIT_FROM_JSON = Symbol("omit-from-json");
+
+interface BoundedJsonSerialization {
+  preview: string;
+  totalChars: number;
+}
+
+interface JsonAccumulator {
+  preview: string;
+  totalChars: number;
+}
 
 export class WorkflowOutputValidationError extends Error {
   constructor(public readonly problems: readonly string[]) {
@@ -21,15 +33,121 @@ export class WorkflowOutputValidationError extends Error {
   }
 }
 
-function diagnosticValue(value: unknown): string {
-  let serialized: string;
-  try {
-    serialized = JSON.stringify(value) ?? String(value);
-  } catch {
-    serialized = `[unserializable ${actualType(value)}]`;
+function appendJson(accumulator: JsonAccumulator, value: string): void {
+  accumulator.totalChars += value.length;
+  const remaining = MAX_DIAGNOSTIC_VALUE_CHARS - accumulator.preview.length;
+  if (remaining > 0) accumulator.preview += value.slice(0, remaining);
+}
+
+function appendJsonString(accumulator: JsonAccumulator, value: string): void {
+  appendJson(accumulator, '"');
+  for (let offset = 0; offset < value.length; ) {
+    let end = Math.min(value.length, offset + DIAGNOSTIC_STRING_CHUNK_CHARS);
+    const lastCodeUnit = value.charCodeAt(end - 1);
+    const nextCodeUnit = value.charCodeAt(end);
+    if (
+      end < value.length &&
+      lastCodeUnit >= 0xd800 &&
+      lastCodeUnit <= 0xdbff &&
+      nextCodeUnit >= 0xdc00 &&
+      nextCodeUnit <= 0xdfff
+    ) {
+      end -= 1;
+    }
+    const encodedChunk = JSON.stringify(value.slice(offset, end)).slice(1, -1);
+    appendJson(accumulator, encodedChunk);
+    offset = end;
   }
-  if (serialized.length <= MAX_DIAGNOSTIC_VALUE_CHARS) return serialized;
-  return `${serialized.slice(0, MAX_DIAGNOSTIC_VALUE_CHARS)}… [truncated; ${serialized.length} characters total]`;
+  appendJson(accumulator, '"');
+}
+
+function normalizeJsonValue(value: unknown, key: string, inArray: boolean): unknown | typeof OMIT_FROM_JSON {
+  if (value !== null && typeof value === "object") {
+    const toJSON = (value as { toJSON?: unknown }).toJSON;
+    if (typeof toJSON === "function") value = toJSON.call(value, key);
+    if (value instanceof Number || value instanceof String || value instanceof Boolean) value = value.valueOf();
+  }
+
+  if (value === undefined || typeof value === "function" || typeof value === "symbol") {
+    return inArray ? null : OMIT_FROM_JSON;
+  }
+  if (typeof value === "bigint") throw new TypeError("BigInt cannot be serialized to JSON");
+  return value;
+}
+
+function writeNormalizedJson(
+  value: unknown,
+  accumulator: JsonAccumulator,
+  seen: Set<object>,
+): void {
+  if (value === null) {
+    appendJson(accumulator, "null");
+    return;
+  }
+  if (typeof value === "string") {
+    appendJsonString(accumulator, value);
+    return;
+  }
+  if (typeof value === "number") {
+    appendJson(accumulator, Number.isFinite(value) ? JSON.stringify(value) : "null");
+    return;
+  }
+  if (typeof value === "boolean") {
+    appendJson(accumulator, value ? "true" : "false");
+    return;
+  }
+  if (typeof value !== "object") {
+    throw new TypeError(`Unsupported JSON value: ${typeof value}`);
+  }
+  if (seen.has(value)) throw new TypeError("Converting circular structure to JSON");
+  seen.add(value);
+
+  try {
+    if (Array.isArray(value)) {
+      appendJson(accumulator, "[");
+      for (let index = 0; index < value.length; index++) {
+        if (index > 0) appendJson(accumulator, ",");
+        const normalized = normalizeJsonValue(value[index], String(index), true);
+        writeNormalizedJson(normalized, accumulator, seen);
+      }
+      appendJson(accumulator, "]");
+      return;
+    }
+
+    appendJson(accumulator, "{");
+    let writtenProperties = 0;
+    for (const key of Object.keys(value)) {
+      const normalized = normalizeJsonValue((value as Record<string, unknown>)[key], key, false);
+      if (normalized === OMIT_FROM_JSON) continue;
+      if (writtenProperties > 0) appendJson(accumulator, ",");
+      appendJsonString(accumulator, key);
+      appendJson(accumulator, ":");
+      writeNormalizedJson(normalized, accumulator, seen);
+      writtenProperties += 1;
+    }
+    appendJson(accumulator, "}");
+  } finally {
+    seen.delete(value);
+  }
+}
+
+function boundedJsonSerialization(value: unknown): BoundedJsonSerialization | undefined {
+  const normalized = normalizeJsonValue(value, "", false);
+  if (normalized === OMIT_FROM_JSON) return undefined;
+  const accumulator: JsonAccumulator = { preview: "", totalChars: 0 };
+  writeNormalizedJson(normalized, accumulator, new Set());
+  return accumulator;
+}
+
+function diagnosticValue(value: unknown): string {
+  try {
+    const serialized = boundedJsonSerialization(value);
+    if (!serialized) return String(value);
+    if (serialized.totalChars <= MAX_DIAGNOSTIC_VALUE_CHARS) return serialized.preview;
+    return `${serialized.preview}… [truncated; ${serialized.totalChars} characters total]`;
+  } catch {
+    return `[unserializable ${actualType(value)}]`;
+  }
 }
 
 function actualType(value: unknown): string {

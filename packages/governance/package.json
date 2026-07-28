@@ -21,6 +21,7 @@
     "lint:redaction": "node --enable-source-maps dist/redaction-lint-cli.js"
   },
   "dependencies": {
+    "@aart/expr": "workspace:*",
     "@aart/store": "workspace:*",
     "@aart/types": "workspace:*",
     "zod": "4.4.3"

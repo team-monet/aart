@@ -1,5 +1,5 @@
 import type { Field } from "@aart/types";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { validateWorkflowOutputs, WorkflowOutputValidationError } from "./output-validation.js";
 
 function validationProblem(field: Field, value: unknown): string {
@@ -49,6 +49,15 @@ describe("workflow output validation diagnostics", () => {
     expect(problem).toMatch(/unsafe pattern.*overlapping sequential quantifiers/i);
   });
 
+  it("rejects overlapping quantifiers separated by a zero-width escape without evaluating them", () => {
+    const problem = validationProblem(
+      { name: "document", type: "string", pattern: "^a+\\Ba+$" },
+      `${"a".repeat(1_000)}!`,
+    );
+
+    expect(problem).toMatch(/unsafe pattern.*overlapping sequential quantifiers/i);
+  });
+
   it("bounds a large pattern-mismatch value while reporting its total size", () => {
     const value = `${"a".repeat(200_000)}-UNBOUNDED-TAIL`;
     const problem = validationProblem({ name: "document", type: "string", pattern: "^accepted$" }, value);
@@ -67,5 +76,23 @@ describe("workflow output validation diagnostics", () => {
     expect(problem).toContain("characters total");
     expect(problem).not.toContain("VALUE-TAIL");
     expect(problem).not.toContain("ENUM-TAIL");
+  });
+
+  it("serializes large nested diagnostic values only in bounded string chunks", () => {
+    const stringify = vi.spyOn(JSON, "stringify");
+    try {
+      const problem = validationProblem(
+        { name: "document", type: "json", enum: [{ accepted: true }] },
+        { document: `${"x".repeat(200_000)}-UNBOUNDED-TAIL` },
+      );
+
+      expect(problem.length).toBeLessThan(1_500);
+      const stringArguments = stringify.mock.calls
+        .map(([value]) => value)
+        .filter((value): value is string => typeof value === "string");
+      expect(Math.max(...stringArguments.map((value) => value.length))).toBeLessThanOrEqual(256);
+    } finally {
+      stringify.mockRestore();
+    }
   });
 });

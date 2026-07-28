@@ -4,6 +4,12 @@
 // effectful-capability-without-idempotencyKey WARNING (advisory, never
 // blocking).
 import {
+  assertExpressionDelimiters,
+  ExprSyntaxError,
+  findExpressionTokens,
+  parseExpression,
+} from "@aart/expr";
+import {
   analyzeWorkflowRegexSafety,
   isPatternCompatibleFieldType,
   type Field,
@@ -152,6 +158,58 @@ function validateSecretLiterals(step: WorkflowStep, path: string, findings: Vali
   }
 }
 
+function validateOutputMappingExpressions(
+  outputMapping: Readonly<Record<string, string>>,
+  steps: readonly WorkflowStep[],
+  findings: ValidationFinding[],
+): void {
+  const knownStepIds = new Set(steps.map((step) => step.id));
+
+  for (const [outputName, candidate] of Object.entries(outputMapping)) {
+    const path = `execution.outputMapping.${outputName}`;
+    const addProblem = (message: string): void => {
+      findings.push({
+        class: "input-safety",
+        path,
+        message: `outputMapping "${outputName}": ${message}`,
+        severity: "error",
+      });
+    };
+
+    try {
+      assertExpressionDelimiters(candidate);
+    } catch (error) {
+      if (error instanceof ExprSyntaxError) addProblem(error.message);
+      else throw error;
+    }
+
+    for (const match of findExpressionTokens(candidate)) {
+      try {
+        const parsed = parseExpression(match[0]);
+        if (parsed.root === "secrets") {
+          addProblem("public workflow outputs may not reference secrets.*; expose a non-secret derived value instead");
+        }
+        if (parsed.root !== "steps") continue;
+
+        const step = parsed.path[0];
+        if (step?.kind === "property" && !knownStepIds.has(step.name)) {
+          addProblem(`references unknown step "${step.name}"`);
+        }
+        const resultPath = parsed.path[1];
+        const hasValidStepShape =
+          resultPath?.kind === "property" &&
+          (resultPath.name === "outputs" || (resultPath.name === "status" && parsed.path.length === 2));
+        if (step?.kind !== "property" || !hasValidStepShape) {
+          addProblem("step references must use steps.<id>.outputs[.<field>] or steps.<id>.status");
+        }
+      } catch (error) {
+        if (error instanceof ExprSyntaxError) addProblem(error.message);
+        else throw error;
+      }
+    }
+  }
+}
+
 // ---------------------------------------------------------------------------
 // (d) effectful-capability-without-idempotencyKey WARNING — architecture
 // §4.2/§7.7. Advisory, never blocking.
@@ -200,6 +258,7 @@ export function validateInputSafety(workflow: Pick<Workflow, "inputs" | "outputs
   });
 
   const outputMapping = workflow.execution.outputMapping ?? {};
+  validateOutputMappingExpressions(outputMapping, workflow.execution.steps, findings);
   const mappedOutputNames = new Set(Object.keys(outputMapping));
   workflow.outputs.forEach((field) => {
     if (field.required === true && !mappedOutputNames.has(field.name)) {

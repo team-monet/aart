@@ -70,6 +70,14 @@ describe("analyzeWorkflowRegexSafety", () => {
     });
     expect(analyzeWorkflowRegexSafety("^a*(?:)a*$")).toMatchObject({ safe: false });
   });
+
+  it("preserves overlap detection across zero-width word-boundary escapes", () => {
+    expect(analyzeWorkflowRegexSafety("^a+\\ba+$")).toMatchObject({
+      safe: false,
+      reason: expect.stringMatching(/overlapping sequential quantifiers/i),
+    });
+    expect(analyzeWorkflowRegexSafety("^a+\\Ba+$")).toMatchObject({ safe: false });
+  });
 });
 
 describe("ExampleSchema", () => {
