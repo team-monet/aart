@@ -88,6 +88,16 @@ describe("analyzeWorkflowRegexSafety", () => {
     expect(analyzeWorkflowRegexSafety("^a+(?<boundary>\\B)a+$")).toMatchObject({ safe: false });
     expect(analyzeWorkflowRegexSafety("^a+(\\B)*a+$")).toMatchObject({ safe: false });
   });
+
+  it("preserves earlier overlap candidates across optional consuming atoms", () => {
+    expect(analyzeWorkflowRegexSafety("^a+b?a+$")).toMatchObject({
+      safe: false,
+      reason: expect.stringMatching(/overlapping sequential quantifiers/i),
+    });
+    expect(analyzeWorkflowRegexSafety("^a+b*a+$")).toMatchObject({ safe: false });
+    expect(analyzeWorkflowRegexSafety("^a+b{0,3}a+$")).toMatchObject({ safe: false });
+    expect(analyzeWorkflowRegexSafety("^a+b+a+$")).toEqual({ safe: true });
+  });
 });
 
 describe("ExampleSchema", () => {

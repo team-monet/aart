@@ -223,7 +223,7 @@ describe("executeRun — fresh execution", () => {
     expect(finished.outputs).toEqual({ publishedAt: "2026-07-28" });
   });
 
-  it("fails before completion when a mapped output would change during JSON persistence", async () => {
+  it("fails before a later wait can persist and normalize a non-JSON step output", async () => {
     const nonJsonBlock: BlockImplementation = {
       manifest: {
         id: "test.non-json",
@@ -242,7 +242,10 @@ describe("executeRun — fresh execution", () => {
       outputs: [{ name: "result", type: "json", required: true }],
       execution: {
         type: "workflow",
-        steps: [{ id: "produce", uses: nonJsonBlock.manifest.id }],
+        steps: [
+          { id: "produce", uses: nonJsonBlock.manifest.id },
+          { id: "pause", uses: "wait.time", with: { duration: "1m" } },
+        ],
         outputMapping: { result: "{{ steps.produce.outputs.value }}" },
       },
     });
@@ -518,6 +521,30 @@ describe("executeRun — fresh execution", () => {
 
     expect(finished.status).toBe("failed");
     expect(finished.error).toMatch(/public outputMapping "secret" may not reference secrets/);
+  });
+
+  it("rejects a public output indirectly sourced from a secret before trace redaction can turn it into a marker", async () => {
+    const { store, config } = await setup({
+      redact: redactResolvedValues,
+      resolveSecret: () => "secret-value",
+    });
+    const workflow = fixtureWorkflow({
+      outputs: [{ name: "secret", type: "string", required: true }],
+      execution: {
+        type: "workflow",
+        steps: [{ id: "echo", uses: "test.echo", with: { secret: "{{ secrets.API_KEY }}" } }],
+        outputMapping: { secret: "{{ steps.echo.outputs.echoed.secret }}" },
+      },
+    });
+    await store.workflows.put(workflow);
+    const run = await triggerRun(config, { workflow, trigger: fixtureTrigger(), inputs: {} });
+
+    const finished = await executeRun(config, run.runId);
+
+    expect(finished.status).toBe("failed");
+    expect(finished.outputs).toBeUndefined();
+    expect(finished.error).toMatch(/changed by secret redaction/);
+    expect(JSON.stringify(await store.runs.get(run.runId))).not.toContain("secret-value");
   });
 
   it("captures ExecutionSnapshot at completion for a run that never waits", async () => {

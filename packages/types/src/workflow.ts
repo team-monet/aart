@@ -33,6 +33,15 @@ function quantifierEnd(pattern: string, index: number): number | undefined {
   return match ? index + match[0].length : undefined;
 }
 
+function quantifierMinimum(pattern: string, index: number): number | undefined {
+  const char = pattern[index];
+  if (char === "*" || char === "?") return 0;
+  if (char === "+") return 1;
+  if (char !== "{") return undefined;
+  const match = /^\{(\d+)(?:,\d*)?\}/.exec(pattern.slice(index));
+  return match ? Number(match[1]) : undefined;
+}
+
 interface QuantifiedAtom {
   source: string;
   asciiDecidable: boolean;
@@ -126,7 +135,7 @@ function isZeroWidthGroup(pattern: string, groupStart: number, groupEnd: number)
 }
 
 function sequentialQuantifierProblem(pattern: string): string | undefined {
-  const previousByDepth: Array<QuantifiedAtom | undefined> = [undefined];
+  const previousByDepth: QuantifiedAtom[][] = [[]];
   const groupStartByDepth: Array<number | undefined> = [undefined];
   let depth = 0;
 
@@ -134,13 +143,13 @@ function sequentialQuantifierProblem(pattern: string): string | undefined {
     const char = pattern[i]!;
     if (char === "(") {
       depth += 1;
-      previousByDepth[depth] = undefined;
+      previousByDepth[depth] = [];
       groupStartByDepth[depth] = i;
       continue;
     }
     if (char === ")") {
       const groupStart = groupStartByDepth[depth];
-      previousByDepth[depth] = undefined;
+      previousByDepth[depth] = [];
       depth = Math.max(0, depth - 1);
       const end = quantifierEnd(pattern, i + 1);
       const zeroWidthGroup = groupStart !== undefined && isZeroWidthGroup(pattern, groupStart, i);
@@ -155,20 +164,21 @@ function sequentialQuantifierProblem(pattern: string): string | undefined {
           source,
           asciiDecidable: /^[\x00-\x7f]*$/.test(source) && !/\\(?:[pP]\{|u|x)/.test(source),
         };
-        const previous = previousByDepth[depth];
-        if (previous && atomsMayOverlap(previous, atom)) {
+        const previous = previousByDepth[depth] ?? [];
+        if (previous.some((candidate) => atomsMayOverlap(candidate, atom))) {
           return "overlapping sequential quantifiers are not allowed";
         }
-        previousByDepth[depth] = atom;
+        const minimum = quantifierMinimum(pattern, i + 1)!;
+        previousByDepth[depth] = minimum === 0 ? [...previous, atom] : [atom];
         i = end - 1;
         if (pattern[i + 1] === "?") i += 1;
       } else {
-        previousByDepth[depth] = undefined;
+        previousByDepth[depth] = [];
       }
       continue;
     }
     if (char === "|") {
-      previousByDepth[depth] = undefined;
+      previousByDepth[depth] = [];
       continue;
     }
     if (char === "^" || char === "$") continue;
@@ -212,15 +222,16 @@ function sequentialQuantifierProblem(pattern: string): string | undefined {
 
     const end = quantifierEnd(pattern, atomEnd);
     if (end !== undefined) {
-      const previous = previousByDepth[depth];
-      if (previous && atomsMayOverlap(previous, atom)) {
+      const previous = previousByDepth[depth] ?? [];
+      if (previous.some((candidate) => atomsMayOverlap(candidate, atom))) {
         return "overlapping sequential quantifiers are not allowed";
       }
-      previousByDepth[depth] = atom;
+      const minimum = quantifierMinimum(pattern, atomEnd)!;
+      previousByDepth[depth] = minimum === 0 ? [...previous, atom] : [atom];
       i = end - 1;
       if (pattern[i + 1] === "?") i += 1;
     } else {
-      if (!zeroWidthEscape) previousByDepth[depth] = undefined;
+      if (!zeroWidthEscape) previousByDepth[depth] = [];
       i = atomEnd - 1;
     }
   }

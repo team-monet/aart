@@ -3,7 +3,6 @@
 // into a different public Workflow.outputs contract. Validate that final
 // boundary independently so a block-version or mapping change cannot persist
 // a completed run whose advertised result shape is false.
-import { isDeepStrictEqual } from "node:util";
 import {
   analyzeWorkflowRegexSafety,
   isSupportedFieldType,
@@ -66,7 +65,7 @@ function matchesDeclaredType(value: unknown, declaredType: SupportedFieldType): 
   }
 }
 
-function jsonCompatibilityProblem(
+export function jsonCompatibilityProblem(
   value: unknown,
   path: string,
   ancestors: Set<object> = new Set(),
@@ -91,9 +90,23 @@ function jsonCompatibilityProblem(
 
   try {
     if (Array.isArray(value)) {
+      if (Object.getOwnPropertySymbols(value).length > 0) {
+        return `${path} contains symbol-keyed array properties, which JSON persistence would discard`;
+      }
+      for (const key of Object.getOwnPropertyNames(value)) {
+        if (key === "length") continue;
+        const index = Number(key);
+        if (!Number.isSafeInteger(index) || index < 0 || index >= value.length || String(index) !== key) {
+          return `${path} contains extra array property "${key}", which JSON persistence would discard`;
+        }
+      }
       for (let index = 0; index < value.length; index++) {
         if (!Object.prototype.hasOwnProperty.call(value, index)) {
           return `${path}[${index}] is a sparse array entry, which JSON persistence would convert to null`;
+        }
+        const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+        if (descriptor?.get || descriptor?.set) {
+          return `${path}[${index}] is an accessor property; workflow outputs must contain stable JSON values`;
         }
         const problem = jsonCompatibilityProblem(value[index], `${path}[${index}]`, ancestors);
         if (problem) return problem;
@@ -127,6 +140,26 @@ function jsonCompatibilityProblem(
   }
 }
 
+/** Equality after JSON persistence, independent of object prototypes. */
+export function jsonValuesEqual(left: unknown, right: unknown): boolean {
+  if (Object.is(left, right)) return true;
+  if (left === null || right === null || typeof left !== "object" || typeof right !== "object") return false;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) return false;
+    return left.every((value, index) => jsonValuesEqual(value, right[index]));
+  }
+  const leftRecord = left as Record<string, unknown>;
+  const rightRecord = right as Record<string, unknown>;
+  const leftKeys = Object.keys(leftRecord);
+  const rightKeys = Object.keys(rightRecord);
+  if (leftKeys.length !== rightKeys.length) return false;
+  return leftKeys.every(
+    (key) =>
+      Object.prototype.hasOwnProperty.call(rightRecord, key) &&
+      jsonValuesEqual(leftRecord[key], rightRecord[key]),
+  );
+}
+
 function validateValue(field: Field, value: unknown, problems: string[]): void {
   const compatibilityProblem = jsonCompatibilityProblem(value, `output "${field.name}"`);
   if (compatibilityProblem) {
@@ -142,7 +175,7 @@ function validateValue(field: Field, value: unknown, problems: string[]): void {
     return;
   }
 
-  if (field.enum && !field.enum.some((candidate) => isDeepStrictEqual(candidate, value))) {
+  if (field.enum && !field.enum.some((candidate) => jsonValuesEqual(candidate, value))) {
     problems.push(
       `output "${field.name}" value ${diagnosticValue(value)} is not one of its declared enum values ${diagnosticValue(field.enum)}`,
     );

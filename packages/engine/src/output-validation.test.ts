@@ -106,4 +106,28 @@ describe("workflow output validation diagnostics", () => {
 
     expect(problem).toMatch(/plain JSON objects/);
   });
+
+  it("rejects named and symbol-keyed array properties that persistence would discard", () => {
+    const named = [1, 2] as number[] & { label?: string };
+    named.label = "lost";
+    expect(validationProblem({ name: "result", type: "json" }, named)).toMatch(/extra array property "label"/);
+
+    const symbolKeyed = [1, 2] as unknown[] & Record<symbol, string>;
+    symbolKeyed[Symbol("label")] = "lost";
+    expect(validationProblem({ name: "result", type: "json" }, symbolKeyed)).toMatch(/symbol-keyed array properties/);
+  });
+
+  it("compares enum objects by persisted JSON value rather than prototype identity", () => {
+    const value = Object.assign(Object.create(null) as Record<string, unknown>, {
+      accepted: true,
+      nested: { count: 2 },
+    });
+
+    expect(() =>
+      validateWorkflowOutputs(
+        { outputs: [{ name: "result", type: "json", enum: [{ accepted: true, nested: { count: 2 } }] }] },
+        { result: value },
+      ),
+    ).not.toThrow();
+  });
 });
