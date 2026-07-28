@@ -4,6 +4,7 @@
 // stable-key JSON, token-budgeted, headline-and-failures-first, artifact
 // *references* (a uri to fetch on demand) rather than payloads inline.
 import { z } from "zod";
+import { summarizeJsonSerialization } from "./json-serialization.js";
 
 export const ModelFacingReportSchema = z.object({
   headline: z.enum(["passed", "failed", "waiting"]),
@@ -16,6 +17,10 @@ export const ModelFacingReportSchema = z.object({
       error: z.string(),
     }),
   ),
+  // The workflow's declared outputMapping resolved into its public result.
+  // Oversized results use compactModelFacingOutputs' bounded summary and
+  // RunRecord pointer instead of consuming the model's context window.
+  outputs: z.record(z.string(), z.unknown()),
   artifactRefs: z.array(
     z.object({
       id: z.string(),
@@ -26,3 +31,29 @@ export const ModelFacingReportSchema = z.object({
   next: z.string(),
 });
 export type ModelFacingReport = z.infer<typeof ModelFacingReportSchema>;
+
+const MAX_INLINE_OUTPUT_CHARS = 4_096;
+const MODEL_OUTPUT_PREVIEW_CHARS = 512;
+
+/**
+ * Keeps bounded report surfaces (model-facing JSON and PR-comment
+ * pretty-printed JSON) small while preserving full-fidelity RunRecord.outputs
+ * in storage and unrestricted human reports. Small public results retain
+ * their authored shape; oversized results become a compact pointer-shaped
+ * summary that tells the consumer exactly where the full value lives.
+ */
+export function compactModelFacingOutputs(runId: string, outputs: Record<string, unknown>): Record<string, unknown> {
+  const serialized = summarizeJsonSerialization(outputs, MODEL_OUTPUT_PREVIEW_CHARS, 2);
+  if (!serialized) return outputs;
+  if (serialized.totalChars <= MAX_INLINE_OUTPUT_CHARS && serialized.prettyChars <= MAX_INLINE_OUTPUT_CHARS) {
+    return outputs;
+  }
+  return {
+    $aart: {
+      kind: "truncated-workflow-outputs",
+      originalChars: serialized.totalChars,
+      preview: serialized.preview,
+      fullResultRef: { runId, field: "outputs" },
+    },
+  };
+}

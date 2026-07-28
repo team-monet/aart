@@ -144,6 +144,221 @@ steps:
     expect(() => compileYamlWorkflow(badYaml)).toThrow(/operators are not supported/);
   });
 
+  it("rejects an invalid public outputMapping expression before registration", () => {
+    const badYaml = `id: bad-output
+name: Bad Output
+version: 0.1.0
+outputs:
+  result:
+    type: string
+    required: true
+steps:
+  - id: read
+    uses: web.read
+outputMapping:
+  result: "{{ steps.read.outputs.text + 1 }}"
+`;
+    expect(() => compileYamlWorkflow(badYaml)).toThrow(/outputMapping "result".*operators are not supported/s);
+  });
+
+  it("rejects an unmatched public outputMapping delimiter before registration", () => {
+    const badYaml = `id: bad-output-delimiter
+name: Bad Output Delimiter
+version: 0.1.0
+outputs:
+  result:
+    type: string
+    required: true
+steps:
+  - id: read
+    uses: web.read
+outputMapping:
+  result: "{{ steps.read.outputs.text"
+`;
+    expect(() => compileYamlWorkflow(badYaml)).toThrow(/outputMapping "result".*unmatched expression delimiter.*"\{\{"/s);
+  });
+
+  it("rejects an unmatched expression delimiter inside a step value", () => {
+    const badYaml = `id: bad-step-delimiter
+name: Bad Step Delimiter
+version: 0.1.0
+steps:
+  - id: read
+    uses: web.read
+    with:
+      url: "https://example.com/}}"
+`;
+    expect(() => compileYamlWorkflow(badYaml)).toThrow(/step "read".*unmatched expression delimiter.*"\}\}"/s);
+  });
+
+  it("rejects a required declared output with no outputMapping entry", () => {
+    expect(() =>
+      compileYamlWorkflow(`id: missing-output
+name: Missing Output
+version: 0.1.0
+outputs:
+  result:
+    type: string
+    required: true
+steps:
+  - id: read
+    uses: web.read
+`),
+    ).toThrow(/required output "result" has no outputMapping entry/);
+  });
+
+  it("rejects an outputMapping field that is not part of the declared public outputs", () => {
+    expect(() =>
+      compileYamlWorkflow(`id: extra-output
+name: Extra Output
+version: 0.1.0
+steps:
+  - id: read
+    uses: web.read
+outputMapping:
+  result: "{{ steps.read.outputs.text }}"
+`),
+    ).toThrow(/outputMapping "result" is not declared in outputs/);
+  });
+
+  it("preserves a custom public output type for Pack-defined semantics", () => {
+    const workflow = compileYamlWorkflow(`id: custom-output-type
+name: Custom Output Type
+version: 0.1.0
+outputs:
+  publishedAt:
+    type: date
+steps:
+  - id: read
+    uses: web.read
+outputMapping:
+  publishedAt: "{{ steps.read.outputs.text }}"
+`);
+    expect(workflow.outputs[0]?.type).toBe("date");
+  });
+
+  it("allows a regex pattern on an opaque custom string-like output type", () => {
+    const workflow = compileYamlWorkflow(`id: custom-pattern
+name: Custom Pattern
+version: 0.1.0
+outputs:
+  publishedAt:
+    type: date
+    pattern: "^\\\\d{4}-\\\\d{2}-\\\\d{2}$"
+steps:
+  - id: read
+    uses: web.read
+outputMapping:
+  publishedAt: "{{ steps.read.outputs.text }}"
+`);
+    expect(workflow.outputs[0]).toMatchObject({ type: "date", pattern: "^\\d{4}-\\d{2}-\\d{2}$" });
+  });
+
+  it("rejects an outputMapping reference to a misspelled step before registration", () => {
+    expect(() =>
+      compileYamlWorkflow(`id: typo-output-step
+name: Typo Output Step
+version: 0.1.0
+outputs:
+  result:
+    type: string
+steps:
+  - id: read
+    uses: web.read
+outputMapping:
+  result: "{{ steps.reed.outputs.text }}"
+`),
+    ).toThrow(/outputMapping "result".*unknown step "reed"/s);
+  });
+
+  it("rejects a malformed step-output path before registration", () => {
+    expect(() =>
+      compileYamlWorkflow(`id: malformed-output-path
+name: Malformed Output Path
+version: 0.1.0
+outputs:
+  result:
+    type: string
+steps:
+  - id: optional
+    uses: web.read
+outputMapping:
+  result: "{{ steps.optional.outptus.text }}"
+`),
+    ).toThrow(/outputMapping "result".*steps\.<id>\.outputs/s);
+  });
+
+  it("keeps the documented step status path available to output mappings", () => {
+    const workflow = compileYamlWorkflow(`id: output-step-status
+name: Output Step Status
+version: 0.1.0
+outputs:
+  status:
+    type: string
+steps:
+  - id: optional
+    uses: web.read
+outputMapping:
+  status: "{{ steps.optional.status }}"
+`);
+    expect(workflow.execution.outputMapping?.status).toBe("{{ steps.optional.status }}");
+  });
+
+  it("rejects duplicate canonical output declarations", () => {
+    expect(() =>
+      compileWorkflowObject({
+        id: "duplicate-outputs",
+        name: "Duplicate Outputs",
+        version: "0.1.0",
+        inputs: [],
+        outputs: [
+          { name: "result", type: "string", required: true },
+          { name: "result", type: "number", required: true },
+        ],
+        execution: {
+          type: "workflow",
+          steps: [{ id: "read", uses: "web.read" }],
+          outputMapping: { result: "{{ steps.read.outputs.text }}" },
+        },
+      }),
+    ).toThrow(/output "result" is declared more than once/);
+  });
+
+  it("rejects a pattern on a non-string output before registration", () => {
+    expect(() =>
+      compileYamlWorkflow(`id: numeric-pattern
+name: Numeric Pattern
+version: 0.1.0
+outputs:
+  count:
+    type: number
+    pattern: "^\\\\d+$"
+steps:
+  - id: read
+    uses: web.read
+outputMapping:
+  count: "{{ steps.read.outputs.count }}"
+`),
+    ).toThrow(/output "count" declares pattern but has non-string type "number"/);
+  });
+
+  it("rejects a secret-dependent public output before effectful execution can occur", () => {
+    expect(() =>
+      compileYamlWorkflow(`id: secret-output
+name: Secret Output
+version: 0.1.0
+outputs:
+  token:
+    type: string
+steps:
+  - id: send
+    uses: email.send
+outputMapping:
+  token: "{{ secrets.API_TOKEN }}"
+`),
+    ).toThrow(/outputMapping "token".*may not reference secrets/s);
+  });
+
   it("accepts a well-formed secrets.* expression", () => {
     const yamlSource = `id: with-secret
 name: With Secret

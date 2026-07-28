@@ -6,6 +6,11 @@
 // (correction.ts) never triggers any of these automatically.
 import type { AartStore } from "@aart/store";
 import type { Correction, EvalExample, ImprovementBrief, RunRecord, StepTrace, Workflow } from "@aart/types";
+import {
+  materializeWorkflowOutputs,
+  resolveWorkflowForRun,
+  validateWorkflowOutputs,
+} from "@aart/engine/workflow-output-contract";
 import { generateImprovementBrief } from "../improvement-brief.js";
 import { correctionKey } from "./correction.js";
 
@@ -34,16 +39,62 @@ function setByPath(target: Record<string, unknown>, path: string, value: unknown
 export async function updateRunOutput(store: AartStore, correction: Correction): Promise<RunRecord> {
   const run = await store.runs.get(correction.runId);
   if (!run) throw new Error(`updateRunOutput: no such run "${correction.runId}"`);
-  const traceIndex = run.trace.findIndex((t) => t.stepId === correction.stepId);
+  // A step may have more than one trace after a loop/back-edge or reclaim.
+  // Expression projection uses the latest matching trace, so corrections
+  // without an explicit sequence target that same observable occurrence.
+  const traceIndex = run.trace.findLastIndex((t) => t.stepId === correction.stepId);
   if (traceIndex === -1) throw new Error(`updateRunOutput: run "${correction.runId}" has no step "${correction.stepId}"`);
 
   const original = run.trace[traceIndex]!;
   const updatedTrace: StepTrace = { ...original, postHocCorrected: true };
   setByPath(updatedTrace as unknown as Record<string, unknown>, correction.fieldPath, correction.corrected);
 
+  let trace = run.trace.map((t, i) => (i === traceIndex ? updatedTrace : t));
+  const forEachMatch = /^(.*)\[(\d+)\]$/.exec(correction.stepId);
+  if (
+    forEachMatch &&
+    (correction.fieldPath === "outputs" || correction.fieldPath.startsWith("outputs."))
+  ) {
+    const parentStepId = forEachMatch[1]!;
+    const itemIndex = forEachMatch[2]!;
+    const aggregateIndex = trace.findLastIndex(
+      (candidate, index) => index > traceIndex && candidate.stepId === parentStepId,
+    );
+    if (aggregateIndex !== -1) {
+      const aggregate = structuredClone(trace[aggregateIndex]!);
+      const outputSuffix =
+        correction.fieldPath === "outputs"
+          ? ""
+          : `.${correction.fieldPath.slice("outputs.".length)}`;
+      setByPath(
+        aggregate as unknown as Record<string, unknown>,
+        `outputs.items.${itemIndex}${outputSuffix}`,
+        correction.corrected,
+      );
+      aggregate.postHocCorrected = true;
+      trace = trace.map((candidate, index) => (index === aggregateIndex ? aggregate : candidate));
+    }
+  }
+  let outputs = run.outputs;
+  // Failed/cancelled runs are intentionally partial evidence: correcting a
+  // trace must remain possible even when required output sources never ran.
+  // Modern completed runs with a public projection promise a fully
+  // materialized contract. Legacy completed records may predate that field
+  // and carry no parseable workflow definition in their old snapshots; in
+  // that case the trace correction remains valid without inventing outputs.
+  if (run.status === "completed" && run.outputs !== undefined) {
+    const workflow = await resolveWorkflowForRun(store, run);
+    const correctedProjection = { ...run, trace };
+    if (workflow.execution.outputMapping) {
+      outputs = await materializeWorkflowOutputs(workflow, correctedProjection);
+      validateWorkflowOutputs(workflow, outputs);
+    }
+  }
+
   const updatedRun: RunRecord = {
     ...run,
-    trace: run.trace.map((t, i) => (i === traceIndex ? updatedTrace : t)),
+    trace,
+    outputs,
     updatedAt: new Date().toISOString(),
   };
   await store.runs.put(updatedRun);

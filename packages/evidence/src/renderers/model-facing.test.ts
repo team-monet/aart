@@ -35,6 +35,38 @@ describe("renderModelFacing", () => {
     expect(report.failures).toEqual([{ stepId: "b", block: "http.request", error: "boom" }]);
   });
 
+  it("returns workflow-level outputs without requiring callers to inspect step traces", () => {
+    const report = renderModelFacing(fixtureRunRecord({ status: "completed", outputs: { items: ["alpha", "beta"], count: 2 } }), identityRedact);
+    expect(report.outputs).toEqual({ items: ["alpha", "beta"], count: 2 });
+  });
+
+  it("surfaces a run-level output mapping failure when no individual step failed", () => {
+    const report = renderModelFacing(fixtureRunRecord({ status: "failed", error: "Workflow output mapping failed: missing field" }), identityRedact);
+    expect(report.failures).toEqual([
+      { stepId: "$workflow", block: "workflow.outputMapping", error: "Workflow output mapping failed: missing field" },
+    ]);
+  });
+
+  it("surfaces a run-level output validation failure when no individual step failed", () => {
+    const error = 'Workflow output validation failed: output "result" expected type "string" but received "object"';
+    const report = renderModelFacing(fixtureRunRecord({ status: "failed", error }), identityRedact);
+    expect(report.failures).toEqual([{ stepId: "$workflow", block: "workflow.outputMapping", error }]);
+  });
+
+  it("surfaces the terminal workflow-output failure even when the trace contains an older failed attempt", () => {
+    const error = "Workflow output validation failed: corrected result is invalid";
+    const report = renderModelFacing(
+      fixtureRunRecord({
+        status: "failed",
+        error,
+        trace: [{ seq: 0, stepId: "retry", block: "http.request", status: "failed", inputs: {}, error: "stale attempt", startedAt: "t" }],
+      }),
+      identityRedact,
+    );
+    expect(report.failures.map((failure) => failure.stepId)).toEqual(["retry", "$workflow"]);
+    expect(report.failures.at(-1)?.error).toBe(error);
+  });
+
   it("maps artifacts to references carrying a uri (path), never bytes/payload", () => {
     const run = fixtureRunRecord({
       artifacts: [{ id: "a1", runId: "r", name: "shot.png", kind: "screenshot", mime: "image/png", path: "artifacts/a1.png", bytes: 999, createdAt: "t" }],
@@ -92,5 +124,21 @@ describe("renderModelFacing", () => {
     // carried full trace detail — it must not, since only failures/artifacts
     // (here: zero of each) drive its size.
     expect(JSON.stringify(report).length).toBeLessThan(2000);
+  });
+
+  it("summarizes an oversized workflow output and points to the full RunRecord value", () => {
+    const run = fixtureRunRecord({ status: "completed", outputs: { document: "x".repeat(200_000) } });
+    const report = renderModelFacing(run, identityRedact);
+
+    expect(JSON.stringify(report).length).toBeLessThan(8_000);
+    expect(report.outputs).toEqual({
+      $aart: {
+        kind: "truncated-workflow-outputs",
+        originalChars: expect.any(Number),
+        preview: expect.any(String),
+        fullResultRef: { runId: run.runId, field: "outputs" },
+      },
+    });
+    expect((report.outputs["$aart"] as { preview: string }).preview.length).toBeLessThanOrEqual(512);
   });
 });

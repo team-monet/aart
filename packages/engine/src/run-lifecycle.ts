@@ -5,21 +5,30 @@
 // what a worker calls after claiming a run from `job_queue` (job_queue
 // claim/lease/reclaim itself is explicitly S2/`@aart/server`'s scope,
 // architecture §4.7 — this package never touches claim/lease/release).
-import { createTrackingSecretResolver, throwingSecretResolver } from "./redaction.js";
-import { buildExprContext, resolveBooleanExpression } from "./expr-context.js";
 import type { RunRecord, StepTrace, Workflow, WorkflowStep } from "@aart/types";
 import { ConcurrencyRejectedError } from "@aart/types";
-import { decideConcurrency, releaseQueuedRuns, resolveConcurrencyKey } from "./concurrency.js";
-import { applyRedaction } from "./redaction.js";
+import { buildExprContext, resolveBooleanExpression } from "./expr-context.js";
+import { decideConcurrency, fingerprintConcurrencyKey, releaseQueuedRuns, resolveConcurrencyKey } from "./concurrency.js";
+import { applyRedaction, applyRunRedaction, createTrackingSecretResolver, throwingSecretResolver } from "./redaction.js";
 import { assertSchemaVersionCompatible, CURRENT_ENGINE_SCHEMA_VERSION } from "./schema-version.js";
 import { captureExecutionSnapshot, isSnapshotCaptured, resolveWorkflowForRun, uncapturedSnapshot } from "./snapshot.js";
+import { validateWorkflowOutputs, WorkflowOutputValidationError } from "./output-validation.js";
 import { determineNextStepId, executeStep, type StepOutcome } from "./step-executor.js";
 import type { EngineConfig, TriggerRunInput } from "./types.js";
 import { isWaitBlockId } from "./wait/wait-blocks.js";
+import { materializeWorkflowOutputs } from "./workflow-outputs.js";
 
 // ---------------------------------------------------------------------------
 // Run intake (architecture §4.3) — S2's trigger adapters call this.
 // ---------------------------------------------------------------------------
+
+function withoutConcurrencyBookkeeping(params: Record<string, unknown> | undefined): Record<string, unknown> {
+  const callerParams = { ...params };
+  delete callerParams.concurrencyKey;
+  delete callerParams.concurrencyKeyFormat;
+  delete callerParams.waitingOnConcurrency;
+  return callerParams;
+}
 
 /**
  * The engine's trigger-intake function (implementation plan S2's consumed-
@@ -44,13 +53,17 @@ import { isWaitBlockId } from "./wait/wait-blocks.js";
 export async function triggerRun(config: EngineConfig, input: TriggerRunInput): Promise<RunRecord> {
   const now = config.now?.() ?? new Date();
   const schemaVersion = config.schemaVersion ?? CURRENT_ENGINE_SCHEMA_VERSION;
-  const key = await resolveConcurrencyKey(input.workflow, input.inputs);
-  const decision = await decideConcurrency(config.store, input.workflow, key);
+  // Keep the persisted slot backward-readable while older intake instances
+  // can share this store during a rolling upgrade. Current readers normalize
+  // both this raw representation and the short-lived fingerprinted format;
+  // the rejection diagnostic uses only a non-reversible fingerprint.
+  const resolvedKey = await resolveConcurrencyKey(input.workflow, input.inputs);
+  const decision = await decideConcurrency(config.store, input.workflow, resolvedKey);
 
   if (decision.action === "reject") {
     throw new ConcurrencyRejectedError({
-      message: `Trigger for workflow "${input.workflow.id}" rejected — an existing non-terminal run already holds concurrency key "${key}" under policy "reject_new" (architecture §4.3).`,
-      detail: { kind: "concurrencyRejected", workflowId: input.workflow.id, key },
+      message: `Trigger for workflow "${input.workflow.id}" rejected — an existing non-terminal run already holds the same concurrency key under policy "reject_new" (architecture §4.3).`,
+      detail: { kind: "concurrencyRejected", workflowId: input.workflow.id, key: fingerprintConcurrencyKey(resolvedKey) },
     });
   }
   if (decision.action === "cancel_existing") {
@@ -76,9 +89,9 @@ export async function triggerRun(config: EngineConfig, input: TriggerRunInput): 
     // decision #12 for the `waitingOnConcurrency` precedent ("Internal...
     // bookkeeping flag... not a spec-visible WaitCondition member").
     params: {
-      ...input.params,
+      ...withoutConcurrencyBookkeeping(input.params),
       ...(input.environment !== undefined ? { environment: input.environment } : {}),
-      ...(key !== undefined ? { concurrencyKey: key } : {}),
+      ...(resolvedKey !== undefined ? { concurrencyKey: resolvedKey } : {}),
       ...(waitingOnConcurrency ? { waitingOnConcurrency: true } : {}),
     },
     trace: [],
@@ -91,7 +104,7 @@ export async function triggerRun(config: EngineConfig, input: TriggerRunInput): 
   };
 
   const resolvedSecretRefs = new Set<string>();
-  const redacted = applyRedaction(config.redact, run, resolvedSecretRefs);
+  const redacted = applyRunRedaction(config.redact, run, resolvedSecretRefs);
   await config.store.runs.put(redacted);
   if (!waitingOnConcurrency) {
     await config.store.jobQueue.enqueue(redacted.runId);
@@ -125,6 +138,44 @@ export async function finalizeTerminal(
 ): Promise<RunRecord> {
   const now = config.now?.() ?? new Date();
   let updated = run;
+  let terminalStatus = status;
+  let terminalError = errorMessage;
+  let outputs = updated.outputs;
+  // Queue bookkeeping is operational state, not a report surface. Preserve
+  // the exact key before whole-record redaction so a secret value that also
+  // occurs in the key cannot prevent the next queued run from being released.
+  const concurrencyKey = updated.params?.concurrencyKey;
+  const concurrencyKeyFormat = updated.params?.concurrencyKeyFormat;
+
+  // A workflow's declared outputMapping is its public result contract. Step
+  // traces are execution evidence; callers should not have to reverse-engineer
+  // the last step (or know the workflow's internal graph) to obtain the actual
+  // result. Resolve the mapping only on successful completion, against the
+  // same expression context and tracked secret resolver used by step inputs.
+  if (status === "completed") {
+    try {
+      const secretResolver = createTrackingSecretResolver(config.resolveSecret ?? throwingSecretResolver, resolvedSecretRefs);
+      outputs = await materializeWorkflowOutputs(workflow, updated, { secretResolver });
+      // Validate what callers will actually observe after the persistence
+      // redaction boundary. A raw number that becomes a string marker, or an
+      // enum/pattern value changed by redaction, is not a valid completed
+      // public result.
+      const observableOutputs = applyRedaction(config.redact, outputs, resolvedSecretRefs);
+      validateWorkflowOutputs(workflow, observableOutputs);
+    } catch (err) {
+      // A declared result that cannot be produced is a failed workflow, even
+      // when every individual block completed. Persist a terminal failure
+      // instead of leaving the run stuck in "running" or reporting success
+      // with an absent result.
+      terminalStatus = "failed";
+      terminalError =
+        err instanceof WorkflowOutputValidationError
+          ? err.message
+          : `Workflow output mapping failed: ${err instanceof Error ? err.message : String(err)}`;
+      outputs = undefined;
+    }
+  }
+
   // ExecutionSnapshot capture (architecture §4.5) — "once per run, at the
   // earlier of (a) the run's first wait, or (b) run completion if it never
   // waits." A run that entered at least one wait already has one (captured
@@ -133,13 +184,12 @@ export async function finalizeTerminal(
   if (!isSnapshotCaptured(updated.snapshot)) {
     updated = { ...updated, snapshot: await captureExecutionSnapshot(workflow, config.blocks, now, config.computePackHashes) };
   }
-  updated = { ...updated, status, error: errorMessage, endedAt: now.toISOString(), updatedAt: now.toISOString() };
+  updated = { ...updated, status: terminalStatus, outputs, error: terminalError, endedAt: now.toISOString(), updatedAt: now.toISOString() };
   const redacted = applyRedaction(config.redact, updated, resolvedSecretRefs);
   await config.store.runs.put(redacted);
 
-  const concurrencyKey = redacted.params?.concurrencyKey;
   if (typeof concurrencyKey === "string") {
-    await releaseQueuedRuns(config.store, redacted.workflowId, concurrencyKey);
+    await releaseQueuedRuns(config.store, redacted.workflowId, concurrencyKey, concurrencyKeyFormat);
   }
   await runOnRunTerminal(config, redacted.runId);
   return redacted;
@@ -241,7 +291,7 @@ export async function runStepsLoop(config: EngineConfig, initialRun: RunRecord, 
     if (!isSnapshotCaptured(run.snapshot) && isWaitBlockId(step.uses)) {
       const now = config.now?.() ?? new Date();
       const withSnapshot: RunRecord = { ...run, snapshot: await captureExecutionSnapshot(workflow, config.blocks, now, config.computePackHashes) };
-      run = applyRedaction(config.redact, withSnapshot, resolvedSecretRefs);
+      run = applyRunRedaction(config.redact, withSnapshot, resolvedSecretRefs);
       await config.store.runs.put(run);
     }
 
@@ -291,7 +341,7 @@ export async function executeRun(config: EngineConfig, runId: string): Promise<R
   let run = loaded;
   if (run.status === "pending") {
     const now = (config.now?.() ?? new Date()).toISOString();
-    run = applyRedaction(config.redact, { ...run, status: "running", updatedAt: now }, resolvedSecretRefs);
+    run = applyRunRedaction(config.redact, { ...run, status: "running", updatedAt: now }, resolvedSecretRefs);
     await config.store.runs.put(run);
   } else if (run.status !== "running") {
     // Already `waiting`/`completed`/`failed`/`cancelled` — idempotent no-op
@@ -332,6 +382,8 @@ export async function cancelRun(config: EngineConfig, runId: string): Promise<Ru
 
   const resolvedSecretRefs = new Set<string>();
   const nowDate = config.now?.() ?? new Date();
+  const concurrencyKey = run.params?.concurrencyKey;
+  const concurrencyKeyFormat = run.params?.concurrencyKeyFormat;
   const updated: RunRecord = {
     ...run,
     status: "cancelled",
@@ -343,9 +395,8 @@ export async function cancelRun(config: EngineConfig, runId: string): Promise<Ru
   const redacted = applyRedaction(config.redact, updated, resolvedSecretRefs);
   await config.store.runs.put(redacted);
 
-  const concurrencyKey = redacted.params?.concurrencyKey;
   if (typeof concurrencyKey === "string") {
-    await releaseQueuedRuns(config.store, redacted.workflowId, concurrencyKey);
+    await releaseQueuedRuns(config.store, redacted.workflowId, concurrencyKey, concurrencyKeyFormat);
   }
   await runOnRunTerminal(config, redacted.runId);
   return redacted;

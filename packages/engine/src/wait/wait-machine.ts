@@ -9,7 +9,7 @@ import type { AartStore } from "@aart/store";
 import type { RunRecord, Signal, StepTrace, WaitCondition } from "@aart/types";
 import { CorrelationError } from "@aart/types";
 import { parseDurationMs } from "../duration.js";
-import { applyRedaction } from "../redaction.js";
+import { applyRedaction, applyRunRedaction } from "../redaction.js";
 import { assertSchemaVersionCompatible } from "../schema-version.js";
 import type { DueWait, ResumeMechanism, ResumeOutcome } from "../types.js";
 import { waitSignalCorrelation } from "./wait-blocks.js";
@@ -111,7 +111,7 @@ export async function enterWait(config: WaitMachineConfig, options: EnterWaitOpt
           durationMs: 0,
         };
         const updatedRun: RunRecord = { ...run, trace: [...run.trace, trace], updatedAt: now.toISOString() };
-        const redacted = applyRedaction(config.redact, updatedRun, resolvedSecretRefs);
+        const redacted = applyRunRedaction(config.redact, updatedRun, resolvedSecretRefs);
         await tx.runs.put(redacted);
         return { run: redacted, suspended: false };
       }
@@ -135,7 +135,7 @@ export async function enterWait(config: WaitMachineConfig, options: EnterWaitOpt
       trace: [...run.trace, trace],
       updatedAt: now.toISOString(),
     };
-    const redactedRun = applyRedaction(config.redact, updatedRun, resolvedSecretRefs);
+    const redactedRun = applyRunRedaction(config.redact, updatedRun, resolvedSecretRefs);
     const redactedWait = applyRedaction(config.redact, wait, resolvedSecretRefs);
     await tx.runs.put(redactedRun);
     await tx.waits.put(run.runId, stepId, redactedWait, now.toISOString());
@@ -259,7 +259,7 @@ async function claimAndCompleteWait(config: WaitMachineConfig, args: ClaimAndCom
       trace: newTrace,
       updatedAt: now.toISOString(),
     };
-    const redacted = applyRedaction(config.redact, updatedRun, resolvedSecretRefs);
+    const redacted = applyRunRedaction(config.redact, updatedRun, resolvedSecretRefs);
     await tx.runs.put(redacted);
     return { kind: "resumed", run: redacted, mechanism };
   });
@@ -351,7 +351,7 @@ export async function failExpiredWait(config: WaitMachineConfig, runId: string, 
     newTrace[traceIndex] = failedTrace;
 
     const updatedRun: RunRecord = { ...run, status: "running", trace: newTrace, updatedAt: now.toISOString() };
-    const redacted = applyRedaction(config.redact, updatedRun, resolvedSecretRefs);
+    const redacted = applyRunRedaction(config.redact, updatedRun, resolvedSecretRefs);
     await tx.runs.put(redacted);
     return { kind: "resumed", run: redacted, mechanism };
   });

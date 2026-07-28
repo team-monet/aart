@@ -60,6 +60,10 @@ inputs:
   who:
     type: string
     required: true
+outputs:
+  greeting:
+    type: string
+    required: true
 steps:
   - id: greet
     uses: data.stringify
@@ -71,6 +75,8 @@ steps:
     with:
       actual: "{{ steps.greet.outputs.output }}"
       expected: "{{ inputs.who }}"
+outputMapping:
+  greeting: "{{ steps.greet.outputs.output }}"
 ```
 
 **A real authoring gotcha worth knowing up front** (found while writing this exact file): `{{ }}` expressions only resolve when they're the ENTIRE value of a top-level `with:` field. An expression buried inside an array or nested object (e.g. `with: { objects: [{ who: "{{ inputs.who }}" }] }`) is passed through completely unresolved — verified directly in `@aart/expr`'s `resolveExpression` (`packages/expr/src/resolver.ts`): a non-string value is returned as-is, no recursion. Keep templated values as direct top-level `with:` fields, the same way the block examples throughout `AGENTS.md` (written by `aart init-agent`, see part (d)) always do.
@@ -88,6 +94,7 @@ Real output:
 { "ok": true, "valid": true, "findings": [], "next": "Workflow is valid. Call `aart_run_workflow` to execute it, or `aart_verify` for a quick one-shot check." }
 {
   "ok": true, "runId": "<uuid>", "status": "completed",
+  "outputs": { "greeting": "\"Hello, John! -- AART smoke test\"" },
   "trace": [
     { "stepId": "greet", "block": "data.stringify", "status": "completed" },
     { "stepId": "check", "block": "assert.contains", "status": "completed" }
@@ -125,7 +132,10 @@ aart run smoke-data-pipeline-should-fail --input '{"who":"John"}'
 
 A stub can't produce that — it genuinely evaluated the assertion against the real, template-resolved value and genuinely failed the run.
 
-**The report** — there's no `aart report` CLI command (checked: it's not in `aart`'s command surface). The equivalent is the `aart_get_report` MCP tool — see part (d) for wiring `aart mcp` in, then ask your agent to call it with the `runId` from above, or drive it directly per part (d)'s "one real tool call" example. It returns the full per-step trace (inputs/outputs/timings) plus a markdown rendering.
+**The report** — run `aart report <runId>` from the CLI, or call
+`aart_get_report` through MCP. Both expose the same workflow-level `outputs`,
+failures, and artifact references; `--format markdown` also renders the
+human-readable report with an Outputs section and expandable full trace.
 
 **A second real governance moment, worth trying**: register a NEW version of the same workflow (`smoke-data-pipeline`, now `0.2.0`) that also writes a file (`artifact.write`, capability `file.write`) —
 
@@ -337,11 +347,19 @@ scp -r ./prod-bundle you@your-server:/path/to/prod-bundle
 **On the server:**
 
 ```bash
-aart server --port 8080 --bundle /path/to/prod-bundle
-aart worker --bundle /path/to/prod-bundle   # second process, same store
+aart server --port 8080 --store sqlite --root /path/to/server/.aart --bundle /path/to/prod-bundle
+aart worker --store sqlite --root /path/to/server/.aart --bundle /path/to/prod-bundle
 ```
 
-Both hydrate the bundle's workflow/pack/prompt/schema definitions — plus its `triggers.json`, sourced as the deployment's real trigger config — into their own `.aart` store **before** starting. Verified this session against two independent, isolated-`npm`-installed copies of the CLI (`AMENDMENTS.md` A44's own methodology, not simulated): a fresh server sees exactly what the bundle carries and nothing else (`GET /workflows`, `GET /deployments`); re-running `--bundle` against an already-hydrated store is a safe no-op (`"bundle": {"kind": "already_hydrated", ...}` in the command's own result); a *different* bundle produced for the same workflow@version is refused outright (`ok:false`, before the port ever binds) rather than silently overwriting whatever's already there; `aart run <id>` against the hydrated store genuinely dispatches and completes, visible on `GET /runs` from either process; both stop cleanly on `Ctrl-C`/`SIGTERM`, same as running locally.
+Both hydrate the bundle's workflow/Pack/prompt/schema definitions, sealed
+Pack executable assets, and `triggers.json` into the shared SQLite store
+before starting. Verified with isolated npm installs and a fresh destination:
+the server sees only what the bundle carries; HTTP `POST /runs/trigger`
+creates a pending run; a separate worker claims it and executes the bundled
+Pack code; `GET /runs/<id>` returns `completed`, the workflow-level outputs,
+and the exact Pack hash in `snapshot.packHashes` (`AMENDMENTS.md` A74).
+Re-running the same bundle is a safe no-op, while a different bundle for the
+same workflow version is refused before a port binds.
 
 **What doesn't move with a bundle:** run history, waits, signals, the job queue, artifacts — a bundle seeds a store's *definitions*, it doesn't replace a store (`packages/server/src/bundle/load.ts`'s own header comment). If you need to move a server's **entire** state to a new host — every past run, every artifact, a real migration rather than a fresh deploy — `rsync` the whole `.aart` directory instead:
 
@@ -471,8 +489,9 @@ Stated plainly, not glossed over:
   guarded Pack loop: `aart pack search` → `aart pack add` (unapproved,
   inert) → `aart pack list` → explicit human `aart pack approve` with the
   exact listed `--content-hash` → restart AART. Imported
-  workflows remain drafts. Executable Pack files do
-  not yet travel inside a fresh server bundle (AMENDMENTS.md A72), so this
-  local reuse proof must not be mistaken for unattended Pack deployment.
+  workflows remain drafts. Once bundled, the approved Pack's sealed
+  executable files travel with the workflow and hydrate into a fresh server
+  store; the separate-worker HTTP-triggered proof is recorded in
+  `AMENDMENTS.md` A74.
 - **`isolated-vm`'s `engines.node: ">=26.0.0"`** vs. this machine's v22.22.2 (part (a)'s install warning) — pre-existing, not new, not addressed here.
 - **A `schedule`-fired trigger has no environment concept to gate by** — `AMENDMENTS.md` A48's fix threads a deployment's real target environment into every webhook/github/slack/poll/queue/database/email/file/sdk trigger's capability-dispatch gating (architecture §4.6), but `Schedule` store records (architecture §5.3's frozen shape) carry no `environmentId` field at all, unlike `Deployment`. A schedule-fired run today is gated by the hosting worker/server process's own ambient trust mode (`"governed"` in a correctly-configured deployment — not the old A48 bug's unconditional `"dev"` bypass), not the specific environment a human might expect. Closing this fully needs a `Schedule`-schema migration, out of A48's scope — flagged for whichever session next touches scheduling.

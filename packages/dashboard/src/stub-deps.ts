@@ -35,6 +35,7 @@
 // resolved).
 import type { AartStore } from "@aart/store";
 import type { ApprovalTask, Correction, EvalExample, EvalRun, EvalSuite, ImprovementBrief, RunRecord, Scorer, StepTrace, Workflow } from "@aart/types";
+import { compactModelFacingOutputs } from "@aart/types";
 import { computeApprovalState, evaluatePromotionForEnvironment, REQUIRED_GATES_BY_MODE, semanticRiskDiff as governanceSemanticRiskDiff } from "@aart/governance";
 import { promoteWorkflowVersionToEnvironment } from "@aart/server";
 import { buildCapabilityClosureLookup, closureFor } from "./capability-catalog.js";
@@ -327,33 +328,69 @@ export function createReportRenderers(redact: DashboardDeps["redact"]): ReportRe
   function redacted(run: RunRecord, resolvedSecretRefs?: ReadonlySet<string>): RunRecord {
     return redact(run, resolvedSecretRefs ?? new Set()) as RunRecord;
   }
+  function failuresFor(run: RunRecord): Array<{ stepId: string; block: string; error: string }> {
+    const failures = run.trace
+      .filter((trace) => trace.status === "failed")
+      .map((trace) => ({ stepId: trace.stepId, block: trace.block, error: trace.error ?? "unknown error" }));
+    if (run.status === "failed" && run.error) {
+      const outputFailure =
+        run.error.startsWith("Workflow output mapping failed:") || run.error.startsWith("Workflow output validation failed:");
+      if (failures.length > 0 && !outputFailure) return failures;
+      failures.push({ stepId: "$workflow", block: outputFailure ? "workflow.outputMapping" : "workflow", error: run.error });
+    }
+    return failures;
+  }
   return {
     modelFacing(run, resolvedSecretRefs) {
       const r = redacted(run, resolvedSecretRefs);
       const headline = r.status === "completed" ? "passed" : r.status === "waiting" ? "waiting" : "failed";
+      const failures = failuresFor(r);
       return {
         headline,
         workflowId: r.workflowId,
         workflowVersion: r.workflowVersion,
-        failures: r.trace.filter((t) => t.status === "failed").map((t) => ({ stepId: t.stepId, block: t.block, error: t.error ?? "unknown error" })),
+        failures,
+        outputs: compactModelFacingOutputs(r.runId, r.outputs ?? {}),
         artifactRefs: r.artifacts.map((a) => ({ id: a.id, kind: a.kind, uri: a.path })),
-        next: headline === "waiting" ? "wait for resume" : headline === "passed" ? "done" : "inspect failures",
+        next: headline === "waiting" ? "wait for resume" : headline === "passed" ? "done" : failures.length > 0 ? "inspect failures" : "inspect run status",
       };
     },
     markdown(run, resolvedSecretRefs) {
       const r = redacted(run, resolvedSecretRefs);
-      const lines = [`# Run ${r.runId}`, ``, `- Workflow: ${r.workflowId}@${r.workflowVersion}`, `- Status: ${r.status}`, `- Started: ${r.startedAt}`, ``, `## Steps`];
+      const lines = [
+        `# Run ${r.runId}`,
+        ``,
+        `- Workflow: ${r.workflowId}@${r.workflowVersion}`,
+        `- Status: ${r.status}`,
+        `- Started: ${r.startedAt}`,
+        ``,
+        `## Outputs`,
+        "```json",
+        JSON.stringify(r.outputs ?? {}, null, 2),
+        "```",
+        ``,
+        `## Steps`,
+      ];
       for (const t of r.trace) lines.push(`- \`${t.stepId}\` (${t.block}): ${t.status}${t.error ? ` — ${t.error}` : ""}`);
       return lines.join("\n");
     },
     html(run, resolvedSecretRefs) {
       const r = redacted(run, resolvedSecretRefs);
+      const failures = failuresFor(r);
       const rows = r.trace
         .map((t) => `<tr><td>${escapeHtml(t.stepId)}</td><td>${escapeHtml(t.block)}</td><td>${escapeHtml(t.status)}</td><td>${escapeHtml(t.error ?? "")}</td></tr>`)
         .join("\n");
+      const failureSection =
+        failures.length === 0
+          ? ""
+          : `<h3>Failures</h3>
+<ul>${failures.map((failure) => `<li><code>${escapeHtml(failure.stepId)}</code> (${escapeHtml(failure.block)}): ${escapeHtml(failure.error)}</li>`).join("")}</ul>`;
       return `<section class="run-report" data-run-id="${escapeHtml(r.runId)}">
 <h2>Run ${escapeHtml(r.runId)}</h2>
 <p>Workflow: ${escapeHtml(r.workflowId)}@${escapeHtml(r.workflowVersion)} — Status: ${escapeHtml(r.status)}</p>
+<h3>Outputs</h3>
+<pre>${escapeHtml(JSON.stringify(r.outputs ?? {}, null, 2))}</pre>
+${failureSection}
 <table><thead><tr><th>Step</th><th>Block</th><th>Status</th><th>Error</th></tr></thead><tbody>
 ${rows}
 </tbody></table>

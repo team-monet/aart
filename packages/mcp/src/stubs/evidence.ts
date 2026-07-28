@@ -16,7 +16,18 @@
 // against the stub engine's (necessarily fake) run outputs, a small fraction
 // of S6's real 12-kind scorer registry (architecture §9.5).
 import type { AartStore } from "@aart/store";
-import type { Correction, EvalExample, EvalRun, EvalSuite, GateStatus, ModelFacingReport, RunRecord, Trigger, Workflow } from "@aart/types";
+import {
+  compactModelFacingOutputs,
+  type Correction,
+  type EvalExample,
+  type EvalRun,
+  type EvalSuite,
+  type GateStatus,
+  type ModelFacingReport,
+  type RunRecord,
+  type Trigger,
+  type Workflow,
+} from "@aart/types";
 import type { EnginePort, EvidencePort } from "../types.js";
 import { newId } from "./engine.js";
 
@@ -51,17 +62,36 @@ function nextForHeadline(headline: ModelFacingReport["headline"]): string {
   }
 }
 
-export function buildModelFacingReport(run: RunRecord): ModelFacingReport {
-  const headline = HEADLINE_BY_STATUS[run.status];
+function workflowFailureBlock(error: string): string {
+  return error.startsWith("Workflow output mapping failed:") || error.startsWith("Workflow output validation failed:")
+    ? "workflow.outputMapping"
+    : "workflow";
+}
+
+function failuresFor(run: RunRecord): ModelFacingReport["failures"] {
   const failures = run.trace
     .filter((t) => t.status === "failed")
     .map((t) => ({ stepId: t.stepId, block: t.block, error: t.error ?? "step failed" }));
+  if (
+    run.status === "failed" &&
+    run.error &&
+    (failures.length === 0 || workflowFailureBlock(run.error) === "workflow.outputMapping")
+  ) {
+    failures.push({ stepId: "$workflow", block: workflowFailureBlock(run.error), error: run.error });
+  }
+  return failures;
+}
+
+export function buildModelFacingReport(run: RunRecord): ModelFacingReport {
+  const headline = HEADLINE_BY_STATUS[run.status];
+  const failures = failuresFor(run);
   const artifactRefs = run.artifacts.map((a) => ({ id: a.id, kind: a.kind, uri: a.path }));
   return {
     headline,
     workflowId: run.workflowId,
     workflowVersion: run.workflowVersion,
     failures,
+    outputs: compactModelFacingOutputs(run.runId, run.outputs ?? {}),
     artifactRefs,
     next: nextForHeadline(headline),
   };
@@ -73,6 +103,14 @@ export function buildMarkdownReport(run: RunRecord): string {
   lines.push("## Steps", "");
   for (const t of run.trace) {
     lines.push(`- [${t.status}] ${t.stepId} (\`${t.block}\`)${t.error ? ` — ${t.error}` : ""}`);
+  }
+  lines.push("", "## Outputs", "", "```json", JSON.stringify(run.outputs ?? {}, null, 2), "```");
+  const failures = failuresFor(run);
+  if (failures.length > 0) {
+    lines.push("", "## Failures", "");
+    for (const failure of failures) {
+      lines.push(`- ${failure.stepId} (\`${failure.block}\`): ${failure.error}`);
+    }
   }
   if (run.artifacts.length > 0) {
     lines.push("", "## Artifacts", "");

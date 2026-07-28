@@ -25,7 +25,7 @@
 // unused) — a composition root that wants real redaction must inject the
 // real `@aart/evidence` renderers (wired to S4's real `redactRecord`)
 // via `createBlockCatalog({ reportRenderers })`.
-import type { ModelFacingReport, RunRecord, RunStatus, StepStatus } from "@aart/types";
+import { compactModelFacingOutputs, type ModelFacingReport, type RunRecord, type RunStatus, type StepStatus } from "@aart/types";
 
 export interface ReportRenderersPort {
   modelFacing(run: RunRecord, resolvedSecretRefs?: ReadonlySet<string>): ModelFacingReport;
@@ -47,16 +47,36 @@ function isFailedStep(status: StepStatus): boolean {
   return status === "failed";
 }
 
-function buildModelFacing(run: RunRecord): ModelFacingReport {
+function workflowFailureBlock(error: string): string {
+  return error.startsWith("Workflow output mapping failed:") || error.startsWith("Workflow output validation failed:")
+    ? "workflow.outputMapping"
+    : "workflow";
+}
+
+function failuresFor(run: RunRecord): ModelFacingReport["failures"] {
   const failures = run.trace
     .filter((step) => isFailedStep(step.status))
     .map((step) => ({ stepId: step.stepId, block: step.block, error: step.error ?? "unknown error" }));
+
+  if (
+    run.status === "failed" &&
+    run.error &&
+    (failures.length === 0 || workflowFailureBlock(run.error) === "workflow.outputMapping")
+  ) {
+    failures.push({ stepId: "$workflow", block: workflowFailureBlock(run.error), error: run.error });
+  }
+  return failures;
+}
+
+function buildModelFacing(run: RunRecord): ModelFacingReport {
+  const failures = failuresFor(run);
 
   return {
     headline: headlineFor(run.status),
     workflowId: run.workflowId,
     workflowVersion: run.workflowVersion,
     failures,
+    outputs: compactModelFacingOutputs(run.runId, run.outputs ?? {}),
     artifactRefs: run.artifacts.map((artifact) => ({ id: artifact.id, kind: artifact.kind, uri: artifact.path })),
     next: failures.length > 0 ? `Review ${failures.length} failed step(s): ${failures.map((f) => f.stepId).join(", ")}` : "No action needed.",
   };
@@ -70,6 +90,11 @@ function buildMarkdown(run: RunRecord): string {
     `**Status:** ${run.status}${run.flag ? ` (flagged: ${run.flag.kind})` : ""}`,
     `**Started:** ${run.startedAt}${run.endedAt ? `  **Ended:** ${run.endedAt}` : ""}`,
     "",
+    "## Outputs",
+    "```json",
+    JSON.stringify(run.outputs ?? {}, null, 2),
+    "```",
+    "",
     "## Steps",
   ];
   for (const step of run.trace) {
@@ -81,26 +106,49 @@ function buildMarkdown(run: RunRecord): string {
       lines.push(`- ${artifact.name} (${artifact.kind}, ${artifact.mime}) — ${artifact.path}`);
     }
   }
+  const failures = failuresFor(run);
+  if (failures.length > 0) {
+    lines.push("", "## Failures");
+    for (const failure of failures) {
+      lines.push(`- \`${failure.stepId}\` (${failure.block}) — ${failure.error}`);
+    }
+  }
   return lines.join("\n");
 }
 
 function buildCliText(run: RunRecord): string {
   const summary = buildModelFacing(run);
   const header = `[${summary.headline.toUpperCase()}] ${run.workflowId}@${run.workflowVersion} (${run.runId})`;
-  if (summary.failures.length === 0) return `${header}\n${summary.next}`;
+  const outputLine = `outputs: ${JSON.stringify(run.outputs ?? {})}`;
+  if (summary.failures.length === 0) return `${header}\n${outputLine}\n${summary.next}`;
   const failureLines = summary.failures.map((f) => `  - ${f.stepId} (${f.block}): ${f.error}`);
-  return [header, ...failureLines].join("\n");
+  return [header, outputLine, ...failureLines].join("\n");
+}
+
+function escapeHtml(value: string): string {
+  return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
 }
 
 function buildHtml(run: RunRecord): string {
   const summary = buildModelFacing(run);
   const stepRows = run.trace
-    .map((step) => `<tr><td>${step.stepId}</td><td>${step.block}</td><td>${step.status}</td><td>${step.error ?? ""}</td></tr>`)
+    .map(
+      (step) =>
+        `<tr><td>${escapeHtml(step.stepId)}</td><td>${escapeHtml(step.block)}</td><td>${escapeHtml(step.status)}</td><td>${escapeHtml(step.error ?? "")}</td></tr>`,
+    )
     .join("");
+  const failures =
+    summary.failures.length > 0
+      ? `<h2>Failures</h2><ul>${summary.failures
+          .map((failure) => `<li>${escapeHtml(`${failure.stepId} (${failure.block}): ${failure.error}`)}</li>`)
+          .join("")}</ul>`
+      : "";
   return (
-    `<section data-run-id="${run.runId}"><h1>Run ${run.runId}</h1>` +
-    `<p>Headline: ${summary.headline}</p>` +
+    `<section data-run-id="${escapeHtml(run.runId)}"><h1>Run ${escapeHtml(run.runId)}</h1>` +
+    `<p>Headline: ${escapeHtml(summary.headline)}</p>` +
+    `<h2>Outputs</h2><pre>${escapeHtml(JSON.stringify(run.outputs ?? {}, null, 2))}</pre>` +
     `<table><thead><tr><th>Step</th><th>Block</th><th>Status</th><th>Error</th></tr></thead><tbody>${stepRows}</tbody></table>` +
+    failures +
     `</section>`
   );
 }
@@ -108,7 +156,15 @@ function buildHtml(run: RunRecord): string {
 function buildPrComment(run: RunRecord): string {
   const summary = buildModelFacing(run);
   const badge = summary.headline === "passed" ? "✅" : summary.headline === "failed" ? "❌" : "⏳";
-  return `${badge} **${run.workflowId}@${run.workflowVersion}** — ${summary.headline}\n\n${summary.next}`;
+  const sections = [
+    `${badge} **${run.workflowId}@${run.workflowVersion}** — ${summary.headline}`,
+    `**Outputs**\n\n\`\`\`json\n${JSON.stringify(summary.outputs, null, 2)}\n\`\`\``,
+  ];
+  if (summary.failures.length > 0) {
+    sections.push(`**Failures**\n\n${summary.failures.map((failure) => `- \`${failure.stepId}\` (${failure.block}): ${failure.error}`).join("\n")}`);
+  }
+  sections.push(summary.next);
+  return sections.join("\n\n");
 }
 
 /** A real, working, non-redacting fallback — used by `report.*` blocks whenever no `ReportRenderersPort` was injected. See module doc comment above for why this differs from eval/scorer-registry-port.ts's deliberately-no-fallback stance. */

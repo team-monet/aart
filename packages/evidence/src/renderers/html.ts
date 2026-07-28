@@ -29,7 +29,7 @@ function renderStepsSummary(model: ReportModel): string {
   return `<table><thead><tr><th>Step</th><th>Block</th><th>Status</th><th>Duration</th></tr></thead><tbody>${rows}</tbody></table>`;
 }
 
-/** Renders `run` as a self-contained HTML fragment. Section order matches spec §19.4's 9-element report UX (ReportModel's field order) — errors/failures render before the full-trace section. */
+/** Renders `run` as a self-contained HTML fragment. Section order follows spec §19.4's report UX plus A74's first-class workflow Outputs section (ReportModel's field order) — errors/failures still render before the full-trace section. */
 export function renderHtml(run: RunRecord, redact: RedactFn, resolvedSecretRefs: ReadonlySet<string> = new Set()): string {
   const clean = applyRedaction(run, redact, resolvedSecretRefs);
   const model = buildReportModel(clean);
@@ -57,6 +57,8 @@ export function renderHtml(run: RunRecord, redact: RedactFn, resolvedSecretRefs:
   // 4. steps summary
   sections.push("<h2>Steps</h2>");
   sections.push(renderStepsSummary(model));
+  sections.push("<h2>Outputs</h2>");
+  sections.push(`<pre>${escapeHtml(JSON.stringify(model.outputs, null, 2))}</pre>`);
 
   // 5. errors/failures
   if (model.failures.length > 0) {

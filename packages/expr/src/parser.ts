@@ -46,6 +46,25 @@ export class ExprSyntaxError extends Error {
   }
 }
 
+export function findUnmatchedExpressionDelimiters(value: string): Array<"{{" | "}}"> {
+  const unmatchedRemainder = value.replace(/\{\{[\s\S]*?\}\}/g, "");
+  const delimiters: Array<"{{" | "}}"> = [];
+  if (unmatchedRemainder.includes("{{")) delimiters.push("{{");
+  if (unmatchedRemainder.includes("}}")) delimiters.push("}}");
+  return delimiters;
+}
+
+/** Rejects expression-looking text that cannot form a complete token. */
+export function assertExpressionDelimiters(value: string): void {
+  const unmatched = findUnmatchedExpressionDelimiters(value);
+  if (unmatched.length === 0) return;
+  const rendered = unmatched.map((delimiter) => `"${delimiter}"`).join(" and ");
+  throw new ExprSyntaxError(
+    `unmatched expression delimiter ${rendered}; every "{{" must have a matching "}}"`,
+    value,
+  );
+}
+
 const EXPRESSION_WRAPPER = /^\{\{\s*([\s\S]*?)\s*\}\}$/;
 const IDENTIFIER_CHAR = /[A-Za-z0-9_]/;
 const IDENTIFIER_START_CHAR = /[A-Za-z_]/;

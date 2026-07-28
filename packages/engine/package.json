@@ -10,6 +10,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./workflow-output-contract": {
+      "types": "./dist/workflow-output-contract.d.ts",
+      "default": "./dist/workflow-output-contract.js"
     }
   },
   "files": ["dist"],

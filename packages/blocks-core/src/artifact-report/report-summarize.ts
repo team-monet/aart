@@ -24,7 +24,7 @@ export function createReportSummarizeBlock(reportRenderers?: ReportRenderersPort
     capabilities: [],
     category: "report",
     description:
-      'Renders a RunRecord as a compact, model-facing report (headline, failures, artifact refs, next action). Example: run: "{{ steps.eval_suite.outputs.run }}".',
+      'Renders a RunRecord as a compact, model-facing report (headline, workflow outputs, failures, artifact refs, next action). Example: run: "{{ steps.eval_suite.outputs.run }}".',
     inputSchema,
     outputSchema,
     execute: async (input) => {

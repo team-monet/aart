@@ -19,6 +19,7 @@ function makeTestRedactor(secretValue: string, marker = "[REDACTED:TEST_SECRET]"
 function secretBearingRun() {
   return fixtureRunRecord({
     status: "failed",
+    outputs: { tokenEcho: SECRET_VALUE },
     trace: [
       {
         seq: 0,
@@ -33,6 +34,18 @@ function secretBearingRun() {
     ],
   });
 }
+
+describe("workflow outputs are first-class report results", () => {
+  const run = fixtureRunRecord({ status: "completed", outputs: { items: ["alpha", "beta"], count: 2 } });
+
+  it("renders outputs directly in model, markdown, HTML, PR-comment, and CLI-text formats", () => {
+    expect(renderModelFacing(run, identityRedact).outputs).toEqual({ items: ["alpha", "beta"], count: 2 });
+    expect(renderMarkdown(run, identityRedact)).toContain('"items": [');
+    expect(renderHtml(run, identityRedact)).toContain("<h2>Outputs</h2>");
+    expect(renderPrComment(run, identityRedact)).toContain("Outputs:");
+    expect(renderCliText(run, identityRedact)).toContain('outputs: {"items":["alpha","beta"],"count":2}');
+  });
+});
 
 describe("every one of the 6 renderers calls the injected RedactFn before returning output (architecture §9.2, this session's DoD)", () => {
   const run = secretBearingRun();
@@ -127,6 +140,28 @@ describe("renderPrComment — spec §26.3 format", () => {
   it("falls back to RunRecord.approved when workflowApprovalState is not supplied", () => {
     const comment = renderPrComment(fixtureRunRecord({ approved: false }), identityRedact);
     expect(comment).toContain("Approval: not approved");
+  });
+
+  it("bounds oversized outputs and points to the full RunRecord in PR comments", () => {
+    const run = fixtureRunRecord({ outputs: { document: `start-${"x".repeat(200_000)}-end` } });
+    const comment = renderPrComment(run, identityRedact);
+
+    expect(comment.length).toBeLessThan(10_000);
+    expect(comment).toContain("truncated-workflow-outputs");
+    expect(comment).toContain(`"runId": "${run.runId}"`);
+    expect(comment).not.toContain("-end");
+  });
+
+  it("bounds deeply nested outputs whose pretty-printed form expands beyond the PR-comment budget", () => {
+    let nested: unknown = "leaf";
+    for (let depth = 0; depth < 1_000; depth++) nested = [nested];
+    const run = fixtureRunRecord({ outputs: { nested } });
+
+    const comment = renderPrComment(run, identityRedact);
+
+    expect(comment.length).toBeLessThan(10_000);
+    expect(comment).toContain("truncated-workflow-outputs");
+    expect(comment).toContain(`"runId": "${run.runId}"`);
   });
 });
 

@@ -5,7 +5,7 @@
 // is the one place that threading happens; every persist call site in this
 // package goes through `applyRedaction`, never `config.redact` directly.
 import type { SecretResolver } from "@aart/expr";
-import type { RedactFn } from "@aart/types";
+import type { RedactFn, RunRecord } from "@aart/types";
 import { SecretResolutionError } from "@aart/types";
 
 /**
@@ -124,4 +124,33 @@ export function createTrackingSecretResolver(resolver: SecretResolver, resolvedR
  */
 export function applyRedaction<T>(redact: RedactFn, record: T, resolvedSecretRefs: ReadonlySet<string>): T {
   return redact(record, resolvedSecretRefs) as T;
+}
+
+/**
+ * Redacts a RunRecord while keeping its active concurrency lock readable by
+ * every intake version sharing the store. The authored key is operational
+ * coordination state while a run is pending/running/waiting; changing it
+ * mid-run can admit overlapping execution or strand a queued run. Terminal
+ * records no longer participate in matching and remain fully redacted.
+ */
+export function applyRunRedaction(redact: RedactFn, run: RunRecord, resolvedSecretRefs: ReadonlySet<string>): RunRecord {
+  const redacted = applyRedaction(redact, run, resolvedSecretRefs);
+  const concurrencyKey = run.params?.concurrencyKey;
+  if (
+    typeof concurrencyKey !== "string" ||
+    (run.status !== "pending" && run.status !== "running" && run.status !== "waiting")
+  ) {
+    return redacted;
+  }
+
+  return {
+    ...redacted,
+    params: {
+      ...redacted.params,
+      concurrencyKey,
+      ...(run.params?.concurrencyKeyFormat !== undefined
+        ? { concurrencyKeyFormat: run.params.concurrencyKeyFormat }
+        : {}),
+    },
+  };
 }

@@ -15,9 +15,13 @@
 // (spec §14.2's own example has no `outputs:` block to confirm this against,
 // but nothing about the keyed-object convention is inputs-specific, and
 // `Field[]` — the compiled target — is the exact same type for both).
-import { findExpressionTokens, parseExpression, ExprSyntaxError } from "@aart/expr";
-import type { Field, Workflow } from "@aart/types";
-import { WorkflowSchema } from "@aart/types";
+import {
+  assertExpressionDelimiters,
+  findExpressionTokens,
+  parseExpression,
+  ExprSyntaxError,
+} from "@aart/expr";
+import { isPatternCompatibleFieldType, WorkflowSchema, type Field, type Workflow } from "@aart/types";
 import yaml from "js-yaml";
 
 export class YamlCompileError extends Error {
@@ -61,9 +65,55 @@ function collectStrings(value: unknown, out: string[] = []): string[] {
   return out;
 }
 
-/** Syntactically validates every `{{ }}` token found in a compiled step list via @aart/expr's real parser (architecture §3.1) — fails loudly, matching AART's "errors are few-shot corrections" design goal (spec §32.2b) rather than silently registering a workflow with a `{{ }}` token that can never resolve at run time. */
-function validateExpressions(steps: readonly Record<string, unknown>[]): void {
+function validateExpressionCandidate(
+  candidate: string,
+  label: string,
+  problems: string[],
+  options: { allowSecrets?: boolean; knownStepIds?: ReadonlySet<string> } = {},
+): void {
+  const tokens = findExpressionTokens(candidate);
+  try {
+    assertExpressionDelimiters(candidate);
+  } catch (err) {
+    if (err instanceof ExprSyntaxError) problems.push(`${label}: ${err.message}`);
+    else throw err;
+  }
+
+  for (const match of tokens) {
+    try {
+      const parsed = parseExpression(match[0]);
+      if (options.allowSecrets === false && parsed.root === "secrets") {
+        problems.push(`${label}: public workflow outputs may not reference secrets.*; expose a non-secret derived value instead`);
+      }
+      const first = parsed.path[0];
+      if (options.knownStepIds && parsed.root === "steps" && first?.kind === "property" && !options.knownStepIds.has(first.name)) {
+        problems.push(`${label}: references unknown step "${first.name}"`);
+      }
+      const second = parsed.path[1];
+      const hasValidStepShape =
+        second?.kind === "property" &&
+        (second.name === "outputs" || (second.name === "status" && parsed.path.length === 2));
+      if (
+        options.knownStepIds &&
+        parsed.root === "steps" &&
+        (first?.kind !== "property" || !hasValidStepShape)
+      ) {
+        problems.push(`${label}: step references must use steps.<id>.outputs[.<field>] or steps.<id>.status`);
+      }
+    } catch (err) {
+      if (err instanceof ExprSyntaxError) {
+        problems.push(`${label}: ${err.message}`);
+      } else {
+        throw err;
+      }
+    }
+  }
+}
+
+/** Syntactically validates every `{{ }}` token found in compiled steps and the workflow's public outputMapping via @aart/expr's real parser (architecture §3.1) — including unmatched delimiters that cannot form a parser token — and fails loudly rather than registering an expression that can never resolve at run time. */
+function validateExpressions(steps: readonly Record<string, unknown>[], outputMapping: unknown): void {
   const problems: string[] = [];
+  const knownStepIds = new Set(steps.flatMap((step) => (typeof step.id === "string" ? [step.id] : [])));
   for (const step of steps) {
     const candidates: string[] = [];
     for (const key of ["if", "then", "else", "next", "until", "forEach", "timeout", "idempotencyKey"] as const) {
@@ -72,21 +122,46 @@ function validateExpressions(steps: readonly Record<string, unknown>[]): void {
     }
     collectStrings(step.with, candidates);
     for (const candidate of candidates) {
-      for (const match of findExpressionTokens(candidate)) {
-        try {
-          parseExpression(match[0]);
-        } catch (err) {
-          if (err instanceof ExprSyntaxError) {
-            problems.push(`step "${String(step.id ?? "?")}": ${err.message}`);
-          } else {
-            throw err;
-          }
-        }
-      }
+      validateExpressionCandidate(candidate, `step "${String(step.id ?? "?")}"`, problems);
+    }
+  }
+  if (isPlainObject(outputMapping)) {
+    for (const [outputName, candidate] of Object.entries(outputMapping)) {
+      if (typeof candidate !== "string") continue;
+      validateExpressionCandidate(candidate, `outputMapping "${outputName}"`, problems, { allowSecrets: false, knownStepIds });
     }
   }
   if (problems.length > 0) {
     throw new YamlCompileError(`Invalid {{ }} expression(s):\n${problems.map((p) => `- ${p}`).join("\n")}`, problems);
+  }
+}
+
+/** Keeps the authored public result contract closed: every required output must be produced, and a mapping cannot silently publish undeclared fields. Optional declared outputs may be omitted. */
+function validateOutputContract(workflow: Workflow): void {
+  const mappingKeys = new Set(Object.keys(workflow.execution.outputMapping ?? {}));
+  const declaredKeys = new Set<string>();
+  const problems: string[] = [];
+
+  for (const field of workflow.outputs) {
+    if (declaredKeys.has(field.name)) {
+      problems.push(`output "${field.name}" is declared more than once`);
+      continue;
+    }
+    declaredKeys.add(field.name);
+    if (field.required === true && !mappingKeys.has(field.name)) {
+      problems.push(`required output "${field.name}" has no outputMapping entry`);
+    }
+    if (field.pattern !== undefined && !isPatternCompatibleFieldType(field.type)) {
+      problems.push(`output "${field.name}" declares pattern but has non-string type "${field.type}"`);
+    }
+  }
+  for (const key of mappingKeys) {
+    if (!declaredKeys.has(key)) {
+      problems.push(`outputMapping "${key}" is not declared in outputs`);
+    }
+  }
+  if (problems.length > 0) {
+    throw new YamlCompileError(`Invalid workflow output contract:\n${problems.map((problem) => `- ${problem}`).join("\n")}`, problems);
   }
 }
 
@@ -136,13 +211,14 @@ export function compileWorkflowObject(obj: Record<string, unknown>): Workflow {
     if (obj[passthroughKey] !== undefined) compiled[passthroughKey] = obj[passthroughKey];
   }
 
-  validateExpressions(stepsSource as Record<string, unknown>[]);
+  validateExpressions(stepsSource as Record<string, unknown>[], outputMapping);
 
   const parsed = WorkflowSchema.safeParse(compiled);
   if (!parsed.success) {
     const issues = parsed.error.issues.map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`);
     throw new YamlCompileError(`Compiled workflow does not match the canonical Workflow schema:\n${issues.map((i) => `- ${i}`).join("\n")}`, issues);
   }
+  validateOutputContract(parsed.data);
   return parsed.data;
 }
 

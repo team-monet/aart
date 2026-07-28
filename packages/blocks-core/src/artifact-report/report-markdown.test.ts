@@ -13,7 +13,7 @@ describe("report.markdown", () => {
 
   it("uses the injected ReportRenderersPort when one is provided", async () => {
     const fakeRenderers: ReportRenderersPort = {
-      modelFacing: () => ({ headline: "passed", workflowId: "w", workflowVersion: "1", failures: [], artifactRefs: [], next: "" }),
+      modelFacing: () => ({ headline: "passed", workflowId: "w", workflowVersion: "1", failures: [], outputs: {}, artifactRefs: [], next: "" }),
       markdown: () => "INJECTED-MARKDOWN",
       html: () => "",
       prComment: () => "",
@@ -26,9 +26,11 @@ describe("report.markdown", () => {
   });
 
   it("falls back to the local renderer (does not throw) when nothing is injected and @aart/evidence is still a stub", async () => {
-    const run = fakeRunRecord({ runId: "run-fallback-test" });
+    const run = fakeRunRecord({ runId: "run-fallback-test", outputs: { reusable: ["alpha", "beta"] } });
     const result = await reportMarkdownBlock.execute({ run }, fakeExecutionContext());
     expect((result as { markdown: string }).markdown).toContain("run-fallback-test");
+    expect((result as { markdown: string }).markdown).toContain('"reusable"');
+    expect((result as { markdown: string }).markdown).toContain('"alpha"');
   });
 
   it("rejects a run input that doesn't match the frozen RunRecord shape", async () => {

@@ -13,7 +13,7 @@ describe("report.json", () => {
 
   it("uses the injected ReportRenderersPort when one is provided", async () => {
     const fakeRenderers: ReportRenderersPort = {
-      modelFacing: () => ({ headline: "passed", workflowId: "w", workflowVersion: "1", failures: [], artifactRefs: [], next: "" }),
+      modelFacing: () => ({ headline: "passed", workflowId: "w", workflowVersion: "1", failures: [], outputs: {}, artifactRefs: [], next: "" }),
       markdown: () => "",
       html: () => "",
       prComment: () => "",

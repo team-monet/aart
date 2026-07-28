@@ -1,7 +1,12 @@
 // Roots and resolution (architecture §3.2) + the exactly-one-expression-
 // preserves-type rule (architecture §3.3, spec §14.3).
-import { parseExpression, type ParsedExpression, type PathSegment } from "./parser.js";
-import { findExpressionTokens } from "./parser.js";
+import {
+  assertExpressionDelimiters,
+  findExpressionTokens,
+  parseExpression,
+  type ParsedExpression,
+  type PathSegment,
+} from "./parser.js";
 
 /**
  * The four data roots resolve against plain values the caller supplies —
@@ -136,6 +141,7 @@ export async function resolveExpression(value: unknown, context: ExprContext, op
     return value;
   }
 
+  assertExpressionDelimiters(value);
   const trimmed = value.trim();
   const trimmedMatches = findExpressionTokens(trimmed);
   if (trimmedMatches.length === 0) {

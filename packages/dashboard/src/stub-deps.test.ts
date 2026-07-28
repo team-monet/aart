@@ -515,9 +515,16 @@ describe("report renderers (S6 seam E3)", () => {
         return deps.redact(record, refs);
       };
       const renderers = deps.createReportRenderers(spyRedact);
-      const run = makeRun({ runId: "run-report", status: "completed", trace: [{ seq: 0, stepId: "s1", block: "http.get", status: "completed", inputs: {}, startedAt: "2026-07-10T00:00:00.000Z" }] });
+      const run = makeRun({
+        runId: "run-report",
+        status: "completed",
+        outputs: { reusable: ["alpha", "beta"] },
+        trace: [{ seq: 0, stepId: "s1", block: "http.get", status: "completed", inputs: {}, startedAt: "2026-07-10T00:00:00.000Z" }],
+      });
 
-      expect(renderers.html(run)).toContain("run-report");
+      const html = renderers.html(run);
+      expect(html).toContain("run-report");
+      expect(html).toContain("alpha");
       expect(renderers.markdown(run)).toContain("run-report");
       expect(renderers.json(run)).toContain("run-report");
       expect(renderers.modelFacing(run).headline).toBe("passed");
@@ -541,6 +548,46 @@ describe("report renderers (S6 seam E3)", () => {
       const html = renderers.html(run);
       expect(html).not.toContain("<script>alert");
       expect(html).toContain("&lt;script&gt;");
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it("surfaces a workflow-level output failure in model-facing and HTML reports when every step completed", async () => {
+    const { deps, cleanup } = await createTestFixture();
+    try {
+      const renderers = deps.createReportRenderers(deps.redact);
+      const error = 'Workflow output validation failed: output "result" expected type "string" but received "object"';
+      const run = makeRun({
+        runId: "run-output-failure",
+        status: "failed",
+        error,
+        trace: [{ seq: 0, stepId: "s1", block: "http.get", status: "completed", inputs: {}, startedAt: "2026-07-10T00:00:00.000Z" }],
+      });
+
+      expect(renderers.modelFacing(run).failures).toEqual([{ stepId: "$workflow", block: "workflow.outputMapping", error }]);
+      const html = renderers.html(run);
+      expect(html).toContain("Workflow output validation failed");
+      expect(html).toContain("workflow.outputMapping");
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it("surfaces the terminal output failure even when the trace contains an older failed attempt", async () => {
+    const { deps, cleanup } = await createTestFixture();
+    try {
+      const renderers = deps.createReportRenderers(deps.redact);
+      const error = "Workflow output mapping failed: corrected result is missing";
+      const run = makeRun({
+        runId: "run-recovered-output-failure",
+        status: "failed",
+        error,
+        trace: [{ seq: 0, stepId: "retry", block: "http.get", status: "failed", inputs: {}, error: "stale attempt", startedAt: "2026-07-10T00:00:00.000Z" }],
+      });
+
+      expect(renderers.modelFacing(run).failures.map((failure) => failure.stepId)).toEqual(["retry", "$workflow"]);
+      expect(renderers.html(run)).toContain(error);
     } finally {
       await cleanup();
     }

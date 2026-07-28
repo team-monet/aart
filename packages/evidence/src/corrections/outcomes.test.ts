@@ -44,9 +44,11 @@ function fixtureCorrection(overrides: Partial<Correction> = {}): Correction {
 
 describe("outcome 1/6 — updateRunOutput (spec §23.4 'update current run output')", () => {
   it("writes correction.corrected into the target StepTrace at fieldPath and flags postHocCorrected", async () => {
+    const workflow = fixtureWorkflow({ id: "checkout-smoke", version: "0.1.0" });
     const run = fixtureRunRecord({
       runId: "run_1",
       trace: [{ seq: 0, stepId: "extract", block: "llm.extract", status: "completed", inputs: {}, outputs: { nmi: "6401234567" }, startedAt: "t" }],
+      snapshot: { definitions: workflow, resolvedVersions: {}, packHashes: {}, capturedAt: "2026-01-01T00:00:00.000Z" },
     });
     await store.runs.put(run);
 
@@ -56,6 +58,199 @@ describe("outcome 1/6 — updateRunOutput (spec §23.4 'update current run outpu
     expect(trace.outputs?.nmi).toBe("6401234568");
     expect(trace.postHocCorrected).toBe(true);
     await expect(store.runs.get("run_1")).resolves.toMatchObject({ trace: [{ outputs: { nmi: "6401234568" }, postHocCorrected: true }] });
+  });
+
+  it("preserves corrections on legacy completed runs without materialized public outputs", async () => {
+    const run = fixtureRunRecord({
+      runId: "run_1",
+      outputs: undefined,
+      trace: [{ seq: 0, stepId: "extract", block: "llm.extract", status: "completed", inputs: {}, outputs: { nmi: "wrong" }, startedAt: "t" }],
+      snapshot: { definitions: {}, resolvedVersions: {}, packHashes: {}, capturedAt: "2026-01-01T00:00:00.000Z" },
+    });
+    await store.runs.put(run);
+
+    const updated = await updateRunOutput(store, fixtureCorrection());
+
+    expect(updated.outputs).toBeUndefined();
+    expect(updated.trace[0]).toMatchObject({ outputs: { nmi: "6401234568" }, postHocCorrected: true });
+  });
+
+  it("recomputes materialized workflow outputs after correcting a mapped step field", async () => {
+    const workflow = fixtureWorkflow({
+      id: "meter-reading",
+      version: "1.0.0",
+      outputs: [{ name: "nmi", type: "string", required: true }],
+      execution: {
+        type: "workflow",
+        steps: [{ id: "extract", uses: "llm.extract" }],
+        outputMapping: { nmi: "{{ steps.extract.outputs.nmi }}" },
+      },
+    });
+    const run = fixtureRunRecord({
+      runId: "run_1",
+      workflowId: workflow.id,
+      workflowVersion: workflow.version,
+      outputs: { nmi: "6401234567" },
+      trace: [{ seq: 0, stepId: "extract", block: "llm.extract", status: "completed", inputs: {}, outputs: { nmi: "6401234567" }, startedAt: "t" }],
+      snapshot: { definitions: workflow, resolvedVersions: {}, packHashes: {}, capturedAt: "2026-01-01T00:00:00.000Z" },
+    });
+    await store.runs.put(run);
+
+    const updated = await updateRunOutput(store, fixtureCorrection());
+
+    expect(updated.outputs).toEqual({ nmi: "6401234568" });
+    await expect(store.runs.get("run_1")).resolves.toMatchObject({ outputs: { nmi: "6401234568" } });
+  });
+
+  it("corrects the latest matching trace used by workflow output projection", async () => {
+    const workflow = fixtureWorkflow({
+      id: "meter-reading-retried",
+      version: "1.0.0",
+      outputs: [{ name: "nmi", type: "string", required: true }],
+      execution: {
+        type: "workflow",
+        steps: [{ id: "extract", uses: "llm.extract" }],
+        outputMapping: { nmi: "{{ steps.extract.outputs.nmi }}" },
+      },
+    });
+    const run = fixtureRunRecord({
+      runId: "run_1",
+      workflowId: workflow.id,
+      workflowVersion: workflow.version,
+      outputs: { nmi: "latest-wrong" },
+      trace: [
+        { seq: 0, stepId: "extract", block: "llm.extract", status: "completed", inputs: {}, outputs: { nmi: "older" }, startedAt: "t0" },
+        { seq: 1, stepId: "extract", block: "llm.extract", status: "completed", inputs: {}, outputs: { nmi: "latest-wrong" }, startedAt: "t1" },
+      ],
+      snapshot: { definitions: workflow, resolvedVersions: {}, packHashes: {}, capturedAt: "2026-01-01T00:00:00.000Z" },
+    });
+    await store.runs.put(run);
+
+    const updated = await updateRunOutput(store, fixtureCorrection());
+
+    expect(updated.trace[0]).toMatchObject({ outputs: { nmi: "older" } });
+    expect(updated.trace[0]).not.toHaveProperty("postHocCorrected");
+    expect(updated.trace[1]).toMatchObject({ outputs: { nmi: "6401234568" }, postHocCorrected: true });
+    expect(updated.outputs).toEqual({ nmi: "6401234568" });
+  });
+
+  it("refreshes a forEach aggregate and public outputs after correcting an iteration", async () => {
+    const workflow = fixtureWorkflow({
+      id: "meter-reading-map",
+      version: "1.0.0",
+      outputs: [{ name: "readings", type: "array", required: true }],
+      execution: {
+        type: "workflow",
+        steps: [{ id: "map", uses: "llm.extract", forEach: "{{ inputs.items }}" }],
+        outputMapping: { readings: "{{ steps.map.outputs.items }}" },
+      },
+    });
+    const run = fixtureRunRecord({
+      runId: "run_1",
+      workflowId: workflow.id,
+      workflowVersion: workflow.version,
+      outputs: { readings: [{ nmi: "wrong" }, { nmi: "second" }] },
+      trace: [
+        { seq: 0, stepId: "map[0]", block: "llm.extract", status: "completed", inputs: {}, outputs: { nmi: "wrong" }, startedAt: "t0" },
+        { seq: 1, stepId: "map[1]", block: "llm.extract", status: "completed", inputs: {}, outputs: { nmi: "second" }, startedAt: "t1" },
+        {
+          seq: 2,
+          stepId: "map",
+          block: "llm.extract",
+          status: "completed",
+          inputs: {},
+          outputs: { items: [{ nmi: "wrong" }, { nmi: "second" }] },
+          startedAt: "t2",
+        },
+      ],
+      snapshot: { definitions: workflow, resolvedVersions: {}, packHashes: {}, capturedAt: "2026-01-01T00:00:00.000Z" },
+    });
+    await store.runs.put(run);
+
+    const updated = await updateRunOutput(
+      store,
+      fixtureCorrection({ stepId: "map[0]", fieldPath: "outputs.nmi", corrected: "corrected" }),
+    );
+
+    expect(updated.trace[0]).toMatchObject({ outputs: { nmi: "corrected" }, postHocCorrected: true });
+    expect(updated.trace[2]).toMatchObject({
+      outputs: { items: [{ nmi: "corrected" }, { nmi: "second" }] },
+      postHocCorrected: true,
+    });
+    expect(updated.outputs).toEqual({ readings: [{ nmi: "corrected" }, { nmi: "second" }] });
+  });
+
+  it("uses the captured workflow snapshot instead of an overwritten live mapping", async () => {
+    const capturedWorkflow = fixtureWorkflow({
+      id: "meter-reading-frozen",
+      version: "1.0.0",
+      outputs: [{ name: "nmi", type: "string", required: true }],
+      execution: {
+        type: "workflow",
+        steps: [{ id: "extract", uses: "llm.extract" }],
+        outputMapping: { nmi: "{{ steps.extract.outputs.nmi }}" },
+      },
+    });
+    const overwrittenLive = {
+      ...capturedWorkflow,
+      execution: { ...capturedWorkflow.execution, outputMapping: { nmi: "{{ inputs.unrelated }}" } },
+    };
+    const run = fixtureRunRecord({
+      runId: "run_1",
+      workflowId: capturedWorkflow.id,
+      workflowVersion: capturedWorkflow.version,
+      inputs: { unrelated: "live-definition-value" },
+      outputs: { nmi: "wrong" },
+      trace: [{ seq: 0, stepId: "extract", block: "llm.extract", status: "completed", inputs: {}, outputs: { nmi: "wrong" }, startedAt: "t" }],
+      snapshot: {
+        definitions: capturedWorkflow,
+        resolvedVersions: {},
+        packHashes: {},
+        capturedAt: "2026-01-01T00:00:00.000Z",
+      },
+    });
+    await store.workflows.put(overwrittenLive);
+    await store.runs.put(run);
+
+    const updated = await updateRunOutput(store, fixtureCorrection());
+
+    expect(updated.outputs).toEqual({ nmi: "6401234568" });
+  });
+
+  it("persists a trace correction on a failed run without requiring unreachable outputs", async () => {
+    const workflow = fixtureWorkflow({
+      id: "partial-failure",
+      version: "1.0.0",
+      outputs: [{ name: "requiredResult", type: "string", required: true }],
+      execution: {
+        type: "workflow",
+        steps: [
+          { id: "extract", uses: "llm.extract" },
+          { id: "never-ran", uses: "llm.extract" },
+        ],
+        outputMapping: { requiredResult: "{{ steps.never-ran.outputs.value }}" },
+      },
+    });
+    const run = fixtureRunRecord({
+      runId: "run_1",
+      workflowId: workflow.id,
+      workflowVersion: workflow.version,
+      status: "failed",
+      outputs: undefined,
+      trace: [{ seq: 0, stepId: "extract", block: "llm.extract", status: "failed", inputs: {}, outputs: { nmi: "wrong" }, startedAt: "t" }],
+      snapshot: { definitions: workflow, resolvedVersions: {}, packHashes: {}, capturedAt: "2026-01-01T00:00:00.000Z" },
+    });
+    await store.runs.put(run);
+
+    const updated = await updateRunOutput(store, fixtureCorrection());
+
+    expect(updated.status).toBe("failed");
+    expect(updated.trace[0]).toMatchObject({ outputs: { nmi: "6401234568" }, postHocCorrected: true });
+    expect(updated.outputs).toBeUndefined();
+    await expect(store.runs.get("run_1")).resolves.toMatchObject({
+      status: "failed",
+      trace: [{ outputs: { nmi: "6401234568" }, postHocCorrected: true }],
+    });
   });
 
   it("throws when the run does not exist", async () => {

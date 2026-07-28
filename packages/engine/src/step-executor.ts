@@ -3,14 +3,15 @@
 // retry/timeout -> idempotency -> redact -> record StepTrace -> determine
 // next. Wait-type block ids (wait/wait-blocks.ts) are intercepted before
 // normal dispatch and handed to wait/wait-machine.ts instead.
-import type { ExprContext, ResolveOptions } from "@aart/expr";
+import { findExpressionTokens, parseExpression, resolveExpression, type ExprContext, type ResolveOptions } from "@aart/expr";
 import type { ApprovalTask, LlmCallMetadata, RetryPolicy, RunRecord, StepTrace, WaitCondition, Workflow, WorkflowStep } from "@aart/types";
 import { AartError, DEFAULT_EFFECTFUL_CAPABILITIES, isEffectfulCapability, IterationLimitExceededError, TimeoutError } from "@aart/types";
 import { checkCapabilityDispatch, alwaysEmptyGrantedCapabilities } from "./capability.js";
 import { parseDurationMs } from "./duration.js";
 import { buildExprContext, resolveArrayExpression, resolveBooleanExpression, resolveStringExpression, resolveWithRecord } from "./expr-context.js";
 import { checkIdempotency, recordIdempotency } from "./idempotency.js";
-import { applyRedaction, createTrackingSecretResolver, isTextMime, throwingSecretResolver } from "./redaction.js";
+import { jsonCompatibilityProblem, jsonValuesEqual } from "./output-validation.js";
+import { applyRedaction, applyRunRedaction, createTrackingSecretResolver, isTextMime, throwingSecretResolver } from "./redaction.js";
 import { CURRENT_ENGINE_SCHEMA_VERSION } from "./schema-version.js";
 import type { EngineBlockExecutionContext, EngineConfig } from "./types.js";
 import { enterWait, type WaitMachineConfig } from "./wait/wait-machine.js";
@@ -229,7 +230,12 @@ async function dispatchOnce(
     const check = await checkIdempotency(config.store, resolvedIdempotencyKey);
     if (check.alreadyCompleted) {
       const endedAt = now().toISOString();
-      return { seq, stepId: stepIdForTrace, block: step.uses, status: "completed", inputs: resolvedInputs, outputs: check.recordedOutput as Record<string, unknown>, startedAt, endedAt, durationMs: 0 };
+      const outputs = check.recordedOutput as Record<string, unknown>;
+      const compatibilityProblem = jsonCompatibilityProblem(outputs, `step "${stepIdForTrace}" outputs`);
+      if (compatibilityProblem) {
+        return { seq, stepId: stepIdForTrace, block: step.uses, status: "failed", inputs: resolvedInputs, error: compatibilityProblem, startedAt, endedAt, durationMs: 0 };
+      }
+      return { seq, stepId: stepIdForTrace, block: step.uses, status: "completed", inputs: resolvedInputs, outputs, startedAt, endedAt, durationMs: 0 };
     }
   }
 
@@ -273,6 +279,20 @@ async function dispatchOnce(
   }
 
   const outputs = output !== null && typeof output === "object" && !Array.isArray(output) ? (output as Record<string, unknown>) : { value: output };
+  const compatibilityProblem = jsonCompatibilityProblem(outputs, `step "${stepIdForTrace}" outputs`);
+  if (compatibilityProblem) {
+    return {
+      seq,
+      stepId: stepIdForTrace,
+      block: step.uses,
+      status: "failed",
+      inputs: resolvedInputs,
+      error: compatibilityProblem,
+      startedAt,
+      endedAt,
+      durationMs,
+    };
+  }
   // A faked (dry-run) dispatch never records idempotency: recording a
   // synthetic "would have called X" result under the real idempotencyKey
   // would wrongly short-circuit a LATER, genuinely real invocation of this
@@ -401,9 +421,55 @@ async function executeForEachStep(
 async function appendTracesAndPersist(config: EngineConfig, run: RunRecord, newTraces: StepTrace[], resolvedSecretRefs: ReadonlySet<string>): Promise<RunRecord> {
   const artifacts = await config.store.artifacts.listByRun(run.runId);
   const updated: RunRecord = { ...run, trace: [...run.trace, ...newTraces], artifacts, updatedAt: (config.now?.() ?? new Date()).toISOString() };
-  const redacted = applyRedaction(config.redact, updated, resolvedSecretRefs);
+  const redacted = applyRunRedaction(config.redact, updated, resolvedSecretRefs);
   await config.store.runs.put(redacted);
   return redacted;
+}
+
+/**
+ * A trace is redacted before it is persisted, so a later terminal output
+ * projection cannot tell whether a marker was authored by the block or
+ * substituted for a secret. Check newly available mapped values while the
+ * raw trace still exists and reject only values that the persistence
+ * redactor would alter.
+ */
+async function assertPubliclyMappedTraceValuesSurviveRedaction(
+  config: EngineConfig,
+  workflow: Workflow,
+  run: RunRecord,
+  newTraces: StepTrace[],
+  resolvedSecretRefs: ReadonlySet<string>,
+): Promise<void> {
+  const outputMapping = workflow.execution.outputMapping;
+  if (!outputMapping || resolvedSecretRefs.size === 0) return;
+
+  const completedStepIds = new Set(
+    newTraces.filter((trace) => trace.status === "completed").map((trace) => trace.stepId),
+  );
+  if (completedStepIds.size === 0) return;
+
+  const candidateRun: RunRecord = { ...run, trace: [...run.trace, ...newTraces] };
+  const context = buildExprContext(candidateRun);
+  for (const [outputName, expression] of Object.entries(outputMapping)) {
+    for (const token of findExpressionTokens(expression)) {
+      const parsed = parseExpression(token[0]);
+      const first = parsed.path[0];
+      if (
+        parsed.root !== "steps" ||
+        first?.kind !== "property" ||
+        !completedStepIds.has(first.name)
+      ) {
+        continue;
+      }
+      const rawValue = await resolveExpression(token[0], context);
+      const observableValue = applyRedaction(config.redact, rawValue, resolvedSecretRefs);
+      if (!jsonValuesEqual(rawValue, observableValue)) {
+        throw new Error(
+          `public outputMapping "${outputName}" resolves from step "${first.name}" to a value changed by secret redaction; expose a non-secret derived value instead`,
+        );
+      }
+    }
+  }
 }
 
 /**
@@ -543,6 +609,15 @@ export async function executeStep(
     stepFailed = trace.status === "failed";
   }
 
+  if (!stepFailed) {
+    await assertPubliclyMappedTraceValuesSurviveRedaction(
+      config,
+      workflow,
+      run,
+      newTraces,
+      resolvedSecretRefs,
+    );
+  }
   const updatedRun = await appendTracesAndPersist(config, run, newTraces, resolvedSecretRefs);
 
   if (stepFailed) {

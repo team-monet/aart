@@ -7,8 +7,13 @@ function field(overrides: Partial<Field>): Field {
   return { name: "f", type: "string", ...overrides };
 }
 
-function wf(inputs: Field[], steps: WorkflowStep[]): Pick<Workflow, "inputs" | "execution"> {
-  return { inputs, execution: { type: "workflow", steps } };
+function wf(
+  inputs: Field[],
+  steps: WorkflowStep[],
+  outputs: Field[] = [],
+  outputMapping?: Record<string, string>,
+): Pick<Workflow, "inputs" | "outputs" | "execution"> {
+  return { inputs, outputs, execution: { type: "workflow", steps, outputMapping } };
 }
 
 const lookup: CapabilityClosureLookup = {
@@ -54,6 +59,103 @@ describe("validateInputSafety — enum/regex/default consistency (spec §18.4)",
   it("flags an invalid regex pattern itself", () => {
     const findings = validateInputSafety(wf([field({ pattern: "(unterminated", default: "x" })], []), lookup);
     expect(findings.some((f) => f.message.includes("not a valid regular expression"))).toBe(true);
+  });
+
+  it("rejects a catastrophically backtracking output pattern before execution", () => {
+    const findings = validateInputSafety(
+      wf([], [], [field({ name: "result", pattern: "^(a+)+$" })], { result: "{{ inputs.value }}" }),
+      lookup,
+    );
+
+    expect(findings).toContainEqual(
+      expect.objectContaining({
+        path: "outputs[0].pattern",
+        severity: "error",
+        message: expect.stringContaining("unsafe to evaluate"),
+      }),
+    );
+  });
+
+  it("validates output field patterns as part of the public result contract", () => {
+    const findings = validateInputSafety(wf([], [], [field({ name: "result", pattern: "(unterminated" })]), lookup);
+    expect(findings).toContainEqual(expect.objectContaining({ path: "outputs[0].pattern", severity: "error" }));
+  });
+
+  it("rejects a pattern on a non-string workflow output before execution", () => {
+    const findings = validateInputSafety(wf([], [], [field({ name: "count", type: "number", pattern: "^\\d+$" })]), lookup);
+    expect(findings).toContainEqual(
+      expect.objectContaining({ path: "outputs[0].pattern", severity: "error", message: expect.stringContaining("non-string") }),
+    );
+  });
+
+  it("allows a pattern on an opaque custom string-like workflow output", () => {
+    const findings = validateInputSafety(
+      wf([], [], [field({ name: "publishedAt", type: "date", pattern: "^\\d{4}-\\d{2}-\\d{2}$" })]),
+      lookup,
+    );
+    expect(findings).toEqual([]);
+  });
+
+  it("rejects duplicate workflow output declarations", () => {
+    const findings = validateInputSafety(
+      wf([], [], [field({ name: "result" }), field({ name: "result", type: "number" })]),
+      lookup,
+    );
+    expect(findings).toContainEqual(
+      expect.objectContaining({ path: "outputs[1].name", severity: "error", message: expect.stringContaining("more than once") }),
+    );
+  });
+
+  it("rejects a required output with no mapping in the canonical governance gate", () => {
+    const findings = validateInputSafety(wf([], [], [field({ name: "result", required: true })]), lookup);
+
+    expect(findings).toContainEqual(
+      expect.objectContaining({
+        path: "execution.outputMapping.result",
+        severity: "error",
+        message: expect.stringContaining('Required output "result" has no outputMapping entry'),
+      }),
+    );
+  });
+
+  it("rejects a mapping that publishes an undeclared output in the canonical governance gate", () => {
+    const findings = validateInputSafety(
+      wf([], [], [field({ name: "declared" })], { undeclared: "{{ inputs.value }}" }),
+      lookup,
+    );
+
+    expect(findings).toContainEqual(
+      expect.objectContaining({
+        path: "execution.outputMapping.undeclared",
+        severity: "error",
+        message: expect.stringContaining('outputMapping "undeclared" is not declared in outputs'),
+      }),
+    );
+  });
+
+  it.each([
+    ["an operator expression", "{{ inputs.value + 1 }}", "operators are not supported"],
+    ["an unknown step source", "{{ steps.missing.outputs.value }}", 'references unknown step "missing"'],
+    ["a malformed delimiter", "{{ inputs.value", "unmatched expression delimiter"],
+    ["a direct secret reference", "{{ secrets.API_KEY }}", "may not reference secrets"],
+  ])("rejects %s in outputMapping through the canonical governance gate", (_label, expression, expectedMessage) => {
+    const findings = validateInputSafety(
+      wf(
+        [],
+        [{ id: "known", uses: "assert.contains" }],
+        [field({ name: "result" })],
+        { result: expression },
+      ),
+      lookup,
+    );
+
+    expect(findings).toContainEqual(
+      expect.objectContaining({
+        path: "execution.outputMapping.result",
+        severity: "error",
+        message: expect.stringContaining(expectedMessage),
+      }),
+    );
   });
 });
 

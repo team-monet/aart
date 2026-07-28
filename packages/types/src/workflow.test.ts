@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { ExampleSchema, FieldSchema, WorkflowSchema, WorkflowStepSchema } from "./workflow.js";
+import {
+  analyzeWorkflowRegexSafety,
+  ExampleSchema,
+  FieldSchema,
+  WorkflowSchema,
+  WorkflowStepSchema,
+} from "./workflow.js";
 
 describe("FieldSchema", () => {
   it("round-trips a Field", () => {
@@ -17,6 +23,90 @@ describe("FieldSchema", () => {
       description: "GitHub repo",
     };
     expect(FieldSchema.parse(input)).toEqual(input);
+  });
+
+  it("preserves custom field types for backward-compatible Pack-defined semantics", () => {
+    const result = FieldSchema.safeParse({ name: "publishedAt", type: "date" });
+    expect(result.success).toBe(true);
+  });
+});
+
+describe("analyzeWorkflowRegexSafety", () => {
+  it("accepts ordinary anchored validation patterns", () => {
+    expect(analyzeWorkflowRegexSafety("^\\d{4}-\\d{2}-\\d{2}$")).toEqual({ safe: true });
+    expect(analyzeWorkflowRegexSafety("^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$")).toEqual({ safe: true });
+  });
+
+  it("rejects nested quantifiers, repeated alternation, and backreferences", () => {
+    expect(analyzeWorkflowRegexSafety("^(a+)+$")).toMatchObject({ safe: false });
+    expect(analyzeWorkflowRegexSafety("^(a|aa)+$")).toMatchObject({ safe: false });
+    expect(analyzeWorkflowRegexSafety("^(a+)\\1$")).toMatchObject({ safe: false });
+  });
+
+  it("rejects overlapping sequential quantifiers at the top level", () => {
+    expect(analyzeWorkflowRegexSafety("a*a*a*a*a*a*a*a*a*b")).toMatchObject({
+      safe: false,
+      reason: expect.stringMatching(/overlapping sequential quantifiers/i),
+    });
+    expect(analyzeWorkflowRegexSafety("[ab]*[bc]*tail")).toMatchObject({ safe: false });
+    expect(analyzeWorkflowRegexSafety("(a)*(a)*tail")).toMatchObject({ safe: false });
+    expect(analyzeWorkflowRegexSafety("a*b*c*tail")).toEqual({ safe: true });
+  });
+
+  it("preserves overlap detection across zero-width assertions", () => {
+    expect(analyzeWorkflowRegexSafety("^a+(?=a+)a+b$")).toMatchObject({
+      safe: false,
+      reason: expect.stringMatching(/overlapping sequential quantifiers/i),
+    });
+    expect(analyzeWorkflowRegexSafety("^a+(?!b+)a+b$")).toMatchObject({ safe: false });
+    expect(analyzeWorkflowRegexSafety("^a+(?<=a+)a+b$")).toMatchObject({ safe: false });
+    expect(analyzeWorkflowRegexSafety("^a+(?<!b+)a+b$")).toMatchObject({ safe: false });
+  });
+
+  it("preserves overlap detection across empty capturing and noncapturing groups", () => {
+    expect(analyzeWorkflowRegexSafety("^a*()a*$")).toMatchObject({
+      safe: false,
+      reason: expect.stringMatching(/overlapping sequential quantifiers/i),
+    });
+    expect(analyzeWorkflowRegexSafety("^a*(?:)a*$")).toMatchObject({ safe: false });
+  });
+
+  it("preserves overlap detection across zero-width word-boundary escapes", () => {
+    expect(analyzeWorkflowRegexSafety("^a+\\ba+$")).toMatchObject({
+      safe: false,
+      reason: expect.stringMatching(/overlapping sequential quantifiers/i),
+    });
+    expect(analyzeWorkflowRegexSafety("^a+\\Ba+$")).toMatchObject({ safe: false });
+  });
+
+  it("preserves overlap detection through grouped zero-width fragments", () => {
+    expect(analyzeWorkflowRegexSafety("^a+(\\B)a+$")).toMatchObject({
+      safe: false,
+      reason: expect.stringMatching(/overlapping sequential quantifiers/i),
+    });
+    expect(analyzeWorkflowRegexSafety("^a+(?:(\\b|^))a+$")).toMatchObject({ safe: false });
+    expect(analyzeWorkflowRegexSafety("^a+(?<boundary>\\B)a+$")).toMatchObject({ safe: false });
+    expect(analyzeWorkflowRegexSafety("^a+(\\B)*a+$")).toMatchObject({ safe: false });
+  });
+
+  it("preserves earlier overlap candidates across optional consuming atoms", () => {
+    expect(analyzeWorkflowRegexSafety("^a+b?a+$")).toMatchObject({
+      safe: false,
+      reason: expect.stringMatching(/overlapping sequential quantifiers/i),
+    });
+    expect(analyzeWorkflowRegexSafety("^a+b*a+$")).toMatchObject({ safe: false });
+    expect(analyzeWorkflowRegexSafety("^a+b{0,3}a+$")).toMatchObject({ safe: false });
+    expect(analyzeWorkflowRegexSafety("^a+b+a+$")).toEqual({ safe: true });
+  });
+
+  it("rejects chains of adjacent ambiguous alternation groups", () => {
+    expect(analyzeWorkflowRegexSafety(`^${"(a|aa)".repeat(8)}b$`)).toMatchObject({
+      safe: false,
+      reason: expect.stringMatching(/adjacent ambiguous alternation groups/i),
+    });
+    expect(analyzeWorkflowRegexSafety("^((a|aa)(a|aa))b$")).toMatchObject({ safe: false });
+    expect(analyzeWorkflowRegexSafety("^(foo|bar)(x|y)$")).toEqual({ safe: true });
+    expect(analyzeWorkflowRegexSafety("^(a|aa)-(a|aa)$")).toEqual({ safe: true });
   });
 });
 

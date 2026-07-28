@@ -44,16 +44,18 @@ export interface ReportModelLinks {
  * The shared intermediate structure every text-producing renderer builds
  * from (architecture §9.3). Field declaration order below IS the §19.4
  * ordering discipline (1. headline, 2. approval/trust status, 3.
- * trigger/source, 4. steps summary, 5. errors/failures, 6. artifacts, 7.
- * screenshots, 8. eval/correction links, 9. full trace expandable) —
- * renderers that emit sections in this object's field order get the
- * ordering guarantee structurally, not by convention.
+ * trigger/source, 4. steps summary, then A74's workflow-level public
+ * outputs before 5. errors/failures, 6. artifacts, 7. screenshots, 8.
+ * eval/correction links, and 9. full trace expandable). Renderers that emit
+ * sections in this object's field order get the ordering guarantee
+ * structurally, not by convention.
  */
 export interface ReportModel {
   headline: { status: RunRecord["status"]; label: string };
   approval: { approved: boolean; mode: TrustMode };
   trigger: { type: string; source: string; receivedAt: string; correlationId?: string };
   stepsSummary: ReportModelStepSummary[];
+  outputs: Record<string, unknown>;
   failures: ReportModelFailure[];
   artifacts: Artifact[];
   screenshots: Artifact[];
@@ -73,11 +75,22 @@ const HEADLINE_LABELS: Record<RunRecord["status"], string> = {
   cancelled: "Cancelled",
 };
 
+function isWorkflowOutputFailure(error: string): boolean {
+  return error.startsWith("Workflow output mapping failed:") || error.startsWith("Workflow output validation failed:");
+}
+
 /** Builds the shared report model from an (already-redacted) RunRecord. */
 export function buildReportModel(run: RunRecord): ReportModel {
   const failures: ReportModelFailure[] = run.trace
     .filter((t) => t.status === "failed")
     .map((t) => ({ stepId: t.stepId, block: t.block, error: t.error ?? "Step failed with no recorded error message." }));
+  if (run.status === "failed" && run.error && (failures.length === 0 || isWorkflowOutputFailure(run.error))) {
+    failures.push({
+      stepId: "$workflow",
+      block: isWorkflowOutputFailure(run.error) ? "workflow.outputMapping" : "workflow",
+      error: run.error,
+    });
+  }
 
   return {
     headline: { status: run.status, label: HEADLINE_LABELS[run.status] },
@@ -89,6 +102,7 @@ export function buildReportModel(run: RunRecord): ReportModel {
       correlationId: run.trigger.correlationId,
     },
     stepsSummary: run.trace.map((t) => ({ stepId: t.stepId, block: t.block, status: t.status, durationMs: t.durationMs })),
+    outputs: run.outputs ?? {},
     failures,
     artifacts: run.artifacts,
     screenshots: run.artifacts.filter((a) => a.kind === "screenshot"),

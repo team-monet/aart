@@ -2,8 +2,488 @@
 import { z } from "zod";
 import { ApprovalStateSchema, ConcurrencyPolicySchema, GatesSchema, RetryPolicySchema } from "./governance.js";
 
+/** Built-in field types whose runtime semantics AART understands directly. */
+export const SUPPORTED_FIELD_TYPES = ["any", "array", "boolean", "integer", "json", "null", "number", "object", "string", "unknown"] as const;
+export type SupportedFieldType = (typeof SUPPORTED_FIELD_TYPES)[number];
+
+export function isSupportedFieldType(type: string): type is SupportedFieldType {
+  return (SUPPORTED_FIELD_TYPES as readonly string[]).includes(type);
+}
+
+/** Whether a regex pattern can meaningfully refine this field type. */
+export function isPatternCompatibleFieldType(type: string): boolean {
+  // Custom types are opaque and may be string-like (for example, "date").
+  // `any`/`json`/`unknown` can also validly carry a string; the runtime
+  // pattern check remains the authority for the mapped value.
+  return !isSupportedFieldType(type) || type === "string" || type === "any" || type === "json" || type === "unknown";
+}
+
+export interface RegexSafetyAnalysis {
+  safe: boolean;
+  reason?: string;
+}
+
+const MAX_WORKFLOW_REGEX_CHARS = 1_024;
+
+function quantifierEnd(pattern: string, index: number): number | undefined {
+  const char = pattern[index];
+  if (char === "*" || char === "+" || char === "?") return index + 1;
+  if (char !== "{") return undefined;
+  const match = /^\{\d+(?:,\d*)?\}/.exec(pattern.slice(index));
+  return match ? index + match[0].length : undefined;
+}
+
+function quantifierMinimum(pattern: string, index: number): number | undefined {
+  const char = pattern[index];
+  if (char === "*" || char === "?") return 0;
+  if (char === "+") return 1;
+  if (char !== "{") return undefined;
+  const match = /^\{(\d+)(?:,\d*)?\}/.exec(pattern.slice(index));
+  return match ? Number(match[1]) : undefined;
+}
+
+interface QuantifiedAtom {
+  source: string;
+  asciiDecidable: boolean;
+}
+
+function atomsMayOverlap(left: QuantifiedAtom, right: QuantifiedAtom): boolean {
+  if (left.source === "." || right.source === "." || left.source === right.source) return true;
+
+  // A single atom cannot itself cause catastrophic evaluation, so testing
+  // their intersection over ASCII is bounded. Non-ASCII/property escapes
+  // remain conservatively overlapping when ASCII cannot decide the result.
+  try {
+    const leftRegex = new RegExp(`^(?:${left.source})$`, "u");
+    const rightRegex = new RegExp(`^(?:${right.source})$`, "u");
+    for (let code = 0; code <= 0x7f; code++) {
+      const candidate = String.fromCharCode(code);
+      if (leftRegex.test(candidate) && rightRegex.test(candidate)) return true;
+    }
+  } catch {
+    return true;
+  }
+  return !(left.asciiDecidable && right.asciiDecidable);
+}
+
+function matchingGroupEnd(source: string, groupStart: number): number | undefined {
+  let depth = 0;
+  let inCharacterClass = false;
+  for (let index = groupStart; index < source.length; index++) {
+    const char = source[index]!;
+    if (char === "\\") {
+      index += 1;
+      continue;
+    }
+    if (char === "[") {
+      inCharacterClass = true;
+      continue;
+    }
+    if (char === "]" && inCharacterClass) {
+      inCharacterClass = false;
+      continue;
+    }
+    if (inCharacterClass) continue;
+    if (char === "(") depth += 1;
+    if (char === ")" && --depth === 0) return index;
+  }
+  return undefined;
+}
+
+function isZeroWidthFragment(source: string): boolean {
+  for (let index = 0; index < source.length; ) {
+    const char = source[index]!;
+    if (char === "^" || char === "$" || char === "|") {
+      index += 1;
+      continue;
+    }
+    if (char === "\\" && (source[index + 1] === "b" || source[index + 1] === "B")) {
+      index += 2;
+      continue;
+    }
+    if (char === "(") {
+      const groupEnd = matchingGroupEnd(source, index);
+      if (groupEnd === undefined || !isZeroWidthGroup(source, index, groupEnd)) return false;
+      index = groupEnd + 1;
+      continue;
+    }
+    return false;
+  }
+  return true;
+}
+
+function isZeroWidthGroup(pattern: string, groupStart: number, groupEnd: number): boolean {
+  const source = pattern.slice(groupStart, groupEnd + 1);
+  if (
+    source.startsWith("(?=") ||
+    source.startsWith("(?!") ||
+    source.startsWith("(?<=") ||
+    source.startsWith("(?<!")
+  ) {
+    return true;
+  }
+  let contentStart: number | undefined;
+  if (source.startsWith("(?:")) {
+    contentStart = 3;
+  } else if (source.startsWith("(?<")) {
+    const nameEnd = source.indexOf(">", 3);
+    contentStart = nameEnd === -1 ? undefined : nameEnd + 1;
+  } else {
+    contentStart = source.startsWith("(?") ? undefined : 1;
+  }
+  return contentStart !== undefined && isZeroWidthFragment(source.slice(contentStart, -1));
+}
+
+function sequentialQuantifierProblem(pattern: string): string | undefined {
+  const previousByDepth: QuantifiedAtom[][] = [[]];
+  const groupStartByDepth: Array<number | undefined> = [undefined];
+  let depth = 0;
+
+  for (let i = 0; i < pattern.length; i++) {
+    const char = pattern[i]!;
+    if (char === "(") {
+      depth += 1;
+      previousByDepth[depth] = [];
+      groupStartByDepth[depth] = i;
+      continue;
+    }
+    if (char === ")") {
+      const groupStart = groupStartByDepth[depth];
+      previousByDepth[depth] = [];
+      depth = Math.max(0, depth - 1);
+      const end = quantifierEnd(pattern, i + 1);
+      const zeroWidthGroup = groupStart !== undefined && isZeroWidthGroup(pattern, groupStart, i);
+      if (zeroWidthGroup) {
+        if (end !== undefined) {
+          i = end - 1;
+          if (pattern[i + 1] === "?") i += 1;
+        }
+      } else if (groupStart !== undefined && end !== undefined) {
+        const source = pattern.slice(groupStart, i + 1);
+        const atom = {
+          source,
+          asciiDecidable: /^[\x00-\x7f]*$/.test(source) && !/\\(?:[pP]\{|u|x)/.test(source),
+        };
+        const previous = previousByDepth[depth] ?? [];
+        if (previous.some((candidate) => atomsMayOverlap(candidate, atom))) {
+          return "overlapping sequential quantifiers are not allowed";
+        }
+        const minimum = quantifierMinimum(pattern, i + 1)!;
+        previousByDepth[depth] = minimum === 0 ? [...previous, atom] : [atom];
+        i = end - 1;
+        if (pattern[i + 1] === "?") i += 1;
+      } else {
+        previousByDepth[depth] = [];
+      }
+      continue;
+    }
+    if (char === "|") {
+      previousByDepth[depth] = [];
+      continue;
+    }
+    if (char === "^" || char === "$") continue;
+
+    let atomEnd = i + 1;
+    let atom: QuantifiedAtom;
+    const zeroWidthEscape = char === "\\" && (pattern[i + 1] === "b" || pattern[i + 1] === "B");
+    if (char === "\\") {
+      if ((pattern[i + 1] === "p" || pattern[i + 1] === "P") && pattern[i + 2] === "{") {
+        const propertyEnd = pattern.indexOf("}", i + 3);
+        atomEnd = propertyEnd === -1 ? pattern.length : propertyEnd + 1;
+      } else {
+        atomEnd = Math.min(pattern.length, i + 2);
+      }
+      const source = pattern.slice(i, atomEnd);
+      atom = {
+        source,
+        asciiDecidable: !/^\\(?:[pP]\{|u|x)/.test(source),
+      };
+    } else if (char === "[") {
+      let escaped = false;
+      let classEnd = i + 1;
+      for (; classEnd < pattern.length; classEnd++) {
+        const classChar = pattern[classEnd]!;
+        if (!escaped && classChar === "]") {
+          classEnd += 1;
+          break;
+        }
+        escaped = !escaped && classChar === "\\";
+        if (classChar !== "\\") escaped = false;
+      }
+      atomEnd = classEnd;
+      const source = pattern.slice(i, atomEnd);
+      atom = {
+        source,
+        asciiDecidable: /^[\x00-\x7f]*$/.test(source) && !/\\(?:[pP]\{|u|x)/.test(source),
+      };
+    } else {
+      atom = { source: char, asciiDecidable: char.charCodeAt(0) <= 0x7f };
+    }
+
+    const end = quantifierEnd(pattern, atomEnd);
+    if (end !== undefined) {
+      const previous = previousByDepth[depth] ?? [];
+      if (previous.some((candidate) => atomsMayOverlap(candidate, atom))) {
+        return "overlapping sequential quantifiers are not allowed";
+      }
+      const minimum = quantifierMinimum(pattern, atomEnd)!;
+      previousByDepth[depth] = minimum === 0 ? [...previous, atom] : [atom];
+      i = end - 1;
+      if (pattern[i + 1] === "?") i += 1;
+    } else {
+      if (!zeroWidthEscape) previousByDepth[depth] = [];
+      i = atomEnd - 1;
+    }
+  }
+  return undefined;
+}
+
+function topLevelAlternatives(source: string): string[] {
+  const alternatives: string[] = [];
+  let start = 0;
+  let depth = 0;
+  let inCharacterClass = false;
+  for (let index = 0; index < source.length; index++) {
+    const char = source[index]!;
+    if (char === "\\") {
+      index += 1;
+      continue;
+    }
+    if (char === "[") {
+      inCharacterClass = true;
+      continue;
+    }
+    if (char === "]" && inCharacterClass) {
+      inCharacterClass = false;
+      continue;
+    }
+    if (inCharacterClass) continue;
+    if (char === "(") depth += 1;
+    if (char === ")") depth -= 1;
+    if (char === "|" && depth === 0) {
+      alternatives.push(source.slice(start, index));
+      start = index + 1;
+    }
+  }
+  alternatives.push(source.slice(start));
+  return alternatives;
+}
+
+function leadingConsumingAtom(source: string): QuantifiedAtom | undefined {
+  for (let index = 0; index < source.length; index++) {
+    const char = source[index]!;
+    if (char === "^" || char === "$") continue;
+    if (char === "\\") {
+      if (source[index + 1] === "b" || source[index + 1] === "B") {
+        index += 1;
+        continue;
+      }
+      if ((source[index + 1] === "p" || source[index + 1] === "P") && source[index + 2] === "{") {
+        const end = source.indexOf("}", index + 3);
+        const atom = source.slice(index, end === -1 ? source.length : end + 1);
+        return { source: atom, asciiDecidable: false };
+      }
+      const atom = source.slice(index, Math.min(source.length, index + 2));
+      return { source: atom, asciiDecidable: !/^\\(?:[pP]\{|u|x)/.test(atom) };
+    }
+    if (char === "[") {
+      let escaped = false;
+      let end = index + 1;
+      for (; end < source.length; end++) {
+        const classChar = source[end]!;
+        if (!escaped && classChar === "]") {
+          end += 1;
+          break;
+        }
+        escaped = !escaped && classChar === "\\";
+        if (classChar !== "\\") escaped = false;
+      }
+      const atom = source.slice(index, end);
+      return {
+        source: atom,
+        asciiDecidable: /^[\x00-\x7f]*$/.test(atom) && !/\\(?:[pP]\{|u|x)/.test(atom),
+      };
+    }
+    // Nested groups and wildcard-like constructs are conservatively treated
+    // as overlapping; literal atoms can be decided precisely over ASCII.
+    if (char === "(" || char === ".") return { source: ".", asciiDecidable: false };
+    return { source: char, asciiDecidable: char.charCodeAt(0) <= 0x7f };
+  }
+  return undefined;
+}
+
+function groupHasAmbiguousAlternation(pattern: string, groupStart: number, groupEnd: number): boolean {
+  const source = pattern.slice(groupStart, groupEnd + 1);
+  if (
+    source.startsWith("(?=") ||
+    source.startsWith("(?!") ||
+    source.startsWith("(?<=") ||
+    source.startsWith("(?<!")
+  ) {
+    return false;
+  }
+  let contentStart = 1;
+  if (source.startsWith("(?:")) {
+    contentStart = 3;
+  } else if (source.startsWith("(?<")) {
+    const nameEnd = source.indexOf(">", 3);
+    if (nameEnd === -1) return true;
+    contentStart = nameEnd + 1;
+  } else if (source.startsWith("(?")) {
+    return true;
+  }
+  const alternatives = topLevelAlternatives(source.slice(contentStart, -1));
+  if (alternatives.length < 2) return false;
+  const leadingAtoms = alternatives.map(leadingConsumingAtom);
+  if (leadingAtoms.some((atom) => atom === undefined)) return true;
+  for (let left = 0; left < leadingAtoms.length; left++) {
+    for (let right = left + 1; right < leadingAtoms.length; right++) {
+      if (atomsMayOverlap(leadingAtoms[left]!, leadingAtoms[right]!)) return true;
+    }
+  }
+  return false;
+}
+
+function adjacentAmbiguousAlternationProblem(pattern: string): string | undefined {
+  const ambiguousByDepth = [0];
+  let depth = 0;
+  for (let index = 0; index < pattern.length; index++) {
+    const char = pattern[index]!;
+    if (char === "\\") {
+      const zeroWidth = pattern[index + 1] === "b" || pattern[index + 1] === "B";
+      index += 1;
+      if (!zeroWidth) ambiguousByDepth[depth] = 0;
+      continue;
+    }
+    if (char === "[") {
+      for (index += 1; index < pattern.length; index++) {
+        if (pattern[index] === "\\") index += 1;
+        else if (pattern[index] === "]") break;
+      }
+      ambiguousByDepth[depth] = 0;
+      continue;
+    }
+    if (char === "^" || char === "$") continue;
+    if (char === ")") {
+      depth = Math.max(0, depth - 1);
+      continue;
+    }
+    if (char !== "(") {
+      ambiguousByDepth[depth] = 0;
+      continue;
+    }
+
+    const groupEnd = matchingGroupEnd(pattern, index);
+    // Syntax validation is handled separately by the RegExp constructor so
+    // callers retain its precise invalid-pattern diagnostic.
+    if (groupEnd === undefined) return undefined;
+    if (!isZeroWidthGroup(pattern, index, groupEnd)) {
+      ambiguousByDepth[depth] = groupHasAmbiguousAlternation(pattern, index, groupEnd)
+        ? (ambiguousByDepth[depth] ?? 0) + 1
+        : 0;
+      if ((ambiguousByDepth[depth] ?? 0) >= 2) {
+        return "adjacent ambiguous alternation groups are not allowed";
+      }
+    }
+    depth += 1;
+    ambiguousByDepth[depth] = 0;
+  }
+  return undefined;
+}
+
+/**
+ * Conservative ReDoS guard for workflow-authored patterns.
+ *
+ * AART accepts the JavaScript RegExp vocabulary, but rejects constructs
+ * whose backtracking cost cannot be safely bounded at terminal run
+ * finalization: oversized patterns, backreferences, and repeated groups
+ * that themselves contain repetition or alternation. This intentionally
+ * favors a smaller predictable subset over synchronously evaluating a
+ * potentially hostile expression on the worker event loop.
+ */
+export function analyzeWorkflowRegexSafety(pattern: string): RegexSafetyAnalysis {
+  if (pattern.length > MAX_WORKFLOW_REGEX_CHARS) {
+    return { safe: false, reason: `pattern exceeds ${MAX_WORKFLOW_REGEX_CHARS} characters` };
+  }
+
+  const sequentialProblem = sequentialQuantifierProblem(pattern);
+  if (sequentialProblem) return { safe: false, reason: sequentialProblem };
+  const alternationProblem = adjacentAmbiguousAlternationProblem(pattern);
+  if (alternationProblem) return { safe: false, reason: alternationProblem };
+
+  const groups: Array<{ containsQuantifier: boolean; containsAlternation: boolean }> = [];
+  let inCharacterClass = false;
+
+  for (let i = 0; i < pattern.length; i++) {
+    const char = pattern[i]!;
+    if (char === "\\") {
+      const escaped = pattern[i + 1];
+      if (
+        !inCharacterClass &&
+        escaped !== undefined &&
+        (/[1-9]/.test(escaped) || (escaped === "k" && pattern[i + 2] === "<"))
+      ) {
+        return { safe: false, reason: "backreferences are not allowed" };
+      }
+      i += 1;
+      continue;
+    }
+    if (char === "[") {
+      inCharacterClass = true;
+      continue;
+    }
+    if (char === "]" && inCharacterClass) {
+      inCharacterClass = false;
+      continue;
+    }
+    if (inCharacterClass) continue;
+
+    if (char === "(") {
+      groups.push({ containsQuantifier: false, containsAlternation: false });
+      continue;
+    }
+    if (char === "|") {
+      const current = groups.at(-1);
+      if (current) current.containsAlternation = true;
+      continue;
+    }
+    if (char === ")") {
+      const closed = groups.pop();
+      if (!closed) continue;
+      const repeated = quantifierEnd(pattern, i + 1) !== undefined;
+      if (repeated && closed.containsQuantifier) {
+        return { safe: false, reason: "nested quantified groups are not allowed" };
+      }
+      if (repeated && closed.containsAlternation) {
+        return { safe: false, reason: "repeated alternation groups are not allowed" };
+      }
+      const parent = groups.at(-1);
+      if (parent) {
+        parent.containsQuantifier ||= closed.containsQuantifier || repeated;
+        parent.containsAlternation ||= closed.containsAlternation;
+      }
+      continue;
+    }
+
+    if (
+      quantifierEnd(pattern, i) !== undefined &&
+      !(char === "?" && pattern[i - 1] === "(") &&
+      !(char === "?" && (pattern[i - 1] === "*" || pattern[i - 1] === "+" || pattern[i - 1] === "?" || pattern[i - 1] === "}"))
+    ) {
+      const current = groups.at(-1);
+      if (current) current.containsQuantifier = true;
+    }
+  }
+
+  return { safe: true };
+}
+
 export const FieldSchema = z.object({
   name: z.string(),
+  // Field types were intentionally extensible before workflow-output
+  // validation existed. Keep that wire/store compatibility: integrations
+  // may attach semantics to custom values such as "date". The engine
+  // validates the built-in vocabulary and treats custom types as opaque.
   type: z.string(),
   description: z.string().optional(),
   required: z.boolean().optional(),

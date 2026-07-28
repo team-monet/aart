@@ -1,6 +1,7 @@
 import { SecretResolutionError } from "@aart/types";
 import { describe, expect, it } from "vitest";
-import { applyRedaction, createTrackingSecretResolver, identityRedactFn, throwingSecretResolver } from "./redaction.js";
+import { applyRedaction, applyRunRedaction, createTrackingSecretResolver, identityRedactFn, throwingSecretResolver } from "./redaction.js";
+import { fixtureRun } from "./test-utils/fixtures.js";
 
 describe("identityRedactFn", () => {
   it("returns the record unchanged — this session's own tests wire this by default (architecture §7.9)", () => {
@@ -125,5 +126,30 @@ describe("applyRedaction", () => {
     const result = applyRedaction(scanAndReplaceRedact, { outputs: { echoed: "the value is shh-secret-value here" } }, refs);
     expect(JSON.stringify(result)).not.toContain("shh-secret-value");
     expect((result as { outputs: { echoed: string } }).outputs.echoed).toBe("the value is [REDACTED] here");
+  });
+});
+
+describe("applyRunRedaction", () => {
+  const redactKey = (record: unknown): unknown =>
+    JSON.parse(JSON.stringify(record).replaceAll("case-secret", "[REDACTED]"));
+
+  it("preserves a non-terminal concurrency key so rolling-upgrade intake still sees the lock", () => {
+    const run = fixtureRun({
+      status: "running",
+      params: { concurrencyKey: "case-secret", concurrencyKeyFormat: "legacy-compatible" },
+    });
+
+    const redacted = applyRunRedaction(redactKey, run, new Set(["case-secret"]));
+
+    expect(redacted.params?.concurrencyKey).toBe("case-secret");
+    expect(redacted.params?.concurrencyKeyFormat).toBe("legacy-compatible");
+  });
+
+  it("fully redacts the concurrency key after the run becomes terminal", () => {
+    const run = fixtureRun({ status: "completed", params: { concurrencyKey: "case-secret" } });
+
+    const redacted = applyRunRedaction(redactKey, run, new Set(["case-secret"]));
+
+    expect(redacted.params?.concurrencyKey).toBe("[REDACTED]");
   });
 });
