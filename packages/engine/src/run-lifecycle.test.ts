@@ -581,6 +581,32 @@ describe("executeRun — fresh execution", () => {
     expect(JSON.stringify(await store.runs.get(run.runId))).not.toContain("secret-value");
   });
 
+  it("treats a whole-steps expression as depending on every tainted trace", async () => {
+    const { store, config } = await setup({
+      redact: redactResolvedValues,
+      resolveSecret: () => "secret-value",
+    });
+    const workflow = fixtureWorkflow({
+      outputs: [{ name: "result", type: "json", required: true }],
+      execution: {
+        type: "workflow",
+        steps: [
+          { id: "source", uses: "test.echo", with: { secret: "{{ secrets.API_KEY }}" } },
+          { id: "relay", uses: "test.echo", with: { allSteps: "{{ steps }}" } },
+        ],
+        outputMapping: { result: "{{ steps.relay.outputs.echoed.allSteps }}" },
+      },
+    });
+    await store.workflows.put(workflow);
+    const run = await triggerRun(config, { workflow, trigger: fixtureTrigger(), inputs: {} });
+
+    const finished = await executeRun(config, run.runId);
+
+    expect(finished.status).toBe("failed");
+    expect(finished.error).toMatch(/secret-tainted step "relay"/);
+    expect(JSON.stringify(await store.runs.get(run.runId))).not.toContain("secret-value");
+  });
+
   it("captures ExecutionSnapshot at completion for a run that never waits", async () => {
     const { store, config } = await setup();
     const workflow = fixtureWorkflow({ execution: { type: "workflow", steps: [{ id: "s1", uses: "test.echo" }] } });

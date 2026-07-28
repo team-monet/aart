@@ -5,7 +5,7 @@
 // is the one place that threading happens; every persist call site in this
 // package goes through `applyRedaction`, never `config.redact` directly.
 import type { SecretResolver } from "@aart/expr";
-import type { RedactFn, RunRecord } from "@aart/types";
+import type { RedactFn, RunRecord, StepTrace } from "@aart/types";
 import { SecretResolutionError } from "@aart/types";
 
 /**
@@ -134,7 +134,31 @@ export function applyRedaction<T>(redact: RedactFn, record: T, resolvedSecretRef
  * records no longer participate in matching and remain fully redacted.
  */
 export function applyRunRedaction(redact: RedactFn, run: RunRecord, resolvedSecretRefs: ReadonlySet<string>): RunRecord {
-  const redacted = applyRedaction(redact, run, resolvedSecretRefs);
+  // `secretTainted` is security metadata, not authored/value data. Keep it
+  // outside value-based redaction entirely: a secret equal to "secret"
+  // could rewrite the key, while a boolean secret `true` could rewrite the
+  // value. Reattach only the trusted original booleans afterward.
+  const secretTaintByTrace = run.trace.map((trace) => trace.secretTainted === true);
+  const redactableTrace = run.trace.map((trace): StepTrace => {
+    const copy = { ...trace };
+    delete copy.secretTainted;
+    return copy;
+  });
+  const redactedPayload = applyRedaction(
+    redact,
+    { ...run, trace: redactableTrace },
+    resolvedSecretRefs,
+  );
+  const redacted: RunRecord = {
+    ...redactedPayload,
+    trace: redactedPayload.trace.map((trace, index) => {
+      const restored = { ...trace };
+      delete restored.secretTainted;
+      return secretTaintByTrace[index]
+        ? { ...restored, secretTainted: true }
+        : restored;
+    }),
+  };
   const concurrencyKey = run.params?.concurrencyKey;
   if (
     typeof concurrencyKey !== "string" ||

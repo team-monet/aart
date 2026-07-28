@@ -16,6 +16,7 @@ import { CURRENT_ENGINE_SCHEMA_VERSION } from "./schema-version.js";
 import type { EngineBlockExecutionContext, EngineConfig } from "./types.js";
 import { enterWait, type WaitMachineConfig } from "./wait/wait-machine.js";
 import { buildWaitConditionFromBlock, isWaitBlockId, type WaitBlockId } from "./wait/wait-blocks.js";
+import { assertNoSecretTaintedOutputSources } from "./workflow-outputs.js";
 
 export type StepOutcome =
   | { kind: "continue"; run: RunRecord; nextStepId: string | undefined }
@@ -439,7 +440,12 @@ function stepReferencesSecretTaintedTrace(step: WorkflowStep, run: RunRecord): b
     for (const token of findExpressionTokens(expression)) {
       const parsed = parseExpression(token[0]);
       const first = parsed.path[0];
-      if (parsed.root !== "steps" || first?.kind !== "property") continue;
+      if (parsed.root !== "steps") continue;
+      if (first === undefined) {
+        if (run.trace.some((trace) => trace.secretTainted === true)) return true;
+        continue;
+      }
+      if (first.kind !== "property") continue;
       const source = run.trace.filter((trace) => trace.stepId === first.name).at(-1);
       if (source?.secretTainted === true) return true;
     }
@@ -497,6 +503,7 @@ async function assertPubliclyMappedTraceValuesSurviveRedaction(
   }
 
   const candidateRun: RunRecord = { ...run, trace: [...run.trace, ...newTraces] };
+  assertNoSecretTaintedOutputSources(workflow, candidateRun);
   const context = buildExprContext(candidateRun);
   for (const [outputName, expression] of Object.entries(outputMapping)) {
     for (const token of findExpressionTokens(expression)) {
@@ -508,11 +515,6 @@ async function assertPubliclyMappedTraceValuesSurviveRedaction(
         !completedTraces.has(first.name)
       ) {
         continue;
-      }
-      if (completedTraces.get(first.name)?.secretTainted === true) {
-        throw new Error(
-          `public outputMapping "${outputName}" depends on secret-tainted step "${first.name}"; expose a non-secret derived value instead`,
-        );
       }
       const rawValue = await resolveExpression(token[0], context);
       const observableValue = applyRedaction(config.redact, rawValue, resolvedSecretRefs);
@@ -643,7 +645,22 @@ export async function executeStep(
   // rather than calling a block's `execute()` at all (see wait-blocks.ts's
   // module doc comment for the fuller design rationale).
   if (isWaitBlockId(step.uses)) {
-    return executeWaitDispatch(config, run, workflow, step, resolvedWith, resolvedSecretRefs, ifResult);
+    const waitSecretTainted =
+      inheritedSecretTaint ||
+      !jsonValuesEqual(
+        resolvedWith,
+        applyRedaction(config.redact, resolvedWith, resolvedSecretRefs),
+      );
+    return executeWaitDispatch(
+      config,
+      run,
+      workflow,
+      step,
+      resolvedWith,
+      resolvedSecretRefs,
+      ifResult,
+      waitSecretTainted,
+    );
   }
 
   const impl = config.resolveBlockForRun?.(run, step.uses) ?? config.blocks[step.uses];
@@ -719,6 +736,7 @@ async function executeWaitDispatch(
   resolvedWith: Record<string, unknown>,
   resolvedSecretRefs: Set<string>,
   ifResult: boolean | undefined,
+  secretTainted: boolean,
 ): Promise<StepOutcome> {
   const schemaVersion = config.schemaVersion ?? CURRENT_ENGINE_SCHEMA_VERSION;
   const waitMachineConfig: WaitMachineConfig = { store: config.store, redact: config.redact, now: config.now ?? (() => new Date()) };
@@ -761,6 +779,7 @@ async function executeWaitDispatch(
     resolvedInputs: resolvedWith,
     wait,
     resolvedSecretRefs,
+    secretTainted,
   });
 
   if (!result.suspended) {

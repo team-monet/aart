@@ -49,6 +49,7 @@ export interface EnterWaitOptions {
   /** Already schema-version-stamped (architecture §4.7) — see `step-executor.ts`'s dispatch site. */
   wait: WaitCondition;
   resolvedSecretRefs: ReadonlySet<string>;
+  secretTainted?: boolean;
 }
 
 export interface EnterWaitResult {
@@ -67,7 +68,7 @@ export interface EnterWaitResult {
  * which skip the check entirely and always suspend).
  */
 export async function enterWait(config: WaitMachineConfig, options: EnterWaitOptions): Promise<EnterWaitResult> {
-  const { run, stepId, blockId, resolvedInputs, wait, resolvedSecretRefs } = options;
+  const { run, stepId, blockId, resolvedInputs, wait, resolvedSecretRefs, secretTainted } = options;
   const now = config.now();
   const correlation = waitSignalCorrelation(wait);
 
@@ -109,6 +110,7 @@ export async function enterWait(config: WaitMachineConfig, options: EnterWaitOpt
           startedAt: now.toISOString(),
           endedAt: now.toISOString(),
           durationMs: 0,
+          ...(secretTainted ? { secretTainted: true } : {}),
         };
         const updatedRun: RunRecord = { ...run, trace: [...run.trace, trace], updatedAt: now.toISOString() };
         const redacted = applyRunRedaction(config.redact, updatedRun, resolvedSecretRefs);
@@ -127,6 +129,7 @@ export async function enterWait(config: WaitMachineConfig, options: EnterWaitOpt
       status: "waiting",
       inputs: resolvedInputs,
       startedAt: now.toISOString(),
+      ...(secretTainted ? { secretTainted: true } : {}),
     };
     const updatedRun: RunRecord = {
       ...run,

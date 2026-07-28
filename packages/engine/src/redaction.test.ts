@@ -152,4 +152,46 @@ describe("applyRunRedaction", () => {
 
     expect(redacted.params?.concurrencyKey).toBe("[REDACTED]");
   });
+
+  it("keeps secret taint metadata outside key and boolean value redaction", () => {
+    const hostileMetadataRedactor = (record: unknown): unknown => {
+      const visit = (value: unknown): unknown => {
+        if (value === true) return "[REDACTED:true]";
+        if (Array.isArray(value)) return value.map(visit);
+        if (value !== null && typeof value === "object") {
+          return Object.fromEntries(
+            Object.entries(value).map(([key, nested]) => [
+              key.replaceAll("secret", "[REDACTED:secret]"),
+              visit(nested),
+            ]),
+          );
+        }
+        return value;
+      };
+      return visit(record);
+    };
+    const run = fixtureRun({
+      trace: [
+        {
+          seq: 0,
+          stepId: "source",
+          block: "test.echo",
+          status: "completed",
+          inputs: {},
+          outputs: { value: "[REDACTED]" },
+          startedAt: "2026-07-28T00:00:00.000Z",
+          secretTainted: true,
+        },
+      ],
+    });
+
+    const redacted = applyRunRedaction(
+      hostileMetadataRedactor,
+      run,
+      new Set(["secret", "true"]),
+    );
+
+    expect(redacted.trace[0]?.secretTainted).toBe(true);
+    expect(redacted.trace[0]).not.toHaveProperty("[REDACTED:secret]Tainted");
+  });
 });

@@ -64,6 +64,57 @@ describe("createEngine — resume wrappers continue execution past the resumed s
     expect(outcome.run.trace.find((t) => t.stepId === "after")).toMatchObject({ status: "completed", inputs: { note: "reached-after-resume" } });
   });
 
+  it("carries secret taint through a persisted wait and rejects its public output after resume", async () => {
+    const { store, cleanup } = await createTestStore();
+    cleanups.push(cleanup);
+    const redact = (record: unknown, resolvedSecretRefs: ReadonlySet<string>): unknown => {
+      let json = JSON.stringify(record);
+      for (const secret of resolvedSecretRefs) {
+        json = json.replaceAll(secret, "[REDACTED]");
+      }
+      return JSON.parse(json);
+    };
+    const engine = createEngine({
+      store,
+      redact,
+      resolveSecret: () => "secret-value",
+      capabilityCheck: alwaysAllowCapabilityCheck,
+      blocks: createBlockRegistry([echoBlock]),
+      computeRetryDelayMs: () => 0,
+    });
+    const workflow = fixtureWorkflow({
+      outputs: [{ name: "result", type: "string", required: true }],
+      execution: {
+        type: "workflow",
+        steps: [
+          { id: "source", uses: "test.echo", with: { secret: "{{ secrets.API_KEY }}" } },
+          {
+            id: "pause",
+            uses: "wait.manual",
+            with: { correlation: "{{ steps.source.outputs.echoed.secret }}" },
+          },
+        ],
+        outputMapping: { result: "{{ steps.pause.outputs.result }}" },
+      },
+    });
+    await store.workflows.put(workflow);
+    const run = await engine.triggerRun({ workflow, trigger: fixtureTrigger(), inputs: {} });
+
+    const waiting = await engine.executeRun(run.runId);
+    expect(waiting.status).toBe("waiting");
+    expect(waiting.trace.find((trace) => trace.stepId === "pause")).toMatchObject({
+      secretTainted: true,
+    });
+
+    const outcome = await engine.resumeManual(run.runId, "pause", {
+      result: "[REDACTED]",
+    });
+    expect(outcome.kind).toBe("resumed");
+    if (outcome.kind !== "resumed") throw new Error("unreachable");
+    expect(outcome.run.status).toBe("failed");
+    expect(outcome.run.error).toMatch(/secret-tainted step "pause"/);
+  });
+
   it("resumeBySignal continues execution and reaches the workflow's actual completion", async () => {
     const { store, engine } = await setup();
     const workflow = fixtureWorkflow({ execution: { type: "workflow", steps: [{ id: "wait_step", uses: "wait.for_signal", with: { name: "quote.received", correlationId: "corr1" } }, { id: "after", uses: "test.echo" }] } });

@@ -17,6 +17,35 @@ function referencesSecret(expression: string): boolean {
   return findExpressionTokens(expression).some((token) => parseExpression(token[0]).root === "secrets");
 }
 
+export function assertNoSecretTaintedOutputSources(
+  workflow: Pick<Workflow, "execution">,
+  run: RunRecord,
+): void {
+  if (!workflow.execution.outputMapping) return;
+  for (const [outputName, expression] of Object.entries(workflow.execution.outputMapping)) {
+    for (const token of findExpressionTokens(expression)) {
+      const parsed = parseExpression(token[0]);
+      if (parsed.root !== "steps") continue;
+      const first = parsed.path[0];
+      if (first === undefined) {
+        if (run.trace.some((trace) => trace.secretTainted === true)) {
+          throw new Error(
+            `public outputMapping "${outputName}" depends on the full steps context containing secret-tainted traces; expose a non-secret derived value instead`,
+          );
+        }
+        continue;
+      }
+      if (first.kind !== "property") continue;
+      const source = run.trace.filter((trace) => trace.stepId === first.name).at(-1);
+      if (source?.secretTainted === true) {
+        throw new Error(
+          `public outputMapping "${outputName}" depends on secret-tainted step "${first.name}"; expose a non-secret derived value instead`,
+        );
+      }
+    }
+  }
+}
+
 function defineOutput(outputs: Record<string, unknown>, name: string, value: unknown): void {
   // Assignment to an ordinary object's "__proto__" key invokes the legacy
   // prototype setter. Define an own data property instead so every valid
@@ -85,6 +114,7 @@ export async function materializeWorkflowOutputs(
 ): Promise<Record<string, unknown>> {
   if (!workflow.execution.outputMapping) return run.outputs ?? {};
 
+  assertNoSecretTaintedOutputSources(workflow, run);
   const context = buildExprContext(run);
   const fieldsByName = new Map(workflow.outputs.map((field) => [field.name, field]));
   const outputs: Record<string, unknown> = {};

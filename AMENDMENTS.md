@@ -2030,10 +2030,14 @@ authored string. `StepTrace.secretTainted` is a persistence-safe boolean that
 records this loss of semantic fidelity without storing a secret, a secret
 name, or a redacted path. A trace is marked when redaction changes its raw
 outputs, and the bit propagates conservatively when a later step references
-that trace in an execution expression.
+that trace in an execution expression. Bare `{{ steps }}` references depend
+on every visible tainted trace. Wait traces carry the same bit through entry,
+durable suspension, and completion.
 
 Public workflow outputs reject a mapping sourced from a secret-tainted step.
 This prevents an intermediate block from laundering a persisted redaction
 marker into a successful public result. A block may still publish a genuinely
 non-secret derived value: when its raw output survives redaction unchanged
-and it did not consume an already-tainted trace, no taint bit is added.
+and it did not consume an already-tainted trace, no taint bit is added. The
+bit itself is removed before value-based redaction and restored afterward, so
+secrets equal to `"secret"` or `true` cannot rewrite its key or value.
