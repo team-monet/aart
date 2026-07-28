@@ -134,6 +134,52 @@ describe("outcome 1/6 — updateRunOutput (spec §23.4 'update current run outpu
     expect(updated.outputs).toEqual({ nmi: "6401234568" });
   });
 
+  it("refreshes a forEach aggregate and public outputs after correcting an iteration", async () => {
+    const workflow = fixtureWorkflow({
+      id: "meter-reading-map",
+      version: "1.0.0",
+      outputs: [{ name: "readings", type: "array", required: true }],
+      execution: {
+        type: "workflow",
+        steps: [{ id: "map", uses: "llm.extract", forEach: "{{ inputs.items }}" }],
+        outputMapping: { readings: "{{ steps.map.outputs.items }}" },
+      },
+    });
+    const run = fixtureRunRecord({
+      runId: "run_1",
+      workflowId: workflow.id,
+      workflowVersion: workflow.version,
+      outputs: { readings: [{ nmi: "wrong" }, { nmi: "second" }] },
+      trace: [
+        { seq: 0, stepId: "map[0]", block: "llm.extract", status: "completed", inputs: {}, outputs: { nmi: "wrong" }, startedAt: "t0" },
+        { seq: 1, stepId: "map[1]", block: "llm.extract", status: "completed", inputs: {}, outputs: { nmi: "second" }, startedAt: "t1" },
+        {
+          seq: 2,
+          stepId: "map",
+          block: "llm.extract",
+          status: "completed",
+          inputs: {},
+          outputs: { items: [{ nmi: "wrong" }, { nmi: "second" }] },
+          startedAt: "t2",
+        },
+      ],
+      snapshot: { definitions: workflow, resolvedVersions: {}, packHashes: {}, capturedAt: "2026-01-01T00:00:00.000Z" },
+    });
+    await store.runs.put(run);
+
+    const updated = await updateRunOutput(
+      store,
+      fixtureCorrection({ stepId: "map[0]", fieldPath: "outputs.nmi", corrected: "corrected" }),
+    );
+
+    expect(updated.trace[0]).toMatchObject({ outputs: { nmi: "corrected" }, postHocCorrected: true });
+    expect(updated.trace[2]).toMatchObject({
+      outputs: { items: [{ nmi: "corrected" }, { nmi: "second" }] },
+      postHocCorrected: true,
+    });
+    expect(updated.outputs).toEqual({ readings: [{ nmi: "corrected" }, { nmi: "second" }] });
+  });
+
   it("uses the captured workflow snapshot instead of an overwritten live mapping", async () => {
     const capturedWorkflow = fixtureWorkflow({
       id: "meter-reading-frozen",

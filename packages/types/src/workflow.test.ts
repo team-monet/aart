@@ -98,6 +98,16 @@ describe("analyzeWorkflowRegexSafety", () => {
     expect(analyzeWorkflowRegexSafety("^a+b{0,3}a+$")).toMatchObject({ safe: false });
     expect(analyzeWorkflowRegexSafety("^a+b+a+$")).toEqual({ safe: true });
   });
+
+  it("rejects chains of adjacent ambiguous alternation groups", () => {
+    expect(analyzeWorkflowRegexSafety(`^${"(a|aa)".repeat(8)}b$`)).toMatchObject({
+      safe: false,
+      reason: expect.stringMatching(/adjacent ambiguous alternation groups/i),
+    });
+    expect(analyzeWorkflowRegexSafety("^((a|aa)(a|aa))b$")).toMatchObject({ safe: false });
+    expect(analyzeWorkflowRegexSafety("^(foo|bar)(x|y)$")).toEqual({ safe: true });
+    expect(analyzeWorkflowRegexSafety("^(a|aa)-(a|aa)$")).toEqual({ safe: true });
+  });
 });
 
 describe("ExampleSchema", () => {

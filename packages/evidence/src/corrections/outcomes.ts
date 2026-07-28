@@ -49,7 +49,32 @@ export async function updateRunOutput(store: AartStore, correction: Correction):
   const updatedTrace: StepTrace = { ...original, postHocCorrected: true };
   setByPath(updatedTrace as unknown as Record<string, unknown>, correction.fieldPath, correction.corrected);
 
-  const trace = run.trace.map((t, i) => (i === traceIndex ? updatedTrace : t));
+  let trace = run.trace.map((t, i) => (i === traceIndex ? updatedTrace : t));
+  const forEachMatch = /^(.*)\[(\d+)\]$/.exec(correction.stepId);
+  if (
+    forEachMatch &&
+    (correction.fieldPath === "outputs" || correction.fieldPath.startsWith("outputs."))
+  ) {
+    const parentStepId = forEachMatch[1]!;
+    const itemIndex = forEachMatch[2]!;
+    const aggregateIndex = trace.findLastIndex(
+      (candidate, index) => index > traceIndex && candidate.stepId === parentStepId,
+    );
+    if (aggregateIndex !== -1) {
+      const aggregate = structuredClone(trace[aggregateIndex]!);
+      const outputSuffix =
+        correction.fieldPath === "outputs"
+          ? ""
+          : `.${correction.fieldPath.slice("outputs.".length)}`;
+      setByPath(
+        aggregate as unknown as Record<string, unknown>,
+        `outputs.items.${itemIndex}${outputSuffix}`,
+        correction.corrected,
+      );
+      aggregate.postHocCorrected = true;
+      trace = trace.map((candidate, index) => (index === aggregateIndex ? aggregate : candidate));
+    }
+  }
   let outputs = run.outputs;
   // Failed/cancelled runs are intentionally partial evidence: correcting a
   // trace must remain possible even when required output sources never ran.

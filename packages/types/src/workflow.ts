@@ -238,6 +238,159 @@ function sequentialQuantifierProblem(pattern: string): string | undefined {
   return undefined;
 }
 
+function topLevelAlternatives(source: string): string[] {
+  const alternatives: string[] = [];
+  let start = 0;
+  let depth = 0;
+  let inCharacterClass = false;
+  for (let index = 0; index < source.length; index++) {
+    const char = source[index]!;
+    if (char === "\\") {
+      index += 1;
+      continue;
+    }
+    if (char === "[") {
+      inCharacterClass = true;
+      continue;
+    }
+    if (char === "]" && inCharacterClass) {
+      inCharacterClass = false;
+      continue;
+    }
+    if (inCharacterClass) continue;
+    if (char === "(") depth += 1;
+    if (char === ")") depth -= 1;
+    if (char === "|" && depth === 0) {
+      alternatives.push(source.slice(start, index));
+      start = index + 1;
+    }
+  }
+  alternatives.push(source.slice(start));
+  return alternatives;
+}
+
+function leadingConsumingAtom(source: string): QuantifiedAtom | undefined {
+  for (let index = 0; index < source.length; index++) {
+    const char = source[index]!;
+    if (char === "^" || char === "$") continue;
+    if (char === "\\") {
+      if (source[index + 1] === "b" || source[index + 1] === "B") {
+        index += 1;
+        continue;
+      }
+      if ((source[index + 1] === "p" || source[index + 1] === "P") && source[index + 2] === "{") {
+        const end = source.indexOf("}", index + 3);
+        const atom = source.slice(index, end === -1 ? source.length : end + 1);
+        return { source: atom, asciiDecidable: false };
+      }
+      const atom = source.slice(index, Math.min(source.length, index + 2));
+      return { source: atom, asciiDecidable: !/^\\(?:[pP]\{|u|x)/.test(atom) };
+    }
+    if (char === "[") {
+      let escaped = false;
+      let end = index + 1;
+      for (; end < source.length; end++) {
+        const classChar = source[end]!;
+        if (!escaped && classChar === "]") {
+          end += 1;
+          break;
+        }
+        escaped = !escaped && classChar === "\\";
+        if (classChar !== "\\") escaped = false;
+      }
+      const atom = source.slice(index, end);
+      return {
+        source: atom,
+        asciiDecidable: /^[\x00-\x7f]*$/.test(atom) && !/\\(?:[pP]\{|u|x)/.test(atom),
+      };
+    }
+    // Nested groups and wildcard-like constructs are conservatively treated
+    // as overlapping; literal atoms can be decided precisely over ASCII.
+    if (char === "(" || char === ".") return { source: ".", asciiDecidable: false };
+    return { source: char, asciiDecidable: char.charCodeAt(0) <= 0x7f };
+  }
+  return undefined;
+}
+
+function groupHasAmbiguousAlternation(pattern: string, groupStart: number, groupEnd: number): boolean {
+  const source = pattern.slice(groupStart, groupEnd + 1);
+  if (
+    source.startsWith("(?=") ||
+    source.startsWith("(?!") ||
+    source.startsWith("(?<=") ||
+    source.startsWith("(?<!")
+  ) {
+    return false;
+  }
+  let contentStart = 1;
+  if (source.startsWith("(?:")) {
+    contentStart = 3;
+  } else if (source.startsWith("(?<")) {
+    const nameEnd = source.indexOf(">", 3);
+    if (nameEnd === -1) return true;
+    contentStart = nameEnd + 1;
+  } else if (source.startsWith("(?")) {
+    return true;
+  }
+  const alternatives = topLevelAlternatives(source.slice(contentStart, -1));
+  if (alternatives.length < 2) return false;
+  const leadingAtoms = alternatives.map(leadingConsumingAtom);
+  if (leadingAtoms.some((atom) => atom === undefined)) return true;
+  for (let left = 0; left < leadingAtoms.length; left++) {
+    for (let right = left + 1; right < leadingAtoms.length; right++) {
+      if (atomsMayOverlap(leadingAtoms[left]!, leadingAtoms[right]!)) return true;
+    }
+  }
+  return false;
+}
+
+function adjacentAmbiguousAlternationProblem(pattern: string): string | undefined {
+  const ambiguousByDepth = [0];
+  let depth = 0;
+  for (let index = 0; index < pattern.length; index++) {
+    const char = pattern[index]!;
+    if (char === "\\") {
+      const zeroWidth = pattern[index + 1] === "b" || pattern[index + 1] === "B";
+      index += 1;
+      if (!zeroWidth) ambiguousByDepth[depth] = 0;
+      continue;
+    }
+    if (char === "[") {
+      for (index += 1; index < pattern.length; index++) {
+        if (pattern[index] === "\\") index += 1;
+        else if (pattern[index] === "]") break;
+      }
+      ambiguousByDepth[depth] = 0;
+      continue;
+    }
+    if (char === "^" || char === "$") continue;
+    if (char === ")") {
+      depth = Math.max(0, depth - 1);
+      continue;
+    }
+    if (char !== "(") {
+      ambiguousByDepth[depth] = 0;
+      continue;
+    }
+
+    const groupEnd = matchingGroupEnd(pattern, index);
+    // Syntax validation is handled separately by the RegExp constructor so
+    // callers retain its precise invalid-pattern diagnostic.
+    if (groupEnd === undefined) return undefined;
+    if (!isZeroWidthGroup(pattern, index, groupEnd)) {
+      ambiguousByDepth[depth] = groupHasAmbiguousAlternation(pattern, index, groupEnd)
+        ? (ambiguousByDepth[depth] ?? 0) + 1
+        : 0;
+      if ((ambiguousByDepth[depth] ?? 0) >= 2) {
+        return "adjacent ambiguous alternation groups are not allowed";
+      }
+    }
+    depth += 1;
+    ambiguousByDepth[depth] = 0;
+  }
+  return undefined;
+}
+
 /**
  * Conservative ReDoS guard for workflow-authored patterns.
  *
@@ -255,6 +408,8 @@ export function analyzeWorkflowRegexSafety(pattern: string): RegexSafetyAnalysis
 
   const sequentialProblem = sequentialQuantifierProblem(pattern);
   if (sequentialProblem) return { safe: false, reason: sequentialProblem };
+  const alternationProblem = adjacentAmbiguousAlternationProblem(pattern);
+  if (alternationProblem) return { safe: false, reason: alternationProblem };
 
   const groups: Array<{ containsQuantifier: boolean; containsAlternation: boolean }> = [];
   let inCharacterClass = false;

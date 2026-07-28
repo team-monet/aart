@@ -117,6 +117,19 @@ describe("workflow output validation diagnostics", () => {
     expect(validationProblem({ name: "result", type: "json" }, symbolKeyed)).toMatch(/symbol-keyed array properties/);
   });
 
+  it("rejects non-enumerable object properties and hidden toJSON hooks", () => {
+    const hidden = { visible: true };
+    Object.defineProperty(hidden, "metadata", { value: "lost", enumerable: false });
+    expect(validationProblem({ name: "result", type: "json" }, hidden)).toMatch(/metadata.*non-enumerable/);
+
+    const customSerialization = { visible: true };
+    Object.defineProperty(customSerialization, "toJSON", {
+      value: () => ({ replaced: true }),
+      enumerable: false,
+    });
+    expect(validationProblem({ name: "result", type: "json" }, customSerialization)).toMatch(/toJSON.*non-enumerable/);
+  });
+
   it("compares enum objects by persisted JSON value rather than prototype identity", () => {
     const value = Object.assign(Object.create(null) as Record<string, unknown>, {
       accepted: true,

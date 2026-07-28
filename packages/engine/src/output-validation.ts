@@ -122,8 +122,11 @@ export function jsonCompatibilityProblem(
     if (Object.getOwnPropertySymbols(value).length > 0) {
       return `${path} contains symbol-keyed properties, which JSON persistence would discard`;
     }
-    for (const key of Object.keys(value)) {
+    for (const key of Object.getOwnPropertyNames(value)) {
       const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (descriptor?.enumerable === false) {
+        return `${path}.${key} is non-enumerable, which JSON persistence would discard`;
+      }
       if (descriptor?.get || descriptor?.set) {
         return `${path}.${key} is an accessor property; workflow outputs must contain stable JSON values`;
       }
