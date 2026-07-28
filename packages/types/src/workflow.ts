@@ -88,7 +88,15 @@ function sequentialQuantifierProblem(pattern: string): string | undefined {
         previousByDepth[depth] = atom;
         i = end - 1;
         if (pattern[i + 1] === "?") i += 1;
-      } else {
+      } else if (
+        groupStart === undefined ||
+        !(
+          pattern.startsWith("(?=", groupStart) ||
+          pattern.startsWith("(?!", groupStart) ||
+          pattern.startsWith("(?<=", groupStart) ||
+          pattern.startsWith("(?<!", groupStart)
+        )
+      ) {
         previousByDepth[depth] = undefined;
       }
       continue;

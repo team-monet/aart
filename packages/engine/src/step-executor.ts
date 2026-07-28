@@ -10,7 +10,7 @@ import { checkCapabilityDispatch, alwaysEmptyGrantedCapabilities } from "./capab
 import { parseDurationMs } from "./duration.js";
 import { buildExprContext, resolveArrayExpression, resolveBooleanExpression, resolveStringExpression, resolveWithRecord } from "./expr-context.js";
 import { checkIdempotency, recordIdempotency } from "./idempotency.js";
-import { applyRedaction, createTrackingSecretResolver, isTextMime, throwingSecretResolver } from "./redaction.js";
+import { applyRedaction, applyRunRedaction, createTrackingSecretResolver, isTextMime, throwingSecretResolver } from "./redaction.js";
 import { CURRENT_ENGINE_SCHEMA_VERSION } from "./schema-version.js";
 import type { EngineBlockExecutionContext, EngineConfig } from "./types.js";
 import { enterWait, type WaitMachineConfig } from "./wait/wait-machine.js";
@@ -401,7 +401,7 @@ async function executeForEachStep(
 async function appendTracesAndPersist(config: EngineConfig, run: RunRecord, newTraces: StepTrace[], resolvedSecretRefs: ReadonlySet<string>): Promise<RunRecord> {
   const artifacts = await config.store.artifacts.listByRun(run.runId);
   const updated: RunRecord = { ...run, trace: [...run.trace, ...newTraces], artifacts, updatedAt: (config.now?.() ?? new Date()).toISOString() };
-  const redacted = applyRedaction(config.redact, updated, resolvedSecretRefs);
+  const redacted = applyRunRedaction(config.redact, updated, resolvedSecretRefs);
   await config.store.runs.put(redacted);
   return redacted;
 }

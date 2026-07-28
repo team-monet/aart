@@ -158,7 +158,7 @@ function buildPrComment(run: RunRecord): string {
   const badge = summary.headline === "passed" ? "✅" : summary.headline === "failed" ? "❌" : "⏳";
   const sections = [
     `${badge} **${run.workflowId}@${run.workflowVersion}** — ${summary.headline}`,
-    `**Outputs**\n\n\`\`\`json\n${JSON.stringify(run.outputs ?? {}, null, 2)}\n\`\`\``,
+    `**Outputs**\n\n\`\`\`json\n${JSON.stringify(summary.outputs, null, 2)}\n\`\`\``,
   ];
   if (summary.failures.length > 0) {
     sections.push(`**Failures**\n\n${summary.failures.map((failure) => `- \`${failure.stepId}\` (${failure.block}): ${failure.error}`).join("\n")}`);

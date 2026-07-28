@@ -52,6 +52,16 @@ describe("analyzeWorkflowRegexSafety", () => {
     expect(analyzeWorkflowRegexSafety("(a)*(a)*tail")).toMatchObject({ safe: false });
     expect(analyzeWorkflowRegexSafety("a*b*c*tail")).toEqual({ safe: true });
   });
+
+  it("preserves overlap detection across zero-width assertions", () => {
+    expect(analyzeWorkflowRegexSafety("^a+(?=a+)a+b$")).toMatchObject({
+      safe: false,
+      reason: expect.stringMatching(/overlapping sequential quantifiers/i),
+    });
+    expect(analyzeWorkflowRegexSafety("^a+(?!b+)a+b$")).toMatchObject({ safe: false });
+    expect(analyzeWorkflowRegexSafety("^a+(?<=a+)a+b$")).toMatchObject({ safe: false });
+    expect(analyzeWorkflowRegexSafety("^a+(?<!b+)a+b$")).toMatchObject({ safe: false });
+  });
 });
 
 describe("ExampleSchema", () => {

@@ -62,16 +62,26 @@ describe("createFallbackReportRenderers", () => {
     expect(report.outputs).toMatchObject({ $aart: { kind: "truncated-workflow-outputs", fullResultRef: { runId: run.runId, field: "outputs" } } });
   });
 
-  it("keeps oversized outputs complete in fallback human-facing renderers", () => {
+  it("keeps oversized outputs complete in fallback human-facing formats without transport limits", () => {
     const document = `start-${"x".repeat(10_000)}-end`;
     const run = fakeRunRecord({ outputs: { document } });
 
     expect(renderers.modelFacing(run).outputs).not.toEqual(run.outputs);
-    for (const rendered of [renderers.markdown(run), renderers.cliText(run), renderers.html(run), renderers.prComment(run)]) {
+    for (const rendered of [renderers.markdown(run), renderers.cliText(run), renderers.html(run)]) {
       expect(rendered).toContain("start-");
       expect(rendered).toContain("-end");
       expect(rendered).not.toContain("truncated-workflow-outputs");
     }
+  });
+
+  it("bounds oversized outputs in the fallback PR-comment renderer", () => {
+    const run = fakeRunRecord({ outputs: { document: `start-${"x".repeat(200_000)}-end` } });
+    const comment = renderers.prComment(run);
+
+    expect(comment.length).toBeLessThan(10_000);
+    expect(comment).toContain("truncated-workflow-outputs");
+    expect(comment).toContain(run.runId);
+    expect(comment).not.toContain("-end");
   });
 
   it("surfaces a run-level output failure in every fallback renderer when no trace step failed", () => {

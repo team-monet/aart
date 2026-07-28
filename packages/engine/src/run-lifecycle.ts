@@ -8,9 +8,8 @@
 import type { RunRecord, StepTrace, Workflow, WorkflowStep } from "@aart/types";
 import { ConcurrencyRejectedError } from "@aart/types";
 import { buildExprContext, resolveBooleanExpression } from "./expr-context.js";
-import { createTrackingSecretResolver, throwingSecretResolver } from "./redaction.js";
-import { CONCURRENCY_KEY_FORMAT, decideConcurrency, fingerprintConcurrencyKey, releaseQueuedRuns, resolveConcurrencyKey } from "./concurrency.js";
-import { applyRedaction } from "./redaction.js";
+import { decideConcurrency, fingerprintConcurrencyKey, releaseQueuedRuns, resolveConcurrencyKey } from "./concurrency.js";
+import { applyRedaction, applyRunRedaction, createTrackingSecretResolver, throwingSecretResolver } from "./redaction.js";
 import { assertSchemaVersionCompatible, CURRENT_ENGINE_SCHEMA_VERSION } from "./schema-version.js";
 import { captureExecutionSnapshot, isSnapshotCaptured, resolveWorkflowForRun, uncapturedSnapshot } from "./snapshot.js";
 import { validateWorkflowOutputs, WorkflowOutputValidationError } from "./output-validation.js";
@@ -46,18 +45,17 @@ import { materializeWorkflowOutputs } from "./workflow-outputs.js";
 export async function triggerRun(config: EngineConfig, input: TriggerRunInput): Promise<RunRecord> {
   const now = config.now?.() ?? new Date();
   const schemaVersion = config.schemaVersion ?? CURRENT_ENGINE_SCHEMA_VERSION;
-  // Equality is the only operation concurrency enforcement needs. Persist a
-  // deterministic fingerprint instead of the author-provided value so a key
-  // that is also a secret never leaks into RunRecord.params and cannot be
-  // rewritten by later whole-record redaction.
+  // Keep the persisted slot backward-readable while older intake instances
+  // can share this store during a rolling upgrade. Current readers normalize
+  // both this raw representation and the short-lived fingerprinted format;
+  // the rejection diagnostic uses only a non-reversible fingerprint.
   const resolvedKey = await resolveConcurrencyKey(input.workflow, input.inputs);
-  const key = fingerprintConcurrencyKey(resolvedKey);
   const decision = await decideConcurrency(config.store, input.workflow, resolvedKey);
 
   if (decision.action === "reject") {
     throw new ConcurrencyRejectedError({
       message: `Trigger for workflow "${input.workflow.id}" rejected — an existing non-terminal run already holds the same concurrency key under policy "reject_new" (architecture §4.3).`,
-      detail: { kind: "concurrencyRejected", workflowId: input.workflow.id, key },
+      detail: { kind: "concurrencyRejected", workflowId: input.workflow.id, key: fingerprintConcurrencyKey(resolvedKey) },
     });
   }
   if (decision.action === "cancel_existing") {
@@ -85,7 +83,7 @@ export async function triggerRun(config: EngineConfig, input: TriggerRunInput): 
     params: {
       ...input.params,
       ...(input.environment !== undefined ? { environment: input.environment } : {}),
-      ...(key !== undefined ? { concurrencyKey: key, concurrencyKeyFormat: CONCURRENCY_KEY_FORMAT } : {}),
+      ...(resolvedKey !== undefined ? { concurrencyKey: resolvedKey } : {}),
       ...(waitingOnConcurrency ? { waitingOnConcurrency: true } : {}),
     },
     trace: [],
@@ -98,7 +96,7 @@ export async function triggerRun(config: EngineConfig, input: TriggerRunInput): 
   };
 
   const resolvedSecretRefs = new Set<string>();
-  const redacted = applyRedaction(config.redact, run, resolvedSecretRefs);
+  const redacted = applyRunRedaction(config.redact, run, resolvedSecretRefs);
   await config.store.runs.put(redacted);
   if (!waitingOnConcurrency) {
     await config.store.jobQueue.enqueue(redacted.runId);
@@ -285,7 +283,7 @@ export async function runStepsLoop(config: EngineConfig, initialRun: RunRecord, 
     if (!isSnapshotCaptured(run.snapshot) && isWaitBlockId(step.uses)) {
       const now = config.now?.() ?? new Date();
       const withSnapshot: RunRecord = { ...run, snapshot: await captureExecutionSnapshot(workflow, config.blocks, now, config.computePackHashes) };
-      run = applyRedaction(config.redact, withSnapshot, resolvedSecretRefs);
+      run = applyRunRedaction(config.redact, withSnapshot, resolvedSecretRefs);
       await config.store.runs.put(run);
     }
 
@@ -335,7 +333,7 @@ export async function executeRun(config: EngineConfig, runId: string): Promise<R
   let run = loaded;
   if (run.status === "pending") {
     const now = (config.now?.() ?? new Date()).toISOString();
-    run = applyRedaction(config.redact, { ...run, status: "running", updatedAt: now }, resolvedSecretRefs);
+    run = applyRunRedaction(config.redact, { ...run, status: "running", updatedAt: now }, resolvedSecretRefs);
     await config.store.runs.put(run);
   } else if (run.status !== "running") {
     // Already `waiting`/`completed`/`failed`/`cancelled` — idempotent no-op
@@ -376,6 +374,8 @@ export async function cancelRun(config: EngineConfig, runId: string): Promise<Ru
 
   const resolvedSecretRefs = new Set<string>();
   const nowDate = config.now?.() ?? new Date();
+  const concurrencyKey = run.params?.concurrencyKey;
+  const concurrencyKeyFormat = run.params?.concurrencyKeyFormat;
   const updated: RunRecord = {
     ...run,
     status: "cancelled",
@@ -387,9 +387,8 @@ export async function cancelRun(config: EngineConfig, runId: string): Promise<Ru
   const redacted = applyRedaction(config.redact, updated, resolvedSecretRefs);
   await config.store.runs.put(redacted);
 
-  const concurrencyKey = redacted.params?.concurrencyKey;
   if (typeof concurrencyKey === "string") {
-    await releaseQueuedRuns(config.store, redacted.workflowId, concurrencyKey, redacted.params?.concurrencyKeyFormat);
+    await releaseQueuedRuns(config.store, redacted.workflowId, concurrencyKey, concurrencyKeyFormat);
   }
   await runOnRunTerminal(config, redacted.runId);
   return redacted;

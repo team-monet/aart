@@ -13,17 +13,17 @@ import { createHash } from "node:crypto";
 const NON_TERMINAL_STATUSES = new Set<RunRecord["status"]>(["pending", "running", "waiting"]);
 export const CONCURRENCY_KEY_FORMAT = "sha256-v1";
 
-/** Stable, non-reversible persisted representation of an authored key. */
+/** Stable, non-reversible representation used by tagged records and diagnostics. */
 export function fingerprintConcurrencyKey(key: string | undefined): string | undefined {
   return key === undefined ? undefined : `sha256:${createHash("sha256").update(key).digest("hex")}`;
 }
 
 function normalizePersistedKey(key: string | undefined, format: unknown): string | undefined {
   if (key === undefined) return undefined;
-  // Never infer storage format from the value's shape: a legacy authored
-  // key can itself legitimately look like "sha256:<64 hex>". New records
-  // carry an explicit format marker; marker-less records are legacy raw
-  // values and are fingerprinted exactly once on comparison.
+  // Never infer storage format from the value's shape: an authored key can
+  // itself legitimately look like "sha256:<64 hex>". Tagged records carry
+  // the fingerprint format explicitly; marker-less records remain the
+  // backward-readable raw form and are fingerprinted once for comparison.
   return format === CONCURRENCY_KEY_FORMAT ? key : fingerprintConcurrencyKey(key);
 }
 
@@ -51,8 +51,8 @@ export type ConcurrencyDecision =
 /**
  * The trigger-intake decision (architecture §4.3's four policies). Looks up
  * every non-terminal run of `workflow.id` and compares `params.concurrencyKey`
- * (a persisted fingerprint; legacy raw values are normalized on read) against
- * the newly-resolved raw authored key. `decideConcurrency` is public beside
+ * (a backward-readable raw key or tagged fingerprint, normalized on read)
+ * against the newly-resolved raw authored key. `decideConcurrency` is public beside
  * `resolveConcurrencyKey`, so it preserves that raw-key contract and performs
  * fingerprinting internally. Returns `{ action: "allow" }`
  * when the workflow declares no `concurrency` block, or when no other

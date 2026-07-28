@@ -6,7 +6,7 @@
 // OPTIONAL extra input, not a violation of architecture §9.1's
 // RunRecord-only purity rule for the renderer's CORE behavior, which still
 // works from RunRecord alone if the caller doesn't have that extra context.
-import type { RunRecord } from "@aart/types";
+import { compactModelFacingOutputs, type RunRecord } from "@aart/types";
 import { applyRedaction, type RedactFn } from "../redact.js";
 import { buildReportModel } from "../report-model.js";
 
@@ -57,7 +57,7 @@ export function renderPrComment(
   lines.push("");
   lines.push("Outputs:");
   lines.push("```json");
-  lines.push(JSON.stringify(model.outputs, null, 2));
+  lines.push(JSON.stringify(compactModelFacingOutputs(clean.runId, model.outputs), null, 2));
   lines.push("```");
 
   if (model.artifacts.length > 0) {

@@ -141,6 +141,16 @@ describe("renderPrComment — spec §26.3 format", () => {
     const comment = renderPrComment(fixtureRunRecord({ approved: false }), identityRedact);
     expect(comment).toContain("Approval: not approved");
   });
+
+  it("bounds oversized outputs and points to the full RunRecord in PR comments", () => {
+    const run = fixtureRunRecord({ outputs: { document: `start-${"x".repeat(200_000)}-end` } });
+    const comment = renderPrComment(run, identityRedact);
+
+    expect(comment.length).toBeLessThan(10_000);
+    expect(comment).toContain("truncated-workflow-outputs");
+    expect(comment).toContain(`"runId": "${run.runId}"`);
+    expect(comment).not.toContain("-end");
+  });
 });
 
 describe("renderJson — full-fidelity dump", () => {

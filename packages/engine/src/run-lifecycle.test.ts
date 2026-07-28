@@ -85,11 +85,26 @@ describe("triggerRun — run intake (architecture §4.3)", () => {
     const second = await triggerRun(config, { workflow, trigger: fixtureTrigger(), inputs: { caseId: "case-1" } });
     expect(second.status).toBe("pending");
     expect(second.params?.waitingOnConcurrency).toBe(true);
-    expect(second.params?.concurrencyKeyFormat).toBe("sha256-v1");
+    expect(second.params?.concurrencyKey).toBe("case-1");
+    expect(second.params?.concurrencyKeyFormat).toBeUndefined();
 
     const claimable = await store.jobQueue.listClaimable(new Date().toISOString());
     expect(claimable.map((c) => c.runId)).toContain(first.runId);
     expect(claimable.map((c) => c.runId)).not.toContain(second.runId);
+  });
+
+  it("keeps newly created runs visible to pre-fingerprint intake during a rolling upgrade", async () => {
+    const { store, config } = await setup();
+    const workflow = fixtureWorkflow({
+      id: "wf-rolling-upgrade",
+      concurrency: { key: "{{ inputs.caseId }}", policy: "queue" },
+    });
+
+    await triggerRun(config, { workflow, trigger: fixtureTrigger(), inputs: { caseId: "case-1" } });
+
+    const candidates = await store.runs.list({ workflowId: workflow.id });
+    // This is the exact comparison used by the pre-change intake path.
+    expect(candidates.some((run) => run.params?.concurrencyKey === "case-1")).toBe(true);
   });
 
   it("cancel_existing: triggering cancels the prior non-terminal run for the same key (skip-recording applies)", async () => {
