@@ -739,6 +739,51 @@ describe("executeRun — fresh execution", () => {
     expect(finished.trace.filter((trace) => trace.stepId === "poll")[1]?.secretTainted).toBeUndefined();
   });
 
+  it("refreshes trace taint when until is the first expression to resolve a secret", async () => {
+    const booleanOutput: BlockImplementation = {
+      manifest: {
+        id: "test.boolean-output",
+        version: "1.0.0",
+        capabilities: [],
+        inputSchema: {},
+        outputSchema: {},
+        description: "Returns the same boolean later resolved as a secret.",
+      },
+      execute: async () => ({ value: true }),
+    };
+    const { store, config } = await setup({
+      blocks: { [booleanOutput.manifest.id]: booleanOutput },
+      redact: redactResolvedValues,
+      resolveSecret: () => true,
+    });
+    const workflow = fixtureWorkflow({
+      outputs: [{ name: "result", type: "json", required: true }],
+      execution: {
+        type: "workflow",
+        steps: [
+          {
+            id: "poll",
+            uses: booleanOutput.manifest.id,
+            next: "poll",
+            maxIterations: 1,
+            until: "{{ secrets.STOP }}",
+          },
+        ],
+        outputMapping: { result: "{{ steps.poll.outputs.value }}" },
+      },
+    });
+    await store.workflows.put(workflow);
+    const run = await triggerRun(config, { workflow, trigger: fixtureTrigger(), inputs: {} });
+
+    const finished = await executeRun(config, run.runId);
+
+    expect(finished.status).toBe("failed");
+    expect(finished.error).toMatch(/secret-tainted step "poll"/);
+    expect(finished.trace.find((trace) => trace.stepId === "poll")).toMatchObject({
+      secretTainted: true,
+    });
+  });
+
   it("respects a forEach binding that shadows a tainted real step id", async () => {
     const { store, config } = await setup({
       redact: redactResolvedValues,

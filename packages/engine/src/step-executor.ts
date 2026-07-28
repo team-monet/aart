@@ -426,7 +426,11 @@ async function appendTracesAndPersist(config: EngineConfig, run: RunRecord, newT
   return redacted;
 }
 
-function stepReferencesSecretTaintedTrace(step: WorkflowStep, run: RunRecord): boolean {
+function stepReferencesSecretTaintedTrace(
+  step: WorkflowStep,
+  run: RunRecord,
+  includeUntil = false,
+): boolean {
   const expressionReferencesTaint = (
     expression: unknown,
     shadowedStepId?: string,
@@ -456,7 +460,7 @@ function stepReferencesSecretTaintedTrace(step: WorkflowStep, run: RunRecord): b
   };
 
   if (
-    [step.if, step.forEach].some((expression) =>
+    [step.if, step.forEach, ...(includeUntil ? [step.until] : [])].some((expression) =>
       expressionReferencesTaint(expression),
     )
   ) {
@@ -498,6 +502,7 @@ function recomputeInheritedSecretTaint(
   step: WorkflowStep,
   run: RunRecord,
   resolvedSecretRefs: ReadonlySet<string>,
+  includeUntil = false,
 ): boolean {
   const taintAwareTrace = annotateSecretTaint(
     config,
@@ -505,7 +510,11 @@ function recomputeInheritedSecretTaint(
     resolvedSecretRefs,
     false,
   );
-  return stepReferencesSecretTaintedTrace(step, { ...run, trace: taintAwareTrace });
+  return stepReferencesSecretTaintedTrace(
+    step,
+    { ...run, trace: taintAwareTrace },
+    includeUntil,
+  );
 }
 
 /**
@@ -707,8 +716,53 @@ export async function executeStep(
     return { kind: "failed", run: updatedRun, error: new Error(failure.error ?? `Step "${step.id}" failed.`) };
   }
 
-  const nextStepId = await determineNextStepId(workflow, step, updatedRun, ifResult, resolvedSecretRefs, config);
-  return { kind: "continue", run: updatedRun, nextStepId };
+  const secretCountBeforeNextResolution = resolvedSecretRefs.size;
+  const nextStepId = await determineNextStepId(
+    workflow,
+    step,
+    updatedRun,
+    ifResult,
+    resolvedSecretRefs,
+    config,
+  );
+  if (resolvedSecretRefs.size === secretCountBeforeNextResolution) {
+    return { kind: "continue", run: updatedRun, nextStepId };
+  }
+
+  let refreshedTrace = annotateSecretTaint(
+    config,
+    updatedRun.trace,
+    resolvedSecretRefs,
+    false,
+  );
+  if (
+    recomputeInheritedSecretTaint(
+      config,
+      step,
+      { ...updatedRun, trace: refreshedTrace },
+      resolvedSecretRefs,
+      true,
+    )
+  ) {
+    const currentTraceStart = Math.max(
+      0,
+      refreshedTrace.length - taintAnnotatedTraces.length,
+    );
+    refreshedTrace = refreshedTrace.map((trace, index) =>
+      index >= currentTraceStart ? { ...trace, secretTainted: true } : trace,
+    );
+  }
+  const refreshedRun = applyRunRedaction(
+    config.redact,
+    {
+      ...updatedRun,
+      trace: refreshedTrace,
+      updatedAt: (config.now?.() ?? new Date()).toISOString(),
+    },
+    resolvedSecretRefs,
+  );
+  await config.store.runs.put(refreshedRun);
+  return { kind: "continue", run: refreshedRun, nextStepId };
 }
 
 /**
