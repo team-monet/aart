@@ -22,13 +22,27 @@ function defineOutput(outputs: Record<string, unknown>, name: string, value: unk
   });
 }
 
-function referencesOnlyUnexecutedWorkflowSteps(expression: string, workflow: Pick<Workflow, "execution">, run: RunRecord): boolean {
+function referencesOnlyUnexecutedWorkflowStepSources(
+  expression: string,
+  workflow: Pick<Workflow, "execution">,
+  run: RunRecord,
+): boolean {
   const tokens = findExpressionTokens(expression);
   const stepIds: string[] = [];
   for (const token of tokens) {
     const parsed = parseExpression(token[0]);
     const first = parsed.path[0];
-    if (parsed.root !== "steps" || first?.kind !== "property") return false;
+    const second = parsed.path[1];
+    const hasValidStepShape =
+      second?.kind === "property" &&
+      (second.name === "outputs" || (second.name === "status" && parsed.path.length === 2));
+    // Optional omission is only meaningful for a valid public step-output
+    // source (or the step status exposed by buildExprContext). A misspelling
+    // such as `steps.read.outptus.value` must fail consistently whether or
+    // not that branch happened to execute.
+    if (parsed.root !== "steps" || first?.kind !== "property" || !hasValidStepShape) {
+      return false;
+    }
     stepIds.push(first.name);
   }
   if (stepIds.length === 0) return false;
@@ -73,7 +87,7 @@ export async function materializeWorkflowOutputs(
         err instanceof ExprResolutionError &&
         field !== undefined &&
         field.required !== true &&
-        referencesOnlyUnexecutedWorkflowSteps(expression, workflow, run)
+        referencesOnlyUnexecutedWorkflowStepSources(expression, workflow, run)
       ) {
         continue;
       }

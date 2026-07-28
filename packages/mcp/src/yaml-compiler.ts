@@ -86,6 +86,17 @@ function validateExpressionCandidate(
       if (options.knownStepIds && parsed.root === "steps" && first?.kind === "property" && !options.knownStepIds.has(first.name)) {
         problems.push(`${label}: references unknown step "${first.name}"`);
       }
+      const second = parsed.path[1];
+      const hasValidStepShape =
+        second?.kind === "property" &&
+        (second.name === "outputs" || (second.name === "status" && parsed.path.length === 2));
+      if (
+        options.knownStepIds &&
+        parsed.root === "steps" &&
+        (first?.kind !== "property" || !hasValidStepShape)
+      ) {
+        problems.push(`${label}: step references must use steps.<id>.outputs[.<field>] or steps.<id>.status`);
+      }
     } catch (err) {
       if (err instanceof ExprSyntaxError) {
         problems.push(`${label}: ${err.message}`);

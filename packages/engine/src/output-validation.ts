@@ -6,11 +6,24 @@
 import { isDeepStrictEqual } from "node:util";
 import { isSupportedFieldType, type Field, type SupportedFieldType, type Workflow } from "@aart/types";
 
+const MAX_DIAGNOSTIC_VALUE_CHARS = 512;
+
 export class WorkflowOutputValidationError extends Error {
   constructor(public readonly problems: readonly string[]) {
     super(`Workflow output validation failed: ${problems.join("; ")}`);
     this.name = "WorkflowOutputValidationError";
   }
+}
+
+function diagnosticValue(value: unknown): string {
+  let serialized: string;
+  try {
+    serialized = JSON.stringify(value) ?? String(value);
+  } catch {
+    serialized = `[unserializable ${actualType(value)}]`;
+  }
+  if (serialized.length <= MAX_DIAGNOSTIC_VALUE_CHARS) return serialized;
+  return `${serialized.slice(0, MAX_DIAGNOSTIC_VALUE_CHARS)}… [truncated; ${serialized.length} characters total]`;
 }
 
 function actualType(value: unknown): string {
@@ -56,23 +69,27 @@ function validateValue(field: Field, value: unknown, problems: string[]): void {
   }
 
   if (field.enum && !field.enum.some((candidate) => isDeepStrictEqual(candidate, value))) {
-    problems.push(`output "${field.name}" value ${JSON.stringify(value)} is not one of its declared enum values ${JSON.stringify(field.enum)}`);
+    problems.push(
+      `output "${field.name}" value ${diagnosticValue(value)} is not one of its declared enum values ${diagnosticValue(field.enum)}`,
+    );
   }
 
   if (field.pattern) {
     if (typeof value !== "string") {
-      problems.push(`output "${field.name}" declares pattern "${field.pattern}" but its value is not a string`);
+      problems.push(`output "${field.name}" declares pattern ${diagnosticValue(field.pattern)} but its value is not a string`);
       return;
     }
     let pattern: RegExp;
     try {
       pattern = new RegExp(field.pattern);
     } catch {
-      problems.push(`output "${field.name}" declares invalid pattern "${field.pattern}"`);
+      problems.push(`output "${field.name}" declares invalid pattern ${diagnosticValue(field.pattern)}`);
       return;
     }
     if (!pattern.test(value)) {
-      problems.push(`output "${field.name}" value ${JSON.stringify(value)} does not match declared pattern "${field.pattern}"`);
+      problems.push(
+        `output "${field.name}" value ${diagnosticValue(value)} does not match declared pattern ${diagnosticValue(field.pattern)}`,
+      );
     }
   }
 }

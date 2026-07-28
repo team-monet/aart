@@ -211,6 +211,25 @@ describe("executeRun — fresh execution", () => {
     expect(finished.outputs).toEqual({});
   });
 
+  it("fails a structurally malformed optional mapping even when its source step was skipped", async () => {
+    const { store, config } = await setup();
+    const workflow = fixtureWorkflow({
+      inputs: [{ name: "includeResult", type: "boolean", required: true }],
+      outputs: [{ name: "optionalResult", type: "string" }],
+      execution: {
+        type: "workflow",
+        steps: [{ id: "optional", uses: "test.echo", if: "{{ inputs.includeResult }}" }],
+        outputMapping: { optionalResult: "{{ steps.optional.outptus.value }}" },
+      },
+    });
+    await store.workflows.put(workflow);
+    const run = await triggerRun(config, { workflow, trigger: fixtureTrigger(), inputs: { includeResult: false } });
+    const finished = await executeRun(config, run.runId);
+
+    expect(finished.status).toBe("failed");
+    expect(finished.error).toMatch(/workflow output mapping failed/i);
+  });
+
   it("fails an optional mapping whose source step ran but did not produce the referenced field", async () => {
     const { store, config } = await setup();
     const workflow = fixtureWorkflow({

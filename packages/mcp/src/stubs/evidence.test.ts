@@ -1,6 +1,6 @@
 import type { RunRecord } from "@aart/types";
 import { describe, expect, it } from "vitest";
-import { buildModelFacingReport } from "./evidence.js";
+import { buildMarkdownReport, buildModelFacingReport } from "./evidence.js";
 
 function runWithOutputs(outputs: Record<string, unknown>): RunRecord {
   const now = "2026-07-28T00:00:00.000Z";
@@ -40,5 +40,16 @@ describe("stub evidence model-facing report", () => {
         fullResultRef: { runId: run.runId, field: "outputs" },
       },
     });
+  });
+
+  it("surfaces a workflow-level output failure when no trace step failed", () => {
+    const error = 'Workflow output validation failed: output "result" expected type "string" but received "object"';
+    const run: RunRecord = { ...runWithOutputs({}), status: "failed", error };
+
+    expect(buildModelFacingReport(run).failures).toEqual([
+      { stepId: "$workflow", block: "workflow.outputMapping", error },
+    ]);
+    expect(buildMarkdownReport(run)).toContain(error);
+    expect(buildMarkdownReport(run)).toContain("workflow.outputMapping");
   });
 });

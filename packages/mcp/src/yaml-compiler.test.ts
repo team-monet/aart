@@ -271,6 +271,39 @@ outputMapping:
     ).toThrow(/outputMapping "result".*unknown step "reed"/s);
   });
 
+  it("rejects a malformed step-output path before registration", () => {
+    expect(() =>
+      compileYamlWorkflow(`id: malformed-output-path
+name: Malformed Output Path
+version: 0.1.0
+outputs:
+  result:
+    type: string
+steps:
+  - id: optional
+    uses: web.read
+outputMapping:
+  result: "{{ steps.optional.outptus.text }}"
+`),
+    ).toThrow(/outputMapping "result".*steps\.<id>\.outputs/s);
+  });
+
+  it("keeps the documented step status path available to output mappings", () => {
+    const workflow = compileYamlWorkflow(`id: output-step-status
+name: Output Step Status
+version: 0.1.0
+outputs:
+  status:
+    type: string
+steps:
+  - id: optional
+    uses: web.read
+outputMapping:
+  status: "{{ steps.optional.status }}"
+`);
+    expect(workflow.execution.outputMapping?.status).toBe("{{ steps.optional.status }}");
+  });
+
   it("rejects duplicate canonical output declarations", () => {
     expect(() =>
       compileWorkflowObject({
