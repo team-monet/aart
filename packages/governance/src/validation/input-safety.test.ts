@@ -7,8 +7,13 @@ function field(overrides: Partial<Field>): Field {
   return { name: "f", type: "string", ...overrides };
 }
 
-function wf(inputs: Field[], steps: WorkflowStep[], outputs: Field[] = []): Pick<Workflow, "inputs" | "outputs" | "execution"> {
-  return { inputs, outputs, execution: { type: "workflow", steps } };
+function wf(
+  inputs: Field[],
+  steps: WorkflowStep[],
+  outputs: Field[] = [],
+  outputMapping?: Record<string, string>,
+): Pick<Workflow, "inputs" | "outputs" | "execution"> {
+  return { inputs, outputs, execution: { type: "workflow", steps, outputMapping } };
 }
 
 const lookup: CapabilityClosureLookup = {
@@ -83,6 +88,33 @@ describe("validateInputSafety — enum/regex/default consistency (spec §18.4)",
     );
     expect(findings).toContainEqual(
       expect.objectContaining({ path: "outputs[1].name", severity: "error", message: expect.stringContaining("more than once") }),
+    );
+  });
+
+  it("rejects a required output with no mapping in the canonical governance gate", () => {
+    const findings = validateInputSafety(wf([], [], [field({ name: "result", required: true })]), lookup);
+
+    expect(findings).toContainEqual(
+      expect.objectContaining({
+        path: "execution.outputMapping.result",
+        severity: "error",
+        message: expect.stringContaining('Required output "result" has no outputMapping entry'),
+      }),
+    );
+  });
+
+  it("rejects a mapping that publishes an undeclared output in the canonical governance gate", () => {
+    const findings = validateInputSafety(
+      wf([], [], [field({ name: "declared" })], { undeclared: "{{ inputs.value }}" }),
+      lookup,
+    );
+
+    expect(findings).toContainEqual(
+      expect.objectContaining({
+        path: "execution.outputMapping.undeclared",
+        severity: "error",
+        message: expect.stringContaining('outputMapping "undeclared" is not declared in outputs'),
+      }),
     );
   });
 });

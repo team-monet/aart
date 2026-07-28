@@ -6,7 +6,7 @@
 // (correction.ts) never triggers any of these automatically.
 import type { AartStore } from "@aart/store";
 import type { Correction, EvalExample, ImprovementBrief, RunRecord, StepTrace, Workflow } from "@aart/types";
-import { materializeWorkflowOutputs, validateWorkflowOutputs } from "@aart/engine";
+import { materializeWorkflowOutputs, validateWorkflowOutputs } from "@aart/engine/workflow-output-contract";
 import { generateImprovementBrief } from "../improvement-brief.js";
 import { correctionKey } from "./correction.js";
 

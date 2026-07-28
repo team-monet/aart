@@ -183,6 +183,29 @@ export function validateInputSafety(workflow: Pick<Workflow, "inputs" | "outputs
     outputNames.add(field.name);
   });
 
+  const outputMapping = workflow.execution.outputMapping ?? {};
+  const mappedOutputNames = new Set(Object.keys(outputMapping));
+  workflow.outputs.forEach((field) => {
+    if (field.required === true && !mappedOutputNames.has(field.name)) {
+      findings.push({
+        class: "input-safety",
+        path: `execution.outputMapping.${field.name}`,
+        message: `Required output "${field.name}" has no outputMapping entry`,
+        severity: "error",
+      });
+    }
+  });
+  for (const mappedName of mappedOutputNames) {
+    if (!outputNames.has(mappedName)) {
+      findings.push({
+        class: "input-safety",
+        path: `execution.outputMapping.${mappedName}`,
+        message: `outputMapping "${mappedName}" is not declared in outputs`,
+        severity: "error",
+      });
+    }
+  }
+
   workflow.execution.steps.forEach((step, i) => {
     const path = `steps[${i}]`;
     validateCommandInterpolation(step, path, findings);

@@ -104,6 +104,7 @@ export function buildMarkdownReport(run: RunRecord): string {
   for (const t of run.trace) {
     lines.push(`- [${t.status}] ${t.stepId} (\`${t.block}\`)${t.error ? ` — ${t.error}` : ""}`);
   }
+  lines.push("", "## Outputs", "", "```json", JSON.stringify(run.outputs ?? {}, null, 2), "```");
   const failures = failuresFor(run);
   if (failures.length > 0) {
     lines.push("", "## Failures", "");

@@ -42,6 +42,15 @@ describe("stub evidence model-facing report", () => {
     });
   });
 
+  it("keeps full workflow outputs in the human-facing Markdown report", () => {
+    const output = "x".repeat(10_000);
+    const markdown = buildMarkdownReport(runWithOutputs({ result: output }));
+
+    expect(markdown).toContain("## Outputs");
+    expect(markdown).toContain(JSON.stringify({ result: output }, null, 2));
+    expect(markdown).not.toContain("truncated-workflow-outputs");
+  });
+
   it("surfaces a workflow-level output failure when no trace step failed", () => {
     const error = 'Workflow output validation failed: output "result" expected type "string" but received "object"';
     const run: RunRecord = { ...runWithOutputs({}), status: "failed", error };
