@@ -144,19 +144,25 @@ export function applyRunRedaction(redact: RedactFn, run: RunRecord, resolvedSecr
     delete copy.secretTainted;
     return copy;
   });
+  const { trace: _trace, ...runWithoutTrace } = run;
   const redactedPayload = applyRedaction(
     redact,
-    { ...run, trace: redactableTrace },
+    runWithoutTrace,
+    resolvedSecretRefs,
+  );
+  const redactedTrace = applyRedaction(
+    redact,
+    redactableTrace,
     resolvedSecretRefs,
   );
   const secretTaintByTrace = run.trace.map((trace, index) => {
     if (trace.secretTainted === true) return true;
     if (trace.outputs === undefined) return false;
-    return !jsonValuesEqual(trace.outputs, redactedPayload.trace[index]?.outputs);
+    return !jsonValuesEqual(trace.outputs, redactedTrace[index]?.outputs);
   });
   const redacted: RunRecord = {
     ...redactedPayload,
-    trace: redactedPayload.trace.map((trace, index) => {
+    trace: redactedTrace.map((trace, index) => {
       const restored = { ...trace };
       delete restored.secretTainted;
       return secretTaintByTrace[index]

@@ -194,4 +194,31 @@ describe("applyRunRedaction", () => {
     expect(redacted.trace[0]?.secretTainted).toBe(true);
     expect(redacted.trace[0]).not.toHaveProperty("[REDACTED:secret]Tainted");
   });
+
+  it("keeps the top-level trace container outside key redaction", () => {
+    const redactTraceKey = (record: unknown): unknown =>
+      JSON.parse(JSON.stringify(record).replaceAll("trace", "[REDACTED]"));
+    const run = fixtureRun({
+      trace: [
+        {
+          seq: 0,
+          stepId: "source",
+          block: "test.echo",
+          status: "completed",
+          inputs: {},
+          outputs: { value: "public" },
+          startedAt: "t",
+        },
+      ],
+    });
+
+    const redacted = applyRunRedaction(
+      redactTraceKey,
+      run,
+      new Set(["trace"]),
+    );
+
+    expect(redacted.trace).toHaveLength(1);
+    expect(redacted).not.toHaveProperty("[REDACTED]");
+  });
 });

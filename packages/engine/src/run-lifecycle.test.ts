@@ -923,6 +923,50 @@ describe("executeRun — fresh execution", () => {
     });
   });
 
+  it("carries secret-controlled branch taint into the selected successor", async () => {
+    const { store, config } = await setup({
+      redact: redactResolvedValues,
+      resolveSecret: () => false,
+    });
+    const workflow = fixtureWorkflow({
+      outputs: [{ name: "result", type: "string", required: true }],
+      execution: {
+        type: "workflow",
+        steps: [
+          {
+            id: "gate",
+            uses: "test.echo",
+            if: "{{ secrets.FLAG }}",
+            then: "allowed",
+            else: "denied",
+          },
+          { id: "allowed", uses: "test.echo", with: { value: "allowed" } },
+          { id: "denied", uses: "test.echo", with: { value: "denied" } },
+        ],
+        outputMapping: {
+          result: "{{ steps.denied.outputs.echoed.value }}",
+        },
+      },
+    });
+    await store.workflows.put(workflow);
+    const run = await triggerRun(config, {
+      workflow,
+      trigger: fixtureTrigger(),
+      inputs: {},
+    });
+
+    const finished = await executeRun(config, run.runId);
+
+    expect(finished.status).toBe("failed");
+    expect(finished.error).toMatch(/secret-tainted step "denied"/);
+    expect(finished.trace.find((trace) => trace.stepId === "gate")).toMatchObject({
+      secretTainted: true,
+    });
+    expect(finished.trace.find((trace) => trace.stepId === "denied")).toMatchObject({
+      secretTainted: true,
+    });
+  });
+
   it("respects a forEach binding that shadows a tainted real step id", async () => {
     const { store, config } = await setup({
       redact: redactResolvedValues,

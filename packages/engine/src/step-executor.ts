@@ -503,6 +503,24 @@ function valueReferencesSecret(value: unknown): boolean {
   );
 }
 
+function runHasSecretControlledFlow(
+  workflow: Workflow,
+  run: RunRecord,
+): boolean {
+  return run.trace.some((trace) => {
+    if (trace.secretTainted !== true) return false;
+    const ownerStepId = trace.stepId.replace(/\[\d+\]$/, "");
+    const owner = workflow.execution.steps.find(
+      (step) => step.id === ownerStepId,
+    );
+    return (
+      owner !== undefined &&
+      (valueReferencesSecret(owner.if) ||
+        (owner.next !== undefined && valueReferencesSecret(owner.until)))
+    );
+  });
+}
+
 function annotateSecretTaint(
   config: EngineConfig,
   traces: StepTrace[],
@@ -657,6 +675,7 @@ export async function executeStep(
   const resolveOptions: ResolveOptions = { secretResolver };
   const exprContextBeforeDispatch = buildExprContext(run);
   let inheritedSecretTaint =
+    runHasSecretControlledFlow(workflow, run) ||
     stepReferencesSecretTaintedTrace(step, run) ||
     (step.forEach === undefined &&
       Object.values(step.with ?? {}).some(valueReferencesSecret)) ||
