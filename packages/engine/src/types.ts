@@ -114,7 +114,7 @@ export interface EngineConfig {
    * (`detail.kind: "guardedBackEdge"`).
    */
   forEachArrayLimit?: number;
-  /** Engine-code schema-version tag stamped onto every persisted `WaitCondition`/`RunRecord` this engine instance writes, and checked for compatibility on every resume (architecture §4.7). Defaults to `CURRENT_ENGINE_SCHEMA_VERSION` (schema-version.ts, currently `1`) — override only to simulate a different engine version in tests (the rolling-upgrade/version-skew test fixture deliberately does this). */
+  /** Engine-code schema-version tag stamped onto every persisted `WaitCondition`/`RunRecord` this engine instance writes, and checked for compatibility on every resume (architecture §4.7). Defaults to `CURRENT_ENGINE_SCHEMA_VERSION` (schema-version.ts, currently `2`) — override only to simulate a different engine version in tests (the rolling-upgrade/version-skew test fixture deliberately does this). */
   schemaVersion?: number;
   /** Injectable clock, defaults to `() => new Date()`. */
   now?: () => Date;

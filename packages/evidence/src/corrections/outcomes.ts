@@ -37,6 +37,14 @@ function setByPath(target: Record<string, unknown>, path: string, value: unknown
  * (architecture §5.3 `step_traces.post_hoc_corrected`, F5 fix).
  */
 export async function updateRunOutput(store: AartStore, correction: Correction): Promise<RunRecord> {
+  if (
+    correction.fieldPath === "secretTainted" ||
+    correction.fieldPath.startsWith("secretTainted.")
+  ) {
+    throw new Error(
+      "updateRunOutput: secretTainted is protected engine security metadata and cannot be changed by a correction",
+    );
+  }
   const run = await store.runs.get(correction.runId);
   if (!run) throw new Error(`updateRunOutput: no such run "${correction.runId}"`);
   // A step may have more than one trace after a loop/back-edge or reclaim.

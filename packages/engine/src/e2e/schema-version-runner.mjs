@@ -20,17 +20,17 @@
 // breaks that SAME process's own subsequent executeRun/resume calls too
 // (verified directly — an earlier version of this script tried exactly
 // that and failed immediately, `resume-time check reads the literal
-// constant, ignores config.schemaVersion, so a "v2-configured" engine
-// immediately rejects the v2-tagged record IT ITSELF just wrote). A real
-// recompiled v2 build wouldn't have this problem (both its write-time tag
-// and its read-time check derive from the SAME bumped literal constant,
-// consistently) — but faithfully reproducing that here would mean
+// constant, ignores config.schemaVersion, so a differently configured
+// engine immediately rejects the differently tagged record IT ITSELF just
+// wrote). A real recompiled build wouldn't have this problem (both its
+// write-time tag and its read-time check derive from the SAME bumped
+// literal constant, consistently) — but faithfully reproducing that here would mean
 // temporarily mutating this repo's own source and rebuilding mid-test,
 // which is fragile and not worth the risk for what amounts to the same
 // proof.
 //
 // What this script does instead, honestly: uses the REAL, unmodified
-// engine (schemaVersion omitted -> the real constant, 1) to run the
+// engine (schemaVersion omitted -> the real current constant) to run the
 // "before" step and reach the "pause" wait checkpoint through 100% real
 // execution — then, ONLY if --schemaVersion=N differs from the real
 // constant, directly re-tags the JUST-PERSISTED RunRecord/WaitCondition's

@@ -261,6 +261,36 @@ describe("outcome 1/6 — updateRunOutput (spec §23.4 'update current run outpu
     await store.runs.put(fixtureRunRecord({ runId: "run_2", trace: [] }));
     await expect(updateRunOutput(store, fixtureCorrection({ runId: "run_2" }))).rejects.toThrow(/no step/);
   });
+
+  it("cannot overwrite protected secret-taint metadata", async () => {
+    await store.runs.put(
+      fixtureRunRecord({
+        runId: "run_1",
+        trace: [
+          {
+            seq: 0,
+            stepId: "extract",
+            block: "llm.extract",
+            status: "completed",
+            inputs: {},
+            outputs: { nmi: "[REDACTED]" },
+            startedAt: "t",
+            secretTainted: true,
+          },
+        ],
+      }),
+    );
+
+    await expect(
+      updateRunOutput(
+        store,
+        fixtureCorrection({ fieldPath: "secretTainted", corrected: false }),
+      ),
+    ).rejects.toThrow(/protected engine security metadata/);
+    await expect(store.runs.get("run_1")).resolves.toMatchObject({
+      trace: [{ secretTainted: true }],
+    });
+  });
 });
 
 describe("outcome 2/6 — createEvalExampleFromCorrection (spec §23.4 'create eval example')", () => {

@@ -441,8 +441,10 @@ function stepReferencesSecretTaintedTrace(
       const first = parsed.path[0];
       if (parsed.root !== "steps") continue;
       if (first === undefined) {
+        const latestByStepId = new Map<string, StepTrace>();
+        for (const trace of run.trace) latestByStepId.set(trace.stepId, trace);
         if (
-          run.trace.some(
+          [...latestByStepId.values()].some(
             (trace) =>
               trace.secretTainted === true && trace.stepId !== shadowedStepId,
           )
@@ -515,6 +517,63 @@ function recomputeInheritedSecretTaint(
     { ...run, trace: taintAwareTrace },
     includeUntil,
   );
+}
+
+export async function refreshTaintAfterControlResolution(
+  config: EngineConfig,
+  step: WorkflowStep,
+  run: RunRecord,
+  currentTraceCount: number,
+  resolvedSecretRefs: ReadonlySet<string>,
+  secretCountBeforeResolution: number,
+): Promise<RunRecord> {
+  let refreshedTrace = annotateSecretTaint(
+    config,
+    run.trace,
+    resolvedSecretRefs,
+    false,
+  );
+  if (
+    step.until !== undefined &&
+    recomputeInheritedSecretTaint(
+      config,
+      step,
+      { ...run, trace: refreshedTrace },
+      resolvedSecretRefs,
+      true,
+    )
+  ) {
+    const currentTraceStart = Math.max(
+      0,
+      refreshedTrace.length - currentTraceCount,
+    );
+    refreshedTrace = refreshedTrace.map((trace, index) =>
+      index >= currentTraceStart ? { ...trace, secretTainted: true } : trace,
+    );
+  }
+
+  const taintChanged = refreshedTrace.some(
+    (trace, index) =>
+      trace.secretTainted !== run.trace[index]?.secretTainted,
+  );
+  if (
+    !taintChanged &&
+    resolvedSecretRefs.size === secretCountBeforeResolution
+  ) {
+    return run;
+  }
+
+  const refreshedRun = applyRunRedaction(
+    config.redact,
+    {
+      ...run,
+      trace: refreshedTrace,
+      updatedAt: (config.now?.() ?? new Date()).toISOString(),
+    },
+    resolvedSecretRefs,
+  );
+  await config.store.runs.put(refreshedRun);
+  return refreshedRun;
 }
 
 /**
@@ -725,43 +784,14 @@ export async function executeStep(
     resolvedSecretRefs,
     config,
   );
-  if (resolvedSecretRefs.size === secretCountBeforeNextResolution) {
-    return { kind: "continue", run: updatedRun, nextStepId };
-  }
-
-  let refreshedTrace = annotateSecretTaint(
+  const refreshedRun = await refreshTaintAfterControlResolution(
     config,
-    updatedRun.trace,
+    step,
+    updatedRun,
+    taintAnnotatedTraces.length,
     resolvedSecretRefs,
-    false,
+    secretCountBeforeNextResolution,
   );
-  if (
-    recomputeInheritedSecretTaint(
-      config,
-      step,
-      { ...updatedRun, trace: refreshedTrace },
-      resolvedSecretRefs,
-      true,
-    )
-  ) {
-    const currentTraceStart = Math.max(
-      0,
-      refreshedTrace.length - taintAnnotatedTraces.length,
-    );
-    refreshedTrace = refreshedTrace.map((trace, index) =>
-      index >= currentTraceStart ? { ...trace, secretTainted: true } : trace,
-    );
-  }
-  const refreshedRun = applyRunRedaction(
-    config.redact,
-    {
-      ...updatedRun,
-      trace: refreshedTrace,
-      updatedAt: (config.now?.() ?? new Date()).toISOString(),
-    },
-    resolvedSecretRefs,
-  );
-  await config.store.runs.put(refreshedRun);
   return { kind: "continue", run: refreshedRun, nextStepId };
 }
 
@@ -829,8 +859,17 @@ async function executeWaitDispatch(
   if (!result.suspended) {
     // Early-arrival resolution — continue exactly as if this step completed
     // normally (architecture §4.4 step 3).
+    const secretCountBeforeNextResolution = resolvedSecretRefs.size;
     const nextStepId = await determineNextStepId(workflow, step, result.run, ifResult, resolvedSecretRefs, config);
-    return { kind: "continue", run: result.run, nextStepId };
+    const refreshedRun = await refreshTaintAfterControlResolution(
+      config,
+      step,
+      result.run,
+      1,
+      resolvedSecretRefs,
+      secretCountBeforeNextResolution,
+    );
+    return { kind: "continue", run: refreshedRun, nextStepId };
   }
   return { kind: "waiting", run: result.run };
 }

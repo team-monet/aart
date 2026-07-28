@@ -7,7 +7,7 @@ import { createTrackingSecretResolver, throwingSecretResolver } from "./redactio
 import { buildExprContext, resolveBooleanExpression } from "./expr-context.js";
 import { cancelRun, executeRun, finalizeTerminal, runStepsLoop, triggerRun } from "./run-lifecycle.js";
 import { resolveWorkflowForRun } from "./snapshot.js";
-import { determineNextStepId } from "./step-executor.js";
+import { determineNextStepId, refreshTaintAfterControlResolution } from "./step-executor.js";
 import type { DueWait, EngineConfig, ResumeOutcome, TriggerRunInput } from "./types.js";
 import {
   failExpiredWait as failExpiredWaitMechanism,
@@ -77,8 +77,17 @@ async function continueAfterResume(config: EngineConfig, outcome: ResumeOutcome,
     const secretResolver = createTrackingSecretResolver(config.resolveSecret ?? throwingSecretResolver, resolvedSecretRefs);
     ifResult = await resolveBooleanExpression(step.if, context, { secretResolver });
   }
+  const secretCountBeforeNextResolution = resolvedSecretRefs.size;
   const nextStepId = await determineNextStepId(workflow, step, outcome.run, ifResult, resolvedSecretRefs, config);
-  const finalRun = await runStepsLoop(config, outcome.run, workflow, nextStepId, resolvedSecretRefs);
+  const refreshedRun = await refreshTaintAfterControlResolution(
+    config,
+    step,
+    outcome.run,
+    1,
+    resolvedSecretRefs,
+    secretCountBeforeNextResolution,
+  );
+  const finalRun = await runStepsLoop(config, refreshedRun, workflow, nextStepId, resolvedSecretRefs);
   return { ...outcome, run: finalRun };
 }
 

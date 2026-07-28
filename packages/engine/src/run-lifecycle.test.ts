@@ -64,7 +64,7 @@ describe("triggerRun — run intake (architecture §4.3)", () => {
   it("stamps this engine's schemaVersion on the created RunRecord", async () => {
     const { config } = await setup();
     const run = await triggerRun(config, { workflow: fixtureWorkflow(), trigger: fixtureTrigger(), inputs: {} });
-    expect(run.schemaVersion).toBe(1);
+    expect(run.schemaVersion).toBe(2);
   });
 
   it("allow (default, no concurrency declared): two triggers of the same workflow both proceed independently", async () => {
@@ -682,7 +682,7 @@ describe("executeRun — fresh execution", () => {
     expect(finished.error).toMatch(/secret-tainted step "derive"/);
   });
 
-  it("uses the latest clean guarded-loop occurrence for public output", async () => {
+  it("uses only the latest guarded-loop occurrence when a later step reads the whole steps context", async () => {
     let attempts = 0;
     const pollingBlock: BlockImplementation = {
       manifest: {
@@ -693,10 +693,10 @@ describe("executeRun — fresh execution", () => {
         outputSchema: {},
         description: "Returns one tainted intermediate value, then a clean final value.",
       },
-      execute: async () => {
+      execute: async (_inputs, ctx) => {
         attempts += 1;
         return attempts === 1
-          ? { done: false, value: "secret-value" }
+          ? { done: false, value: await ctx.resolveSecret("API_KEY") }
           : { done: true, value: "clean-result" };
       },
     };
@@ -713,7 +713,6 @@ describe("executeRun — fresh execution", () => {
       execution: {
         type: "workflow",
         steps: [
-          { id: "seed", uses: "test.echo", with: { secret: "{{ secrets.API_KEY }}" } },
           {
             id: "poll",
             uses: pollingBlock.manifest.id,
@@ -721,8 +720,12 @@ describe("executeRun — fresh execution", () => {
             maxIterations: 2,
             until: "{{ steps.poll.outputs.done }}",
           },
+          { id: "relay", uses: "test.echo", with: { allSteps: "{{ steps }}" } },
         ],
-        outputMapping: { result: "{{ steps.poll.outputs.value }}" },
+        outputMapping: {
+          result:
+            "{{ steps.relay.outputs.echoed.allSteps.poll.outputs.value }}",
+        },
       },
     });
     await store.workflows.put(workflow);
@@ -737,6 +740,7 @@ describe("executeRun — fresh execution", () => {
       { outputs: { value: "clean-result" } },
     ]);
     expect(finished.trace.filter((trace) => trace.stepId === "poll")[1]?.secretTainted).toBeUndefined();
+    expect(finished.trace.find((trace) => trace.stepId === "relay")?.secretTainted).toBeUndefined();
   });
 
   it("refreshes trace taint when until is the first expression to resolve a secret", async () => {
@@ -774,6 +778,94 @@ describe("executeRun — fresh execution", () => {
     });
     await store.workflows.put(workflow);
     const run = await triggerRun(config, { workflow, trigger: fixtureTrigger(), inputs: {} });
+
+    const finished = await executeRun(config, run.runId);
+
+    expect(finished.status).toBe("failed");
+    expect(finished.error).toMatch(/secret-tainted step "poll"/);
+    expect(finished.trace.find((trace) => trace.stepId === "poll")).toMatchObject({
+      secretTainted: true,
+    });
+  });
+
+  it("taints an early-arrival wait after until first resolves a matching secret", async () => {
+    const { store, config } = await setup({
+      redact: redactResolvedValues,
+      resolveSecret: () => true,
+    });
+    const workflow = fixtureWorkflow({
+      outputs: [{ name: "result", type: "json", required: true }],
+      execution: {
+        type: "workflow",
+        steps: [
+          {
+            id: "pause",
+            uses: "wait.for_signal",
+            with: { name: "ready", correlationId: "early" },
+            next: "pause",
+            maxIterations: 1,
+            until: "{{ secrets.STOP }}",
+          },
+        ],
+        outputMapping: { result: "{{ steps.pause.outputs.value }}" },
+      },
+    });
+    await store.workflows.put(workflow);
+    await store.signals.append({
+      id: "early-secret-signal",
+      name: "ready",
+      correlationId: "early",
+      payload: { value: true },
+      receivedAt: new Date().toISOString(),
+    });
+    const run = await triggerRun(config, {
+      workflow,
+      trigger: fixtureTrigger(),
+      inputs: {},
+    });
+
+    const finished = await executeRun(config, run.runId);
+
+    expect(finished.status).toBe("failed");
+    expect(finished.error).toMatch(/secret-tainted step "pause"/);
+    expect(finished.trace.find((trace) => trace.stepId === "pause")).toMatchObject({
+      secretTainted: true,
+    });
+  });
+
+  it("taints the current step when until reads an already-known tainted trace", async () => {
+    const { store, config } = await setup({
+      redact: redactResolvedValues,
+      resolveSecret: () => "secret-value",
+    });
+    const workflow = fixtureWorkflow({
+      outputs: [{ name: "result", type: "string", required: true }],
+      execution: {
+        type: "workflow",
+        steps: [
+          {
+            id: "source",
+            uses: "test.echo",
+            with: { secret: "{{ secrets.API_KEY }}" },
+          },
+          {
+            id: "poll",
+            uses: "test.echo",
+            with: { value: "clean-result" },
+            next: "poll",
+            maxIterations: 1,
+            until: "{{ steps.source.outputs.echoed.secret }}",
+          },
+        ],
+        outputMapping: { result: "{{ steps.poll.outputs.echoed.value }}" },
+      },
+    });
+    await store.workflows.put(workflow);
+    const run = await triggerRun(config, {
+      workflow,
+      trigger: fixtureTrigger(),
+      inputs: {},
+    });
 
     const finished = await executeRun(config, run.runId);
 
