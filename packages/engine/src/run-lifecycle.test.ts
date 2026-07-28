@@ -1069,6 +1069,57 @@ describe("executeRun — reclaim-safety: resumes mid-step from persisted trace h
     expect(finished.status).toBe("completed");
     expect(finished.trace.filter((t) => t.stepId === "s1")).toHaveLength(2);
   });
+
+  it("refreshes taint when reclaim re-evaluates until after a completed trace was persisted", async () => {
+    const { store, config } = await setup({
+      redact: redactResolvedValues,
+      resolveSecret: () => true,
+    });
+    const workflow = fixtureWorkflow({
+      outputs: [{ name: "result", type: "json", required: true }],
+      execution: {
+        type: "workflow",
+        steps: [
+          {
+            id: "poll",
+            uses: "test.echo",
+            next: "poll",
+            maxIterations: 1,
+            until: "{{ secrets.STOP }}",
+          },
+        ],
+        outputMapping: { result: "{{ steps.poll.outputs.value }}" },
+      },
+    });
+    await store.workflows.put(workflow);
+    const run = await triggerRun(config, {
+      workflow,
+      trigger: fixtureTrigger(),
+      inputs: {},
+    });
+    await store.runs.put({
+      ...run,
+      status: "running",
+      trace: [
+        {
+          seq: 0,
+          stepId: "poll",
+          block: "test.echo",
+          status: "completed",
+          inputs: {},
+          outputs: { value: true },
+          startedAt: "t",
+          endedAt: "t",
+        },
+      ],
+    });
+
+    const finished = await executeRun(config, run.runId);
+
+    expect(finished.status).toBe("failed");
+    expect(finished.error).toMatch(/secret-tainted step "poll"/);
+    expect(finished.trace[0]).toMatchObject({ secretTainted: true });
+  });
 });
 
 describe("cancelRun (architecture §4.1, spec F16)", () => {

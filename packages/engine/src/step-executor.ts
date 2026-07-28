@@ -534,7 +534,6 @@ export async function refreshTaintAfterControlResolution(
     false,
   );
   if (
-    step.until !== undefined &&
     recomputeInheritedSecretTaint(
       config,
       step,

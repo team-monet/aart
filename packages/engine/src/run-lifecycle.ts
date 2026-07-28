@@ -13,7 +13,12 @@ import { applyRedaction, applyRunRedaction, createTrackingSecretResolver, throwi
 import { assertSchemaVersionCompatible, CURRENT_ENGINE_SCHEMA_VERSION } from "./schema-version.js";
 import { captureExecutionSnapshot, isSnapshotCaptured, resolveWorkflowForRun, uncapturedSnapshot } from "./snapshot.js";
 import { validateWorkflowOutputs, WorkflowOutputValidationError } from "./output-validation.js";
-import { determineNextStepId, executeStep, type StepOutcome } from "./step-executor.js";
+import {
+  determineNextStepId,
+  executeStep,
+  refreshTaintAfterControlResolution,
+  type StepOutcome,
+} from "./step-executor.js";
 import type { EngineConfig, TriggerRunInput } from "./types.js";
 import { isWaitBlockId } from "./wait/wait-blocks.js";
 import { materializeWorkflowOutputs } from "./workflow-outputs.js";
@@ -246,16 +251,21 @@ async function recordThrownFailureAndFinalize(
  * crash mid-single-step can re-attempt it — `idempotencyKey` is what turns
  * either into an exactly-once EFFECT, same as always.
  */
-async function resolveContinuationStepId(config: EngineConfig, run: RunRecord, workflow: Workflow, resolvedSecretRefs: Set<string>): Promise<string | undefined> {
+async function resolveContinuation(
+  config: EngineConfig,
+  run: RunRecord,
+  workflow: Workflow,
+  resolvedSecretRefs: Set<string>,
+): Promise<{ run: RunRecord; nextStepId: string | undefined }> {
   if (run.trace.length === 0) {
-    return workflow.execution.steps[0]?.id;
+    return { run, nextStepId: workflow.execution.steps[0]?.id };
   }
   const lastTrace = run.trace[run.trace.length - 1]!;
   const ownerStepId = lastTrace.stepId.replace(/\[\d+\]$/, "");
   const isForEachSubEntry = lastTrace.stepId !== ownerStepId;
 
   if (lastTrace.status === "failed" || isForEachSubEntry) {
-    return ownerStepId;
+    return { run, nextStepId: ownerStepId };
   }
 
   const lastStep = workflow.execution.steps.find((s) => s.id === ownerStepId);
@@ -263,12 +273,43 @@ async function resolveContinuationStepId(config: EngineConfig, run: RunRecord, w
     throw new Error(`Cannot resolve continuation point for run "${run.runId}": step "${ownerStepId}" (from trailing trace entry "${lastTrace.stepId}") not found in workflow ${workflow.id}@${workflow.version}.`);
   }
   let ifResult: boolean | undefined;
+  const secretCountBeforeControlResolution = resolvedSecretRefs.size;
   if (lastStep.if !== undefined) {
     const context = buildExprContext(run);
     const secretResolver = createTrackingSecretResolver(config.resolveSecret ?? throwingSecretResolver, resolvedSecretRefs);
     ifResult = await resolveBooleanExpression(lastStep.if, context, { secretResolver });
   }
-  return determineNextStepId(workflow, lastStep, run, ifResult, resolvedSecretRefs, config);
+  const nextStepId = await determineNextStepId(
+    workflow,
+    lastStep,
+    run,
+    ifResult,
+    resolvedSecretRefs,
+    config,
+  );
+  let currentTraceCount = 1;
+  const escapedOwnerStepId = ownerStepId.replace(
+    /[.*+?^${}()|[\]\\]/g,
+    "\\$&",
+  );
+  const iterationTracePattern = new RegExp(
+    `^${escapedOwnerStepId}\\[\\d+\\]$`,
+  );
+  for (let index = run.trace.length - 2; index >= 0; index -= 1) {
+    if (!iterationTracePattern.test(run.trace[index]!.stepId)) {
+      break;
+    }
+    currentTraceCount += 1;
+  }
+  const refreshedRun = await refreshTaintAfterControlResolution(
+    config,
+    lastStep,
+    run,
+    currentTraceCount,
+    resolvedSecretRefs,
+    secretCountBeforeControlResolution,
+  );
+  return { run: refreshedRun, nextStepId };
 }
 
 /**
@@ -325,7 +366,7 @@ export async function runStepsLoop(config: EngineConfig, initialRun: RunRecord, 
  * plan S1 DoD). Transitions `pending` → `running` (architecture §4.1); a
  * run already `running` (the reclaim case — a prior attempt crashed
  * mid-step without reaching a wait or terminal status) resumes from
- * `resolveContinuationStepId`'s computed continuation point instead of
+ * `resolveContinuation`'s computed continuation point instead of
  * restarting at step 0.
  */
 export async function executeRun(config: EngineConfig, runId: string): Promise<RunRecord> {
@@ -349,8 +390,19 @@ export async function executeRun(config: EngineConfig, runId: string): Promise<R
     return run;
   }
 
-  const startStepId = await resolveContinuationStepId(config, run, workflow, resolvedSecretRefs);
-  return runStepsLoop(config, run, workflow, startStepId, resolvedSecretRefs);
+  const continuation = await resolveContinuation(
+    config,
+    run,
+    workflow,
+    resolvedSecretRefs,
+  );
+  return runStepsLoop(
+    config,
+    continuation.run,
+    workflow,
+    continuation.nextStepId,
+    resolvedSecretRefs,
+  );
 }
 
 // ---------------------------------------------------------------------------
