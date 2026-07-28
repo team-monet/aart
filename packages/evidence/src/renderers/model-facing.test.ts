@@ -53,6 +53,20 @@ describe("renderModelFacing", () => {
     expect(report.failures).toEqual([{ stepId: "$workflow", block: "workflow.outputMapping", error }]);
   });
 
+  it("surfaces the terminal workflow-output failure even when the trace contains an older failed attempt", () => {
+    const error = "Workflow output validation failed: corrected result is invalid";
+    const report = renderModelFacing(
+      fixtureRunRecord({
+        status: "failed",
+        error,
+        trace: [{ seq: 0, stepId: "retry", block: "http.request", status: "failed", inputs: {}, error: "stale attempt", startedAt: "t" }],
+      }),
+      identityRedact,
+    );
+    expect(report.failures.map((failure) => failure.stepId)).toEqual(["retry", "$workflow"]);
+    expect(report.failures.at(-1)?.error).toBe(error);
+  });
+
   it("maps artifacts to references carrying a uri (path), never bytes/payload", () => {
     const run = fixtureRunRecord({
       artifacts: [{ id: "a1", runId: "r", name: "shot.png", kind: "screenshot", mime: "image/png", path: "artifacts/a1.png", bytes: 999, createdAt: "t" }],

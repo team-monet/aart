@@ -11,7 +11,7 @@ import type { ValidationFinding } from "./types.js";
 // (a) enum / regex / default consistency — spec §18.4
 // ---------------------------------------------------------------------------
 
-function validateFieldConsistency(field: Field, path: string, findings: ValidationFinding[]): void {
+function validateFieldConsistency(field: Field, path: string, findings: ValidationFinding[], isOutput = false): void {
   if (field.enum && field.default !== undefined) {
     const inEnum = field.enum.some((v) => JSON.stringify(v) === JSON.stringify(field.default));
     if (!inEnum) {
@@ -24,6 +24,14 @@ function validateFieldConsistency(field: Field, path: string, findings: Validati
     }
   }
   if (field.pattern) {
+    if (isOutput && field.type !== "string") {
+      findings.push({
+        class: "input-safety",
+        path: `${path}.pattern`,
+        message: `Output "${field.name}" declares a pattern but has non-string type "${field.type}"`,
+        severity: "error",
+      });
+    }
     let regex: RegExp | undefined;
     try {
       regex = new RegExp(field.pattern);
@@ -161,7 +169,19 @@ export function validateInputSafety(workflow: Pick<Workflow, "inputs" | "outputs
   const findings: ValidationFinding[] = [];
 
   workflow.inputs.forEach((field, i) => validateFieldConsistency(field, `inputs[${i}]`, findings));
-  workflow.outputs.forEach((field, i) => validateFieldConsistency(field, `outputs[${i}]`, findings));
+  const outputNames = new Set<string>();
+  workflow.outputs.forEach((field, i) => {
+    validateFieldConsistency(field, `outputs[${i}]`, findings, true);
+    if (outputNames.has(field.name)) {
+      findings.push({
+        class: "input-safety",
+        path: `outputs[${i}].name`,
+        message: `Output "${field.name}" is declared more than once`,
+        severity: "error",
+      });
+    }
+    outputNames.add(field.name);
+  });
 
   workflow.execution.steps.forEach((step, i) => {
     const path = `steps[${i}]`;

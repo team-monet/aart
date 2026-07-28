@@ -50,6 +50,21 @@ describe("buildReportModel", () => {
     expect(model.failures).toEqual([{ stepId: "$workflow", block: "workflow.outputMapping", error }]);
   });
 
+  it("keeps the terminal workflow-output failure alongside a stale failed trace", () => {
+    const error = "Workflow output mapping failed: corrected output is missing";
+    const model = buildReportModel(
+      fixtureRunRecord({
+        status: "failed",
+        error,
+        trace: [{ seq: 0, stepId: "retry", block: "http.request", status: "failed", inputs: {}, error: "stale attempt", startedAt: "t" }],
+      }),
+    );
+    expect(model.failures).toEqual([
+      { stepId: "retry", block: "http.request", error: "stale attempt" },
+      { stepId: "$workflow", block: "workflow.outputMapping", error },
+    ]);
+  });
+
   it("splits screenshots out of artifacts by kind", () => {
     const run = fixtureRunRecord({
       artifacts: [

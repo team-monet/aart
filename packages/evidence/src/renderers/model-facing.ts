@@ -37,6 +37,10 @@ function nextAffordance(status: RunRecord["status"]): string {
   }
 }
 
+function isWorkflowOutputFailure(error: string): boolean {
+  return error.startsWith("Workflow output mapping failed:") || error.startsWith("Workflow output validation failed:");
+}
+
 /**
  * Renders `run` into the spec §32.7 ModelFacingReport shape. Always calls
  * `redact` first (architecture §9.2) — see redact.ts for why
@@ -48,13 +52,10 @@ export function renderModelFacing(run: RunRecord, redact: RedactFn, resolvedSecr
   const failures = clean.trace
     .filter((t) => t.status === "failed")
     .map((t) => ({ stepId: t.stepId, block: t.block, error: t.error ?? "Step failed with no recorded error message." }));
-  if (clean.status === "failed" && clean.error && failures.length === 0) {
+  if (clean.status === "failed" && clean.error && (failures.length === 0 || isWorkflowOutputFailure(clean.error))) {
     failures.push({
       stepId: "$workflow",
-      block:
-        clean.error.startsWith("Workflow output mapping failed:") || clean.error.startsWith("Workflow output validation failed:")
-          ? "workflow.outputMapping"
-          : "workflow",
+      block: isWorkflowOutputFailure(clean.error) ? "workflow.outputMapping" : "workflow",
       error: clean.error,
     });
   }

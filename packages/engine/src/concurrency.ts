@@ -11,20 +11,28 @@ import type { RunRecord, Workflow } from "@aart/types";
 import { createHash } from "node:crypto";
 
 const NON_TERMINAL_STATUSES = new Set<RunRecord["status"]>(["pending", "running", "waiting"]);
-const SHA256_FINGERPRINT = /^sha256:[a-f0-9]{64}$/;
+export const CONCURRENCY_KEY_FORMAT = "sha256-v1";
 
 /** Stable, non-reversible persisted representation of an authored key. */
 export function fingerprintConcurrencyKey(key: string | undefined): string | undefined {
   return key === undefined ? undefined : `sha256:${createHash("sha256").update(key).digest("hex")}`;
 }
 
-function normalizePersistedKey(key: string | undefined): string | undefined {
-  if (key === undefined || SHA256_FINGERPRINT.test(key)) return key;
-  return fingerprintConcurrencyKey(key);
+function normalizePersistedKey(key: string | undefined, format: unknown): string | undefined {
+  if (key === undefined) return undefined;
+  // Never infer storage format from the value's shape: a legacy authored
+  // key can itself legitimately look like "sha256:<64 hex>". New records
+  // carry an explicit format marker; marker-less records are legacy raw
+  // values and are fingerprinted exactly once on comparison.
+  return format === CONCURRENCY_KEY_FORMAT ? key : fingerprintConcurrencyKey(key);
 }
 
-function concurrencyKeysEqual(left: string | undefined, right: string | undefined): boolean {
-  return normalizePersistedKey(left) === normalizePersistedKey(right);
+function persistedConcurrencyKey(run: RunRecord): string | undefined {
+  return normalizePersistedKey(run.params?.concurrencyKey as string | undefined, run.params?.concurrencyKeyFormat);
+}
+
+function concurrencyKeysEqual(run: RunRecord, key: string | undefined, keyFormat: unknown): boolean {
+  return persistedConcurrencyKey(run) === normalizePersistedKey(key, keyFormat);
 }
 
 /** Resolves `workflow.concurrency.key` (architecture §4.3, `{{ }}` against `inputs.*`) — `undefined` if the workflow declares no `concurrency` block at all (the "no constraint" default, equivalent to `policy: "allow"`). */
@@ -54,7 +62,7 @@ export async function decideConcurrency(store: AartStore, workflow: Workflow, ke
   }
   const candidates = await store.runs.list({ workflowId: workflow.id });
   const existing = candidates.find(
-    (r) => NON_TERMINAL_STATUSES.has(r.status) && concurrencyKeysEqual(r.params?.concurrencyKey as string | undefined, key),
+    (r) => NON_TERMINAL_STATUSES.has(r.status) && concurrencyKeysEqual(r, key, CONCURRENCY_KEY_FORMAT),
   );
   if (!existing) {
     return { action: "allow" };
@@ -86,11 +94,16 @@ export async function decideConcurrency(store: AartStore, workflow: Workflow, ke
  * eventual completion will in turn release the next one in line (FIFO by
  * `startedAt`).
  */
-export async function releaseQueuedRuns(store: AartStore, workflowId: string, key: string): Promise<RunRecord | undefined> {
+export async function releaseQueuedRuns(
+  store: AartStore,
+  workflowId: string,
+  key: string,
+  keyFormat: unknown,
+): Promise<RunRecord | undefined> {
   const candidates = await store.runs.list({ workflowId, status: "pending" });
   const queued = candidates
     .filter(
-      (r) => r.params?.waitingOnConcurrency === true && concurrencyKeysEqual(r.params?.concurrencyKey as string | undefined, key),
+      (r) => r.params?.waitingOnConcurrency === true && concurrencyKeysEqual(r, key, keyFormat),
     )
     .sort((a, b) => a.startedAt.localeCompare(b.startedAt));
   const next = queued[0];

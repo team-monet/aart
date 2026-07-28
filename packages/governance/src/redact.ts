@@ -103,7 +103,16 @@ function applyReplacements(value: unknown, replacements: readonly Replacement[])
     const out: Record<string, unknown> = {};
     for (const [key, v] of Object.entries(value as Record<string, unknown>)) {
       const redactedKey = applyStringReplacements(key, replacements);
-      out[redactedKey] = applyReplacements(v, replacements);
+      // `out["__proto__"] = value` invokes Object.prototype's legacy
+      // setter instead of preserving JSON-shaped data. Define every key as
+      // an own data property so redaction cannot drop a valid public output
+      // or mutate the reconstructed object's prototype.
+      Object.defineProperty(out, redactedKey, {
+        value: applyReplacements(v, replacements),
+        enumerable: true,
+        configurable: true,
+        writable: true,
+      });
     }
     return out;
   }

@@ -62,6 +62,18 @@ describe("createFallbackReportRenderers", () => {
     expect(report.outputs).toMatchObject({ $aart: { kind: "truncated-workflow-outputs", fullResultRef: { runId: run.runId, field: "outputs" } } });
   });
 
+  it("keeps oversized outputs complete in fallback human-facing renderers", () => {
+    const document = `start-${"x".repeat(10_000)}-end`;
+    const run = fakeRunRecord({ outputs: { document } });
+
+    expect(renderers.modelFacing(run).outputs).not.toEqual(run.outputs);
+    for (const rendered of [renderers.markdown(run), renderers.cliText(run), renderers.html(run), renderers.prComment(run)]) {
+      expect(rendered).toContain("start-");
+      expect(rendered).toContain("-end");
+      expect(rendered).not.toContain("truncated-workflow-outputs");
+    }
+  });
+
   it("surfaces a run-level output failure in every fallback renderer when no trace step failed", () => {
     const error = 'Workflow output validation failed: output "result" expected type "string" but received "object"';
     const run = fakeRunRecord({ status: "failed", error });
@@ -70,6 +82,16 @@ describe("createFallbackReportRenderers", () => {
       expect(rendered).toContain("Workflow output validation failed");
       expect(rendered).toContain("workflow.outputMapping");
     }
+  });
+
+  it("keeps the terminal output failure when an older failed trace also exists", () => {
+    const error = "Workflow output mapping failed: corrected result is missing";
+    const run = fakeRunRecord({
+      status: "failed",
+      error,
+      trace: [fakeStepTrace({ stepId: "retry", block: "http.request", status: "failed", error: "stale attempt" })],
+    });
+    expect(renderers.modelFacing(run).failures.map((failure) => failure.stepId)).toEqual(["retry", "$workflow"]);
   });
 
   it("markdown: includes the run id, status, and every step", () => {

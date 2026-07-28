@@ -9,7 +9,7 @@ import type { RunRecord, StepTrace, Workflow, WorkflowStep } from "@aart/types";
 import { ConcurrencyRejectedError } from "@aart/types";
 import { buildExprContext, resolveBooleanExpression } from "./expr-context.js";
 import { createTrackingSecretResolver, throwingSecretResolver } from "./redaction.js";
-import { decideConcurrency, fingerprintConcurrencyKey, releaseQueuedRuns, resolveConcurrencyKey } from "./concurrency.js";
+import { CONCURRENCY_KEY_FORMAT, decideConcurrency, fingerprintConcurrencyKey, releaseQueuedRuns, resolveConcurrencyKey } from "./concurrency.js";
 import { applyRedaction } from "./redaction.js";
 import { assertSchemaVersionCompatible, CURRENT_ENGINE_SCHEMA_VERSION } from "./schema-version.js";
 import { captureExecutionSnapshot, isSnapshotCaptured, resolveWorkflowForRun, uncapturedSnapshot } from "./snapshot.js";
@@ -84,7 +84,7 @@ export async function triggerRun(config: EngineConfig, input: TriggerRunInput): 
     params: {
       ...input.params,
       ...(input.environment !== undefined ? { environment: input.environment } : {}),
-      ...(key !== undefined ? { concurrencyKey: key } : {}),
+      ...(key !== undefined ? { concurrencyKey: key, concurrencyKeyFormat: CONCURRENCY_KEY_FORMAT } : {}),
       ...(waitingOnConcurrency ? { waitingOnConcurrency: true } : {}),
     },
     trace: [],
@@ -138,6 +138,7 @@ export async function finalizeTerminal(
   // the exact key before whole-record redaction so a secret value that also
   // occurs in the key cannot prevent the next queued run from being released.
   const concurrencyKey = updated.params?.concurrencyKey;
+  const concurrencyKeyFormat = updated.params?.concurrencyKeyFormat;
 
   // A workflow's declared outputMapping is its public result contract. Step
   // traces are execution evidence; callers should not have to reverse-engineer
@@ -181,7 +182,7 @@ export async function finalizeTerminal(
   await config.store.runs.put(redacted);
 
   if (typeof concurrencyKey === "string") {
-    await releaseQueuedRuns(config.store, redacted.workflowId, concurrencyKey);
+    await releaseQueuedRuns(config.store, redacted.workflowId, concurrencyKey, concurrencyKeyFormat);
   }
   await runOnRunTerminal(config, redacted.runId);
   return redacted;
@@ -387,7 +388,7 @@ export async function cancelRun(config: EngineConfig, runId: string): Promise<Ru
 
   const concurrencyKey = redacted.params?.concurrencyKey;
   if (typeof concurrencyKey === "string") {
-    await releaseQueuedRuns(config.store, redacted.workflowId, concurrencyKey);
+    await releaseQueuedRuns(config.store, redacted.workflowId, concurrencyKey, redacted.params?.concurrencyKeyFormat);
   }
   await runOnRunTerminal(config, redacted.runId);
   return redacted;

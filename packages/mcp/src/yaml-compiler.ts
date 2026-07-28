@@ -61,7 +61,12 @@ function collectStrings(value: unknown, out: string[] = []): string[] {
   return out;
 }
 
-function validateExpressionCandidate(candidate: string, label: string, problems: string[], options: { allowSecrets?: boolean } = {}): void {
+function validateExpressionCandidate(
+  candidate: string,
+  label: string,
+  problems: string[],
+  options: { allowSecrets?: boolean; knownStepIds?: ReadonlySet<string> } = {},
+): void {
   const tokens = findExpressionTokens(candidate);
   const unmatchedRemainder = candidate.replace(/\{\{[\s\S]*?\}\}/g, "");
   const unmatchedOpen = unmatchedRemainder.includes("{{");
@@ -78,6 +83,10 @@ function validateExpressionCandidate(candidate: string, label: string, problems:
       if (options.allowSecrets === false && parsed.root === "secrets") {
         problems.push(`${label}: public workflow outputs may not reference secrets.*; expose a non-secret derived value instead`);
       }
+      const first = parsed.path[0];
+      if (options.knownStepIds && parsed.root === "steps" && first?.kind === "property" && !options.knownStepIds.has(first.name)) {
+        problems.push(`${label}: references unknown step "${first.name}"`);
+      }
     } catch (err) {
       if (err instanceof ExprSyntaxError) {
         problems.push(`${label}: ${err.message}`);
@@ -91,6 +100,7 @@ function validateExpressionCandidate(candidate: string, label: string, problems:
 /** Syntactically validates every `{{ }}` token found in compiled steps and the workflow's public outputMapping via @aart/expr's real parser (architecture §3.1) — including unmatched delimiters that cannot form a parser token — and fails loudly rather than registering an expression that can never resolve at run time. */
 function validateExpressions(steps: readonly Record<string, unknown>[], outputMapping: unknown): void {
   const problems: string[] = [];
+  const knownStepIds = new Set(steps.flatMap((step) => (typeof step.id === "string" ? [step.id] : [])));
   for (const step of steps) {
     const candidates: string[] = [];
     for (const key of ["if", "then", "else", "next", "until", "forEach", "timeout", "idempotencyKey"] as const) {
@@ -105,7 +115,7 @@ function validateExpressions(steps: readonly Record<string, unknown>[], outputMa
   if (isPlainObject(outputMapping)) {
     for (const [outputName, candidate] of Object.entries(outputMapping)) {
       if (typeof candidate !== "string") continue;
-      validateExpressionCandidate(candidate, `outputMapping "${outputName}"`, problems, { allowSecrets: false });
+      validateExpressionCandidate(candidate, `outputMapping "${outputName}"`, problems, { allowSecrets: false, knownStepIds });
     }
   }
   if (problems.length > 0) {
@@ -116,12 +126,20 @@ function validateExpressions(steps: readonly Record<string, unknown>[], outputMa
 /** Keeps the authored public result contract closed: every required output must be produced, and a mapping cannot silently publish undeclared fields. Optional declared outputs may be omitted. */
 function validateOutputContract(workflow: Workflow): void {
   const mappingKeys = new Set(Object.keys(workflow.execution.outputMapping ?? {}));
-  const declaredKeys = new Set(workflow.outputs.map((field) => field.name));
+  const declaredKeys = new Set<string>();
   const problems: string[] = [];
 
   for (const field of workflow.outputs) {
+    if (declaredKeys.has(field.name)) {
+      problems.push(`output "${field.name}" is declared more than once`);
+      continue;
+    }
+    declaredKeys.add(field.name);
     if (field.required === true && !mappingKeys.has(field.name)) {
       problems.push(`required output "${field.name}" has no outputMapping entry`);
+    }
+    if (field.pattern !== undefined && field.type !== "string") {
+      problems.push(`output "${field.name}" declares pattern but has non-string type "${field.type}"`);
     }
   }
   for (const key of mappingKeys) {

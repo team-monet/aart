@@ -22,6 +22,26 @@ function defineOutput(outputs: Record<string, unknown>, name: string, value: unk
   });
 }
 
+function referencesOnlyUnexecutedWorkflowSteps(expression: string, workflow: Pick<Workflow, "execution">, run: RunRecord): boolean {
+  const tokens = findExpressionTokens(expression);
+  const stepIds: string[] = [];
+  for (const token of tokens) {
+    const parsed = parseExpression(token[0]);
+    const first = parsed.path[0];
+    if (parsed.root !== "steps" || first?.kind !== "property") return false;
+    stepIds.push(first.name);
+  }
+  if (stepIds.length === 0) return false;
+
+  const declaredStepIds = new Set(workflow.execution.steps.map((step) => step.id));
+  return stepIds.every((stepId) => {
+    if (!declaredStepIds.has(stepId)) return false;
+    const traces = run.trace.filter((trace) => trace.stepId === stepId);
+    const latest = traces.at(-1);
+    return latest === undefined || latest.status === "skipped";
+  });
+}
+
 /**
  * Projects a run's current trace/inputs into its declared public outputs.
  * Missing sources omit optional fields but fail required fields later in
@@ -49,7 +69,14 @@ export async function materializeWorkflowOutputs(
       defineOutput(outputs, name, await resolveExpression(expression, context, options));
     } catch (err) {
       const field = fieldsByName.get(name);
-      if (err instanceof ExprResolutionError && field !== undefined && field.required !== true) continue;
+      if (
+        err instanceof ExprResolutionError &&
+        field !== undefined &&
+        field.required !== true &&
+        referencesOnlyUnexecutedWorkflowSteps(expression, workflow, run)
+      ) {
+        continue;
+      }
       throw err;
     }
   }

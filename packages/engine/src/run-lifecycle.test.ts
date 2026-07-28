@@ -85,6 +85,7 @@ describe("triggerRun — run intake (architecture §4.3)", () => {
     const second = await triggerRun(config, { workflow, trigger: fixtureTrigger(), inputs: { caseId: "case-1" } });
     expect(second.status).toBe("pending");
     expect(second.params?.waitingOnConcurrency).toBe(true);
+    expect(second.params?.concurrencyKeyFormat).toBe("sha256-v1");
 
     const claimable = await store.jobQueue.listClaimable(new Date().toISOString());
     expect(claimable.map((c) => c.runId)).toContain(first.runId);
@@ -154,6 +155,25 @@ describe("executeRun — fresh execution", () => {
     await expect(store.runs.get(run.runId)).resolves.toMatchObject({ outputs: { result: { value: "reusable" } } });
   });
 
+  it("preserves backward-compatible custom output types as opaque Pack-defined contracts", async () => {
+    const { store, config } = await setup();
+    const workflow = fixtureWorkflow({
+      inputs: [{ name: "publishedAt", type: "date", required: true }],
+      outputs: [{ name: "publishedAt", type: "date", required: true }],
+      execution: {
+        type: "workflow",
+        steps: [{ id: "s1", uses: "test.echo" }],
+        outputMapping: { publishedAt: "{{ inputs.publishedAt }}" },
+      },
+    });
+    await store.workflows.put(workflow);
+    const run = await triggerRun(config, { workflow, trigger: fixtureTrigger(), inputs: { publishedAt: "2026-07-28" } });
+    const finished = await executeRun(config, run.runId);
+
+    expect(finished.status).toBe("completed");
+    expect(finished.outputs).toEqual({ publishedAt: "2026-07-28" });
+  });
+
   it("fails terminally when a declared workflow output cannot be resolved", async () => {
     const { store, config } = await setup();
     const workflow = fixtureWorkflow({
@@ -172,22 +192,41 @@ describe("executeRun — fresh execution", () => {
     expect(finished.error).toMatch(/workflow output mapping failed/i);
   });
 
-  it("omits an unresolved optional mapped output instead of failing a successful branch", async () => {
+  it("omits an optional mapped output only when its valid source step was skipped", async () => {
+    const { store, config } = await setup();
+    const workflow = fixtureWorkflow({
+      inputs: [{ name: "includeResult", type: "boolean", required: true }],
+      outputs: [{ name: "optionalResult", type: "string" }],
+      execution: {
+        type: "workflow",
+        steps: [{ id: "s1", uses: "test.echo", if: "{{ inputs.includeResult }}" }],
+        outputMapping: { optionalResult: "{{ steps.s1.outputs.missing }}" },
+      },
+    });
+    await store.workflows.put(workflow);
+    const run = await triggerRun(config, { workflow, trigger: fixtureTrigger(), inputs: { includeResult: false } });
+    const finished = await executeRun(config, run.runId);
+
+    expect(finished.status).toBe("completed");
+    expect(finished.outputs).toEqual({});
+  });
+
+  it("fails an optional mapping whose source step ran but did not produce the referenced field", async () => {
     const { store, config } = await setup();
     const workflow = fixtureWorkflow({
       outputs: [{ name: "optionalResult", type: "string" }],
       execution: {
         type: "workflow",
-        steps: [{ id: "s1", uses: "test.echo" }],
-        outputMapping: { optionalResult: "{{ steps.s1.outputs.missing }}" },
+        steps: [{ id: "read", uses: "test.echo" }],
+        outputMapping: { optionalResult: "{{ steps.read.outputs.typo }}" },
       },
     });
     await store.workflows.put(workflow);
     const run = await triggerRun(config, { workflow, trigger: fixtureTrigger(), inputs: {} });
     const finished = await executeRun(config, run.runId);
 
-    expect(finished.status).toBe("completed");
-    expect(finished.outputs).toEqual({});
+    expect(finished.status).toBe("failed");
+    expect(finished.error).toMatch(/workflow output mapping failed/i);
   });
 
   it('stores "__proto__" as an own public output without changing the output map prototype', async () => {
@@ -264,6 +303,28 @@ describe("executeRun — fresh execution", () => {
     expect(finished.status).toBe("failed");
     expect(finished.outputs).toBeUndefined();
     expect(finished.error).toMatch(/required output "result" is missing/i);
+  });
+
+  it("fails terminally when canonical output declarations contain duplicate names", async () => {
+    const { store, config } = await setup();
+    const workflow = fixtureWorkflow({
+      inputs: [{ name: "value", type: "unknown", required: true }],
+      outputs: [
+        { name: "result", type: "string", required: true },
+        { name: "result", type: "number", required: true },
+      ],
+      execution: {
+        type: "workflow",
+        steps: [{ id: "s1", uses: "test.echo" }],
+        outputMapping: { result: "{{ inputs.value }}" },
+      },
+    });
+    await store.workflows.put(workflow);
+    const run = await triggerRun(config, { workflow, trigger: fixtureTrigger(), inputs: { value: 42 } });
+    const finished = await executeRun(config, run.runId);
+
+    expect(finished.status).toBe("failed");
+    expect(finished.error).toMatch(/output "result" is declared more than once/);
   });
 
   it("validates the redacted value that will be persisted, not only the raw mapped output", async () => {

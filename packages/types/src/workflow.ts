@@ -2,12 +2,21 @@
 import { z } from "zod";
 import { ApprovalStateSchema, ConcurrencyPolicySchema, GatesSchema, RetryPolicySchema } from "./governance.js";
 
-/** Closed vocabulary understood by workflow input/output contract validation. */
+/** Built-in field types whose runtime semantics AART understands directly. */
 export const SUPPORTED_FIELD_TYPES = ["any", "array", "boolean", "integer", "json", "null", "number", "object", "string", "unknown"] as const;
+export type SupportedFieldType = (typeof SUPPORTED_FIELD_TYPES)[number];
+
+export function isSupportedFieldType(type: string): type is SupportedFieldType {
+  return (SUPPORTED_FIELD_TYPES as readonly string[]).includes(type);
+}
 
 export const FieldSchema = z.object({
   name: z.string(),
-  type: z.enum(SUPPORTED_FIELD_TYPES),
+  // Field types were intentionally extensible before workflow-output
+  // validation existed. Keep that wire/store compatibility: integrations
+  // may attach semantics to custom values such as "date". The engine
+  // validates the built-in vocabulary and treats custom types as opaque.
+  type: z.string(),
   description: z.string().optional(),
   required: z.boolean().optional(),
   default: z.unknown().optional(),

@@ -1,6 +1,6 @@
 import type { AartStore } from "@aart/store";
 import { afterEach, describe, expect, it } from "vitest";
-import { decideConcurrency, fingerprintConcurrencyKey, releaseQueuedRuns, resolveConcurrencyKey } from "./concurrency.js";
+import { CONCURRENCY_KEY_FORMAT, decideConcurrency, fingerprintConcurrencyKey, releaseQueuedRuns, resolveConcurrencyKey } from "./concurrency.js";
 import { createTestStore, fixtureRun, fixtureWorkflow } from "./test-utils/fixtures.js";
 
 const cleanups: Array<() => Promise<void>> = [];
@@ -12,6 +12,10 @@ async function setup(): Promise<AartStore> {
   const { store, cleanup } = await createTestStore();
   cleanups.push(cleanup);
   return store;
+}
+
+function currentKey(raw: string): string {
+  return fingerprintConcurrencyKey(raw)!;
 }
 
 describe("resolveConcurrencyKey", () => {
@@ -41,14 +45,14 @@ describe("decideConcurrency — all four policies (architecture §4.3)", () => {
   it("allow: concurrency declared but no existing non-terminal run shares the key -> allow", async () => {
     const store = await setup();
     const workflow = fixtureWorkflow({ id: "wf-allow", concurrency: { key: "{{ inputs.caseId }}", policy: "queue" } });
-    expect(await decideConcurrency(store, workflow, "case-1")).toEqual({ action: "allow" });
+    expect(await decideConcurrency(store, workflow, currentKey("case-1"))).toEqual({ action: "allow" });
   });
 
   it("allow: policy is literally 'allow' even with an existing conflicting run -> allow (no constraint)", async () => {
     const store = await setup();
     const workflow = fixtureWorkflow({ id: "wf-allow-policy", concurrency: { key: "{{ inputs.caseId }}", policy: "allow" } });
     await store.runs.put(fixtureRun({ workflowId: "wf-allow-policy", status: "running", params: { concurrencyKey: "case-1" } }));
-    expect(await decideConcurrency(store, workflow, "case-1")).toEqual({ action: "allow" });
+    expect(await decideConcurrency(store, workflow, currentKey("case-1"))).toEqual({ action: "allow" });
   });
 
   it("queue: an existing non-terminal run with the same key -> queue, returning the blocking run", async () => {
@@ -56,7 +60,7 @@ describe("decideConcurrency — all four policies (architecture §4.3)", () => {
     const workflow = fixtureWorkflow({ id: "wf-queue", concurrency: { key: "{{ inputs.caseId }}", policy: "queue" } });
     const existing = fixtureRun({ workflowId: "wf-queue", status: "running", params: { concurrencyKey: "case-1" } });
     await store.runs.put(existing);
-    const decision = await decideConcurrency(store, workflow, "case-1");
+    const decision = await decideConcurrency(store, workflow, currentKey("case-1"));
     expect(decision.action).toBe("queue");
     if (decision.action !== "queue") throw new Error("unreachable");
     expect(decision.blockingRun.runId).toBe(existing.runId);
@@ -73,18 +77,29 @@ describe("decideConcurrency — all four policies (architecture §4.3)", () => {
     expect(decision).toEqual({ action: "queue", blockingRun: existing });
   });
 
+  it("does not mistake a legacy raw hash-shaped key for a current fingerprint", async () => {
+    const store = await setup();
+    const rawHashShapedKey = `sha256:${"a".repeat(64)}`;
+    const workflow = fixtureWorkflow({ id: "wf-legacy-hash-shaped", concurrency: { key: "{{ inputs.caseId }}", policy: "reject_new" } });
+    await store.runs.put(
+      fixtureRun({ workflowId: workflow.id, status: "running", params: { concurrencyKey: rawHashShapedKey } }),
+    );
+
+    expect(await decideConcurrency(store, workflow, currentKey(rawHashShapedKey))).toEqual({ action: "reject" });
+  });
+
   it("queue: only matches non-terminal statuses (pending/running/waiting) — a completed run with the same key does not block", async () => {
     const store = await setup();
     const workflow = fixtureWorkflow({ id: "wf-queue2", concurrency: { key: "{{ inputs.caseId }}", policy: "queue" } });
     await store.runs.put(fixtureRun({ workflowId: "wf-queue2", status: "completed", params: { concurrencyKey: "case-1" } }));
-    expect(await decideConcurrency(store, workflow, "case-1")).toEqual({ action: "allow" });
+    expect(await decideConcurrency(store, workflow, currentKey("case-1"))).toEqual({ action: "allow" });
   });
 
   it("queue: a DIFFERENT key on an existing run does not block", async () => {
     const store = await setup();
     const workflow = fixtureWorkflow({ id: "wf-queue3", concurrency: { key: "{{ inputs.caseId }}", policy: "queue" } });
     await store.runs.put(fixtureRun({ workflowId: "wf-queue3", status: "running", params: { concurrencyKey: "case-OTHER" } }));
-    expect(await decideConcurrency(store, workflow, "case-1")).toEqual({ action: "allow" });
+    expect(await decideConcurrency(store, workflow, currentKey("case-1"))).toEqual({ action: "allow" });
   });
 
   it("cancel_existing: an existing non-terminal run with the same key -> cancel_existing, returning the existing run", async () => {
@@ -92,7 +107,7 @@ describe("decideConcurrency — all four policies (architecture §4.3)", () => {
     const workflow = fixtureWorkflow({ id: "wf-cancel", concurrency: { key: "{{ inputs.caseId }}", policy: "cancel_existing" } });
     const existing = fixtureRun({ workflowId: "wf-cancel", status: "waiting", params: { concurrencyKey: "case-1" } });
     await store.runs.put(existing);
-    const decision = await decideConcurrency(store, workflow, "case-1");
+    const decision = await decideConcurrency(store, workflow, currentKey("case-1"));
     expect(decision).toEqual({ action: "cancel_existing", existingRun: existing });
   });
 
@@ -100,7 +115,7 @@ describe("decideConcurrency — all four policies (architecture §4.3)", () => {
     const store = await setup();
     const workflow = fixtureWorkflow({ id: "wf-reject", concurrency: { key: "{{ inputs.caseId }}", policy: "reject_new" } });
     await store.runs.put(fixtureRun({ workflowId: "wf-reject", status: "pending", params: { concurrencyKey: "case-1" } }));
-    expect(await decideConcurrency(store, workflow, "case-1")).toEqual({ action: "reject" });
+    expect(await decideConcurrency(store, workflow, currentKey("case-1"))).toEqual({ action: "reject" });
   });
 });
 
@@ -112,7 +127,7 @@ describe("releaseQueuedRuns", () => {
     await store.runs.put(older);
     await store.runs.put(newer);
 
-    const released = await releaseQueuedRuns(store, "wf-1", "case-1");
+    const released = await releaseQueuedRuns(store, "wf-1", "case-1", undefined);
     expect(released?.runId).toBe(older.runId);
     expect(released?.params?.waitingOnConcurrency).toBe(false);
 
@@ -123,7 +138,7 @@ describe("releaseQueuedRuns", () => {
 
   it("does nothing (returns undefined) when no run is queued for that workflow+key", async () => {
     const store = await setup();
-    expect(await releaseQueuedRuns(store, "wf-none", "case-none")).toBeUndefined();
+    expect(await releaseQueuedRuns(store, "wf-none", currentKey("case-none"), CONCURRENCY_KEY_FORMAT)).toBeUndefined();
   });
 
   it("releases a legacy raw-key queued run when the completing run carries the new fingerprint", async () => {
@@ -135,7 +150,7 @@ describe("releaseQueuedRuns", () => {
     });
     await store.runs.put(queued);
 
-    const released = await releaseQueuedRuns(store, "wf-legacy-release", fingerprintConcurrencyKey("case-1")!);
+    const released = await releaseQueuedRuns(store, "wf-legacy-release", fingerprintConcurrencyKey("case-1")!, CONCURRENCY_KEY_FORMAT);
 
     expect(released?.runId).toBe(queued.runId);
   });
@@ -143,6 +158,6 @@ describe("releaseQueuedRuns", () => {
   it("ignores runs not marked waitingOnConcurrency (e.g. a plain pending run that hasn't been claimed yet for an unrelated reason)", async () => {
     const store = await setup();
     await store.runs.put(fixtureRun({ workflowId: "wf-1", status: "pending", params: { concurrencyKey: "case-1" } }));
-    expect(await releaseQueuedRuns(store, "wf-1", "case-1")).toBeUndefined();
+    expect(await releaseQueuedRuns(store, "wf-1", "case-1", undefined)).toBeUndefined();
   });
 });

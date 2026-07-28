@@ -60,6 +60,23 @@ describe("validateInputSafety — enum/regex/default consistency (spec §18.4)",
     const findings = validateInputSafety(wf([], [], [field({ name: "result", pattern: "(unterminated" })]), lookup);
     expect(findings).toContainEqual(expect.objectContaining({ path: "outputs[0].pattern", severity: "error" }));
   });
+
+  it("rejects a pattern on a non-string workflow output before execution", () => {
+    const findings = validateInputSafety(wf([], [], [field({ name: "count", type: "number", pattern: "^\\d+$" })]), lookup);
+    expect(findings).toContainEqual(
+      expect.objectContaining({ path: "outputs[0].pattern", severity: "error", message: expect.stringContaining("non-string") }),
+    );
+  });
+
+  it("rejects duplicate workflow output declarations", () => {
+    const findings = validateInputSafety(
+      wf([], [], [field({ name: "result" }), field({ name: "result", type: "number" })]),
+      lookup,
+    );
+    expect(findings).toContainEqual(
+      expect.objectContaining({ path: "outputs[1].name", severity: "error", message: expect.stringContaining("more than once") }),
+    );
+  });
 });
 
 describe("validateInputSafety — no unsafe interpolation into command binaries (spec §18.4, command.run specifically)", () => {

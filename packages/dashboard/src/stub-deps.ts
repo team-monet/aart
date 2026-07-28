@@ -332,9 +332,10 @@ export function createReportRenderers(redact: DashboardDeps["redact"]): ReportRe
     const failures = run.trace
       .filter((trace) => trace.status === "failed")
       .map((trace) => ({ stepId: trace.stepId, block: trace.block, error: trace.error ?? "unknown error" }));
-    if (run.status === "failed" && run.error && failures.length === 0) {
+    if (run.status === "failed" && run.error) {
       const outputFailure =
         run.error.startsWith("Workflow output mapping failed:") || run.error.startsWith("Workflow output validation failed:");
+      if (failures.length > 0 && !outputFailure) return failures;
       failures.push({ stepId: "$workflow", block: outputFailure ? "workflow.outputMapping" : "workflow", error: run.error });
     }
     return failures;

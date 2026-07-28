@@ -15,6 +15,16 @@ describe("redactRecord — the RedactFn chokepoint (architecture §7.9, ADR-10)"
     expect(result.outputs.token).toMatch(/^\[REDACTED:secret-1\]$/);
   });
 
+  it('preserves "__proto__" as an own data property while rebuilding objects', () => {
+    const outputs = JSON.parse(`{"__proto__":"safe","token":"${SECRET}"}`) as Record<string, unknown>;
+    const result = redactRecord({ outputs }, new Set([SECRET])) as { outputs: Record<string, unknown> };
+
+    expect(Object.prototype.hasOwnProperty.call(result.outputs, "__proto__")).toBe(true);
+    expect(result.outputs["__proto__"]).toBe("safe");
+    expect(Object.getPrototypeOf(result.outputs)).toBe(Object.prototype);
+    expect(result.outputs.token).toBe("[REDACTED:secret-1]");
+  });
+
   it("redacts a secret value EMBEDDED inside a longer LLM-echoed output string, not just a full-string match", () => {
     const record = {
       stepId: "llm_call",

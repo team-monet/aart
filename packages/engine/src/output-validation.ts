@@ -4,7 +4,7 @@
 // boundary independently so a block-version or mapping change cannot persist
 // a completed run whose advertised result shape is false.
 import { isDeepStrictEqual } from "node:util";
-import type { Field, Workflow } from "@aart/types";
+import { isSupportedFieldType, type Field, type SupportedFieldType, type Workflow } from "@aart/types";
 
 export class WorkflowOutputValidationError extends Error {
   constructor(public readonly problems: readonly string[]) {
@@ -20,7 +20,7 @@ function actualType(value: unknown): string {
   return typeof value;
 }
 
-function matchesDeclaredType(value: unknown, declaredType: Field["type"]): boolean {
+function matchesDeclaredType(value: unknown, declaredType: SupportedFieldType): boolean {
   switch (declaredType) {
     case "any":
     case "json":
@@ -47,7 +47,10 @@ function matchesDeclaredType(value: unknown, declaredType: Field["type"]): boole
 }
 
 function validateValue(field: Field, value: unknown, problems: string[]): void {
-  if (!matchesDeclaredType(value, field.type)) {
+  // Custom field types predate this validator and may be interpreted by a
+  // Pack/integration outside the engine. Preserve those workflows by
+  // enforcing only the built-in vocabulary AART can evaluate faithfully.
+  if (isSupportedFieldType(field.type) && !matchesDeclaredType(value, field.type)) {
     problems.push(`output "${field.name}" expected type "${field.type}" but received "${actualType(value)}"`);
     return;
   }
@@ -76,9 +79,14 @@ function validateValue(field: Field, value: unknown, problems: string[]): void {
 
 export function validateWorkflowOutputs(workflow: Pick<Workflow, "outputs">, outputs: Record<string, unknown>): void {
   const problems: string[] = [];
-  const fieldsByName = new Map(workflow.outputs.map((field) => [field.name, field]));
+  const fieldsByName = new Map<string, Field>();
 
   for (const field of workflow.outputs) {
+    if (fieldsByName.has(field.name)) {
+      problems.push(`output "${field.name}" is declared more than once`);
+      continue;
+    }
+    fieldsByName.set(field.name, field);
     if (field.required === true && !Object.prototype.hasOwnProperty.call(outputs, field.name)) {
       problems.push(`required output "${field.name}" is missing`);
     }

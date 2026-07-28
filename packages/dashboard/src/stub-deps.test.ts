@@ -573,6 +573,25 @@ describe("report renderers (S6 seam E3)", () => {
       await cleanup();
     }
   });
+
+  it("surfaces the terminal output failure even when the trace contains an older failed attempt", async () => {
+    const { deps, cleanup } = await createTestFixture();
+    try {
+      const renderers = deps.createReportRenderers(deps.redact);
+      const error = "Workflow output mapping failed: corrected result is missing";
+      const run = makeRun({
+        runId: "run-recovered-output-failure",
+        status: "failed",
+        error,
+        trace: [{ seq: 0, stepId: "retry", block: "http.get", status: "failed", inputs: {}, error: "stale attempt", startedAt: "2026-07-10T00:00:00.000Z" }],
+      });
+
+      expect(renderers.modelFacing(run).failures.map((failure) => failure.stepId)).toEqual(["retry", "$workflow"]);
+      expect(renderers.html(run)).toContain(error);
+    } finally {
+      await cleanup();
+    }
+  });
 });
 
 describe("scorer registry + runEvalSuite (S6 seam E2 / run-suite.ts)", () => {

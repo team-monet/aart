@@ -75,18 +75,19 @@ const HEADLINE_LABELS: Record<RunRecord["status"], string> = {
   cancelled: "Cancelled",
 };
 
+function isWorkflowOutputFailure(error: string): boolean {
+  return error.startsWith("Workflow output mapping failed:") || error.startsWith("Workflow output validation failed:");
+}
+
 /** Builds the shared report model from an (already-redacted) RunRecord. */
 export function buildReportModel(run: RunRecord): ReportModel {
   const failures: ReportModelFailure[] = run.trace
     .filter((t) => t.status === "failed")
     .map((t) => ({ stepId: t.stepId, block: t.block, error: t.error ?? "Step failed with no recorded error message." }));
-  if (run.status === "failed" && run.error && failures.length === 0) {
+  if (run.status === "failed" && run.error && (failures.length === 0 || isWorkflowOutputFailure(run.error))) {
     failures.push({
       stepId: "$workflow",
-      block:
-        run.error.startsWith("Workflow output mapping failed:") || run.error.startsWith("Workflow output validation failed:")
-          ? "workflow.outputMapping"
-          : "workflow",
+      block: isWorkflowOutputFailure(run.error) ? "workflow.outputMapping" : "workflow",
       error: run.error,
     });
   }

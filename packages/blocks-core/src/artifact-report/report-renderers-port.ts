@@ -58,7 +58,11 @@ function failuresFor(run: RunRecord): ModelFacingReport["failures"] {
     .filter((step) => isFailedStep(step.status))
     .map((step) => ({ stepId: step.stepId, block: step.block, error: step.error ?? "unknown error" }));
 
-  if (run.status === "failed" && run.error && failures.length === 0) {
+  if (
+    run.status === "failed" &&
+    run.error &&
+    (failures.length === 0 || workflowFailureBlock(run.error) === "workflow.outputMapping")
+  ) {
     failures.push({ stepId: "$workflow", block: workflowFailureBlock(run.error), error: run.error });
   }
   return failures;
@@ -115,7 +119,7 @@ function buildMarkdown(run: RunRecord): string {
 function buildCliText(run: RunRecord): string {
   const summary = buildModelFacing(run);
   const header = `[${summary.headline.toUpperCase()}] ${run.workflowId}@${run.workflowVersion} (${run.runId})`;
-  const outputLine = `outputs: ${JSON.stringify(summary.outputs)}`;
+  const outputLine = `outputs: ${JSON.stringify(run.outputs ?? {})}`;
   if (summary.failures.length === 0) return `${header}\n${outputLine}\n${summary.next}`;
   const failureLines = summary.failures.map((f) => `  - ${f.stepId} (${f.block}): ${f.error}`);
   return [header, outputLine, ...failureLines].join("\n");
@@ -142,7 +146,7 @@ function buildHtml(run: RunRecord): string {
   return (
     `<section data-run-id="${escapeHtml(run.runId)}"><h1>Run ${escapeHtml(run.runId)}</h1>` +
     `<p>Headline: ${escapeHtml(summary.headline)}</p>` +
-    `<h2>Outputs</h2><pre>${escapeHtml(JSON.stringify(summary.outputs, null, 2))}</pre>` +
+    `<h2>Outputs</h2><pre>${escapeHtml(JSON.stringify(run.outputs ?? {}, null, 2))}</pre>` +
     `<table><thead><tr><th>Step</th><th>Block</th><th>Status</th><th>Error</th></tr></thead><tbody>${stepRows}</tbody></table>` +
     failures +
     `</section>`
@@ -154,7 +158,7 @@ function buildPrComment(run: RunRecord): string {
   const badge = summary.headline === "passed" ? "✅" : summary.headline === "failed" ? "❌" : "⏳";
   const sections = [
     `${badge} **${run.workflowId}@${run.workflowVersion}** — ${summary.headline}`,
-    `**Outputs**\n\n\`\`\`json\n${JSON.stringify(summary.outputs, null, 2)}\n\`\`\``,
+    `**Outputs**\n\n\`\`\`json\n${JSON.stringify(run.outputs ?? {}, null, 2)}\n\`\`\``,
   ];
   if (summary.failures.length > 0) {
     sections.push(`**Failures**\n\n${summary.failures.map((failure) => `- \`${failure.stepId}\` (${failure.block}): ${failure.error}`).join("\n")}`);

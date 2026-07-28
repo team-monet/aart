@@ -221,10 +221,9 @@ outputMapping:
     ).toThrow(/outputMapping "result" is not declared in outputs/);
   });
 
-  it("rejects an unsupported public output type before registration", () => {
-    expect(() =>
-      compileYamlWorkflow(`id: unsupported-output-type
-name: Unsupported Output Type
+  it("preserves a custom public output type for Pack-defined semantics", () => {
+    const workflow = compileYamlWorkflow(`id: custom-output-type
+name: Custom Output Type
 version: 0.1.0
 outputs:
   publishedAt:
@@ -234,8 +233,63 @@ steps:
     uses: web.read
 outputMapping:
   publishedAt: "{{ steps.read.outputs.text }}"
+`);
+    expect(workflow.outputs[0]?.type).toBe("date");
+  });
+
+  it("rejects an outputMapping reference to a misspelled step before registration", () => {
+    expect(() =>
+      compileYamlWorkflow(`id: typo-output-step
+name: Typo Output Step
+version: 0.1.0
+outputs:
+  result:
+    type: string
+steps:
+  - id: read
+    uses: web.read
+outputMapping:
+  result: "{{ steps.reed.outputs.text }}"
 `),
-    ).toThrow(/outputs\.0\.type.*Invalid option.*string/s);
+    ).toThrow(/outputMapping "result".*unknown step "reed"/s);
+  });
+
+  it("rejects duplicate canonical output declarations", () => {
+    expect(() =>
+      compileWorkflowObject({
+        id: "duplicate-outputs",
+        name: "Duplicate Outputs",
+        version: "0.1.0",
+        inputs: [],
+        outputs: [
+          { name: "result", type: "string", required: true },
+          { name: "result", type: "number", required: true },
+        ],
+        execution: {
+          type: "workflow",
+          steps: [{ id: "read", uses: "web.read" }],
+          outputMapping: { result: "{{ steps.read.outputs.text }}" },
+        },
+      }),
+    ).toThrow(/output "result" is declared more than once/);
+  });
+
+  it("rejects a pattern on a non-string output before registration", () => {
+    expect(() =>
+      compileYamlWorkflow(`id: numeric-pattern
+name: Numeric Pattern
+version: 0.1.0
+outputs:
+  count:
+    type: number
+    pattern: "^\\\\d+$"
+steps:
+  - id: read
+    uses: web.read
+outputMapping:
+  count: "{{ steps.read.outputs.count }}"
+`),
+    ).toThrow(/output "count" declares pattern but has non-string type "number"/);
   });
 
   it("rejects a secret-dependent public output before effectful execution can occur", () => {

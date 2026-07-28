@@ -19,9 +19,9 @@ describe("FieldSchema", () => {
     expect(FieldSchema.parse(input)).toEqual(input);
   });
 
-  it("rejects a field type the runtime cannot validate", () => {
+  it("preserves custom field types for backward-compatible Pack-defined semantics", () => {
     const result = FieldSchema.safeParse({ name: "publishedAt", type: "date" });
-    expect(result.success).toBe(false);
+    expect(result.success).toBe(true);
   });
 });
 
