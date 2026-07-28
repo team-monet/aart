@@ -435,6 +435,16 @@ function stepReferencesSecretTaintedTrace(
     expression: unknown,
     shadowedStepId?: string,
   ): boolean => {
+    if (Array.isArray(expression)) {
+      return expression.some((value) =>
+        expressionReferencesTaint(value, shadowedStepId),
+      );
+    }
+    if (expression !== null && typeof expression === "object") {
+      return Object.values(expression).some((value) =>
+        expressionReferencesTaint(value, shadowedStepId),
+      );
+    }
     if (typeof expression !== "string") return false;
     for (const token of findExpressionTokens(expression)) {
       const parsed = parseExpression(token[0]);
@@ -478,6 +488,19 @@ function stepReferencesSecretTaintedTrace(
     if (expressionReferencesTaint(expression, iterationBinding)) return true;
   }
   return false;
+}
+
+function valueReferencesSecret(value: unknown): boolean {
+  if (Array.isArray(value)) {
+    return value.some(valueReferencesSecret);
+  }
+  if (value !== null && typeof value === "object") {
+    return Object.values(value).some(valueReferencesSecret);
+  }
+  if (typeof value !== "string") return false;
+  return findExpressionTokens(value).some(
+    (token) => parseExpression(token[0]).root === "secrets",
+  );
 }
 
 function annotateSecretTaint(
@@ -533,7 +556,11 @@ export async function refreshTaintAfterControlResolution(
     resolvedSecretRefs,
     false,
   );
+  const directlySecretControlled =
+    valueReferencesSecret(step.if) ||
+    (step.next !== undefined && valueReferencesSecret(step.until));
   if (
+    directlySecretControlled ||
     recomputeInheritedSecretTaint(
       config,
       step,
@@ -629,7 +656,11 @@ export async function executeStep(
   const secretResolver = createTrackingSecretResolver(config.resolveSecret ?? throwingSecretResolver, resolvedSecretRefs);
   const resolveOptions: ResolveOptions = { secretResolver };
   const exprContextBeforeDispatch = buildExprContext(run);
-  let inheritedSecretTaint = stepReferencesSecretTaintedTrace(step, run);
+  let inheritedSecretTaint =
+    stepReferencesSecretTaintedTrace(step, run) ||
+    (step.forEach === undefined &&
+      Object.values(step.with ?? {}).some(valueReferencesSecret)) ||
+    valueReferencesSecret(step.if);
 
   // 1. resolve step.with — EXCEPT for a forEach step, whose `with:` is
   // resolved per-iteration instead (executeForEachStep, below), with the
@@ -722,6 +753,12 @@ export async function executeStep(
       waitSecretTainted,
     );
   }
+
+  inheritedSecretTaint ||=
+    valueReferencesSecret(step.idempotencyKey) ||
+    (step.forEach !== undefined &&
+      (valueReferencesSecret(step.forEach) ||
+        Object.values(step.with ?? {}).some(valueReferencesSecret)));
 
   const impl = config.resolveBlockForRun?.(run, step.uses) ?? config.blocks[step.uses];
   if (!impl) {

@@ -288,18 +288,27 @@ async function resolveContinuation(
     config,
   );
   let currentTraceCount = 1;
-  const escapedOwnerStepId = ownerStepId.replace(
-    /[.*+?^${}()|[\]\\]/g,
-    "\\$&",
-  );
-  const iterationTracePattern = new RegExp(
-    `^${escapedOwnerStepId}\\[\\d+\\]$`,
-  );
-  for (let index = run.trace.length - 2; index >= 0; index -= 1) {
-    if (!iterationTracePattern.test(run.trace[index]!.stepId)) {
-      break;
+  if (lastStep.forEach !== undefined) {
+    const declaredStepIds = new Set(
+      workflow.execution.steps.map((step) => step.id),
+    );
+    const escapedOwnerStepId = ownerStepId.replace(
+      /[.*+?^${}()|[\]\\]/g,
+      "\\$&",
+    );
+    const iterationTracePattern = new RegExp(
+      `^${escapedOwnerStepId}\\[\\d+\\]$`,
+    );
+    for (let index = run.trace.length - 2; index >= 0; index -= 1) {
+      const candidateStepId = run.trace[index]!.stepId;
+      if (
+        declaredStepIds.has(candidateStepId) ||
+        !iterationTracePattern.test(candidateStepId)
+      ) {
+        break;
+      }
+      currentTraceCount += 1;
     }
-    currentTraceCount += 1;
   }
   const refreshedRun = await refreshTaintAfterControlResolution(
     config,

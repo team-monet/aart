@@ -547,6 +547,53 @@ describe("executeRun — fresh execution", () => {
     expect(JSON.stringify(await store.runs.get(run.runId))).not.toContain("secret-value");
   });
 
+  it("rejects a non-literal derivative of a directly referenced secret", async () => {
+    const deriveLength: BlockImplementation = {
+      manifest: {
+        id: "test.direct-secret-length",
+        version: "1.0.0",
+        capabilities: [],
+        inputSchema: {},
+        outputSchema: {},
+        description: "Returns only the length of its input.",
+      },
+      execute: async (inputs) => ({
+        length: String((inputs as Record<string, unknown>)["source"]).length,
+      }),
+    };
+    const { store, config } = await setup({
+      blocks: { [deriveLength.manifest.id]: deriveLength },
+      redact: redactResolvedValues,
+      resolveSecret: () => "secret-value",
+    });
+    const workflow = fixtureWorkflow({
+      outputs: [{ name: "result", type: "integer", required: true }],
+      execution: {
+        type: "workflow",
+        steps: [
+          {
+            id: "derive",
+            uses: deriveLength.manifest.id,
+            with: { source: "{{ secrets.API_KEY }}" },
+          },
+        ],
+        outputMapping: { result: "{{ steps.derive.outputs.length }}" },
+      },
+    });
+    await store.workflows.put(workflow);
+    const run = await triggerRun(config, {
+      workflow,
+      trigger: fixtureTrigger(),
+      inputs: {},
+    });
+
+    const finished = await executeRun(config, run.runId);
+
+    expect(finished.status).toBe("failed");
+    expect(finished.error).toMatch(/secret-tainted step "derive"/);
+    expect(finished.trace[0]).toMatchObject({ secretTainted: true });
+  });
+
   it("preserves secret taint across an intermediate persisted step", async () => {
     const { store, config } = await setup({
       redact: redactResolvedValues,
@@ -1107,7 +1154,7 @@ describe("executeRun — reclaim-safety: resumes mid-step from persisted trace h
           block: "test.echo",
           status: "completed",
           inputs: {},
-          outputs: { value: true },
+          outputs: { value: "public" },
           startedAt: "t",
           endedAt: "t",
         },
@@ -1119,6 +1166,66 @@ describe("executeRun — reclaim-safety: resumes mid-step from persisted trace h
     expect(finished.status).toBe("failed");
     expect(finished.error).toMatch(/secret-tainted step "poll"/);
     expect(finished.trace[0]).toMatchObject({ secretTainted: true });
+  });
+
+  it("does not treat a normal bracket-suffixed step as a forEach occurrence during reclaim", async () => {
+    const { store, config } = await setup({
+      redact: redactResolvedValues,
+      resolveSecret: () => true,
+    });
+    const workflow = fixtureWorkflow({
+      execution: {
+        type: "workflow",
+        steps: [
+          { id: "poll[0]", uses: "test.echo" },
+          {
+            id: "poll",
+            uses: "test.echo",
+            next: "poll",
+            maxIterations: 1,
+            until: "{{ secrets.STOP }}",
+          },
+        ],
+      },
+    });
+    await store.workflows.put(workflow);
+    const run = await triggerRun(config, {
+      workflow,
+      trigger: fixtureTrigger(),
+      inputs: {},
+    });
+    await store.runs.put({
+      ...run,
+      status: "running",
+      trace: [
+        {
+          seq: 0,
+          stepId: "poll[0]",
+          block: "test.echo",
+          status: "completed",
+          inputs: {},
+          outputs: { value: "safe" },
+          startedAt: "t",
+          endedAt: "t",
+        },
+        {
+          seq: 1,
+          stepId: "poll",
+          block: "test.echo",
+          status: "completed",
+          inputs: {},
+          outputs: { value: "public" },
+          startedAt: "t",
+          endedAt: "t",
+        },
+      ],
+    });
+
+    const finished = await executeRun(config, run.runId);
+
+    expect(finished.status).toBe("completed");
+    expect(finished.trace[0]?.secretTainted).toBeUndefined();
+    expect(finished.trace[1]).toMatchObject({ secretTainted: true });
   });
 });
 
