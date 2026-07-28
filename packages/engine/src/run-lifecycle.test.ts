@@ -159,7 +159,7 @@ describe("executeRun — fresh execution", () => {
     const { store, config } = await setup();
     const workflow = fixtureWorkflow({
       inputs: [{ name: "publishedAt", type: "date", required: true }],
-      outputs: [{ name: "publishedAt", type: "date", required: true }],
+      outputs: [{ name: "publishedAt", type: "date", required: true, pattern: "^\\d{4}-\\d{2}-\\d{2}$" }],
       execution: {
         type: "workflow",
         steps: [{ id: "s1", uses: "test.echo" }],

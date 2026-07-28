@@ -237,6 +237,23 @@ outputMapping:
     expect(workflow.outputs[0]?.type).toBe("date");
   });
 
+  it("allows a regex pattern on an opaque custom string-like output type", () => {
+    const workflow = compileYamlWorkflow(`id: custom-pattern
+name: Custom Pattern
+version: 0.1.0
+outputs:
+  publishedAt:
+    type: date
+    pattern: "^\\\\d{4}-\\\\d{2}-\\\\d{2}$"
+steps:
+  - id: read
+    uses: web.read
+outputMapping:
+  publishedAt: "{{ steps.read.outputs.text }}"
+`);
+    expect(workflow.outputs[0]).toMatchObject({ type: "date", pattern: "^\\d{4}-\\d{2}-\\d{2}$" });
+  });
+
   it("rejects an outputMapping reference to a misspelled step before registration", () => {
     expect(() =>
       compileYamlWorkflow(`id: typo-output-step

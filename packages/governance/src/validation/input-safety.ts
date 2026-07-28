@@ -3,7 +3,7 @@
 // secrets referenced correctly." Plus architecture §4.2/§7.7's
 // effectful-capability-without-idempotencyKey WARNING (advisory, never
 // blocking).
-import type { Field, Workflow, WorkflowStep } from "@aart/types";
+import { isPatternCompatibleFieldType, type Field, type Workflow, type WorkflowStep } from "@aart/types";
 import type { CapabilityClosureLookup } from "../capability.js";
 import type { ValidationFinding } from "./types.js";
 
@@ -24,7 +24,7 @@ function validateFieldConsistency(field: Field, path: string, findings: Validati
     }
   }
   if (field.pattern) {
-    if (isOutput && field.type !== "string") {
+    if (isOutput && !isPatternCompatibleFieldType(field.type)) {
       findings.push({
         class: "input-safety",
         path: `${path}.pattern`,

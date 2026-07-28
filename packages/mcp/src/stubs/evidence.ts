@@ -16,7 +16,18 @@
 // against the stub engine's (necessarily fake) run outputs, a small fraction
 // of S6's real 12-kind scorer registry (architecture §9.5).
 import type { AartStore } from "@aart/store";
-import type { Correction, EvalExample, EvalRun, EvalSuite, GateStatus, ModelFacingReport, RunRecord, Trigger, Workflow } from "@aart/types";
+import {
+  compactModelFacingOutputs,
+  type Correction,
+  type EvalExample,
+  type EvalRun,
+  type EvalSuite,
+  type GateStatus,
+  type ModelFacingReport,
+  type RunRecord,
+  type Trigger,
+  type Workflow,
+} from "@aart/types";
 import type { EnginePort, EvidencePort } from "../types.js";
 import { newId } from "./engine.js";
 
@@ -62,7 +73,7 @@ export function buildModelFacingReport(run: RunRecord): ModelFacingReport {
     workflowId: run.workflowId,
     workflowVersion: run.workflowVersion,
     failures,
-    outputs: run.outputs ?? {},
+    outputs: compactModelFacingOutputs(run.runId, run.outputs ?? {}),
     artifactRefs,
     next: nextForHeadline(headline),
   };

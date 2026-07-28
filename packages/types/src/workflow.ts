@@ -10,6 +10,14 @@ export function isSupportedFieldType(type: string): type is SupportedFieldType {
   return (SUPPORTED_FIELD_TYPES as readonly string[]).includes(type);
 }
 
+/** Whether a regex pattern can meaningfully refine this field type. */
+export function isPatternCompatibleFieldType(type: string): boolean {
+  // Custom types are opaque and may be string-like (for example, "date").
+  // `any`/`json`/`unknown` can also validly carry a string; the runtime
+  // pattern check remains the authority for the mapped value.
+  return !isSupportedFieldType(type) || type === "string" || type === "any" || type === "json" || type === "unknown";
+}
+
 export const FieldSchema = z.object({
   name: z.string(),
   // Field types were intentionally extensible before workflow-output

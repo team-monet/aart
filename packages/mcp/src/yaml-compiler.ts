@@ -16,8 +16,7 @@
 // but nothing about the keyed-object convention is inputs-specific, and
 // `Field[]` — the compiled target — is the exact same type for both).
 import { findExpressionTokens, parseExpression, ExprSyntaxError } from "@aart/expr";
-import type { Field, Workflow } from "@aart/types";
-import { WorkflowSchema } from "@aart/types";
+import { isPatternCompatibleFieldType, WorkflowSchema, type Field, type Workflow } from "@aart/types";
 import yaml from "js-yaml";
 
 export class YamlCompileError extends Error {
@@ -138,7 +137,7 @@ function validateOutputContract(workflow: Workflow): void {
     if (field.required === true && !mappingKeys.has(field.name)) {
       problems.push(`required output "${field.name}" has no outputMapping entry`);
     }
-    if (field.pattern !== undefined && field.type !== "string") {
+    if (field.pattern !== undefined && !isPatternCompatibleFieldType(field.type)) {
       problems.push(`output "${field.name}" declares pattern but has non-string type "${field.type}"`);
     }
   }

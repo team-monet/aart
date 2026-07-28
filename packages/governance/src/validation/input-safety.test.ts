@@ -68,6 +68,14 @@ describe("validateInputSafety — enum/regex/default consistency (spec §18.4)",
     );
   });
 
+  it("allows a pattern on an opaque custom string-like workflow output", () => {
+    const findings = validateInputSafety(
+      wf([], [], [field({ name: "publishedAt", type: "date", pattern: "^\\d{4}-\\d{2}-\\d{2}$" })]),
+      lookup,
+    );
+    expect(findings).toEqual([]);
+  });
+
   it("rejects duplicate workflow output declarations", () => {
     const findings = validateInputSafety(
       wf([], [], [field({ name: "result" }), field({ name: "result", type: "number" })]),

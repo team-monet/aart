@@ -52,17 +52,19 @@ export type ConcurrencyDecision =
  * The trigger-intake decision (architecture §4.3's four policies). Looks up
  * every non-terminal run of `workflow.id` and compares `params.concurrencyKey`
  * (a persisted fingerprint; legacy raw values are normalized on read) against
- * the newly-resolved key/fingerprint. Returns `{ action: "allow" }`
+ * the newly-resolved raw authored key. `decideConcurrency` is public beside
+ * `resolveConcurrencyKey`, so it preserves that raw-key contract and performs
+ * fingerprinting internally. Returns `{ action: "allow" }`
  * when the workflow declares no `concurrency` block, or when no other
  * non-terminal run shares this exact key.
  */
-export async function decideConcurrency(store: AartStore, workflow: Workflow, key: string | undefined): Promise<ConcurrencyDecision> {
-  if (!workflow.concurrency || key === undefined) {
+export async function decideConcurrency(store: AartStore, workflow: Workflow, rawKey: string | undefined): Promise<ConcurrencyDecision> {
+  if (!workflow.concurrency || rawKey === undefined) {
     return { action: "allow" };
   }
   const candidates = await store.runs.list({ workflowId: workflow.id });
   const existing = candidates.find(
-    (r) => NON_TERMINAL_STATUSES.has(r.status) && concurrencyKeysEqual(r, key, CONCURRENCY_KEY_FORMAT),
+    (r) => NON_TERMINAL_STATUSES.has(r.status) && concurrencyKeysEqual(r, rawKey, undefined),
   );
   if (!existing) {
     return { action: "allow" };

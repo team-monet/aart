@@ -50,8 +50,9 @@ export async function triggerRun(config: EngineConfig, input: TriggerRunInput): 
   // deterministic fingerprint instead of the author-provided value so a key
   // that is also a secret never leaks into RunRecord.params and cannot be
   // rewritten by later whole-record redaction.
-  const key = fingerprintConcurrencyKey(await resolveConcurrencyKey(input.workflow, input.inputs));
-  const decision = await decideConcurrency(config.store, input.workflow, key);
+  const resolvedKey = await resolveConcurrencyKey(input.workflow, input.inputs);
+  const key = fingerprintConcurrencyKey(resolvedKey);
+  const decision = await decideConcurrency(config.store, input.workflow, resolvedKey);
 
   if (decision.action === "reject") {
     throw new ConcurrencyRejectedError({
