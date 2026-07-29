@@ -2023,12 +2023,15 @@ the isolated reuse-and-execute acceptance loop above.
 
 ### A75 — Secret taint survives trace persistence without retaining secret values
 
-Step traces are redacted before they are persisted, but the active execution
-continues with its raw in-memory run rather than reading its own public audit
-copy back as operational input. At a durable wait boundary the exact raw
-continuation is AES-GCM sealed with the wait, so a restarted worker can
-continue with the values and frozen workflow it actually had without exposing
-either through `RunStore`. `StepTrace.secretTainted` remains the
+Step traces are redacted before they are persisted, while exact execution
+state is kept separately from the public audit. A claimed running segment
+stores an AES-GCM-sealed active continuation and atomically refreshes it with
+every public progress write. At a durable wait boundary that state transfers
+to the sealed wait continuation; at terminal completion it is deleted. A
+worker crashing immediately after wait resumption, or between later steps,
+can therefore continue with the values and frozen workflow it actually had
+without exposing either through `RunStore.get()`/`list()`.
+`StepTrace.secretTainted` remains the
 backward-compatible summary bit. `secretTaintedPaths` records output JSON
 pointers (or `"*"` when arbitrary output may be derived from secret data), while
 `controlSecretTainted` separately records that a branch, loop exit, or
@@ -2093,13 +2096,20 @@ raw operational value receives the repaired taint metadata in memory while
 only the independently redacted audit value is persisted.
 The filesystem adapter serializes every top-level member operation and
 `transact()` call under one process-local, root-scoped mutex shared by every
-handle opened for that root. Security repair therefore cannot flush a stale
+handle opened for the same canonical filesystem root, including handles
+created through symlink aliases before the `.aart` child exists. Security
+repair therefore cannot flush a stale
 whole-run image over a concurrently completed step. Because a step may prepare
 its next trace before acquiring that mutex, every engine run-write transaction
 also merges the latest persisted security provenance after it acquires the
 lock, preserving both the new progress and any repair that won first. The
 filesystem adapter remains the local-development store; multi-process server
 workers use the database adapter.
+An active concurrency key remains backward-readable while it is ordinary
+coordination data. If later secret resolution classifies that raw value as a
+secret, the public `RunRecord` atomically switches to the existing tagged
+SHA-256 representation; intake and queue release compare both forms without
+publishing the newly sensitive key.
 Historical data/control analysis then follows descendants; if a repaired
 consumer cached a non-literal derivative, that key is revoked and its own
 consumers are repaired until the lineage reaches closure. Waiting runs remain
@@ -2162,6 +2172,10 @@ Each audit replacement rotates that generation, so an earlier operational
 ciphertext cannot be substituted after the known-secret set expands.
 Matching opens that copy only inside the engine, rehydrates those literals
 into the consuming segment, and removes the operational copy on consumption.
+The ordinary outstanding-wait resume path also loads the matched signal's
+sealed secret-literal set before rebuilding the completed trace or replacing
+the audit, so an earlier global repair cannot be undone by a later consumer
+that knew only the wait's secret set.
 Thus a signal remains actionable without publishing its original audit or
 reintroducing its payload into the completed wait trace.
 Approval and outstanding-wait audits are members of the same durable-copy
@@ -2187,8 +2201,11 @@ The same generation also authenticates a separately sealed full
 workflow snapshot, and every secret literal known before suspension. Global
 late-secret repair merges new taint metadata and literals into this protected
 copy and rotates/reseals the wait generation before rewriting the public
-RunRecord. Resume and expiry rehydrate it
-before completing the wait, so a boolean/numeric secret cannot corrupt
+RunRecord. Resume and expiry rehydrate it before completing the wait, then
+atomically move the exact running state into the run's sealed active
+continuation before deleting the wait row. That active copy advances with
+each subsequent step and is removed only when another sealed wait or terminal
+record commits. A boolean/numeric secret therefore cannot corrupt
 structural fields such as `approved`/`schemaVersion`, a redacted snapshot
 cannot change continuation semantics, and an echoed pre-restart secret is
 redacted on its first post-restart write. The public RunRecord is reconstructed
@@ -2205,8 +2222,9 @@ wait state, removes the raw scheduling shadow during repair, and records a
 stable text-eligibility bit for existing artifacts. Migration
 `0009_wait_operation_generation` adds the per-entry generation for SQLite.
 Migration `0010_protected_continuation_state` adds sealed unconsumed-signal
-state, signal fingerprints/generations, the sealed suspended-run state, and
-the producer trace sequence used by stable cache revocation. Legacy
+state, signal fingerprints/generations, sealed suspended and active-run
+continuation state, and the producer trace sequence used by stable cache
+revocation. Legacy
 unconsumed signals are sealed lazily before their first audit rewrite.
 Text artifacts obey the same retrospective discovery rule as traces and cache
 entries. Every boundary that can enlarge the resolved-secret set—normal

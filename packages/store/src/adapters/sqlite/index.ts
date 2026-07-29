@@ -134,7 +134,7 @@ function buildStore(
 ): AartStore {
   return {
     workflows: new SqliteWorkflowStore(exec),
-    runs: new SqliteRunStore(exec),
+    runs: new SqliteRunStore(exec, blobsDir),
     waits: new SqliteWaitStore(exec, blobsDir),
     signals: new SqliteSignalStore(exec, blobsDir),
     artifacts: new SqliteArtifactStore(

@@ -180,6 +180,10 @@ async function redactAndPersistRun(
     }
   }
   await store.runs.put(redacted);
+  await store.runs.replaceOperationalState(run.runId, {
+    run,
+    resolvedSecretValues: [...resolvedSecretRefs],
+  });
   return redacted;
 }
 

@@ -460,9 +460,10 @@ export function createSqliteAddWaitOperationGenerationMigration(
 }
 
 /**
- * Separates still-actionable signal values and suspended-run continuation
- * state from their customer-visible audit copies. Existing rows are lazily
- * sealed before the first audit rewrite, while new rows are sealed at put.
+ * Separates still-actionable signal values plus suspended/active run
+ * continuation state from their customer-visible audit copies. Existing
+ * signal rows are lazily sealed before the first audit rewrite, while new
+ * operational state is sealed at its lifecycle transition.
  */
 export function createSqliteAddProtectedContinuationStateMigration(
   db: DatabaseSync,
@@ -490,6 +491,11 @@ export function createSqliteAddProtectedContinuationStateMigration(
         "waits",
         "operational_run_state_ciphertext TEXT",
       );
+      addColumn("runs", "operational_generation TEXT");
+      addColumn(
+        "runs",
+        "operational_run_state_ciphertext TEXT",
+      );
       addColumn("idempotency_ledger", "trace_seq INTEGER");
       db.exec(
         "CREATE INDEX IF NOT EXISTS idx_signals_match_fingerprint ON signals(signal_match_fingerprint)",
@@ -501,6 +507,12 @@ export function createSqliteAddProtectedContinuationStateMigration(
       );
       db.exec(
         "ALTER TABLE waits DROP COLUMN operational_run_state_ciphertext",
+      );
+      db.exec(
+        "ALTER TABLE runs DROP COLUMN operational_run_state_ciphertext",
+      );
+      db.exec(
+        "ALTER TABLE runs DROP COLUMN operational_generation",
       );
       db.exec(
         "ALTER TABLE idempotency_ledger DROP COLUMN trace_seq",

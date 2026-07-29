@@ -16,6 +16,10 @@ import type {
   WaitCondition,
 } from "@aart/types";
 import { SecretResolutionError } from "@aart/types";
+import {
+  CONCURRENCY_KEY_FORMAT,
+  fingerprintConcurrencyKey,
+} from "./concurrency.js";
 import { idempotencyAssociationFingerprint } from "./idempotency-association.js";
 import { jsonValuesEqual } from "./output-validation.js";
 
@@ -504,6 +508,22 @@ export async function repairCustomerVisibleAudits(
       run,
       resolvedSecretRefs,
     );
+    const activeState =
+      await store.runs.getOperationalState(run.runId);
+    if (activeState !== undefined) {
+      await store.runs.putOperationalState(run.runId, {
+        run: mergeOperationalRunTaint(
+          activeState.run,
+          repaired,
+        ),
+        resolvedSecretValues: [
+          ...new Set([
+            ...activeState.resolvedSecretValues,
+            ...resolvedSecretRefs,
+          ]),
+        ],
+      });
+    }
     if (run.status === "waiting") {
       const outstanding = waits.filter(
         (entry) => entry.runId === run.runId,
@@ -730,11 +750,11 @@ function mergeTaintPaths(
 }
 
 /**
- * Redacts a RunRecord while keeping its active concurrency lock readable by
- * every intake version sharing the store. The authored key is operational
- * coordination state while a run is pending/running/waiting; changing it
- * mid-run can admit overlapping execution or strand a queued run. Terminal
- * records no longer participate in matching and remain fully redacted.
+ * Redacts a RunRecord while keeping its active concurrency lock usable.
+ * A still-public authored key remains backward-readable until it becomes a
+ * known secret; at that point it is replaced by the tagged fingerprint the
+ * concurrency matcher already supports. Terminal records no longer
+ * participate in matching and remain fully redacted.
  */
 export function applyRunRedaction(redact: RedactFn, run: RunRecord, resolvedSecretRefs: ReadonlySet<string>): RunRecord {
   const {
@@ -791,6 +811,10 @@ export function applyRunRedaction(redact: RedactFn, run: RunRecord, resolvedSecr
     changedJsonPointers(rawTrigger, trigger),
     resolvedSecretRefs,
   );
+  const activeRun =
+    run.status === "pending" ||
+    run.status === "running" ||
+    run.status === "waiting";
   const params =
     run.params === undefined
       ? undefined
@@ -821,6 +845,29 @@ export function applyRunRedaction(redact: RedactFn, run: RunRecord, resolvedSecr
                 concurrencyKeyFormat:
                   run.params.concurrencyKeyFormat,
               }
+            : {}),
+          ...(activeRun &&
+          run.params.concurrencyKeyFormat ===
+            CONCURRENCY_KEY_FORMAT &&
+          typeof run.params.concurrencyKey === "string"
+            ? { concurrencyKey: run.params.concurrencyKey }
+            : {}),
+          ...(activeRun &&
+          run.params.concurrencyKeyFormat !==
+            CONCURRENCY_KEY_FORMAT &&
+          typeof run.params.concurrencyKey === "string"
+            ? applyRedaction(
+                redact,
+                run.params.concurrencyKey,
+                resolvedSecretRefs,
+              ) === run.params.concurrencyKey
+              ? { concurrencyKey: run.params.concurrencyKey }
+              : {
+                  concurrencyKey: fingerprintConcurrencyKey(
+                    run.params.concurrencyKey,
+                  ),
+                  concurrencyKeyFormat: CONCURRENCY_KEY_FORMAT,
+                }
             : {}),
         };
   const redactedTrace = run.trace.map((trace): StepTrace => {
@@ -1136,24 +1183,7 @@ export function applyRunRedaction(redact: RedactFn, run: RunRecord, resolvedSecr
       ? { secretTaintedTriggerPaths }
       : {}),
   };
-  const concurrencyKey = run.params?.concurrencyKey;
-  if (
-    typeof concurrencyKey !== "string" ||
-    (run.status !== "pending" && run.status !== "running" && run.status !== "waiting")
-  ) {
-    return redacted;
-  }
-
-  return {
-    ...redacted,
-    params: {
-      ...redacted.params,
-      concurrencyKey,
-      ...(run.params?.concurrencyKeyFormat !== undefined
-        ? { concurrencyKeyFormat: run.params.concurrencyKeyFormat }
-        : {}),
-    },
-  };
+  return redacted;
 }
 
 function mergeStringSets(

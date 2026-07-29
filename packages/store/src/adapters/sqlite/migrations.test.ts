@@ -706,6 +706,15 @@ describe("0010 protected continuation state", () => {
       handle.store,
     );
     await expect(all.up()).resolves.toBe(10);
+    const runColumns = handle.db
+      .prepare("PRAGMA table_info(runs)")
+      .all() as Array<{ name: string }>;
+    expect(runColumns.map((column) => column.name)).toEqual(
+      expect.arrayContaining([
+        "operational_generation",
+        "operational_run_state_ciphertext",
+      ]),
+    );
     await handle.store.signals.replaceAudit(
       "legacy-unconsumed",
       {

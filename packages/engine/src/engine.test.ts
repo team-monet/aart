@@ -15,6 +15,7 @@ import {
 import { CURRENT_ENGINE_SCHEMA_VERSION, SchemaVersionMismatchError } from "./schema-version.js";
 import { createTestStore, echoBlock, fixtureTrigger, fixtureWorkflow } from "./test-utils/fixtures.js";
 import { createBlockRegistry } from "./types.js";
+import { resumeManual as resumeManualMechanism } from "./wait/wait-machine.js";
 
 /** Like `createTestStore`, but also returns the on-disk `root` path — needed by the restart/reclaim tests below, which must construct a SECOND, fully independent `createFsStore()` instance pointed at the same directory (simulating a genuine process restart: no in-memory object is shared between the two `AartStore`s, only the filesystem). */
 async function createTestStoreWithRoot(): Promise<{ root: string; store: AartStore; cleanup: () => Promise<void> }> {
@@ -2008,6 +2009,141 @@ describe("createEngine — THE durable-execution proof: a real process restart, 
     expect(
       JSON.stringify(await reloadedStore.runs.get(run.runId)),
     ).not.toContain(secret);
+  });
+
+  it("reclaims the exact protected continuation after a crash immediately following wait resumption", async () => {
+    const { root, store, cleanup } =
+      await createTestStoreWithRoot();
+    cleanups.push(cleanup);
+    const secret = "post-resume-crash-secret";
+    const redact = (
+      record: unknown,
+      refs: ReadonlySet<string>,
+    ): unknown => {
+      let json = JSON.stringify(record);
+      for (const value of refs) {
+        json = json.replaceAll(value, "[REDACTED]");
+      }
+      return JSON.parse(json);
+    };
+    const requireSecretBlock: BlockImplementation = {
+      manifest: {
+        id: "test.require-post-resume-secret",
+        version: "1.0.0",
+        capabilities: [],
+        inputSchema: {},
+        outputSchema: {},
+        description:
+          "Fails unless active protected state survives a post-resume crash.",
+      },
+      execute: async (inputs) => {
+        if (
+          (inputs as Record<string, unknown>)["prior"] !== secret
+        ) {
+          throw new Error(
+            "post-resume protected continuation was not restored",
+          );
+        }
+        return { restored: true };
+      },
+    };
+    const workflow = fixtureWorkflow({
+      execution: {
+        type: "workflow",
+        steps: [
+          {
+            id: "source",
+            uses: "test.echo",
+            with: { value: "{{ secrets.API_KEY }}" },
+          },
+          { id: "pause", uses: "wait.manual" },
+          {
+            id: "after",
+            uses: requireSecretBlock.manifest.id,
+            with: {
+              prior:
+                "{{ steps.source.outputs.echoed.value }}",
+            },
+          },
+        ],
+      },
+    });
+    await store.workflows.put(workflow);
+    const engine1 = createEngine({
+      store,
+      redact,
+      resolveSecret: () => secret,
+      capabilityCheck: alwaysAllowCapabilityCheck,
+      blocks: createBlockRegistry([
+        echoBlock,
+        requireSecretBlock,
+      ]),
+    });
+    const triggered = await engine1.triggerRun({
+      workflow,
+      trigger: fixtureTrigger(),
+      inputs: {},
+    });
+    await engine1.executeRun(triggered.runId);
+
+    const resumeStore = createFsStore(root);
+    const resumed = await resumeManualMechanism(
+      {
+        store: resumeStore,
+        redact,
+        now: () => new Date(),
+      },
+      triggered.runId,
+      "pause",
+      {},
+      new Set(),
+      async (run) => run,
+    );
+    expect(resumed.kind).toBe("resumed");
+    expect(JSON.stringify(await resumeStore.runs.get(triggered.runId))).not.toContain(
+      secret,
+    );
+    await expect(
+      resumeStore.runs.getOperationalState(triggered.runId),
+    ).resolves.toMatchObject({
+      run: {
+        status: "running",
+        trace: [
+          expect.objectContaining({
+            outputs: { echoed: { value: secret } },
+          }),
+          expect.objectContaining({ status: "completed" }),
+        ],
+      },
+      resolvedSecretValues: expect.arrayContaining([secret]),
+    });
+
+    // The resuming process crashes here, before runStepsLoop can write
+    // another suspension or terminal state.
+    const reclaimStore = createFsStore(root);
+    const engineAfterCrash = createEngine({
+      store: reclaimStore,
+      redact,
+      resolveSecret: () => {
+        throw new Error("must rehydrate the sealed active state");
+      },
+      capabilityCheck: alwaysAllowCapabilityCheck,
+      blocks: createBlockRegistry([
+        echoBlock,
+        requireSecretBlock,
+      ]),
+    });
+    const finished = await engineAfterCrash.executeRun(
+      triggered.runId,
+    );
+
+    expect(finished.status).toBe("completed");
+    expect(
+      finished.trace.find((trace) => trace.stepId === "after"),
+    ).toMatchObject({ outputs: { restored: true } });
+    await expect(
+      reclaimStore.runs.getOperationalState(triggered.runId),
+    ).resolves.toBeUndefined();
   });
 
   it("reclaim-safety: a DIFFERENT engine instance (a different worker) resumes a run the original claimant never released cleanly — a different code path than a clean same-worker restart", async () => {

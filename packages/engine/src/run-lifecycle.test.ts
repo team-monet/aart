@@ -634,6 +634,51 @@ describe("executeRun — fresh execution", () => {
     });
   });
 
+  it("does not taint a later step that consumes only secret-producing step status metadata", async () => {
+    const { store, config } = await setup({
+      redact: redactResolvedValues,
+      resolveSecret: () => "secret-value",
+    });
+    const workflow = fixtureWorkflow({
+      outputs: [{ name: "status", type: "string", required: true }],
+      execution: {
+        type: "workflow",
+        steps: [
+          {
+            id: "source",
+            uses: "test.echo",
+            with: { secret: "{{ secrets.API_KEY }}" },
+          },
+          {
+            id: "consume_status",
+            uses: "test.echo",
+            with: { value: "{{ steps.source.status }}" },
+          },
+        ],
+        outputMapping: {
+          status:
+            "{{ steps.consume_status.outputs.echoed.value }}",
+        },
+      },
+    });
+    await store.workflows.put(workflow);
+    const run = await triggerRun(config, {
+      workflow,
+      trigger: fixtureTrigger(),
+      inputs: {},
+    });
+
+    const finished = await executeRun(config, run.runId);
+
+    expect(finished.status).toBe("completed");
+    expect(finished.outputs).toEqual({ status: "completed" });
+    expect(
+      finished.trace.find(
+        (trace) => trace.stepId === "consume_status",
+      )?.secretTainted,
+    ).toBeUndefined();
+  });
+
   it("rejects a non-literal derivative of a directly referenced secret", async () => {
     const deriveLength: BlockImplementation = {
       manifest: {

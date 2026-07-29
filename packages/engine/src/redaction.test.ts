@@ -353,7 +353,7 @@ describe("applyRunRedaction", () => {
     return JSON.parse(json);
   };
 
-  it("preserves a non-terminal concurrency key so rolling-upgrade intake still sees the lock", () => {
+  it("fingerprints a non-terminal concurrency key once its raw value becomes secret", () => {
     const run = fixtureRun({
       status: "running",
       params: { concurrencyKey: "case-secret", concurrencyKeyFormat: "legacy-compatible" },
@@ -361,8 +361,11 @@ describe("applyRunRedaction", () => {
 
     const redacted = applyRunRedaction(redactKey, run, new Set(["case-secret"]));
 
-    expect(redacted.params?.concurrencyKey).toBe("case-secret");
-    expect(redacted.params?.concurrencyKeyFormat).toBe("legacy-compatible");
+    expect(redacted.params?.concurrencyKey).toMatch(/^sha256:/);
+    expect(redacted.params?.concurrencyKey).not.toContain(
+      "case-secret",
+    );
+    expect(redacted.params?.concurrencyKeyFormat).toBe("sha256-v1");
   });
 
   it("fully redacts the concurrency key after the run becomes terminal", () => {

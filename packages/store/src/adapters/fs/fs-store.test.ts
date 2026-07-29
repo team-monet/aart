@@ -87,6 +87,32 @@ describe("fs adapter — .aart/ layout (architecture §5.2)", () => {
     expect(JSON.parse(onDisk).record.runId).toBe("run_layout_1");
   });
 
+  it("keeps an active run continuation sealed beside its public audit record", async () => {
+    const secret = "active-run-secret";
+    const publicRun = continuationState(secret).run;
+    publicRun.inputs = { secret: "[REDACTED]" };
+    await store.runs.put(publicRun);
+    await store.runs.putOperationalState(publicRun.runId, {
+      run: {
+        ...publicRun,
+        inputs: { secret },
+      },
+      resolvedSecretValues: [secret],
+    });
+
+    const onDisk = await fs.readFile(
+      join(paths.runsDir(root), `${publicRun.runId}.json`),
+      "utf8",
+    );
+    expect(onDisk).not.toContain(secret);
+    await expect(
+      store.runs.getOperationalState(publicRun.runId),
+    ).resolves.toMatchObject({
+      run: { inputs: { secret } },
+      resolvedSecretValues: [secret],
+    });
+  });
+
   it("shares one mutex across symlink aliases before the store directory exists", async () => {
     const container = await fs.mkdtemp(
       join(tmpdir(), "aart-store-fs-alias-"),

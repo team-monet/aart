@@ -3,8 +3,17 @@
 // module doc comment for why trace/waits/artifacts are stored as columns
 // on `runs` directly rather than architecture's literal separate
 // `step_traces` table.
+import { randomUUID } from "node:crypto";
+import { join } from "node:path";
 import type { RunFlag, RunRecord, RunStatus } from "@aart/types";
-import type { RunStore } from "../../../types.js";
+import type {
+  RunOperationalState,
+  RunStore,
+} from "../../../types.js";
+import {
+  openOperationalState,
+  sealOperationalState,
+} from "../../operational-state-seal.js";
 import { dbAll, dbGet, dbRun, fromBool, fromJson, toBool, toJson, type SqlExec } from "../db.js";
 
 interface RunRow {
@@ -30,6 +39,8 @@ interface RunRow {
   started_at: string;
   updated_at: string;
   ended_at: string | null;
+  operational_generation: string | null | undefined;
+  operational_run_state_ciphertext: string | null | undefined;
 }
 
 function rowToRun(row: RunRow): RunRecord {
@@ -72,7 +83,17 @@ function rowToRun(row: RunRow): RunRecord {
 }
 
 export class SqliteRunStore implements RunStore {
-  constructor(private readonly exec: SqlExec) {}
+  private readonly operationKeyPath: string;
+
+  constructor(
+    private readonly exec: SqlExec,
+    operationalStateDir: string,
+  ) {
+    this.operationKeyPath = join(
+      operationalStateDir,
+      ".run-operational-key",
+    );
+  }
 
   async get(runId: string): Promise<RunRecord | undefined> {
     const row = await this.exec((db) => dbGet<RunRow>(db, "SELECT * FROM runs WHERE run_id = ?", [runId]));
@@ -153,6 +174,88 @@ export class SqliteRunStore implements RunStore {
     const where = clauses.length ? ` WHERE ${clauses.join(" AND ")}` : "";
     const rows = await this.exec((db) => dbAll<RunRow>(db, `SELECT * FROM runs${where}`, params));
     return rows.map(rowToRun);
+  }
+
+  async getOperationalState(
+    runId: string,
+  ): Promise<RunOperationalState | undefined> {
+    const row = await this.exec((db) =>
+      dbGet<RunRow>(
+        db,
+        "SELECT * FROM runs WHERE run_id = ?",
+        [runId],
+      ),
+    );
+    if (
+      row?.operational_generation === null ||
+      row?.operational_generation === undefined ||
+      row.operational_run_state_ciphertext === null ||
+      row.operational_run_state_ciphertext === undefined
+    ) {
+      return undefined;
+    }
+    return openOperationalState<RunOperationalState>(
+      this.operationKeyPath,
+      [runId, row.operational_generation, "active-run-state"],
+      row.operational_run_state_ciphertext,
+    );
+  }
+
+  async putOperationalState(
+    runId: string,
+    state: RunOperationalState,
+  ): Promise<void> {
+    const generation = randomUUID();
+    const ciphertext = await sealOperationalState(
+      this.operationKeyPath,
+      [runId, generation, "active-run-state"],
+      state,
+    );
+    const changed = await this.exec((db) =>
+      dbRun(
+        db,
+        `UPDATE runs
+         SET operational_generation = ?,
+             operational_run_state_ciphertext = ?
+         WHERE run_id = ?`,
+        [generation, ciphertext, runId],
+      ),
+    );
+    if (changed.changes === 0) {
+      throw new Error(
+        `putOperationalState: no run ${runId} exists.`,
+      );
+    }
+  }
+
+  async replaceOperationalState(
+    runId: string,
+    state: RunOperationalState,
+  ): Promise<void> {
+    const existing = await this.exec((db) =>
+      dbGet<{ found: number }>(
+        db,
+        `SELECT 1 AS found FROM runs
+         WHERE run_id = ?
+           AND operational_run_state_ciphertext IS NOT NULL`,
+        [runId],
+      ),
+    );
+    if (existing === undefined) return;
+    await this.putOperationalState(runId, state);
+  }
+
+  async deleteOperationalState(runId: string): Promise<void> {
+    await this.exec((db) =>
+      dbRun(
+        db,
+        `UPDATE runs
+         SET operational_generation = NULL,
+             operational_run_state_ciphertext = NULL
+         WHERE run_id = ?`,
+        [runId],
+      ),
+    );
   }
 
   async hasDedupeKey(runId: string, dedupeKey: string): Promise<boolean> {

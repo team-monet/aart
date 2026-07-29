@@ -619,6 +619,10 @@ async function appendTracesAndPersist(
       resolvedSecretRefs,
     );
     await tx.runs.put(redacted);
+    await tx.runs.replaceOperationalState(repaired.runId, {
+      run: repaired,
+      resolvedSecretValues: [...resolvedSecretRefs],
+    });
     return repaired;
   });
 }
@@ -739,6 +743,14 @@ function valueReferencesSecretTaintedTrace(
         .at(-1);
       if (source?.controlSecretTainted === true) return true;
       if (source?.secretTainted !== true) continue;
+      const second = parsed.path[1];
+      if (
+        second?.kind === "property" &&
+        second.name === "status" &&
+        parsed.path.length === 2
+      ) {
+        continue;
+      }
       const pointer = pointerForOutputPath(parsed.path);
       if (pointer === undefined) return true;
       const paths =
@@ -1326,6 +1338,10 @@ export async function refreshTaintAfterControlResolution(
       resolvedSecretRefs,
     );
     await tx.runs.put(refreshedRun);
+    await tx.runs.replaceOperationalState(repaired.runId, {
+      run: repaired,
+      resolvedSecretValues: [...resolvedSecretRefs],
+    });
     return repaired;
   });
 }

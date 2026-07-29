@@ -58,6 +58,26 @@ export interface RunStore {
   put(run: RunRecord): Promise<void>;
   list(filter?: { status?: RunStatus; workflowId?: string }): Promise<RunRecord[]>;
   /**
+   * Engine-only exact state for a currently-running continuation whose
+   * public RunRecord may contain redaction markers. This state is sealed at
+   * rest and updated atomically with every public progress write.
+   */
+  getOperationalState(
+    runId: string,
+  ): Promise<RunOperationalState | undefined>;
+  /** Creates or replaces the protected active continuation. */
+  putOperationalState(
+    runId: string,
+    state: RunOperationalState,
+  ): Promise<void>;
+  /** Replaces it only when one already exists. */
+  replaceOperationalState(
+    runId: string,
+    state: RunOperationalState,
+  ): Promise<void>;
+  /** Removes it at the next terminal or durably-suspended boundary. */
+  deleteOperationalState(runId: string): Promise<void>;
+  /**
    * The exactly-once resume dedupe ledger (architecture §4.4.2): has this
    * exact key — `(runId, waitStepId, signal.name + signal.correlationId)`
    * for signal-matched resume, or an equivalent caller-constructed key for
@@ -188,6 +208,8 @@ export interface WaitOperationalRunState {
   run: RunRecord;
   resolvedSecretValues: string[];
 }
+
+export type RunOperationalState = WaitOperationalRunState;
 
 export interface ArtifactStore {
   put(artifact: Artifact, bytes: Uint8Array): Promise<void>;

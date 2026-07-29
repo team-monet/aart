@@ -58,7 +58,7 @@ export const REDACTION_LINT_SUPPRESSIONS: readonly RedactionLintSuppression[] = 
   { file: "packages/engine/src/concurrency.ts", snippet: "await tx.runs.put(released);", reason: "releaseQueuedRuns runs in one store transaction and only flips params.waitingOnConcurrency to false on the latest already-redacted pending RunRecord selected inside that transaction; it introduces no new arbitrary content." },
 
   // ---- packages/engine/src/redaction.ts ----
-  { file: "packages/engine/src/redaction.ts", snippet: "await store.runs.put(repaired);", reason: "repairCustomerVisibleAudits computes `repaired` immediately above with applyRunRedaction(redact, run, resolvedSecretRefs). The separately sealed operational continuation is written through WaitStore, never this public RunStore write." },
+  { file: "packages/engine/src/redaction.ts", snippet: "await store.runs.put(repaired);", reason: "repairCustomerVisibleAudits computes `repaired` immediately above with applyRunRedaction(redact, run, resolvedSecretRefs). Exact active/suspended continuation state is independently resealed through RunStore/WaitStore operational methods before this public audit write." },
 
   // ---- packages/engine/src/wait/wait-machine.ts ----
   { file: "packages/engine/src/wait/wait-machine.ts", snippet: "await tx.approvals.put({ ...task, status: \"expired\", decidedAt: now.toISOString() });", reason: "failExpiredWait spreads an existing ApprovalTask (redacted at creation by step-executor.ts's executeWaitDispatch, A41 fix) with only a static status/decidedAt pair added -- introduces no new content." },

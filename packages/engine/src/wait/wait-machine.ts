@@ -223,6 +223,13 @@ export async function enterWait(config: WaitMachineConfig, options: EnterWaitOpt
           resolvedSecretRefs,
         );
         await tx.runs.put(redacted);
+        await tx.runs.replaceOperationalState(
+          repairedRun.runId,
+          {
+            run: repairedRun,
+            resolvedSecretValues: [...resolvedSecretRefs],
+          },
+        );
         return { run: redacted, suspended: false };
       }
     }
@@ -272,7 +279,6 @@ export async function enterWait(config: WaitMachineConfig, options: EnterWaitOpt
       wait,
       resolvedSecretRefs,
     );
-    await tx.runs.put(redactedRun);
     await tx.waits.put(
       persistenceAwareRun.runId,
       stepId,
@@ -290,6 +296,15 @@ export async function enterWait(config: WaitMachineConfig, options: EnterWaitOpt
         auditWait,
       );
     }
+    // The filesystem adapter flushes staged files one by one. Stage the
+    // sealed recoverable wait before the public RunRecord transition so a
+    // process exit between those writes leaves either the prior active
+    // continuation or the new wait continuation available, never only a
+    // redacted waiting record.
+    await tx.runs.put(redactedRun);
+    await tx.runs.deleteOperationalState(
+      persistenceAwareRun.runId,
+    );
     return { run: redactedRun, suspended: true };
   });
   await repairGlobalAuditsForNewSecrets(
@@ -413,6 +428,14 @@ async function claimAndCompleteWait(config: WaitMachineConfig, args: ClaimAndCom
       operationalRunState?.resolvedSecretValues ?? []) {
       resolvedSecretRefs.add(value);
     }
+    if (signalAudit !== undefined) {
+      for (const value of
+        await tx.signals.getOperationalSecretValues(
+          signalAudit.id,
+        )) {
+        resolvedSecretRefs.add(value);
+      }
+    }
     const run =
       operationalRunState === undefined
         ? publicRun
@@ -494,6 +517,10 @@ async function claimAndCompleteWait(config: WaitMachineConfig, args: ClaimAndCom
       resolvedSecretRefs,
     );
     await tx.runs.put(redacted);
+    await tx.runs.putOperationalState(runId, {
+      run: repairedRun,
+      resolvedSecretValues: [...resolvedSecretRefs],
+    });
     return { kind: "resumed", run: redacted, mechanism };
   });
   await repairGlobalAuditsForNewSecrets(
@@ -625,6 +652,10 @@ export async function failExpiredWait(config: WaitMachineConfig, runId: string, 
       resolvedSecretRefs,
     );
     await tx.runs.put(redacted);
+    await tx.runs.putOperationalState(runId, {
+      run: repairedRun,
+      resolvedSecretValues: [...resolvedSecretRefs],
+    });
     return { kind: "resumed", run: redacted, mechanism };
   });
   await repairGlobalAuditsForNewSecrets(

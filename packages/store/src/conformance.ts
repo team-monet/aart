@@ -139,6 +139,55 @@ export function runAartStoreConformanceSuite(label: string, options: Conformance
         await expect(store.runs.get(run.runId)).resolves.toEqual(run);
       });
 
+      it("keeps active operational state separate from the public run and preserves it across audit writes", async () => {
+        const run = fixtureRun({
+          inputs: { token: "[REDACTED]" },
+        });
+        const operationalRun = {
+          ...run,
+          inputs: { token: "exact-secret" },
+        };
+        await store.runs.put(run);
+        await store.runs.putOperationalState(run.runId, {
+          run: operationalRun,
+          resolvedSecretValues: ["exact-secret"],
+        });
+
+        await store.runs.put({
+          ...run,
+          updatedAt: "audit-write",
+        });
+        await expect(
+          store.runs.getOperationalState(run.runId),
+        ).resolves.toEqual({
+          run: operationalRun,
+          resolvedSecretValues: ["exact-secret"],
+        });
+        await expect(store.runs.get(run.runId)).resolves.toMatchObject({
+          inputs: { token: "[REDACTED]" },
+          updatedAt: "audit-write",
+        });
+
+        const progressed = {
+          ...operationalRun,
+          updatedAt: "progressed",
+        };
+        await store.runs.replaceOperationalState(run.runId, {
+          run: progressed,
+          resolvedSecretValues: ["exact-secret"],
+        });
+        await expect(
+          store.runs.getOperationalState(run.runId),
+        ).resolves.toMatchObject({
+          run: { updatedAt: "progressed" },
+        });
+
+        await store.runs.deleteOperationalState(run.runId);
+        await expect(
+          store.runs.getOperationalState(run.runId),
+        ).resolves.toBeUndefined();
+      });
+
       it("round-trips persisted input and trigger secret-taint paths", async () => {
         const run = fixtureRun({
           secretTaintedInputPaths: ["/token"],

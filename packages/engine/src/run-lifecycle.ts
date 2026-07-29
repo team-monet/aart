@@ -238,6 +238,7 @@ export async function finalizeTerminal(
       resolvedSecretRefs,
     );
     await tx.runs.put(persistenceSafeRun);
+    await tx.runs.deleteOperationalState(repaired.runId);
     return persistenceSafeRun;
   });
 
@@ -489,14 +490,25 @@ export async function runStepsLoop(config: EngineConfig, initialRun: RunRecord, 
  * restarting at step 0.
  */
 export async function executeRun(config: EngineConfig, runId: string): Promise<RunRecord> {
-  const loaded = await config.store.runs.get(runId);
-  if (!loaded) {
+  const publicRun = await config.store.runs.get(runId);
+  if (!publicRun) {
     throw new Error(`executeRun: no RunRecord found for runId "${runId}".`);
   }
+  const operationalState =
+    await config.store.runs.getOperationalState(runId);
+  const resolvedSecretRefs = new Set(
+    operationalState?.resolvedSecretValues ?? [],
+  );
+  const loaded =
+    operationalState === undefined
+      ? publicRun
+      : mergeOperationalRunTaint(
+          operationalState.run,
+          publicRun,
+        );
   assertSchemaVersionCompatible(loaded.schemaVersion, { runId, recordKind: "RunRecord" });
 
   const workflow = await resolveWorkflowForRun(config.store, loaded);
-  const resolvedSecretRefs = new Set<string>();
 
   let run = loaded;
   if (run.status === "pending") {
@@ -509,12 +521,21 @@ export async function executeRun(config: EngineConfig, runId: string): Promise<R
       }
       if (current.status !== "pending") return current;
       const now = (config.now?.() ?? new Date()).toISOString();
+      const operationalRun = {
+        ...current,
+        status: "running" as const,
+        updatedAt: now,
+      };
       const running = applyRunRedaction(
         config.redact,
-        { ...current, status: "running", updatedAt: now },
+        operationalRun,
         resolvedSecretRefs,
       );
       await tx.runs.put(running);
+      await tx.runs.putOperationalState(runId, {
+        run: operationalRun,
+        resolvedSecretValues: [...resolvedSecretRefs],
+      });
       return running;
     });
   }
@@ -585,7 +606,7 @@ export async function cancelRun(config: EngineConfig, runId: string): Promise<Ru
 
   const operationalState =
     outstandingWaits[0] === undefined
-      ? undefined
+      ? await config.store.runs.getOperationalState(runId)
       : await config.store.waits.getOperationalRunState(
           outstandingWaits[0].runId,
           outstandingWaits[0].stepId,
@@ -627,6 +648,7 @@ export async function cancelRun(config: EngineConfig, runId: string): Promise<Ru
       resolvedSecretRefs,
     );
     await tx.runs.put(persistenceSafeRun);
+    await tx.runs.deleteOperationalState(runId);
     for (const wait of outstandingWaits) {
       await tx.waits.delete(wait.runId, wait.stepId);
     }

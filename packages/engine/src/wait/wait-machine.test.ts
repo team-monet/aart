@@ -6,7 +6,14 @@
 import type { AartStore } from "@aart/store";
 import { CorrelationError, type RedactFn, type RunRecord, type Signal } from "@aart/types";
 import { afterEach, describe, expect, it } from "vitest";
-import { identityRedactFn } from "../redaction.js";
+import {
+  CONCURRENCY_KEY_FORMAT,
+  fingerprintConcurrencyKey,
+} from "../concurrency.js";
+import {
+  identityRedactFn,
+  repairGlobalAuditsForNewSecrets,
+} from "../redaction.js";
 import { CURRENT_ENGINE_SCHEMA_VERSION } from "../schema-version.js";
 import { createTestStore, fixtureRun, uniqueId } from "../test-utils/fixtures.js";
 import {
@@ -143,6 +150,54 @@ describe("enterWait — no early match (architecture §4.4 steps 1-4)", () => {
     expect(waitRow).toEqual(wait);
   });
 
+  it("atomically transfers an active protected continuation into the new wait boundary", async () => {
+    const { store, config } = await setup();
+    const secret = "active-segment-secret";
+    const run = fixtureRun({
+      status: "running",
+      inputs: { value: secret },
+    });
+    await store.runs.put({
+      ...run,
+      inputs: { value: "[REDACTED]" },
+    });
+    await store.runs.putOperationalState(run.runId, {
+      run,
+      resolvedSecretValues: [secret],
+    });
+
+    await enterWait(
+      { ...config, redact: redactLiteral(secret) },
+      {
+        run,
+        stepId: "pause",
+        blockId: "wait.manual",
+        resolvedInputs: {},
+        wait: {
+          type: "manual",
+          schemaVersion: CURRENT_ENGINE_SCHEMA_VERSION,
+        },
+        resolvedSecretRefs: new Set([secret]),
+      },
+    );
+
+    await expect(
+      store.runs.getOperationalState(run.runId),
+    ).resolves.toBeUndefined();
+    await expect(
+      store.waits.getOperationalRunState(run.runId, "pause"),
+    ).resolves.toMatchObject({
+      run: {
+        status: "waiting",
+        inputs: { value: secret },
+      },
+      resolvedSecretValues: [secret],
+    });
+    expect(
+      JSON.stringify(await store.runs.get(run.runId)),
+    ).not.toContain(secret);
+  });
+
   it("records a StepTrace with status 'waiting' for the wait step, capturing resolvedInputs and startedAt", async () => {
     const { store, config } = await setup();
     const run = fixtureRun({ status: "running" });
@@ -171,7 +226,7 @@ describe("enterWait — no early match (architecture §4.4 steps 1-4)", () => {
     expect(result.run.status).toBe("waiting");
   });
 
-  it("preserves the active concurrency key when wait-entry redaction sees the same secret value", async () => {
+  it("preserves active concurrency coordination with a fingerprint when wait-entry discovers the raw key is secret", async () => {
     const { store, config } = await setup();
     const concurrencyKey = "case-secret";
     const run = fixtureRun({ status: "running", params: { concurrencyKey } });
@@ -190,8 +245,14 @@ describe("enterWait — no early match (architecture §4.4 steps 1-4)", () => {
     );
 
     expect(result.run.status).toBe("waiting");
-    expect(result.run.params?.concurrencyKey).toBe(concurrencyKey);
-    await expect(store.runs.get(run.runId)).resolves.toMatchObject({ params: { concurrencyKey } });
+    const fingerprint = fingerprintConcurrencyKey(concurrencyKey);
+    expect(result.run.params).toMatchObject({
+      concurrencyKey: fingerprint,
+      concurrencyKeyFormat: CONCURRENCY_KEY_FORMAT,
+    });
+    await expect(store.runs.get(run.runId)).resolves.toMatchObject({
+      params: { concurrencyKey: fingerprint },
+    });
   });
 });
 
@@ -244,7 +305,7 @@ describe("enterWait — early-arrival resolution (architecture §4.4 step 3 / §
     await expect(store.signals.findUnconsumedMatch("quote.received", "corr1")).resolves.toBeUndefined();
   });
 
-  it("preserves the active concurrency key across early-arrival resolution redaction", async () => {
+  it("preserves active concurrency coordination with a fingerprint across early-arrival redaction", async () => {
     const { store, config } = await setup();
     const concurrencyKey = "case-secret";
     const run = fixtureRun({ status: "running", params: { concurrencyKey } });
@@ -270,8 +331,14 @@ describe("enterWait — early-arrival resolution (architecture §4.4 step 3 / §
     );
 
     expect(result.suspended).toBe(false);
-    expect(result.run.params?.concurrencyKey).toBe(concurrencyKey);
-    await expect(store.runs.get(run.runId)).resolves.toMatchObject({ params: { concurrencyKey } });
+    const fingerprint = fingerprintConcurrencyKey(concurrencyKey);
+    expect(result.run.params).toMatchObject({
+      concurrencyKey: fingerprint,
+      concurrencyKeyFormat: CONCURRENCY_KEY_FORMAT,
+    });
+    await expect(store.runs.get(run.runId)).resolves.toMatchObject({
+      params: { concurrencyKey: fingerprint },
+    });
   });
 
   it("THE EARLY-ARRIVAL RACE TEST: the SignalStore check and the WaitStore/RunRecord writes happen inside ONE store.transact() call (architecture §4.4 step 3) — a simulated crash after the check but before the wait row commits leaves NEITHER a resolved-immediately outcome NOR a persisted outstanding wait", async () => {
@@ -452,6 +519,64 @@ describe("resumeBySignal — signal-matched mechanism (architecture §4.4.1)", (
     });
   });
 
+  it("restores secret refs from a late-repaired matched signal before completing the wait", async () => {
+    const { store, config } = await setup();
+    const secret = "signal-only-secret";
+    const run = fixtureRun({ status: "running" });
+    await store.runs.put(run);
+    await enterWait(config, {
+      run,
+      stepId: "wait_step",
+      blockId: "wait.for_signal",
+      resolvedInputs: {},
+      wait: {
+        type: "signal",
+        name: "ready",
+        correlationId: "corr",
+        schemaVersion: CURRENT_ENGINE_SCHEMA_VERSION,
+      },
+      resolvedSecretRefs: new Set(),
+    });
+    const signal = {
+      id: uniqueId("sig"),
+      name: "ready",
+      correlationId: "corr",
+      payload: { value: secret },
+      receivedAt: new Date().toISOString(),
+    };
+    await store.signals.append(signal);
+    const redact = redactLiteral(secret);
+    await repairGlobalAuditsForNewSecrets(
+      store,
+      redact,
+      new Set([secret]),
+    );
+
+    const outcome = await resumeBySignal(
+      { ...config, redact },
+      signal,
+    );
+
+    expect(outcome.kind).toBe("resumed");
+    if (outcome.kind !== "resumed") throw new Error("unreachable");
+    expect(JSON.stringify(outcome.run)).not.toContain(secret);
+    expect(
+      JSON.stringify(await store.runs.get(run.runId)),
+    ).not.toContain(secret);
+    await expect(
+      store.runs.getOperationalState(run.runId),
+    ).resolves.toMatchObject({
+      run: {
+        trace: [
+          expect.objectContaining({
+            outputs: { value: secret },
+          }),
+        ],
+      },
+      resolvedSecretValues: expect.arrayContaining([secret]),
+    });
+  });
+
   it("redelivery of the same logical signal AFTER the wait has already been fully resolved and cleaned up does NOT double-advance the run — reported as unmatched (safe/inspectable), not an error, and critically not a second 'resumed'", async () => {
     // [DESIGN NOTE, see this session's report]: this is deliberately NOT
     // asserting `kind: "duplicate"` here. Architecture §4.4.2's dedupe
@@ -583,7 +708,7 @@ describe("resumeManual — direct-lookup mechanism", () => {
     expect(second.kind).toBe("duplicate");
   });
 
-  it("preserves the active concurrency key across resume redaction", async () => {
+  it("preserves active concurrency coordination with a fingerprint across resume redaction", async () => {
     const { store, config } = await setup();
     const concurrencyKey = "case-secret";
     const run = fixtureRun({ status: "running", params: { concurrencyKey } });
@@ -603,8 +728,14 @@ describe("resumeManual — direct-lookup mechanism", () => {
 
     expect(outcome.kind).toBe("resumed");
     if (outcome.kind !== "resumed") throw new Error("unreachable");
-    expect(outcome.run.params?.concurrencyKey).toBe(concurrencyKey);
-    await expect(store.runs.get(run.runId)).resolves.toMatchObject({ params: { concurrencyKey } });
+    const fingerprint = fingerprintConcurrencyKey(concurrencyKey);
+    expect(outcome.run.params).toMatchObject({
+      concurrencyKey: fingerprint,
+      concurrencyKeyFormat: CONCURRENCY_KEY_FORMAT,
+    });
+    await expect(store.runs.get(run.runId)).resolves.toMatchObject({
+      params: { concurrencyKey: fingerprint },
+    });
   });
 
   it("resuming a step that was never waited on is unmatched", async () => {
@@ -942,6 +1073,14 @@ describe("THE REQUIRED TEST — exactly-once resume's transaction boundary holds
             runs: {
               get: tx.runs.get.bind(tx.runs),
               list: tx.runs.list.bind(tx.runs),
+              getOperationalState:
+                tx.runs.getOperationalState.bind(tx.runs),
+              putOperationalState:
+                tx.runs.putOperationalState.bind(tx.runs),
+              replaceOperationalState:
+                tx.runs.replaceOperationalState.bind(tx.runs),
+              deleteOperationalState:
+                tx.runs.deleteOperationalState.bind(tx.runs),
               hasDedupeKey: tx.runs.hasDedupeKey.bind(tx.runs),
               recordDedupeKey: tx.runs.recordDedupeKey.bind(tx.runs),
               put: async () => {
@@ -987,6 +1126,14 @@ describe("THE REQUIRED TEST — exactly-once resume's transaction boundary holds
             runs: {
               get: tx.runs.get.bind(tx.runs),
               list: tx.runs.list.bind(tx.runs),
+              getOperationalState:
+                tx.runs.getOperationalState.bind(tx.runs),
+              putOperationalState:
+                tx.runs.putOperationalState.bind(tx.runs),
+              replaceOperationalState:
+                tx.runs.replaceOperationalState.bind(tx.runs),
+              deleteOperationalState:
+                tx.runs.deleteOperationalState.bind(tx.runs),
               hasDedupeKey: tx.runs.hasDedupeKey.bind(tx.runs),
               recordDedupeKey: tx.runs.recordDedupeKey.bind(tx.runs),
               put: (r) => (shouldCrash ? Promise.reject(new SimulatedCrash("crash")) : tx.runs.put(r)),
