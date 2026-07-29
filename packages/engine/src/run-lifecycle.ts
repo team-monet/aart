@@ -5,11 +5,12 @@
 // what a worker calls after claiming a run from `job_queue` (job_queue
 // claim/lease/reclaim itself is explicitly S2/`@aart/server`'s scope,
 // architecture §4.7 — this package never touches claim/lease/release).
+import type { AartStore } from "@aart/store";
 import type { RunRecord, StepTrace, Workflow, WorkflowStep } from "@aart/types";
 import { ConcurrencyRejectedError } from "@aart/types";
 import { buildExprContext, resolveBooleanExpression } from "./expr-context.js";
 import { decideConcurrency, fingerprintConcurrencyKey, releaseQueuedRuns, resolveConcurrencyKey } from "./concurrency.js";
-import { applyConservativeRedaction, applyRunRedaction, createTrackingSecretResolver, mergeActiveRunProtection, mergeOperationalRunTaint, mergePersistedRunTaint, redactStoredTextArtifacts, repairGlobalAuditsForNewSecrets, throwingSecretResolver } from "./redaction.js";
+import { applyConservativeRedaction, applyRunRedaction, createTrackingSecretResolver, mergeActiveRunProtection, mergeOperationalRunTaint, mergePersistedRunTaint, redactStoredTextArtifacts, throwingSecretResolver, transactWithGlobalSecretRepair } from "./redaction.js";
 import { assertSchemaVersionCompatible, CURRENT_ENGINE_SCHEMA_VERSION } from "./schema-version.js";
 import { captureExecutionSnapshot, isSnapshotCaptured, resolveWorkflowForRun, uncapturedSnapshot } from "./snapshot.js";
 import { validateWorkflowOutputs, WorkflowOutputValidationError } from "./output-validation.js";
@@ -24,6 +25,10 @@ import {
 } from "./step-executor.js";
 import { revokeSecretTaintedIdempotency } from "./idempotency.js";
 import type { EngineConfig, TriggerRunInput } from "./types.js";
+import {
+  notifyRunTerminal,
+  notifyRunTerminals,
+} from "./terminal-hooks.js";
 import { materializeWorkflowOutputs } from "./workflow-outputs.js";
 
 // ---------------------------------------------------------------------------
@@ -206,22 +211,20 @@ export async function finalizeTerminal(
   if (!isSnapshotCaptured(updated.snapshot)) {
     updated = { ...updated, snapshot: await captureExecutionSnapshot(workflow, config.blocks, now, config.computePackHashes) };
   }
-  await repairGlobalAuditsForNewSecrets(
-    config.store,
-    config.redact,
-    resolvedSecretRefs,
-  );
-  updated = {
-    ...updated,
-    artifacts: await redactStoredTextArtifacts(
-      config.store,
-      config.redact,
-      updated.runId,
-      resolvedSecretRefs,
-    ),
-  };
   updated = { ...updated, status: terminalStatus, outputs, error: terminalError, endedAt: now.toISOString(), updatedAt: now.toISOString() };
-  const redacted = await config.store.transact(async (tx) => {
+  const invalidatedTerminalRunIds = new Set<string>();
+  const transition = async (
+    tx: AartStore,
+  ): Promise<RunRecord> => {
+    updated = {
+      ...updated,
+      artifacts: await redactStoredTextArtifacts(
+        tx,
+        config.redact,
+        updated.runId,
+        resolvedSecretRefs,
+      ),
+    };
     updated = await mergeActiveRunProtection(
       tx,
       updated,
@@ -247,9 +250,12 @@ export async function finalizeTerminal(
           consumerRun,
           outputTaintedLedgerKeys,
           secretRefs,
-          consumerRun.runId === updated.runId ? workflow : undefined,
+          consumerRun.runId === updated.runId
+            ? workflow
+            : undefined,
           repairOptions?.includeUnattributedSignalAudits,
         ),
+      invalidatedTerminalRunIds,
     );
     const persistenceSafeRun = applyRunRedaction(
       config.redact,
@@ -259,26 +265,24 @@ export async function finalizeTerminal(
     await tx.runs.put(persistenceSafeRun);
     await tx.runs.deleteOperationalState(repaired.runId);
     return persistenceSafeRun;
-  });
+  };
+  const redacted = await transactWithGlobalSecretRepair(
+    config.store,
+    config.redact,
+    resolvedSecretRefs,
+    transition,
+  );
 
   if (typeof concurrencyKey === "string") {
     await releaseQueuedRuns(config.store, redacted.workflowId, concurrencyKey, concurrencyKeyFormat);
   }
-  await runOnRunTerminal(config, redacted.runId);
+  invalidatedTerminalRunIds.delete(redacted.runId);
+  await notifyRunTerminals(
+    config.onRunTerminal,
+    invalidatedTerminalRunIds,
+  );
+  await notifyRunTerminal(config.onRunTerminal, redacted.runId);
   return redacted;
-}
-
-/** Best-effort per-run resource cleanup (S9 reconciliation ledger item 10, SEAMS.md S3-E1) — never lets a cleanup-hook failure fail the run's own (already-persisted) terminal transition. */
-async function runOnRunTerminal(config: EngineConfig, runId: string): Promise<void> {
-  if (!config.onRunTerminal) return;
-  try {
-    await config.onRunTerminal(runId);
-  } catch {
-    // Best-effort: the run's terminal status is already durably persisted;
-    // a resource-cleanup hook failing (e.g. a browser context that was
-    // already closed, or a transient error closing it) must never
-    // retroactively fail an already-completed/failed/cancelled run.
-  }
 }
 
 async function recordThrownFailureAndFinalize(
@@ -726,6 +730,6 @@ export async function cancelRun(config: EngineConfig, runId: string): Promise<Ru
   if (typeof concurrencyKey === "string") {
     await releaseQueuedRuns(config.store, redacted.workflowId, concurrencyKey, concurrencyKeyFormat);
   }
-  await runOnRunTerminal(config, redacted.runId);
+  await notifyRunTerminal(config.onRunTerminal, redacted.runId);
   return redacted;
 }

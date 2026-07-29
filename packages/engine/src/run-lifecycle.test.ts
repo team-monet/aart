@@ -1386,6 +1386,7 @@ describe("executeRun — fresh execution", () => {
     expect(persisted?.trace.some((trace) => trace.stepId === "discover")).toBe(
       false,
     );
+    expect(JSON.stringify(persisted)).toContain("secret-value");
   });
 
   it("retroactively taints a completed forEach whose source later becomes secret", async () => {

@@ -20,10 +20,14 @@ import {
   mergePersistedRunTaint,
   redactSignalAudit,
   redactWaitAudit,
-  repairGlobalAuditsForNewSecrets,
+  transactWithGlobalSecretRepair,
 } from "../redaction.js";
 import { assertSchemaVersionCompatible } from "../schema-version.js";
 import { uncapturedSnapshot } from "../snapshot.js";
+import {
+  notifyRunTerminals,
+  type RunTerminalHook,
+} from "../terminal-hooks.js";
 import type { DueWait, ResumeMechanism, ResumeOutcome } from "../types.js";
 import { waitSignalCorrelation } from "./wait-blocks.js";
 
@@ -31,6 +35,7 @@ export interface WaitMachineConfig {
   store: AartStore;
   redact: import("@aart/types").RedactFn;
   now: () => Date;
+  onRunTerminal?: RunTerminalHook;
   prepareRevokedIdempotencyConsumer?: PrepareRevokedIdempotencyConsumer;
 }
 
@@ -120,11 +125,7 @@ export async function enterWait(config: WaitMachineConfig, options: EnterWaitOpt
       : new Set(suppliedSecretRefs);
   const now = config.now();
   const correlation = waitSignalCorrelation(wait);
-  await repairGlobalAuditsForNewSecrets(
-    config.store,
-    config.redact,
-    resolvedSecretRefs,
-  );
+  const invalidatedTerminalRunIds = new Set<string>();
 
   // `[DECISION]` The ENTIRE check-then-act sequence below runs inside ONE
   // `store.transact()` call — architecture §4.4 step 3, verbatim: "FIRST,
@@ -144,7 +145,9 @@ export async function enterWait(config: WaitMachineConfig, options: EnterWaitOpt
   // the SignalStore *audit-copy* write specifically (`tx.signals.append`/
   // `markConsumed` are "deliberately NOT staged" — see types.ts's
   // `SignalStore` doc comment), not to this check-then-act sequence itself.
-  const result = await config.store.transact(async (tx) => {
+  const transition = async (
+    tx: AartStore,
+  ): Promise<EnterWaitResult> => {
     const activeState =
       await tx.runs.getOperationalState(run.runId);
     const activeAwareRun = await mergeActiveRunProtection(
@@ -224,6 +227,7 @@ export async function enterWait(config: WaitMachineConfig, options: EnterWaitOpt
           preparedRun,
           resolvedSecretRefs,
           config.prepareRevokedIdempotencyConsumer,
+          invalidatedTerminalRunIds,
         );
         const redacted = applyRunRedaction(
           config.redact,
@@ -277,6 +281,7 @@ export async function enterWait(config: WaitMachineConfig, options: EnterWaitOpt
       updatedRun,
       resolvedSecretRefs,
       config.prepareRevokedIdempotencyConsumer,
+      invalidatedTerminalRunIds,
     );
     const redactedRun = applyRunRedaction(
       config.redact,
@@ -315,11 +320,16 @@ export async function enterWait(config: WaitMachineConfig, options: EnterWaitOpt
       persistenceAwareRun.runId,
     );
     return { run: redactedRun, suspended: true };
-  });
-  await repairGlobalAuditsForNewSecrets(
+  };
+  const result = await transactWithGlobalSecretRepair(
     config.store,
     config.redact,
     resolvedSecretRefs,
+    transition,
+  );
+  await notifyRunTerminals(
+    config.onRunTerminal,
+    invalidatedTerminalRunIds,
   );
   return result;
 }
@@ -405,13 +415,10 @@ async function claimAndCompleteWait(config: WaitMachineConfig, args: ClaimAndCom
     );
   }
   const now = config.now();
-
-  await repairGlobalAuditsForNewSecrets(
-    config.store,
-    config.redact,
-    resolvedSecretRefs,
-  );
-  const outcome: ResumeOutcome = await config.store.transact(async (tx) => {
+  const invalidatedTerminalRunIds = new Set<string>();
+  const transition = async (
+    tx: AartStore,
+  ): Promise<ResumeOutcome> => {
     const publicRun = await tx.runs.get(runId);
     if (!publicRun) {
       return { kind: "unmatched", mechanism };
@@ -519,6 +526,7 @@ async function claimAndCompleteWait(config: WaitMachineConfig, args: ClaimAndCom
       preparedRun,
       resolvedSecretRefs,
       config.prepareRevokedIdempotencyConsumer,
+      invalidatedTerminalRunIds,
     );
     const redacted = applyRunRedaction(
       config.redact,
@@ -531,11 +539,16 @@ async function claimAndCompleteWait(config: WaitMachineConfig, args: ClaimAndCom
       resolvedSecretValues: [...resolvedSecretRefs],
     });
     return { kind: "resumed", run: redacted, mechanism };
-  });
-  await repairGlobalAuditsForNewSecrets(
+  };
+  const outcome = await transactWithGlobalSecretRepair(
     config.store,
     config.redact,
     resolvedSecretRefs,
+    transition,
+  );
+  await notifyRunTerminals(
+    config.onRunTerminal,
+    invalidatedTerminalRunIds,
   );
   return outcome;
 }
@@ -555,7 +568,7 @@ async function claimAndCompleteWait(config: WaitMachineConfig, args: ClaimAndCom
 // ---------------------------------------------------------------------------
 
 /** Every outstanding wait carrying a `timeout` field whose deadline (relative to the `WaitStore` row's own `createdAt`) has elapsed. `[DECISION]` NOT part of `getDueWaits` (below) — `WaitStore.listDue` (S0-frozen, architecture §4.4.3) is specifically "every timer-type wait whose `resumeAt` has passed"; `timeout` is a DIFFERENT, relative-duration field present on 6 of the 7 `WaitCondition` members (all but `timer`, which has no `timeout` field — a timer's own `resumeAt` due-ness, via `getDueWaits`, is the only time-based resolution it has) and checking it requires comparing against `createdAt` + a parsed duration, not a stored absolute deadline. S2's ticker should sweep this ALONGSIDE `getDueWaits`/`listExternalJobWaits` on the same interval. */
-export async function getExpiredWaits(store: AartStore, now: Date): Promise<Array<{ runId: string; stepId: string; wait: WaitCondition }>> {
+export async function getExpiredWaits(store: AartStore, now: Date): Promise<Array<{ runId: string; stepId: string; wait: WaitCondition; }>> {
   const all = await store.waits.listOperational();
   return all
     .filter((entry) => {
@@ -584,13 +597,10 @@ export async function failExpiredWait(config: WaitMachineConfig, runId: string, 
       : new Set(suppliedSecretRefs);
   const now = config.now();
   const mechanism: ResumeMechanism = "scheduler-tick";
-
-  await repairGlobalAuditsForNewSecrets(
-    config.store,
-    config.redact,
-    resolvedSecretRefs,
-  );
-  const outcome: ResumeOutcome = await config.store.transact(async (tx) => {
+  const invalidatedTerminalRunIds = new Set<string>();
+  const transition = async (
+    tx: AartStore,
+  ): Promise<ResumeOutcome> => {
     const publicRun = await tx.runs.get(runId);
     if (!publicRun) {
       return { kind: "unmatched", mechanism };
@@ -654,6 +664,7 @@ export async function failExpiredWait(config: WaitMachineConfig, runId: string, 
       updatedRun,
       resolvedSecretRefs,
       config.prepareRevokedIdempotencyConsumer,
+      invalidatedTerminalRunIds,
     );
     const redacted = applyRunRedaction(
       config.redact,
@@ -666,11 +677,16 @@ export async function failExpiredWait(config: WaitMachineConfig, runId: string, 
       resolvedSecretValues: [...resolvedSecretRefs],
     });
     return { kind: "resumed", run: redacted, mechanism };
-  });
-  await repairGlobalAuditsForNewSecrets(
+  };
+  const outcome = await transactWithGlobalSecretRepair(
     config.store,
     config.redact,
     resolvedSecretRefs,
+    transition,
+  );
+  await notifyRunTerminals(
+    config.onRunTerminal,
+    invalidatedTerminalRunIds,
   );
   return outcome;
 }
@@ -756,7 +772,7 @@ export async function resumeManual(
 }
 
 /** **Direct-lookup** resume (architecture §4.4.1 mechanism 3) for an `approval` wait — both authorship paths (CLI/dashboard human decision, and PR-merge-as-approval, architecture §7.2) write directly to `ApprovalStore` then call this, never a `Signal` (architecture §4.4.1's explicit statement: "approval... direct ApprovalStore write, either authorship path"). `task.status` must already be terminal (`approved`/`rejected`/`needs_changes`/`expired`) — the caller (governance's approval-write path, S4) is responsible for that state transition; this function only handles the RUN-side resume once it's happened. */
-export async function resumeApproval(config: WaitMachineConfig, runId: string, stepId: string, task: { id: string; status: string; decision?: unknown; reviewer?: string }, resolvedSecretRefs: ReadonlySet<string> = new Set(), prepareCompletedRun: PrepareCompletedRun): Promise<ResumeOutcome> {
+export async function resumeApproval(config: WaitMachineConfig, runId: string, stepId: string, task: { id: string; status: string; decision?: unknown; reviewer?: string; }, resolvedSecretRefs: ReadonlySet<string> = new Set(), prepareCompletedRun: PrepareCompletedRun): Promise<ResumeOutcome> {
   return claimAndCompleteWait(config, {
     runId,
     stepId,
@@ -804,14 +820,14 @@ export async function resumeExternalJobResult(config: WaitMachineConfig, runId: 
 export async function getDueWaits(store: AartStore, now: Date): Promise<DueWait[]> {
   const due = await store.waits.listDue(now.toISOString());
   return due
-    .filter((entry): entry is typeof entry & { wait: Extract<WaitCondition, { type: "timer" }> } => entry.wait.type === "timer")
+    .filter((entry): entry is typeof entry & { wait: Extract<WaitCondition, { type: "timer"; }>; } => entry.wait.type === "timer")
     .map((entry) => ({ runId: entry.runId, stepId: entry.stepId, wait: entry.wait }));
 }
 
 /** Every currently-outstanding `external_job` wait — for S2's poll mechanism to sweep on its own interval (no fixed deadline to filter by, unlike `timer` — see `DueWait`'s doc comment in types.ts) and, for each, poll the named provider's job-status endpoint, calling `resumeExternalJobResult` once a poll reports completion. */
-export async function listExternalJobWaits(store: AartStore): Promise<Array<{ runId: string; stepId: string; wait: Extract<WaitCondition, { type: "external_job" }> }>> {
+export async function listExternalJobWaits(store: AartStore): Promise<Array<{ runId: string; stepId: string; wait: Extract<WaitCondition, { type: "external_job"; }>; }>> {
   const all = await store.waits.listOperational({
     type: "external_job",
   });
-  return all.filter((entry): entry is typeof entry & { wait: Extract<WaitCondition, { type: "external_job" }> } => entry.wait.type === "external_job");
+  return all.filter((entry): entry is typeof entry & { wait: Extract<WaitCondition, { type: "external_job"; }>; } => entry.wait.type === "external_job");
 }

@@ -5,7 +5,10 @@
 // is the one place that threading happens; every persist call site in this
 // package goes through `applyRedaction`, never `config.redact` directly.
 import type { SecretResolver } from "@aart/expr";
-import type { AartStore } from "@aart/store";
+import type {
+  AartStore,
+  ArtifactRedactionCandidate,
+} from "@aart/store";
 import type {
   ApprovalTask,
   Artifact,
@@ -262,7 +265,8 @@ export async function redactStoredTextArtifacts(
   runId: string,
   resolvedSecretRefs: ReadonlySet<string>,
 ): Promise<Artifact[]> {
-  const artifacts = await store.artifacts.listByRun(runId);
+  const artifacts =
+    await store.artifacts.listForRedaction(runId);
   return redactStoredArtifacts(
     store,
     redact,
@@ -274,14 +278,19 @@ export async function redactStoredTextArtifacts(
 async function redactStoredArtifacts(
   store: Pick<AartStore, "artifacts">,
   redact: RedactFn,
-  artifacts: Artifact[],
+  artifacts: ArtifactRedactionCandidate[],
   resolvedSecretRefs: ReadonlySet<string>,
 ): Promise<Artifact[]> {
-  if (resolvedSecretRefs.size === 0) return artifacts;
+  if (resolvedSecretRefs.size === 0) {
+    return artifacts.flatMap(({ artifact, auditVisible }) =>
+      auditVisible ? [artifact] : [],
+    );
+  }
   redact = conservativePublicRedact(redact);
 
   const refreshed: Artifact[] = [];
-  for (const artifact of artifacts) {
+  for (const candidate of artifacts) {
+    const { artifact } = candidate;
     const audit = redactArtifactAudit(
       redact,
       artifact,
@@ -289,7 +298,8 @@ async function redactStoredArtifacts(
     );
     let redactedBytes: Uint8Array | undefined;
     if (await store.artifacts.isTextEligible(artifact.id)) {
-      const bytes = await store.artifacts.getBytes(artifact.id);
+      const bytes =
+        await store.artifacts.getBytesForRedaction(artifact.id);
       if (bytes !== undefined) {
         const rawText = new TextDecoder().decode(bytes);
         const redactedText = applyRedaction(
@@ -310,16 +320,30 @@ async function redactStoredArtifacts(
         mime: artifact.mime,
         path: artifact.path,
       });
-    if (!auditChanged && redactedBytes === undefined) {
-      refreshed.push(artifact);
+    const finalByteCount =
+      redactedBytes?.byteLength ?? artifact.bytes;
+    const auditVisible =
+      candidate.auditVisible &&
+      redactAuditNumber(
+        redact,
+        finalByteCount,
+        resolvedSecretRefs,
+      ) !== undefined;
+    if (
+      !auditChanged &&
+      redactedBytes === undefined &&
+      auditVisible === candidate.auditVisible
+    ) {
+      if (auditVisible) refreshed.push(artifact);
       continue;
     }
     const updated = await store.artifacts.replaceAudit(
       artifact.id,
       audit,
       redactedBytes,
+      auditVisible ? undefined : { auditVisible: false },
     );
-    refreshed.push(updated ?? artifact);
+    if (auditVisible) refreshed.push(updated ?? artifact);
   }
   return refreshed;
 }
@@ -581,8 +605,8 @@ export async function repairCustomerVisibleAudits(
     options.includeArtifacts === false
       ? Promise.resolve([])
       : runId === undefined
-        ? store.artifacts.list()
-        : store.artifacts.listByRun(runId),
+        ? store.artifacts.listForRedaction()
+        : store.artifacts.listForRedaction(runId),
     store.approvals.list(
       runId === undefined ? undefined : { runId },
     ),
@@ -794,11 +818,54 @@ const globallyRepairedSecretValues = new WeakMap<
 >();
 
 /**
- * Runs one cheap global literal scan per newly resolved value in an
- * execution segment. This must be called outside another store transaction:
- * its successful transaction is the durable boundary that lets the
- * in-memory watermark advance without a later run-write rollback undoing
- * the audit repair.
+ * Runs a state transition and every newly required public-audit repair in
+ * one store transaction. The callback may discover additional secret
+ * values; those receive a second repair pass before commit. The watermark
+ * advances only after the complete transition succeeds.
+ */
+export async function transactWithGlobalSecretRepair<T>(
+  store: AartStore,
+  redact: RedactFn,
+  resolvedSecretRefs: ReadonlySet<string>,
+  transition: (transactionStore: AartStore) => Promise<T>,
+): Promise<T> {
+  const alreadyRepaired = new Set(
+    globallyRepairedSecretValues.get(resolvedSecretRefs) ?? [],
+  );
+  const repairedByThisTransition = new Set(alreadyRepaired);
+  const result = await store.transact(
+    async (transactionStore) => {
+      const repairNewValues = async (): Promise<void> => {
+        const newlyResolved = [...resolvedSecretRefs].filter(
+          (value) => !repairedByThisTransition.has(value),
+        );
+        if (newlyResolved.length === 0) return;
+        await repairCustomerVisibleAudits(
+          transactionStore,
+          redact,
+          resolvedSecretRefs,
+        );
+        for (const value of resolvedSecretRefs) {
+          repairedByThisTransition.add(value);
+        }
+      };
+      await repairNewValues();
+      const transitioned = await transition(transactionStore);
+      await repairNewValues();
+      return transitioned;
+    },
+  );
+  globallyRepairedSecretValues.set(
+    resolvedSecretRefs,
+    repairedByThisTransition,
+  );
+  return result;
+}
+
+/**
+ * Standalone public-audit repair for callers that have no accompanying run
+ * transition. Production lifecycle paths pair repair with cache revocation
+ * through transactWithGlobalSecretRepair().
  */
 export async function repairGlobalAuditsForNewSecrets(
   store: AartStore,
@@ -806,27 +873,20 @@ export async function repairGlobalAuditsForNewSecrets(
   resolvedSecretRefs: ReadonlySet<string>,
 ): Promise<void> {
   const alreadyRepaired =
-    globallyRepairedSecretValues.get(resolvedSecretRefs) ??
-    new Set<string>();
-  const newlyResolved = new Set(
-    [...resolvedSecretRefs].filter(
-      (value) => !alreadyRepaired.has(value),
-    ),
-  );
-  if (newlyResolved.size === 0) return;
-  await store.transact((transactionStore) =>
-    repairCustomerVisibleAudits(
-      transactionStore,
-      redact,
-      resolvedSecretRefs,
-    ),
-  );
-  for (const value of newlyResolved) {
-    alreadyRepaired.add(value);
+    globallyRepairedSecretValues.get(resolvedSecretRefs);
+  if (
+    alreadyRepaired !== undefined &&
+    [...resolvedSecretRefs].every((value) =>
+      alreadyRepaired.has(value),
+    )
+  ) {
+    return;
   }
-  globallyRepairedSecretValues.set(
+  await transactWithGlobalSecretRepair(
+    store,
+    redact,
     resolvedSecretRefs,
-    alreadyRepaired,
+    async () => undefined,
   );
 }
 

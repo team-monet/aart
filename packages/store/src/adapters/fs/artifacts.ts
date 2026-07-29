@@ -14,11 +14,15 @@ import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { join } from "node:path";
 import type { Artifact } from "@aart/types";
-import type { ArtifactStore } from "../../types.js";
+import type {
+  ArtifactRedactionCandidate,
+  ArtifactStore,
+} from "../../types.js";
 import { JsonFileHandle } from "./json-file.js";
 
 interface StoredArtifact extends Artifact {
   redactionTextEligible?: boolean;
+  redactionAuditVisible?: boolean;
 }
 
 interface ArtifactRedactionJournal {
@@ -160,13 +164,15 @@ export class FsArtifactStore implements ArtifactStore {
         existing?.redactionTextEligible ??
         options?.redactionTextEligible ??
         isTextMime(artifact.mime),
+      redactionAuditVisible:
+        existing?.redactionAuditVisible ?? true,
     });
   }
 
   async getMetadata(artifactId: string): Promise<Artifact | undefined> {
     await this.recoverPendingRedactions();
     const found = await this.findByArtifactId(artifactId);
-    return found
+    return found && this.isAuditVisible(found.metadata)
       ? this.publicArtifact(found.metadata)
       : undefined;
   }
@@ -174,9 +180,29 @@ export class FsArtifactStore implements ArtifactStore {
   async getBytes(artifactId: string): Promise<Uint8Array | undefined> {
     await this.recoverPendingRedactions();
     const found = await this.findByArtifactId(artifactId);
+    if (!found || !this.isAuditVisible(found.metadata)) {
+      return undefined;
+    }
+    return this.readBytes(found.metadata.runId, artifactId);
+  }
+
+  async getBytesForRedaction(
+    artifactId: string,
+  ): Promise<Uint8Array | undefined> {
+    await this.recoverPendingRedactions();
+    const found = await this.findByArtifactId(artifactId);
     if (!found) return undefined;
+    return this.readBytes(found.metadata.runId, artifactId);
+  }
+
+  private async readBytes(
+    runId: string,
+    artifactId: string,
+  ): Promise<Uint8Array | undefined> {
     try {
-      const buffer = await fs.readFile(this.blobPath(found.metadata.runId, artifactId));
+      const buffer = await fs.readFile(
+        this.blobPath(runId, artifactId),
+      );
       // Return a plain Uint8Array, not a Node Buffer — Buffer is a Uint8Array
       // subclass so it satisfies the interface, but a caller that put() a
       // plain Uint8Array and deep-equality-compares what getBytes() returns
@@ -204,7 +230,31 @@ export class FsArtifactStore implements ArtifactStore {
   }
 
   async listByRun(runId: string): Promise<Artifact[]> {
+    return (await this.listForRedaction(runId)).flatMap(
+      ({ artifact, auditVisible }) =>
+        auditVisible ? [artifact] : [],
+    );
+  }
+
+  async listForRedaction(
+    runId?: string,
+  ): Promise<ArtifactRedactionCandidate[]> {
     await this.recoverPendingRedactions();
+    if (runId === undefined) {
+      let runIds: string[];
+      try {
+        runIds = await fs.readdir(this.dir);
+      } catch {
+        return [];
+      }
+      return (
+        await Promise.all(
+          runIds.map((candidateRunId) =>
+            this.listForRedaction(candidateRunId),
+          ),
+        )
+      ).flat();
+    }
     let files: string[];
     try {
       files = (await fs.readdir(this.runDir(runId))).filter((f) => f.endsWith(".meta.json"));
@@ -219,7 +269,14 @@ export class FsArtifactStore implements ArtifactStore {
       ),
     );
     return values.flatMap((value) =>
-      value === undefined ? [] : [this.publicArtifact(value)],
+      value === undefined
+        ? []
+        : [
+            {
+              artifact: this.publicArtifact(value),
+              auditVisible: this.isAuditVisible(value),
+            },
+          ],
     );
   }
 
@@ -237,6 +294,7 @@ export class FsArtifactStore implements ArtifactStore {
     artifactId: string,
     audit: Pick<Artifact, "name" | "kind" | "mime" | "path">,
     bytes?: Uint8Array,
+    options?: { auditVisible?: false },
   ): Promise<Artifact | undefined> {
     await this.recoverPendingRedactions();
     const found = await this.findByArtifactId(artifactId);
@@ -248,6 +306,11 @@ export class FsArtifactStore implements ArtifactStore {
       redactionTextEligible:
         found.metadata.redactionTextEligible ??
         isTextMime(found.metadata.mime),
+      redactionAuditVisible:
+        found.metadata.redactionAuditVisible === false ||
+        options?.auditVisible === false
+          ? false
+          : true,
     };
     let stagedBlobName: string | undefined;
     if (bytes !== undefined) {
@@ -311,8 +374,13 @@ export class FsArtifactStore implements ArtifactStore {
   private publicArtifact(stored: StoredArtifact): Artifact {
     const {
       redactionTextEligible: _redactionTextEligible,
+      redactionAuditVisible: _redactionAuditVisible,
       ...artifact
     } = stored;
     return artifact;
+  }
+
+  private isAuditVisible(stored: StoredArtifact): boolean {
+    return stored.redactionAuditVisible !== false;
   }
 }

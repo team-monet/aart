@@ -2370,6 +2370,33 @@ authoritative `if: false` result and reproduces the original transition order
 (`next`, then `else`, then array order) without evaluating `until`; restart
 cannot select a branch the first execution never considered.
 
+Standalone artifact access now closes the same numeric-observation boundary as
+embedded run/trace audits. If a required byte count matches a secret, the
+artifact disappears from public metadata, listing, run listing, and byte-read
+surfaces as one unit. The engine retains a non-public repair candidate and byte
+source so later secret discovery can continue rewriting it; public suppression
+is one-way. `ArtifactStore.listForRedaction()` and
+`getBytesForRedaction()` are therefore engine-only counterparts to the public
+methods, and `replaceAudit(..., { auditVisible: false })` records the one-way
+transition. SQLite migration `0011_artifact_audit_visibility` preserves legacy
+rows as visible by default and persists that boundary across restarts.
+
+Secret audit repair, cache revocation, and the run/wait transition that learned
+the secret now share one store transaction on normal dispatch, control refresh,
+wait entry, wait resume/expiry, and terminal finalization. The global repair
+watermark advances only after that complete transition commits, so a crash
+cannot leave customer audits repaired while a secret-tainted cache remains
+replayable. A reclaimed occurrence that falls back to fresh execution because
+its ledger row is absent or inadmissible clears the stale replay claim for that
+exact step/trace occurrence; fresh output cannot inherit an older cache
+generation's revocation taint.
+
+Retrospective cache repair can transition an already completed consumer to
+failed. That transition now invokes `onRunTerminal` after the failed
+`RunRecord` commits, using the same best-effort observer contract as ordinary
+completion/cancellation. Event and resource observers therefore see the
+customer-visible final state instead of a silent database-only rewrite.
+
 Because this metadata changes the security interpretation of persisted
 RunRecords, the engine record schema version is bumped from 1 to 2. Version 2
 does not claim v1 resume compatibility: an older record may already contain a

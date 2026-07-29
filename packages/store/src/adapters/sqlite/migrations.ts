@@ -530,6 +530,39 @@ export function createSqliteAddProtectedContinuationStateMigration(
   };
 }
 
+/**
+ * Separates an artifact's engine-retained repair source from its public
+ * audit visibility. Existing artifacts remain visible; redaction may only
+ * move the flag from 1 to 0.
+ */
+export function createSqliteAddArtifactAuditVisibilityMigration(
+  db: DatabaseSync,
+): Migration {
+  return {
+    id: "0011_artifact_audit_visibility",
+    async up(): Promise<void> {
+      try {
+        db.exec(
+          "ALTER TABLE artifacts ADD COLUMN redaction_audit_visible INTEGER NOT NULL DEFAULT 1",
+        );
+      } catch (error) {
+        if (
+          error instanceof Error &&
+          error.message.includes("duplicate column name")
+        ) {
+          return;
+        }
+        throw error;
+      }
+    },
+    async down(): Promise<void> {
+      db.exec(
+        "ALTER TABLE artifacts DROP COLUMN redaction_audit_visible",
+      );
+    },
+  };
+}
+
 export const ALL_SQLITE_MIGRATIONS = (db: DatabaseSync): Migration[] => [
   createSqliteInitMigration(db),
   createSqliteAddDeploymentPromotedMigration(db),
@@ -541,4 +574,5 @@ export const ALL_SQLITE_MIGRATIONS = (db: DatabaseSync): Migration[] => [
   createSqliteAddSealedOperationalStateMigration(db),
   createSqliteAddWaitOperationGenerationMigration(db),
   createSqliteAddProtectedContinuationStateMigration(db),
+  createSqliteAddArtifactAuditVisibilityMigration(db),
 ];

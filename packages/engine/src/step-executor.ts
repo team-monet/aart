@@ -19,7 +19,7 @@ import {
 } from "./idempotency.js";
 import { idempotencyAssociationFingerprint } from "./idempotency-association.js";
 import { jsonCompatibilityProblem, jsonValuesEqual, validateWorkflowOutputs } from "./output-validation.js";
-import { applyConservativeRedaction, applyRedaction, applyRunRedaction, changedJsonPointers, createTrackingSecretResolver, isTextMime, mergeActiveRunProtection, mergeOperationalRunTaint, mergePersistedRunTaint, redactStoredTextArtifacts, repairCustomerVisibleAudits, repairGlobalAuditsForNewSecrets, throwingSecretResolver } from "./redaction.js";
+import { applyConservativeRedaction, applyRedaction, applyRunRedaction, changedJsonPointers, createTrackingSecretResolver, isTextMime, mergeActiveRunProtection, mergeOperationalRunTaint, mergePersistedRunTaint, redactStoredTextArtifacts, repairCustomerVisibleAudits, throwingSecretResolver, transactWithGlobalSecretRepair } from "./redaction.js";
 import { CURRENT_ENGINE_SCHEMA_VERSION } from "./schema-version.js";
 import {
   captureExecutionSnapshot,
@@ -27,14 +27,15 @@ import {
   resolveWorkflowForRun,
 } from "./snapshot.js";
 import type { EngineBlockExecutionContext, EngineConfig } from "./types.js";
+import { notifyRunTerminals } from "./terminal-hooks.js";
 import { enterWait, type WaitMachineConfig } from "./wait/wait-machine.js";
 import { buildWaitConditionFromBlock, isWaitBlockId, type WaitBlockId } from "./wait/wait-blocks.js";
 import { materializeWorkflowOutputs } from "./workflow-outputs.js";
 
 export type StepOutcome =
-  | { kind: "continue"; run: RunRecord; nextStepId: string | undefined }
-  | { kind: "waiting"; run: RunRecord }
-  | { kind: "failed"; run: RunRecord; error: Error };
+  | { kind: "continue"; run: RunRecord; nextStepId: string | undefined; }
+  | { kind: "waiting"; run: RunRecord; }
+  | { kind: "failed"; run: RunRecord; error: Error; };
 
 const DEFAULT_FOR_EACH_LIMIT = 10_000;
 const DEFAULT_RETRY_BASE_DELAY_MS = 50;
@@ -53,7 +54,7 @@ function countPriorExecutions(run: RunRecord, stepId: string): number {
 function classifyErrorClass(error: unknown): string {
   if (error instanceof AartError) return error.errorClass;
   if (error && typeof error === "object") {
-    const status = (error as { status?: unknown; statusCode?: unknown }).status ?? (error as { statusCode?: unknown }).statusCode;
+    const status = (error as { status?: unknown; statusCode?: unknown; }).status ?? (error as { statusCode?: unknown; }).statusCode;
     if (typeof status === "number") {
       if (status >= 500) return "HttpServerError";
       if (status >= 400 && status < 500) return "HttpClientError";
@@ -85,7 +86,7 @@ function sleep(ms: number): Promise<void> {
 }
 
 /** `[DECISION]` per-attempt timeout via `Promise.race` (architecture micro-decision #10: "timeout applies per-attempt... a fresh timeout budget"). Note this is best-effort cancellation, a real JS/Node constraint: the underlying `execute()` call is not forcibly aborted when it loses the race (no ambient `AbortSignal` in the frozen `BlockExecutionContext`, architecture §2.5) — a block that ignores its own long-running work will keep running in the background even after this function has moved on. The one block type this engine itself builds (the isolated-vm sandbox, sandbox/node-sandbox.ts) DOES get true cancellation, since isolated-vm's own `timeout` option genuinely terminates isolate execution. */
-async function withTimeout<T>(promise: Promise<T>, timeoutMs: number | undefined, context: { stepId: string }): Promise<T> {
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number | undefined, context: { stepId: string; }): Promise<T> {
   if (timeoutMs === undefined) return promise;
   let timer: ReturnType<typeof setTimeout>;
   const timeoutPromise = new Promise<never>((_resolve, reject) => {
@@ -111,7 +112,7 @@ async function dispatchWithRetry(
   retry: RetryPolicy | undefined,
   timeoutMs: number | undefined,
   computeDelay: (attempt: number, backoff: string | undefined) => number,
-  context: { stepId: string },
+  context: { stepId: string; },
 ): Promise<RetryOutcome> {
   const maxAttempts = Math.max(1, retry?.maxAttempts ?? 1);
   let lastError: Error | undefined;
@@ -554,7 +555,7 @@ async function executeForEachStep(
   resolvedSecretRefs: Set<string>,
   dataSecretTaintedBeforeDispatch: boolean,
   controlSecretTaintedBeforeDispatch: boolean,
-): Promise<{ traces: StepTrace[]; failed: boolean }> {
+): Promise<{ traces: StepTrace[]; failed: boolean; }> {
   const baseContext = buildExprContext(run);
   const secretResolver = createTrackingSecretResolver(config.resolveSecret ?? throwingSecretResolver, resolvedSecretRefs);
   const resolveOptions: ResolveOptions = { secretResolver };
@@ -694,35 +695,38 @@ async function appendTracesAndPersist(
   resolvedSecretRefs: Set<string>,
   secretCountBeforeStep: number,
 ): Promise<RunRecord> {
-  run = await mergeActiveRunProtection(
-    config.store,
-    run,
-    resolvedSecretRefs,
-  );
-  await repairGlobalAuditsForNewSecrets(
-    config.store,
-    config.redact,
-    resolvedSecretRefs,
-  );
-  const artifacts =
-    resolvedSecretRefs.size > secretCountBeforeStep
-      ? await redactStoredTextArtifacts(
-          config.store,
-          config.redact,
-          run.runId,
-          resolvedSecretRefs,
-        )
-      : await config.store.artifacts.listByRun(run.runId);
-  const updated: RunRecord = { ...run, trace: [...run.trace, ...newTraces], artifacts, updatedAt: (config.now?.() ?? new Date()).toISOString() };
-  const prepared = prepareTaintAfterControlResolution(
-    config,
-    workflow,
-    step,
-    updated,
-    newTraces.length,
-    resolvedSecretRefs,
-  );
-  return config.store.transact(async (tx) => {
+  const invalidatedTerminalRunIds = new Set<string>();
+  const transition = async (
+    tx: AartStore,
+  ): Promise<RunRecord> => {
+    run = await mergeActiveRunProtection(
+      tx,
+      run,
+      resolvedSecretRefs,
+    );
+    const artifacts =
+      resolvedSecretRefs.size > secretCountBeforeStep
+        ? await redactStoredTextArtifacts(
+            tx,
+            config.redact,
+            run.runId,
+            resolvedSecretRefs,
+          )
+        : await tx.artifacts.listByRun(run.runId);
+    const updated: RunRecord = {
+      ...run,
+      trace: [...run.trace, ...newTraces],
+      artifacts,
+      updatedAt: (config.now?.() ?? new Date()).toISOString(),
+    };
+    const prepared = prepareTaintAfterControlResolution(
+      config,
+      workflow,
+      step,
+      updated,
+      newTraces.length,
+      resolvedSecretRefs,
+    );
     const activeAwarePrepared =
       await mergeActiveRunProtection(
         tx,
@@ -749,9 +753,12 @@ async function appendTracesAndPersist(
           consumerRun,
           outputTaintedLedgerKeys,
           secretRefs,
-          consumerRun.runId === prepared.runId ? workflow : undefined,
+          consumerRun.runId === prepared.runId
+            ? workflow
+            : undefined,
           repairOptions?.includeUnattributedSignalAudits,
         ),
+      invalidatedTerminalRunIds,
     );
     const redacted = applyRunRedaction(
       config.redact,
@@ -774,7 +781,18 @@ async function appendTracesAndPersist(
         : {}),
     });
     return repaired;
-  });
+  };
+  const persisted = await transactWithGlobalSecretRepair(
+    config.store,
+    config.redact,
+    resolvedSecretRefs,
+    transition,
+  );
+  await notifyRunTerminals(
+    config.onRunTerminal,
+    invalidatedTerminalRunIds,
+  );
+  return persisted;
 }
 
 export function authoredStepIdForTrace(
@@ -1412,57 +1430,55 @@ export async function refreshTaintAfterControlResolution(
   resolvedSecretRefs: Set<string>,
   secretCountBeforeResolution: number,
 ): Promise<RunRecord> {
-  run = await mergeActiveRunProtection(
-    config.store,
-    run,
-    resolvedSecretRefs,
-  );
-  await repairGlobalAuditsForNewSecrets(
-    config.store,
-    config.redact,
-    resolvedSecretRefs,
-  );
-  let preparedRun = prepareTaintAfterControlResolution(
-    config,
-    workflow,
-    step,
-    run,
-    currentTraceCount,
-    resolvedSecretRefs,
-  );
-  preparedRun = {
-    ...preparedRun,
-    artifacts: await redactStoredTextArtifacts(
-      config.store,
-      config.redact,
-      run.runId,
+  const invalidatedTerminalRunIds = new Set<string>();
+  const transition = async (
+    tx: AartStore,
+  ): Promise<RunRecord> => {
+    run = await mergeActiveRunProtection(
+      tx,
+      run,
       resolvedSecretRefs,
-    ),
-  };
-  const taintChanged = preparedRun.trace.some(
-    (trace, index) =>
-      trace.secretTainted !== run.trace[index]?.secretTainted ||
-      trace.controlSecretTainted !==
-        run.trace[index]?.controlSecretTainted ||
-      JSON.stringify(trace.secretTaintedPaths) !==
-        JSON.stringify(run.trace[index]?.secretTaintedPaths),
-  ) ||
-    JSON.stringify(preparedRun.secretTaintedInputPaths) !==
-      JSON.stringify(run.secretTaintedInputPaths) ||
-    JSON.stringify(preparedRun.secretTaintedTriggerPaths) !==
-      JSON.stringify(run.secretTaintedTriggerPaths);
-  const artifactsChanged =
-    JSON.stringify(preparedRun.artifacts) !==
-    JSON.stringify(run.artifacts);
-  if (
-    !taintChanged &&
-    !artifactsChanged &&
-    resolvedSecretRefs.size === secretCountBeforeResolution
-  ) {
-    return run;
-  }
-
-  return config.store.transact(async (tx) => {
+    );
+    let preparedRun = prepareTaintAfterControlResolution(
+      config,
+      workflow,
+      step,
+      run,
+      currentTraceCount,
+      resolvedSecretRefs,
+    );
+    preparedRun = {
+      ...preparedRun,
+      artifacts: await redactStoredTextArtifacts(
+        tx,
+        config.redact,
+        run.runId,
+        resolvedSecretRefs,
+      ),
+    };
+    const taintChanged = preparedRun.trace.some(
+      (trace, index) =>
+        trace.secretTainted !==
+          run.trace[index]?.secretTainted ||
+        trace.controlSecretTainted !==
+          run.trace[index]?.controlSecretTainted ||
+        JSON.stringify(trace.secretTaintedPaths) !==
+          JSON.stringify(run.trace[index]?.secretTaintedPaths),
+    ) ||
+      JSON.stringify(preparedRun.secretTaintedInputPaths) !==
+        JSON.stringify(run.secretTaintedInputPaths) ||
+      JSON.stringify(preparedRun.secretTaintedTriggerPaths) !==
+        JSON.stringify(run.secretTaintedTriggerPaths);
+    const artifactsChanged =
+      JSON.stringify(preparedRun.artifacts) !==
+      JSON.stringify(run.artifacts);
+    if (
+      !taintChanged &&
+      !artifactsChanged &&
+      resolvedSecretRefs.size === secretCountBeforeResolution
+    ) {
+      return run;
+    }
     const activeAwarePrepared =
       await mergeActiveRunProtection(
         tx,
@@ -1492,6 +1508,7 @@ export async function refreshTaintAfterControlResolution(
           consumerRun.runId === preparedRun.runId ? workflow : undefined,
           repairOptions?.includeUnattributedSignalAudits,
         ),
+      invalidatedTerminalRunIds,
     );
     const refreshedRun = applyRunRedaction(
       config.redact,
@@ -1514,7 +1531,18 @@ export async function refreshTaintAfterControlResolution(
         : {}),
     });
     return repaired;
-  });
+  };
+  const refreshed = await transactWithGlobalSecretRepair(
+    config.store,
+    config.redact,
+    resolvedSecretRefs,
+    transition,
+  );
+  await notifyRunTerminals(
+    config.onRunTerminal,
+    invalidatedTerminalRunIds,
+  );
+  return refreshed;
 }
 
 /**
@@ -1555,8 +1583,8 @@ async function determineNextStepId(
 }
 
 export type CompletedStepControlResolution =
-  | { kind: "resolved"; nextStepId?: string }
-  | { kind: "failed"; error: Error };
+  | { kind: "resolved"; nextStepId?: string; }
+  | { kind: "failed"; error: Error; };
 
 /**
  * Resolves post-dispatch control without discarding a successful effect

@@ -79,9 +79,9 @@ describe("SQLite adapter — connection setup (architecture §5.1)", () => {
     expect(row.journal_mode).toBe("wal");
   });
 
-  it("auto-runs migrations by default, advancing the watermark to the latest ordinal (10, including protected continuation state)", async () => {
+  it("auto-runs migrations by default, advancing the watermark to the latest ordinal (11, including artifact audit visibility)", async () => {
     const watermark = new SqliteMigrationWatermarkStore(handle.db);
-    await expect(watermark.read()).resolves.toBe(10);
+    await expect(watermark.read()).resolves.toBe(11);
   });
 
   it("runMigrations: false skips DDL — store calls fail against the not-yet-created schema", async () => {
@@ -103,20 +103,22 @@ describe("SQLite adapter — connection setup (architecture §5.1)", () => {
       await expect(runner.currentVersion()).resolves.toBe(0);
       // D1 (AMENDMENTS.md A56) + D2a (AMENDMENTS.md A59) + V1 (AMENDMENTS.md
       // A61) plus secret-taint ledger, root provenance, sealed waits, and
-      // operation-generation and protected-continuation metadata: ten migrations now
+      // operation-generation, protected-continuation metadata, and artifact
+      // audit visibility: eleven migrations now
       // registered (0001_init,
       // 0002_deployment_promoted, 0003_approval_task_authenticated_as,
       // 0004_events_table, 0005_idempotency_schema_version,
       // 0006_run_root_taint_paths + 0007_secret_audit_provenance +
       // 0008_sealed_operational_state +
       // 0009_wait_operation_generation +
-      // 0010_protected_continuation_state) — up() from
-      // watermark 0 applies all ten in one
+      // 0010_protected_continuation_state +
+      // 0011_artifact_audit_visibility) — up() from
+      // watermark 0 applies all eleven in one
       // call, landing on the latest ordinal.
-      await expect(runner.up()).resolves.toBe(10);
+      await expect(runner.up()).resolves.toBe(11);
       await expect(handle3.store.workflows.listWorkflowIds()).resolves.toEqual([]);
       // Idempotent re-run.
-      await expect(runner.up()).resolves.toBe(10);
+      await expect(runner.up()).resolves.toBe(11);
     } finally {
       handle3.close();
       await fs.rm(dir3, { recursive: true, force: true });

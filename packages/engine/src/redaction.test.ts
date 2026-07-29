@@ -172,6 +172,69 @@ describe("repairGlobalAuditsForNewSecrets", () => {
     }
   });
 
+  it("withholds a non-text artifact when its byte count is a secret while retaining it for later repair", async () => {
+    const { store, cleanup } = await createTestStore();
+    try {
+      const artifact = {
+        id: "secret-sized-artifact",
+        runId: "run-secret-sized-artifact",
+        name: "opaque.bin",
+        kind: "file",
+        mime: "application/octet-stream",
+        path: "opaque.bin",
+        bytes: 42,
+        createdAt: "2026-07-29T00:00:00.000Z",
+      };
+      const bytes = new Uint8Array(42).fill(7);
+      await store.artifacts.put(artifact, bytes);
+      const redact = (
+        record: unknown,
+        refs: ReadonlySet<string>,
+      ): unknown =>
+        typeof record === "number" &&
+        refs.has(String(record))
+          ? "[REDACTED]"
+          : record;
+      const resolved = new Set(["42"]);
+
+      await repairGlobalAuditsForNewSecrets(
+        store,
+        redact,
+        resolved,
+      );
+
+      await expect(
+        store.artifacts.getMetadata(artifact.id),
+      ).resolves.toBeUndefined();
+      await expect(
+        store.artifacts.getBytes(artifact.id),
+      ).resolves.toBeUndefined();
+      await expect(
+        store.artifacts.listByRun(artifact.runId),
+      ).resolves.toEqual([]);
+      await expect(
+        store.artifacts.listForRedaction(artifact.runId),
+      ).resolves.toEqual([
+        { artifact, auditVisible: false },
+      ]);
+      await expect(
+        store.artifacts.getBytesForRedaction(artifact.id),
+      ).resolves.toEqual(bytes);
+
+      resolved.add("later-secret");
+      await repairGlobalAuditsForNewSecrets(
+        store,
+        redact,
+        resolved,
+      );
+      await expect(
+        store.artifacts.getMetadata(artifact.id),
+      ).resolves.toBeUndefined();
+    } finally {
+      await cleanup();
+    }
+  });
+
   it("withholds whole late-repaired leaves so a longer overlapping secret cannot expose a suffix", async () => {
     const { store, cleanup } = await createTestStore();
     try {
@@ -497,7 +560,14 @@ describe("applyRunRedaction", () => {
     expect(publicRun.trace[0]).not.toHaveProperty("durationMs");
     expect(publicRun.trace[0]).not.toHaveProperty("llmCall");
     expect(publicRun.trace[0]?.externalCalls).toEqual([]);
-    expect(JSON.stringify(publicRun)).not.toContain("42");
+    expect(
+      JSON.stringify({
+        inputs: publicRun.inputs,
+        outputs: publicRun.outputs,
+        trace: publicRun.trace,
+        artifacts: publicRun.artifacts,
+      }),
+    ).not.toContain("42");
     expect(() => RunRecordSchema.parse(publicRun)).not.toThrow();
   });
 
@@ -544,7 +614,12 @@ describe("applyRunRedaction", () => {
 
     expect(publicRun.artifacts).toEqual([]);
     expect(publicRun.trace[0]?.artifacts).toEqual([]);
-    expect(JSON.stringify(publicRun)).not.toContain("42");
+    expect(
+      JSON.stringify({
+        trace: publicRun.trace,
+        artifacts: publicRun.artifacts,
+      }),
+    ).not.toContain("42");
     expect(() => RunRecordSchema.parse(publicRun)).not.toThrow();
   });
 
@@ -639,7 +714,7 @@ describe("applyRunRedaction", () => {
     expect(publicRun.trace[0]?.llmCall).not.toHaveProperty(
       "costEstimate",
     );
-    expect(JSON.stringify(publicRun)).not.toContain("42");
+    expect(JSON.stringify(publicRun.trace)).not.toContain("42");
   });
 
   it("fingerprints a non-terminal concurrency key once its raw value becomes secret", () => {

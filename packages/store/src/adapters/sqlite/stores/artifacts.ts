@@ -21,7 +21,10 @@ import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { dirname, join } from "node:path";
 import type { Artifact } from "@aart/types";
-import type { ArtifactStore } from "../../../types.js";
+import type {
+  ArtifactRedactionCandidate,
+  ArtifactStore,
+} from "../../../types.js";
 import { dbAll, dbGet, dbRun, type SqlExec } from "../db.js";
 
 interface ArtifactRow {
@@ -35,6 +38,7 @@ interface ArtifactRow {
   bytes: number;
   created_at: string;
   redaction_text_eligible: number | null;
+  redaction_audit_visible: number;
 }
 
 interface ArtifactRedactionJournal {
@@ -44,6 +48,7 @@ interface ArtifactRedactionJournal {
   audit: Pick<Artifact, "name" | "kind" | "mime" | "path">;
   byteCount: number;
   textEligible: number;
+  auditVisible?: number;
   stagedBlobName?: string;
 }
 
@@ -207,7 +212,12 @@ export async function recoverSqliteArtifactRedactions(
         db,
         `UPDATE artifacts
          SET name = ?, kind = ?, mime = ?, path_or_uri = ?, bytes = ?,
-             redaction_text_eligible = ?
+             redaction_text_eligible = ?,
+             redaction_audit_visible =
+               CASE
+                 WHEN redaction_audit_visible = 0 OR ? = 0 THEN 0
+                 ELSE 1
+               END
          WHERE artifact_id = ? AND run_id = ?`,
         [
           journal.audit.name,
@@ -216,6 +226,7 @@ export async function recoverSqliteArtifactRedactions(
           journal.audit.path,
           journal.byteCount,
           journal.textEligible,
+          journal.auditVisible ?? 1,
           journal.artifactId,
           journal.runId,
         ],
@@ -258,13 +269,14 @@ export class SqliteArtifactStore implements ArtifactStore {
     await this.exec((db) =>
       dbRun(
         db,
-        `INSERT INTO artifacts (artifact_id, run_id, step_id, name, kind, mime, path_or_uri, bytes, created_at, redaction_text_eligible)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO artifacts (artifact_id, run_id, step_id, name, kind, mime, path_or_uri, bytes, created_at, redaction_text_eligible, redaction_audit_visible)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(artifact_id) DO UPDATE SET
            run_id = excluded.run_id, step_id = excluded.step_id, name = excluded.name,
            kind = excluded.kind, mime = excluded.mime, path_or_uri = excluded.path_or_uri,
            bytes = excluded.bytes, created_at = excluded.created_at,
-           redaction_text_eligible = COALESCE(artifacts.redaction_text_eligible, excluded.redaction_text_eligible)`,
+           redaction_text_eligible = COALESCE(artifacts.redaction_text_eligible, excluded.redaction_text_eligible),
+           redaction_audit_visible = artifacts.redaction_audit_visible`,
         [
           artifact.id,
           artifact.runId,
@@ -279,6 +291,7 @@ export class SqliteArtifactStore implements ArtifactStore {
             isTextMime(artifact.mime))
             ? 1
             : 0,
+          1,
         ],
       ),
     );
@@ -286,14 +299,47 @@ export class SqliteArtifactStore implements ArtifactStore {
 
   async getMetadata(artifactId: string): Promise<Artifact | undefined> {
     await this.recoverPending();
-    const row = await this.exec((db) => dbGet<ArtifactRow>(db, "SELECT * FROM artifacts WHERE artifact_id = ?", [artifactId]));
+    const row = await this.exec((db) =>
+      dbGet<ArtifactRow>(
+        db,
+        "SELECT * FROM artifacts WHERE artifact_id = ? AND redaction_audit_visible = 1",
+        [artifactId],
+      ),
+    );
     return row ? rowToArtifact(row) : undefined;
   }
 
   async getBytes(artifactId: string): Promise<Uint8Array | undefined> {
     await this.recoverPending();
-    const row = await this.exec((db) => dbGet<ArtifactRow>(db, "SELECT * FROM artifacts WHERE artifact_id = ?", [artifactId]));
+    const row = await this.exec((db) =>
+      dbGet<ArtifactRow>(
+        db,
+        "SELECT * FROM artifacts WHERE artifact_id = ? AND redaction_audit_visible = 1",
+        [artifactId],
+      ),
+    );
     if (!row) return undefined;
+    return this.readBytes(row);
+  }
+
+  async getBytesForRedaction(
+    artifactId: string,
+  ): Promise<Uint8Array | undefined> {
+    await this.recoverPending();
+    const row = await this.exec((db) =>
+      dbGet<ArtifactRow>(
+        db,
+        "SELECT * FROM artifacts WHERE artifact_id = ?",
+        [artifactId],
+      ),
+    );
+    if (!row) return undefined;
+    return this.readBytes(row);
+  }
+
+  private async readBytes(
+    row: ArtifactRow,
+  ): Promise<Uint8Array | undefined> {
     try {
       const buffer = await fs.readFile(this.blobFilePath(row.run_id, row.artifact_id));
       // Plain Uint8Array, not a Node Buffer — see the fs adapter's
@@ -309,15 +355,43 @@ export class SqliteArtifactStore implements ArtifactStore {
   async list(): Promise<Artifact[]> {
     await this.recoverPending();
     const rows = await this.exec((db) =>
-      dbAll<ArtifactRow>(db, "SELECT * FROM artifacts"),
+      dbAll<ArtifactRow>(
+        db,
+        "SELECT * FROM artifacts WHERE redaction_audit_visible = 1",
+      ),
     );
     return rows.map(rowToArtifact);
   }
 
   async listByRun(runId: string): Promise<Artifact[]> {
     await this.recoverPending();
-    const rows = await this.exec((db) => dbAll<ArtifactRow>(db, "SELECT * FROM artifacts WHERE run_id = ?", [runId]));
+    const rows = await this.exec((db) =>
+      dbAll<ArtifactRow>(
+        db,
+        "SELECT * FROM artifacts WHERE run_id = ? AND redaction_audit_visible = 1",
+        [runId],
+      ),
+    );
     return rows.map(rowToArtifact);
+  }
+
+  async listForRedaction(
+    runId?: string,
+  ): Promise<ArtifactRedactionCandidate[]> {
+    await this.recoverPending();
+    const rows = await this.exec((db) =>
+      runId === undefined
+        ? dbAll<ArtifactRow>(db, "SELECT * FROM artifacts")
+        : dbAll<ArtifactRow>(
+            db,
+            "SELECT * FROM artifacts WHERE run_id = ?",
+            [runId],
+          ),
+    );
+    return rows.map((row) => ({
+      artifact: rowToArtifact(row),
+      auditVisible: row.redaction_audit_visible === 1,
+    }));
   }
 
   async isTextEligible(artifactId: string): Promise<boolean> {
@@ -339,6 +413,7 @@ export class SqliteArtifactStore implements ArtifactStore {
     artifactId: string,
     audit: Pick<Artifact, "name" | "kind" | "mime" | "path">,
     bytes?: Uint8Array,
+    options?: { auditVisible?: false },
   ): Promise<Artifact | undefined> {
     await this.recoverPending();
     const row = await this.exec((db) =>
@@ -375,6 +450,11 @@ export class SqliteArtifactStore implements ArtifactStore {
         audit,
         byteCount,
         textEligible,
+        auditVisible:
+          row.redaction_audit_visible === 0 ||
+          options?.auditVisible === false
+            ? 0
+            : 1,
         ...(stagedBlobName !== undefined
           ? { stagedBlobName }
           : {}),
@@ -391,7 +471,12 @@ export class SqliteArtifactStore implements ArtifactStore {
         db,
         `UPDATE artifacts
          SET name = ?, kind = ?, mime = ?, path_or_uri = ?, bytes = ?,
-             redaction_text_eligible = ?
+             redaction_text_eligible = ?,
+             redaction_audit_visible =
+               CASE
+                 WHEN redaction_audit_visible = 0 OR ? = 0 THEN 0
+                 ELSE 1
+               END
          WHERE artifact_id = ?`,
         [
           audit.name,
@@ -400,6 +485,10 @@ export class SqliteArtifactStore implements ArtifactStore {
           audit.path,
           byteCount,
           textEligible,
+          row.redaction_audit_visible === 0 ||
+          options?.auditVisible === false
+            ? 0
+            : 1,
           artifactId,
         ],
       ),
@@ -415,6 +504,11 @@ export class SqliteArtifactStore implements ArtifactStore {
       path_or_uri: audit.path,
       bytes: byteCount,
       redaction_text_eligible: textEligible,
+      redaction_audit_visible:
+        row.redaction_audit_visible === 0 ||
+        options?.auditVisible === false
+          ? 0
+          : 1,
     });
   }
 }

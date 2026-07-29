@@ -73,19 +73,50 @@ export async function claimIdempotencyReplay(
 ): Promise<IdempotencyCheck> {
   return store.transact(async (tx) => {
     const storageKey = idempotencyStorageKey(resolvedKey);
+    const activeState =
+      await tx.runs.getOperationalState(run.runId);
+    const pendingWithoutThisOccurrence = (
+      activeState?.pendingIdempotencyReplays ?? []
+    ).filter(
+      (candidate) =>
+        candidate.stepId !== stepId ||
+        candidate.traceSeq !== traceSeq,
+    );
+    const clearStaleClaim = async (): Promise<void> => {
+      if (
+        activeState === undefined ||
+        pendingWithoutThisOccurrence.length ===
+          (activeState.pendingIdempotencyReplays ?? []).length
+      ) {
+        return;
+      }
+      const {
+        pendingIdempotencyReplays: _staleClaims,
+        ...stateWithoutClaims
+      } = activeState;
+      await tx.runs.putOperationalState(run.runId, {
+        ...stateWithoutClaims,
+        ...(pendingWithoutThisOccurrence.length > 0
+          ? {
+              pendingIdempotencyReplays:
+                pendingWithoutThisOccurrence,
+            }
+          : {}),
+      });
+    };
     const entry = await tx.idempotencyLedger.get(storageKey);
     if (
       !entry ||
       entry.schemaVersion !== CURRENT_ENGINE_SCHEMA_VERSION
     ) {
+      await clearStaleClaim();
       return { alreadyCompleted: false };
     }
-    const activeState =
-      await tx.runs.getOperationalState(run.runId);
     for (const value of activeState?.resolvedSecretValues ?? []) {
       resolvedSecretRefs.add(value);
     }
     if (!canReplay(activeState?.run ?? run, entry.recordedOutput)) {
+      await clearStaleClaim();
       return { alreadyCompleted: false };
     }
     const claim: IdempotencyReplayClaim = {
@@ -93,19 +124,13 @@ export async function claimIdempotencyReplay(
       stepId,
       traceSeq,
     };
+    // One occurrence can represent only one admitted replay. A reclaimed
+    // attempt replaces any stale claim from an older ledger generation
+    // rather than inheriting its revocation state.
     const pending = [
-      ...(activeState?.pendingIdempotencyReplays ?? []),
+      ...pendingWithoutThisOccurrence,
+      claim,
     ];
-    if (
-      !pending.some(
-        (candidate) =>
-          candidate.ledgerKey === claim.ledgerKey &&
-          candidate.stepId === claim.stepId &&
-          candidate.traceSeq === claim.traceSeq,
-      )
-    ) {
-      pending.push(claim);
-    }
     await tx.runs.putOperationalState(run.runId, {
       ...(activeState ?? {
         run,
@@ -325,6 +350,7 @@ export async function revokeSecretTaintedIdempotency(
   run: RunRecord,
   resolvedSecretRefs: ReadonlySet<string>,
   prepareConsumer?: PrepareRevokedIdempotencyConsumer,
+  invalidatedTerminalRunIds?: Set<string>,
 ): Promise<RunRecord> {
   if (resolvedSecretRefs.size === 0) return run;
   const entries = await store.idempotencyLedger.list();
@@ -363,6 +389,12 @@ export async function revokeSecretTaintedIdempotency(
         { includeUnattributedSignalAudits: true },
       )
     : run;
+  if (
+    run.status === "completed" &&
+    activeRun.status === "failed"
+  ) {
+    invalidatedTerminalRunIds?.add(run.runId);
+  }
   const activeAudit = applyRunRedaction(
     redact,
     activeRun,
@@ -393,8 +425,14 @@ export async function revokeSecretTaintedIdempotency(
           persistedProducer,
           new Set(),
           resolvedSecretRefs,
-        )
+      )
       : persistedProducer;
+    if (
+      persistedProducer.status === "completed" &&
+      preparedProducer.status === "failed"
+    ) {
+      invalidatedTerminalRunIds?.add(persistedProducer.runId);
+    }
     const redactedProducer = await redactAndPersistRun(
       store,
       redact,
@@ -565,6 +603,12 @@ export async function revokeSecretTaintedIdempotency(
             resolvedSecretRefs,
           )
         : directlyMarked;
+      if (
+        persistedRun.status === "completed" &&
+        prepared.status === "failed"
+      ) {
+        invalidatedTerminalRunIds?.add(runId);
+      }
       const repaired =
         runId === activeRun.runId
           ? mergeOperationalRunTaint(

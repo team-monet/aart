@@ -272,6 +272,7 @@ export {
   createSqliteAddSealedOperationalStateMigration,
   createSqliteAddWaitOperationGenerationMigration,
   createSqliteAddProtectedContinuationStateMigration,
+  createSqliteAddArtifactAuditVisibilityMigration,
   ALL_SQLITE_MIGRATIONS,
 } from "./migrations.js";
 export { SqliteMigrationWatermarkStore } from "./watermark.js";

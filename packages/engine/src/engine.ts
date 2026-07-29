@@ -64,6 +64,7 @@ function waitMachineConfig(config: EngineConfig): WaitMachineConfig {
     store: config.store,
     redact: config.redact,
     now: config.now ?? (() => new Date()),
+    onRunTerminal: config.onRunTerminal,
     prepareRevokedIdempotencyConsumer: (
       store,
       run,

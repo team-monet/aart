@@ -218,6 +218,12 @@ export interface WaitOperationalRunState {
 
 export type RunOperationalState = WaitOperationalRunState;
 
+export interface ArtifactRedactionCandidate {
+  artifact: Artifact;
+  /** False once the complete artifact surface has been withheld publicly. */
+  auditVisible: boolean;
+}
+
 export interface ArtifactStore {
   put(
     artifact: Artifact,
@@ -231,10 +237,22 @@ export interface ArtifactStore {
     },
   ): Promise<void>;
   getMetadata(artifactId: string): Promise<Artifact | undefined>;
+  /** Customer-visible bytes; withheld artifacts return undefined. */
   getBytes(artifactId: string): Promise<Uint8Array | undefined>;
   /** All customer-visible artifact audit rows. */
   list(): Promise<Artifact[]>;
   listByRun(runId: string): Promise<Artifact[]>;
+  /**
+   * Engine-only scan that includes rows already withheld from public APIs,
+   * so later secret discovery can continue repairing their audit and bytes.
+   */
+  listForRedaction(
+    runId?: string,
+  ): Promise<ArtifactRedactionCandidate[]>;
+  /** Engine-only byte access paired with listForRedaction(). */
+  getBytesForRedaction(
+    artifactId: string,
+  ): Promise<Uint8Array | undefined>;
   /** Stable classification retained before audit MIME values are redacted. */
   isTextEligible(artifactId: string): Promise<boolean>;
   /**
@@ -246,6 +264,14 @@ export interface ArtifactStore {
     artifactId: string,
     audit: Pick<Artifact, "name" | "kind" | "mime" | "path">,
     bytes?: Uint8Array,
+    options?: {
+      /**
+       * One-way public suppression. Adapters never restore visibility once
+       * false because the secret set that justified it may not be present in
+       * a later execution segment's local scan.
+       */
+      auditVisible?: false;
+    },
   ): Promise<Artifact | undefined>;
 }
 

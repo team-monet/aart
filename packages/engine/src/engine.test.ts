@@ -1,7 +1,11 @@
 import { promises as fs } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createFsStore, type AartStore } from "@aart/store";
+import {
+  createFsStore,
+  recordRunTerminalEvent,
+  type AartStore,
+} from "@aart/store";
 import { openSqliteStore } from "@aart/store/sqlite";
 import type { BlockImplementation } from "@aart/types";
 import { afterEach, describe, expect, it } from "vitest";
@@ -379,6 +383,10 @@ describe("createEngine — resume wrappers continue execution past the resumed s
     };
     let sourceExecutions = 0;
     let derivativeExecutions = 0;
+    const terminalObservations: Array<{
+      runId: string;
+      status: string | undefined;
+    }> = [];
     const sourceBlock: BlockImplementation = {
       manifest: {
         id: "test.late-secret-source",
@@ -422,6 +430,13 @@ describe("createEngine — resume wrappers continue execution past the resumed s
         derivativeBlock,
       ]),
       computeRetryDelayMs: () => 0,
+      onRunTerminal: async (runId) => {
+        await recordRunTerminalEvent(store, runId);
+        terminalObservations.push({
+          runId,
+          status: (await store.runs.get(runId))?.status,
+        });
+      },
     });
     const sourceWorkflow = fixtureWorkflow({
       id: "wf-cache-source",
@@ -573,6 +588,22 @@ describe("createEngine — resume wrappers continue execution past the resumed s
     expect(repairedTransitive?.outputs).toBeUndefined();
     expect(repairedTransitive?.error).toMatch(
       /replayed cache result was later identified as secret-derived/,
+    );
+    expect(
+      terminalObservations.filter(
+        ({ runId }) => runId === transitiveRun.runId,
+      ),
+    ).toEqual([
+      { runId: transitiveRun.runId, status: "completed" },
+      { runId: transitiveRun.runId, status: "failed" },
+    ]);
+    await expect(store.events.list()).resolves.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "run.failed",
+          runId: transitiveRun.runId,
+        }),
+      ]),
     );
     expect(
       repairedTransitive?.trace.find((trace) => trace.stepId === "derive"),

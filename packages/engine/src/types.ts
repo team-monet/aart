@@ -134,8 +134,10 @@ export interface EngineConfig {
   computePackHashes?: import("./snapshot.js").ComputePackHashes;
   /**
    * S9 integration (reconciliation ledger item 10, SEAMS.md S3-E1): called
-   * once a run reaches a terminal status (`finalizeTerminal`/`cancelRun`,
-   * run-lifecycle.ts), AFTER the terminal `RunRecord` is durably persisted
+   * after every durable transition into a terminal status, including a
+   * previously completed run retrospectively invalidated when a replayed
+   * cache output is later proven secret-derived. The callback runs AFTER
+   * the terminal `RunRecord` is durably persisted
    * and any queued same-key run is released — the same per-run resource-
    * cleanup cadence `@aart/blocks-core`'s browser-session manager asked for
    * ("the engine... once a run reaches a terminal status... should call

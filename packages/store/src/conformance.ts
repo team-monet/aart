@@ -666,6 +666,74 @@ export function runAartStoreConformanceSuite(label: string, options: Conformance
           store.artifacts.isTextEligible(artifact.id),
         ).resolves.toBe(true);
       });
+
+      it("withholds a secret-sized artifact from every public surface while retaining its repair source", async () => {
+        const runId = uniqueId("run");
+        const artifact: Artifact = {
+          id: uniqueId("art"),
+          runId,
+          name: "secret-sized.bin",
+          kind: "file",
+          mime: "application/octet-stream",
+          path: `artifacts/${runId}/secret-sized.bin`,
+          bytes: 4,
+          createdAt: new Date().toISOString(),
+        };
+        const bytes = new Uint8Array([1, 2, 3, 4]);
+        await store.artifacts.put(artifact, bytes);
+
+        await store.artifacts.replaceAudit(
+          artifact.id,
+          {
+            name: artifact.name,
+            kind: artifact.kind,
+            mime: artifact.mime,
+            path: artifact.path,
+          },
+          undefined,
+          { auditVisible: false },
+        );
+
+        await expect(
+          store.artifacts.getMetadata(artifact.id),
+        ).resolves.toBeUndefined();
+        await expect(
+          store.artifacts.getBytes(artifact.id),
+        ).resolves.toBeUndefined();
+        await expect(store.artifacts.list()).resolves.not.toContainEqual(
+          expect.objectContaining({ id: artifact.id }),
+        );
+        await expect(
+          store.artifacts.listByRun(runId),
+        ).resolves.not.toContainEqual(
+          expect.objectContaining({ id: artifact.id }),
+        );
+        await expect(
+          store.artifacts.listForRedaction(runId),
+        ).resolves.toContainEqual({
+          artifact,
+          auditVisible: false,
+        });
+        await expect(
+          store.artifacts.getBytesForRedaction(artifact.id),
+        ).resolves.toEqual(bytes);
+
+        await store.artifacts.replaceAudit(artifact.id, {
+          name: "repaired.bin",
+          kind: artifact.kind,
+          mime: artifact.mime,
+          path: artifact.path,
+        });
+        await expect(
+          store.artifacts.getMetadata(artifact.id),
+        ).resolves.toBeUndefined();
+        await expect(
+          store.artifacts.listForRedaction(runId),
+        ).resolves.toContainEqual({
+          artifact: { ...artifact, name: "repaired.bin" },
+          auditVisible: false,
+        });
+      });
     });
 
     describe("approvals", () => {

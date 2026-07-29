@@ -49,6 +49,7 @@ interface WorkerResult {
   hasEventsTable?: boolean;
   hasIdempotencySchemaVersionColumn?: boolean;
   hasRunRootTaintColumns?: boolean;
+  hasArtifactAuditVisibilityColumn?: boolean;
   error?: string;
 }
 
@@ -91,7 +92,7 @@ describe("sqlite adapter — concurrent-startup migration race (AMENDMENTS.md A5
   const ITERATIONS = 8;
 
   it(
-    `two genuinely separate OS processes opening the SAME fresh sqlite store at once, repeated ${ITERATIONS} times: both always come up cleanly, watermark 6, correct schema, no "duplicate column name" / "database is locked" crash`,
+    `two genuinely separate OS processes opening the SAME fresh sqlite store at once, repeated ${ITERATIONS} times: both always come up cleanly, watermark 11, correct schema, no "duplicate column name" / "database is locked" crash`,
     async () => {
       for (let i = 0; i < ITERATIONS; i++) {
         const dir = await mkdtemp(join(tmpdir(), "aart-sqlite-migration-race-"));
@@ -113,13 +114,15 @@ describe("sqlite adapter — concurrent-startup migration race (AMENDMENTS.md A5
           // +0007_secret_audit_provenance
           // +0008_sealed_operational_state
           // +0009_wait_operation_generation
-          // +0010_protected_continuation_state).
-          expect(result.watermark, `worker ${label} (iteration ${i}) watermark`).toBe(10);
+          // +0010_protected_continuation_state
+          // +0011_artifact_audit_visibility).
+          expect(result.watermark, `worker ${label} (iteration ${i}) watermark`).toBe(11);
           expect(result.hasPromotedColumn, `worker ${label} (iteration ${i}) deployments.promoted column`).toBe(true);
           expect(result.hasAuthenticatedAsColumn, `worker ${label} (iteration ${i}) approval_tasks.authenticated_as column`).toBe(true);
           expect(result.hasEventsTable, `worker ${label} (iteration ${i}) events table`).toBe(true);
           expect(result.hasIdempotencySchemaVersionColumn, `worker ${label} (iteration ${i}) idempotency_ledger.schema_version column`).toBe(true);
           expect(result.hasRunRootTaintColumns, `worker ${label} (iteration ${i}) run root taint columns`).toBe(true);
+          expect(result.hasArtifactAuditVisibilityColumn, `worker ${label} (iteration ${i}) artifacts.redaction_audit_visible column`).toBe(true);
         }
       }
     },

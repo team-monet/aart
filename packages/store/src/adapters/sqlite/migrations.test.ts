@@ -521,7 +521,7 @@ describe("0007_secret_audit_provenance", () => {
       new SqliteMigrationWatermarkStore(handle.db),
       handle.store,
     );
-    await expect(all.up()).resolves.toBe(10);
+    await expect(all.up()).resolves.toBe(11);
     await handle.store.waits.redactAudit("run-audit", "pause", {
       ...wait,
       correlationId: "[REDACTED]",
@@ -633,7 +633,7 @@ describe("0008/0009 sealed operational state", () => {
       new SqliteMigrationWatermarkStore(handle.db),
       handle.store,
     );
-    await expect(all.up()).resolves.toBe(10);
+    await expect(all.up()).resolves.toBe(11);
     await handle.store.waits.redactAudit(
       "run-sealed-upgrade",
       "pause",
@@ -705,7 +705,7 @@ describe("0010 protected continuation state", () => {
       new SqliteMigrationWatermarkStore(handle.db),
       handle.store,
     );
-    await expect(all.up()).resolves.toBe(10);
+    await expect(all.up()).resolves.toBe(11);
     const runColumns = handle.db
       .prepare("PRAGMA table_info(runs)")
       .all() as Array<{ name: string }>;
@@ -763,5 +763,79 @@ describe("0010 protected continuation state", () => {
       expect.any(String),
     );
     expect(JSON.stringify(stored)).not.toContain("late-secret");
+  });
+});
+
+describe("0011 artifact audit visibility", () => {
+  it("keeps legacy rows public by default and supports one-way withholding", async () => {
+    dir = await fs.mkdtemp(
+      join(tmpdir(), "aart-sqlite-migration-test-"),
+    );
+    handle = await openSqliteStore(join(dir, "aart.db"), {
+      runMigrations: false,
+      blobsDir: join(dir, "blobs"),
+    });
+    const through0010 = new MigrationRunner(
+      ALL_SQLITE_MIGRATIONS(handle.db).slice(0, 10),
+      new SqliteMigrationWatermarkStore(handle.db),
+      handle.store,
+    );
+    await expect(through0010.up()).resolves.toBe(10);
+    handle.db
+      .prepare(
+        `INSERT INTO artifacts
+          (artifact_id, run_id, step_id, name, kind, mime, path_or_uri, bytes, created_at, redaction_text_eligible)
+         VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        "legacy-artifact",
+        "legacy-run",
+        "report.bin",
+        "file",
+        "application/octet-stream",
+        "report.bin",
+        42,
+        "2026-07-29T00:00:00.000Z",
+        0,
+      );
+
+    const all = new MigrationRunner(
+      ALL_SQLITE_MIGRATIONS(handle.db),
+      new SqliteMigrationWatermarkStore(handle.db),
+      handle.store,
+    );
+    await expect(all.up()).resolves.toBe(11);
+    await expect(
+      handle.store.artifacts.getMetadata("legacy-artifact"),
+    ).resolves.toMatchObject({
+      id: "legacy-artifact",
+      bytes: 42,
+    });
+
+    await handle.store.artifacts.replaceAudit(
+      "legacy-artifact",
+      {
+        name: "report.bin",
+        kind: "file",
+        mime: "application/octet-stream",
+        path: "report.bin",
+      },
+      undefined,
+      { auditVisible: false },
+    );
+    await expect(
+      handle.store.artifacts.getMetadata("legacy-artifact"),
+    ).resolves.toBeUndefined();
+    await expect(
+      handle.store.artifacts.listForRedaction("legacy-run"),
+    ).resolves.toEqual([
+      expect.objectContaining({
+        artifact: expect.objectContaining({
+          id: "legacy-artifact",
+          bytes: 42,
+        }),
+        auditVisible: false,
+      }),
+    ]);
   });
 });
