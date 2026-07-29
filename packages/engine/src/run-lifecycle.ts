@@ -15,10 +15,10 @@ import { captureExecutionSnapshot, isSnapshotCaptured, resolveWorkflowForRun, un
 import { validateWorkflowOutputs, WorkflowOutputValidationError } from "./output-validation.js";
 import {
   authoredStepIdForTrace,
-  determineNextStepId,
   executeStep,
   prepareTaintAfterControlResolution,
   refreshTaintAfterControlResolution,
+  resolveCompletedStepControl,
   type StepOutcome,
 } from "./step-executor.js";
 import { revokeSecretTaintedIdempotency } from "./idempotency.js";
@@ -275,7 +275,11 @@ async function resolveContinuation(
   run: RunRecord,
   workflow: Workflow,
   resolvedSecretRefs: Set<string>,
-): Promise<{ run: RunRecord; nextStepId: string | undefined }> {
+): Promise<{
+  run: RunRecord;
+  nextStepId: string | undefined;
+  controlError?: Error;
+}> {
   if (run.trace.length === 0) {
     return { run, nextStepId: workflow.execution.steps[0]?.id };
   }
@@ -298,20 +302,28 @@ async function resolveContinuation(
     throw new Error(`Cannot resolve continuation point for run "${run.runId}": step "${ownerStepId}" (from trailing trace entry "${lastTrace.stepId}") not found in workflow ${workflow.id}@${workflow.version}.`);
   }
   let ifResult: boolean | undefined;
+  let preDispatchControlError: Error | undefined;
   const secretCountBeforeControlResolution = resolvedSecretRefs.size;
-  if (lastStep.if !== undefined) {
-    const context = buildExprContext(run);
-    const secretResolver = createTrackingSecretResolver(config.resolveSecret ?? throwingSecretResolver, resolvedSecretRefs);
-    ifResult = await resolveBooleanExpression(lastStep.if, context, { secretResolver });
+  try {
+    if (lastStep.if !== undefined) {
+      const context = buildExprContext(run);
+      const secretResolver = createTrackingSecretResolver(config.resolveSecret ?? throwingSecretResolver, resolvedSecretRefs);
+      ifResult = await resolveBooleanExpression(lastStep.if, context, { secretResolver });
+    }
+  } catch (err) {
+    preDispatchControlError =
+      err instanceof Error ? err : new Error(String(err));
   }
-  const nextStepId = await determineNextStepId(
-    workflow,
-    lastStep,
-    run,
-    ifResult,
-    resolvedSecretRefs,
-    config,
-  );
+  const controlResolution = preDispatchControlError
+    ? { kind: "failed" as const, error: preDispatchControlError }
+    : await resolveCompletedStepControl(
+        workflow,
+        lastStep,
+        run,
+        ifResult,
+        resolvedSecretRefs,
+        config,
+      );
   let currentTraceCount = 1;
   if (lastStep.forEach !== undefined) {
     const declaredStepIds = new Set(
@@ -349,7 +361,16 @@ async function resolveContinuation(
     resolvedSecretRefs,
     secretCountBeforeControlResolution,
   );
-  return { run: refreshedRun, nextStepId };
+  return {
+    run: refreshedRun,
+    nextStepId:
+      controlResolution.kind === "resolved"
+        ? controlResolution.nextStepId
+        : undefined,
+    ...(controlResolution.kind === "failed"
+      ? { controlError: controlResolution.error }
+      : {}),
+  };
 }
 
 /**
@@ -436,6 +457,16 @@ export async function executeRun(config: EngineConfig, runId: string): Promise<R
     workflow,
     resolvedSecretRefs,
   );
+  if (continuation.controlError) {
+    return finalizeTerminal(
+      config,
+      continuation.run,
+      workflow,
+      "failed",
+      resolvedSecretRefs,
+      continuation.controlError.message,
+    );
+  }
   return runStepsLoop(
     config,
     continuation.run,

@@ -2037,6 +2037,11 @@ durable suspension, and completion.
 
 Public workflow outputs reject control-tainted sources and data-tainted output
 paths, naming both the public field and source path in the error.
+An optional mapping is not a secrecy escape hatch: when a referenced step is
+absent after secret-controlled flow, the workflow fails instead of publishing
+an output object whose field presence reveals the branch decision. Ordinary
+optional omission remains valid when no secret-controlled flow contributed to
+the run.
 This prevents an intermediate block from laundering a persisted redaction
 marker or a non-literal derivative into a successful public result. Block
 secret access defaults to data use and therefore taints arbitrary output;
@@ -2072,6 +2077,14 @@ against that provisional trace, computes data/control provenance, redacts,
 and only then performs the first durable write. Early-arrival waits use the
 same prepare-before-persist hook; ordinary wait resumes also prepare the
 completed trace inside the atomic claim transaction before its first write.
+Post-dispatch control resolution is represented as an outcome rather than an
+exception that can erase history. Once a block effect or wait event succeeds,
+its completed trace is persisted before a failing `until`/continuation
+expression terminalizes the run. The same ordering applies to normal
+dispatch, early-arrival signals, atomic wait claims, and worker reclaim:
+operators see that the effect already happened and do not retry it as though
+the dispatch had failed. Control reconstruction failure never replaces the
+completed trace with a synthetic failed step.
 The individually exported low-level resume mechanisms require this preparation
 callback and reject a missing callback before touching the transaction; callers
 that do not own the full preparation pipeline use `createEngine`'s bound resume
@@ -2091,6 +2104,8 @@ worker reloads and server restarts preserve the same decision. If a later
 secret matches text inside an already-recorded pointer, that root's pointer
 set collapses to `"*"`; security coverage remains conservative without
 persisting the secret-bearing path segment itself.
+The same collapse rule applies to per-trace output pointers, so later secret
+discovery cannot turn provenance metadata itself into a disclosure channel.
 forEach aggregate traces likewise inherit child data/control provenance.
 The same retrospective rule applies to each trace's resolved inputs: if a
 later-discovered secret changes a prior trace input, that trace's outputs are

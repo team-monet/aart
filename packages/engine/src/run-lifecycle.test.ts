@@ -328,6 +328,55 @@ describe("executeRun — fresh execution", () => {
     expect(finished.outputs).toEqual({});
   });
 
+  it("rejects an optional output whose absent source reveals a secret-controlled branch", async () => {
+    const { store, config } = await setup({
+      redact: redactResolvedValues,
+      resolveSecret: () => true,
+    });
+    const workflow = fixtureWorkflow({
+      outputs: [{ name: "optionalResult", type: "string" }],
+      execution: {
+        type: "workflow",
+        steps: [
+          {
+            id: "gate",
+            uses: "test.echo",
+            if: "{{ secrets.FLAG }}",
+            then: "selected",
+            else: "optional",
+          },
+          {
+            id: "optional",
+            uses: "test.echo",
+            with: { value: "optional" },
+          },
+          {
+            id: "selected",
+            uses: "test.echo",
+            with: { value: "selected" },
+          },
+        ],
+        outputMapping: {
+          optionalResult: "{{ steps.optional.outputs.echoed.value }}",
+        },
+      },
+    });
+    await store.workflows.put(workflow);
+    const run = await triggerRun(config, {
+      workflow,
+      trigger: fixtureTrigger(),
+      inputs: {},
+    });
+
+    const finished = await executeRun(config, run.runId);
+
+    expect(finished.status).toBe("failed");
+    expect(finished.outputs).toBeUndefined();
+    expect(finished.error).toMatch(
+      /absent step "optional" after secret-controlled flow/,
+    );
+  });
+
   it("fails a structurally malformed optional mapping even when its source step was skipped", async () => {
     const { store, config } = await setup();
     const workflow = fixtureWorkflow({
@@ -1614,6 +1663,64 @@ describe("executeRun — fresh execution", () => {
     expect(persistedPollValues[0]).toMatch(/REDACTED/);
   });
 
+  it("preserves a successful effect trace when post-dispatch until evaluation fails", async () => {
+    let executeCount = 0;
+    const effectBlock: BlockImplementation = {
+      manifest: {
+        id: "test.effect-before-control-failure",
+        version: "1.0.0",
+        capabilities: ["network"],
+        inputSchema: {},
+        outputSchema: {},
+        description: "Represents an external effect that must not be hidden.",
+      },
+      execute: async () => ({ receipt: `effect-${++executeCount}` }),
+    };
+    const { store, config } = await setup({
+      blocks: { [effectBlock.manifest.id]: effectBlock },
+      getGrantedCapabilities: async () => ["network"],
+    });
+    const workflow = fixtureWorkflow({
+      execution: {
+        type: "workflow",
+        steps: [
+          {
+            id: "effect",
+            uses: effectBlock.manifest.id,
+            idempotencyKey: "effect-once",
+            next: "effect",
+            until: "{{ steps.effect.outputs.missing }}",
+            maxIterations: 2,
+          },
+        ],
+      },
+    });
+    await store.workflows.put(workflow);
+    const run = await triggerRun(config, {
+      workflow,
+      trigger: fixtureTrigger(),
+      inputs: {},
+    });
+
+    const finished = await executeRun(config, run.runId);
+
+    expect(executeCount).toBe(1);
+    expect(finished.status).toBe("failed");
+    expect(finished.error).toMatch(/resolved to undefined/);
+    expect(finished.trace).toHaveLength(1);
+    expect(finished.trace[0]).toMatchObject({
+      stepId: "effect",
+      status: "completed",
+      outputs: { receipt: "effect-1" },
+      idempotencyLedgerKey: idempotencyStorageKey("effect-once"),
+    });
+    await expect(
+      store.idempotencyLedger.get(idempotencyStorageKey("effect-once")),
+    ).resolves.toMatchObject({
+      recordedOutput: { receipt: "effect-1" },
+    });
+  });
+
   it("taints an early-arrival wait after until first resolves a matching secret", async () => {
     const { store, config } = await setup({
       redact: redactResolvedValues,
@@ -1657,6 +1764,53 @@ describe("executeRun — fresh execution", () => {
     expect(finished.trace.find((trace) => trace.stepId === "pause")).toMatchObject({
       secretTainted: true,
     });
+  });
+
+  it("keeps an early-arrival event completed when its post-event until cannot resolve", async () => {
+    const { store, config } = await setup();
+    const workflow = fixtureWorkflow({
+      execution: {
+        type: "workflow",
+        steps: [
+          {
+            id: "pause",
+            uses: "wait.for_signal",
+            with: { name: "ready", correlationId: "early-failure" },
+            next: "pause",
+            maxIterations: 2,
+            until: "{{ steps.pause.outputs.missing }}",
+          },
+        ],
+      },
+    });
+    await store.workflows.put(workflow);
+    await store.signals.append({
+      id: "early-control-failure",
+      name: "ready",
+      correlationId: "early-failure",
+      payload: { received: true },
+      receivedAt: new Date().toISOString(),
+    });
+    const run = await triggerRun(config, {
+      workflow,
+      trigger: fixtureTrigger(),
+      inputs: {},
+    });
+
+    const finished = await executeRun(config, run.runId);
+
+    expect(finished.status).toBe("failed");
+    expect(finished.error).toMatch(/resolved to undefined/);
+    expect(finished.trace).toEqual([
+      expect.objectContaining({
+        stepId: "pause",
+        status: "completed",
+        outputs: { received: true },
+      }),
+    ]);
+    await expect(
+      store.signals.findUnconsumedMatch("ready", "early-failure"),
+    ).resolves.toBeUndefined();
   });
 
   it("taints the current step when until reads an already-known tainted trace", async () => {
@@ -2081,6 +2235,58 @@ describe("executeRun — reclaim-safety: resumes mid-step from persisted trace h
     expect(finished.status).toBe("failed");
     expect(finished.error).toMatch(/secret-tainted step "poll"/);
     expect(finished.trace[0]).toMatchObject({ secretTainted: true });
+  });
+
+  it("finalizes a reclaimed run without replacing its successful trace when control reconstruction fails", async () => {
+    const { store, config } = await setup();
+    const workflow = fixtureWorkflow({
+      execution: {
+        type: "workflow",
+        steps: [
+          {
+            id: "effect",
+            uses: "test.echo",
+            next: "effect",
+            until: "{{ steps.effect.outputs.missing }}",
+            maxIterations: 2,
+          },
+        ],
+      },
+    });
+    await store.workflows.put(workflow);
+    const run = await triggerRun(config, {
+      workflow,
+      trigger: fixtureTrigger(),
+      inputs: {},
+    });
+    await store.runs.put({
+      ...run,
+      status: "running",
+      trace: [
+        {
+          seq: 0,
+          stepId: "effect",
+          block: "test.echo",
+          status: "completed",
+          inputs: {},
+          outputs: { receipt: "already-happened" },
+          startedAt: "t",
+          endedAt: "t",
+        },
+      ],
+    });
+
+    const finished = await executeRun(config, run.runId);
+
+    expect(finished.status).toBe("failed");
+    expect(finished.error).toMatch(/resolved to undefined/);
+    expect(finished.trace).toEqual([
+      expect.objectContaining({
+        stepId: "effect",
+        status: "completed",
+        outputs: { receipt: "already-happened" },
+      }),
+    ]);
   });
 
   it("does not treat a normal bracket-suffixed step as a forEach occurrence during reclaim", async () => {

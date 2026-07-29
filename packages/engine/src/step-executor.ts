@@ -1051,6 +1051,43 @@ async function determineNextStepId(
   return nextStepIdInArrayOrder(workflow, step.id);
 }
 
+export type CompletedStepControlResolution =
+  | { kind: "resolved"; nextStepId?: string }
+  | { kind: "failed"; error: Error };
+
+/**
+ * Resolves post-dispatch control without discarding a successful effect
+ * trace when `until` evaluation fails. Callers persist the completed trace
+ * first, then surface `error` as the run-level failure.
+ */
+export async function resolveCompletedStepControl(
+  workflow: Workflow,
+  step: WorkflowStep,
+  run: RunRecord,
+  ifResult: boolean | undefined,
+  resolvedSecretRefs: Set<string>,
+  config: EngineConfig,
+): Promise<CompletedStepControlResolution> {
+  try {
+    return {
+      kind: "resolved",
+      nextStepId: await determineNextStepId(
+        workflow,
+        step,
+        run,
+        ifResult,
+        resolvedSecretRefs,
+        config,
+      ),
+    };
+  } catch (err) {
+    return {
+      kind: "failed",
+      error: err instanceof Error ? err : new Error(String(err)),
+    };
+  }
+}
+
 /**
  * The full per-step dispatch pipeline (architecture §4.2). Returns a
  * `StepOutcome` telling the run-loop (`run-lifecycle.ts`) whether to
@@ -1267,7 +1304,7 @@ export async function executeStep(
     return { kind: "failed", run: updatedRun, error: new Error(failure.error ?? `Step "${step.id}" failed.`) };
   }
 
-  const nextStepId = await determineNextStepId(
+  const controlResolution = await resolveCompletedStepControl(
     workflow,
     step,
     provisionalRun,
@@ -1302,7 +1339,18 @@ export async function executeStep(
     finalTraces,
     resolvedSecretRefs,
   );
-  return { kind: "continue", run: updatedRun, nextStepId };
+  if (controlResolution.kind === "failed") {
+    return {
+      kind: "failed",
+      run: updatedRun,
+      error: controlResolution.error,
+    };
+  }
+  return {
+    kind: "continue",
+    run: updatedRun,
+    nextStepId: controlResolution.nextStepId,
+  };
 }
 
 /**
@@ -1366,6 +1414,7 @@ async function executeWaitDispatch(
   }
 
   let preparedNextStepId: string | undefined;
+  let preparedControlError: Error | undefined;
   const result = await enterWait(waitMachineConfig, {
     run: historicallyTaintAwareRun,
     stepId: step.id,
@@ -1376,7 +1425,7 @@ async function executeWaitDispatch(
     secretTainted: dataSecretTainted,
     controlSecretTainted,
     prepareEarlyArrivalRun: async (provisionalRun) => {
-      preparedNextStepId = await determineNextStepId(
+      const controlResolution = await resolveCompletedStepControl(
         workflow,
         step,
         provisionalRun,
@@ -1384,6 +1433,11 @@ async function executeWaitDispatch(
         resolvedSecretRefs,
         config,
       );
+      if (controlResolution.kind === "failed") {
+        preparedControlError = controlResolution.error;
+      } else {
+        preparedNextStepId = controlResolution.nextStepId;
+      }
       return prepareTaintAfterControlResolution(
         config,
         workflow,
@@ -1398,6 +1452,13 @@ async function executeWaitDispatch(
   if (!result.suspended) {
     // Early-arrival resolution — continue exactly as if this step completed
     // normally (architecture §4.4 step 3).
+    if (preparedControlError) {
+      return {
+        kind: "failed",
+        run: result.run,
+        error: preparedControlError,
+      };
+    }
     return {
       kind: "continue",
       run: result.run,

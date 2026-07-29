@@ -64,6 +64,52 @@ describe("createEngine — resume wrappers continue execution past the resumed s
     expect(outcome.run.trace.find((t) => t.stepId === "after")).toMatchObject({ status: "completed", inputs: { note: "reached-after-resume" } });
   });
 
+  it("commits a completed wait event before failing a broken post-resume until", async () => {
+    const { store, engine } = await setup();
+    const workflow = fixtureWorkflow({
+      execution: {
+        type: "workflow",
+        steps: [
+          {
+            id: "wait_step",
+            uses: "wait.manual",
+            next: "wait_step",
+            until: "{{ steps.wait_step.outputs.missing }}",
+            maxIterations: 2,
+          },
+        ],
+      },
+    });
+    await store.workflows.put(workflow);
+    const run = await engine.triggerRun({
+      workflow,
+      trigger: fixtureTrigger(),
+      inputs: {},
+    });
+    const waiting = await engine.executeRun(run.runId);
+    expect(waiting.status).toBe("waiting");
+
+    const outcome = await engine.resumeManual(
+      run.runId,
+      "wait_step",
+      { received: true },
+    );
+
+    expect(outcome.kind).toBe("resumed");
+    if (outcome.kind !== "resumed") throw new Error("unreachable");
+    expect(outcome.run.status).toBe("failed");
+    expect(outcome.run.error).toMatch(/resolved to undefined/);
+    expect(outcome.run.trace).toHaveLength(1);
+    expect(outcome.run.trace[0]).toMatchObject({
+      stepId: "wait_step",
+      status: "completed",
+      outputs: { received: true },
+    });
+    await expect(
+      store.waits.get(run.runId, "wait_step"),
+    ).resolves.toBeUndefined();
+  });
+
   it("carries secret taint through a persisted wait and rejects its public output after resume", async () => {
     const { store, cleanup } = await createTestStore();
     cleanups.push(cleanup);

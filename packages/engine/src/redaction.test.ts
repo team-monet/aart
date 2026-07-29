@@ -242,12 +242,26 @@ describe("applyRunRedaction", () => {
           payload: { "future-secret": "first-secret" },
           receivedAt: "2026-07-29T00:00:00.000Z",
         },
+        trace: [
+          {
+            seq: 0,
+            stepId: "source",
+            block: "test.echo",
+            status: "completed",
+            inputs: {},
+            outputs: { "future-secret": "first-secret" },
+            startedAt: "2026-07-29T00:00:00.000Z",
+          },
+        ],
       }),
       new Set(["first-secret"]),
     );
     expect(firstPass.secretTaintedInputPaths).toEqual(["/future-secret"]);
     expect(firstPass.secretTaintedTriggerPaths).toEqual([
       "/payload/future-secret",
+    ]);
+    expect(firstPass.trace[0]?.secretTaintedPaths).toEqual([
+      "/future-secret",
     ]);
 
     const secondPass = applyRunRedaction(
@@ -258,6 +272,43 @@ describe("applyRunRedaction", () => {
 
     expect(secondPass.secretTaintedInputPaths).toEqual(["*"]);
     expect(secondPass.secretTaintedTriggerPaths).toEqual(["*"]);
+    expect(secondPass.trace[0]?.secretTaintedPaths).toEqual(["*"]);
     expect(JSON.stringify(secondPass)).not.toContain("future-secret");
+  });
+
+  it("never persists a newly discovered pointer whose path already contains a secret", () => {
+    const secretKey = "already-secret";
+    const redacted = applyRunRedaction(
+      redactResolved,
+      fixtureRun({
+        inputs: { [secretKey]: "public" },
+        trigger: {
+          type: "manual",
+          id: "trigger",
+          source: "test",
+          payload: { [secretKey]: "public" },
+          receivedAt: "2026-07-29T00:00:00.000Z",
+        },
+        trace: [
+          {
+            seq: 0,
+            stepId: "source",
+            block: "test.echo",
+            status: "completed",
+            inputs: {},
+            outputs: { [secretKey]: "public" },
+            startedAt: "2026-07-29T00:00:00.000Z",
+          },
+        ],
+      }),
+      new Set([secretKey]),
+    );
+
+    expect(redacted.secretTaintedInputPaths).toEqual(["*"]);
+    // The trigger redactor detects the changed payload object at its parent
+    // boundary, which is already a safe, conservative pointer.
+    expect(redacted.secretTaintedTriggerPaths).toEqual(["/payload"]);
+    expect(redacted.trace[0]?.secretTaintedPaths).toEqual(["*"]);
+    expect(JSON.stringify(redacted)).not.toContain(secretKey);
   });
 });

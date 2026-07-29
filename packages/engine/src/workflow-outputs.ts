@@ -98,6 +98,14 @@ export function assertNoSecretTaintedOutputSources(
       }
       if (first.kind !== "property") continue;
       const source = run.trace.filter((trace) => trace.stepId === first.name).at(-1);
+      if (
+        source === undefined &&
+        run.trace.some((trace) => trace.controlSecretTainted === true)
+      ) {
+        throw new Error(
+          `public outputMapping "${outputName}" depends on absent step "${first.name}" after secret-controlled flow; optional field presence must not reveal a secret branch decision`,
+        );
+      }
       if (source?.controlSecretTainted === true) {
         throw new Error(
           `public outputMapping "${outputName}" depends on secret-tainted step "${first.name}" because its execution path was secret-controlled; expose a result whose selection does not depend on secret data`,

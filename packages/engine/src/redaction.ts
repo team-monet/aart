@@ -172,6 +172,35 @@ export function applyRedaction<T>(redact: RedactFn, record: T, resolvedSecretRef
   return redact(record, resolvedSecretRefs) as T;
 }
 
+function mergeTaintPaths(
+  redact: RedactFn,
+  existing: string[],
+  discovered: string[],
+  resolvedSecretRefs: ReadonlySet<string>,
+  forceWildcard = false,
+): string[] {
+  const redactedExisting = applyRedaction(
+    redact,
+    existing,
+    resolvedSecretRefs,
+  );
+  const redactedDiscovered = applyRedaction(
+    redact,
+    discovered,
+    resolvedSecretRefs,
+  );
+  if (
+    forceWildcard ||
+    existing.includes("*") ||
+    discovered.includes("*") ||
+    changedJsonPointers(existing, redactedExisting).length > 0 ||
+    changedJsonPointers(discovered, redactedDiscovered).length > 0
+  ) {
+    return ["*"];
+  }
+  return [...new Set([...existing, ...discovered])];
+}
+
 /**
  * Redacts a RunRecord while keeping its active concurrency lock readable by
  * every intake version sharing the store. The authored key is operational
@@ -195,31 +224,17 @@ export function applyRunRedaction(redact: RedactFn, run: RunRecord, resolvedSecr
   );
   const inputs = applyRedaction(redact, rawInputs, resolvedSecretRefs);
   const trigger = applyRedaction(redact, rawTrigger, resolvedSecretRefs);
-  const mergeRootTaintPaths = (
-    existing: string[],
-    discovered: string[],
-  ): string[] => {
-    const redactedExisting = applyRedaction(
-      redact,
-      existing,
-      resolvedSecretRefs,
-    );
-    if (
-      existing.includes("*") ||
-      discovered.includes("*") ||
-      changedJsonPointers(existing, redactedExisting).length > 0
-    ) {
-      return ["*"];
-    }
-    return [...new Set([...existing, ...discovered])];
-  };
-  const secretTaintedInputPaths = mergeRootTaintPaths(
+  const secretTaintedInputPaths = mergeTaintPaths(
+    redact,
     existingInputPaths,
     changedJsonPointers(rawInputs, inputs),
+    resolvedSecretRefs,
   );
-  const secretTaintedTriggerPaths = mergeRootTaintPaths(
+  const secretTaintedTriggerPaths = mergeTaintPaths(
+    redact,
     existingTriggerPaths,
     changedJsonPointers(rawTrigger, trigger),
+    resolvedSecretRefs,
   );
   const redactedTrace = run.trace.map((trace): StepTrace => {
     const redactedInputs = applyRedaction(
@@ -242,17 +257,13 @@ export function applyRunRedaction(redact: RedactFn, run: RunRecord, resolvedSecr
     const existingPaths =
       trace.secretTaintedPaths ??
       (trace.secretTainted === true ? ["*"] : []);
-    const combinedTaintedPaths = [
-      ...existingPaths,
-      ...(inputDiscoveredPaths.length > 0 &&
-      trace.outputs !== undefined
-        ? ["*"]
-        : []),
-      ...discoveredPaths,
-    ];
-    const secretTaintedPaths = combinedTaintedPaths.includes("*")
-      ? ["*"]
-      : [...new Set(combinedTaintedPaths)];
+    const secretTaintedPaths = mergeTaintPaths(
+      redact,
+      existingPaths,
+      discoveredPaths,
+      resolvedSecretRefs,
+      inputDiscoveredPaths.length > 0 && trace.outputs !== undefined,
+    );
     return {
       ...trace,
       inputs: redactedInputs,

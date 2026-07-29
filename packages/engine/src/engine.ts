@@ -7,7 +7,7 @@ import { createTrackingSecretResolver, throwingSecretResolver } from "./redactio
 import { buildExprContext, resolveBooleanExpression } from "./expr-context.js";
 import { cancelRun, executeRun, finalizeTerminal, runStepsLoop, triggerRun } from "./run-lifecycle.js";
 import { resolveWorkflowForRun } from "./snapshot.js";
-import { determineNextStepId, prepareTaintAfterControlResolution } from "./step-executor.js";
+import { prepareTaintAfterControlResolution, resolveCompletedStepControl } from "./step-executor.js";
 import type { DueWait, EngineConfig, ResumeOutcome, TriggerRunInput } from "./types.js";
 import {
   failExpiredWait as failExpiredWaitMechanism,
@@ -64,6 +64,7 @@ function waitMachineConfig(config: EngineConfig): WaitMachineConfig {
 interface PreparedResume {
   workflow?: Workflow;
   nextStepId?: string;
+  controlError?: Error;
 }
 
 async function prepareResumedRun(
@@ -80,21 +81,33 @@ async function prepareResumedRun(
   }
 
   let ifResult: boolean | undefined;
-  if (step.if !== undefined) {
-    const context = buildExprContext(run);
-    const secretResolver = createTrackingSecretResolver(config.resolveSecret ?? throwingSecretResolver, resolvedSecretRefs);
-    ifResult = await resolveBooleanExpression(step.if, context, { secretResolver });
+  let preDispatchControlError: Error | undefined;
+  try {
+    if (step.if !== undefined) {
+      const context = buildExprContext(run);
+      const secretResolver = createTrackingSecretResolver(config.resolveSecret ?? throwingSecretResolver, resolvedSecretRefs);
+      ifResult = await resolveBooleanExpression(step.if, context, { secretResolver });
+    }
+  } catch (err) {
+    preDispatchControlError =
+      err instanceof Error ? err : new Error(String(err));
   }
-  const nextStepId = await determineNextStepId(
-    workflow,
-    step,
-    run,
-    ifResult,
-    resolvedSecretRefs,
-    config,
-  );
+  const controlResolution = preDispatchControlError
+    ? { kind: "failed" as const, error: preDispatchControlError }
+    : await resolveCompletedStepControl(
+        workflow,
+        step,
+        run,
+        ifResult,
+        resolvedSecretRefs,
+        config,
+      );
   prepared.workflow = workflow;
-  prepared.nextStepId = nextStepId;
+  if (controlResolution.kind === "failed") {
+    prepared.controlError = controlResolution.error;
+  } else {
+    prepared.nextStepId = controlResolution.nextStepId;
+  }
   return prepareTaintAfterControlResolution(
     config,
     workflow,
@@ -130,6 +143,17 @@ async function resumeWithPreparation(
     throw new Error(
       `Resumed run "${outcome.run.runId}" was persisted without preparing its control-flow provenance.`,
     );
+  }
+  if (prepared.controlError) {
+    const finalRun = await finalizeTerminal(
+      config,
+      outcome.run,
+      prepared.workflow,
+      "failed",
+      resolvedSecretRefs,
+      prepared.controlError.message,
+    );
+    return { ...outcome, run: finalRun };
   }
   const finalRun = await runStepsLoop(
     config,
