@@ -279,6 +279,15 @@ export function applyRunRedaction(redact: RedactFn, run: RunRecord, resolvedSecr
             ),
           }
         : {}),
+      ...(trace.idempotencyLedgerKey !== undefined
+        ? {
+            idempotencyLedgerKey: applyRedaction(
+              redact,
+              trace.idempotencyLedgerKey,
+              resolvedSecretRefs,
+            ),
+          }
+        : {}),
       ...(secretTaintedPaths.length > 0
         ? { secretTainted: true, secretTaintedPaths }
         : {}),

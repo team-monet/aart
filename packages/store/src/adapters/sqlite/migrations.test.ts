@@ -364,6 +364,12 @@ describe("0005_idempotency_schema_version", () => {
       handle.store,
     );
     await expect(all.up()).resolves.toBe(5);
+    const indexes = handle.db
+      .prepare("PRAGMA index_list(idempotency_ledger)")
+      .all() as Array<{ name: string }>;
+    expect(indexes.map((index) => index.name)).toContain(
+      "idx_idempotency_ledger_run_id",
+    );
     const legacy = await handle.store.idempotencyLedger.get(
       "v2:legacy-collision",
     );

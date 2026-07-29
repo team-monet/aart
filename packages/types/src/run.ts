@@ -67,6 +67,10 @@ export const StepTraceSchema = z.object({
   // such as `map[0]`, but ownership never depends on parsing that string.
   authoredStepId: z.string().optional(),
   iterationIndex: z.number().int().nonnegative().optional(),
+  // Storage identity of the idempotency entry replayed or written by this
+  // occurrence. Persisted so a later secret discovery can revoke a global
+  // ledger entry even when another run originally created it.
+  idempotencyLedgerKey: z.string().optional(),
 });
 export type StepTrace = z.infer<typeof StepTraceSchema>;
 

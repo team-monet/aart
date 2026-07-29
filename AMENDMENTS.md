@@ -2046,14 +2046,23 @@ written to the idempotency cache. The cache decision also compares every
 successful output with its redacted form before the ledger write, covering an
 output that matches a secret resolved by an earlier step even when the current
 block did not itself consume secret data. If the matching secret is discovered
-only by a later step, every subsequent persistence boundary revisits the
-current run's ledger entries and atomically deletes any entry whose recorded
-output the redactor now changes. Idempotency storage keys remain namespaced,
+only by a later step, every subsequent persistence boundary revisits both the
+current run's authored entries and the exact global entries replayed by its
+traces. Deletion and the redacted `RunRecord` write share one store
+transaction. An entry is revoked when its key or output is changed by
+redaction, or when the consuming trace is data/control tainted; this also
+covers non-literal derivatives and cache entries originally written by another
+run. Control-tainted dispatches are neither replayed from nor admitted to the
+global cache. `StepTrace.idempotencyLedgerKey` is protected operational
+metadata used only to locate that entry and is itself redacted if a later
+secret matches it. Thrown finalization paths perform the same preparation and
+revocation as normal step/wait boundaries. Idempotency storage keys remain namespaced,
 but replay safety does not rely on a string prefix: every current entry also
 carries the engine schema version, and entries without that metadata are
 rejected even when a legacy authored key happens to equal the v2-prefixed key.
 SQLite migration `0005_idempotency_schema_version` adds the nullable metadata
-column so upgraded legacy rows remain readable but never replayable.
+column so upgraded legacy rows remain readable but never replayable, plus a
+`run_id` index for the persistence-boundary revocation lookup.
 
 Normal dispatch now prepares the raw trace in memory, evaluates `until`
 against that provisional trace, computes data/control provenance, redacts,
@@ -2081,6 +2090,9 @@ conservatively tainted at `"*"`, including non-literal derivatives. Historical
 `if`/active-`until` dependencies are then replayed as provenance analysis over
 the persisted trace order, so a branch selected earlier through that derivative
 taints its selected continuation before terminal output materialization.
+Historical `with`, `idempotencyKey`, and `forEach` expressions receive the same
+replay analysis, including a completed forEach aggregate whose source only
+becomes known as secret later.
 
 Trace identity and execution metadata (`stepId`, `block`, timestamps, status,
 and the explicit authored/iteration identity) are intentionally structural,

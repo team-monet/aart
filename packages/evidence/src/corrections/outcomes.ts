@@ -43,6 +43,7 @@ export async function updateRunOutput(store: AartStore, correction: Correction):
     "controlSecretTainted",
     "authoredStepId",
     "iterationIndex",
+    "idempotencyLedgerKey",
   ];
   if (protectedTraceFields.some(
     (field) =>

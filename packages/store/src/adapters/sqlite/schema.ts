@@ -292,6 +292,7 @@ export const SQLITE_SCHEMA_STATEMENTS: readonly string[] = [
     recorded_output_json TEXT NOT NULL,
     created_at TEXT NOT NULL
   )`,
+  `CREATE INDEX IF NOT EXISTS idx_idempotency_ledger_run_id ON idempotency_ledger(run_id)`,
 
   `CREATE TABLE IF NOT EXISTS rejected_triggers (
     id TEXT PRIMARY KEY,

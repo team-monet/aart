@@ -137,7 +137,7 @@ export async function enterWait(config: WaitMachineConfig, options: EnterWaitOpt
         await revokeSecretTaintedIdempotency(
           tx,
           config.redact,
-          run.runId,
+          preparedRun,
           resolvedSecretRefs,
         );
         const redacted = applyRunRedaction(config.redact, preparedRun, resolvedSecretRefs);
@@ -177,7 +177,7 @@ export async function enterWait(config: WaitMachineConfig, options: EnterWaitOpt
     await revokeSecretTaintedIdempotency(
       tx,
       config.redact,
-      run.runId,
+      updatedRun,
       resolvedSecretRefs,
     );
     const redactedRun = applyRunRedaction(config.redact, updatedRun, resolvedSecretRefs);
@@ -325,7 +325,7 @@ async function claimAndCompleteWait(config: WaitMachineConfig, args: ClaimAndCom
     await revokeSecretTaintedIdempotency(
       tx,
       config.redact,
-      runId,
+      preparedRun,
       resolvedSecretRefs,
     );
     const redacted = applyRunRedaction(config.redact, preparedRun, resolvedSecretRefs);
@@ -423,7 +423,7 @@ export async function failExpiredWait(config: WaitMachineConfig, runId: string, 
     await revokeSecretTaintedIdempotency(
       tx,
       config.redact,
-      runId,
+      updatedRun,
       resolvedSecretRefs,
     );
     const redacted = applyRunRedaction(config.redact, updatedRun, resolvedSecretRefs);

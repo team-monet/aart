@@ -58,20 +58,45 @@ export async function recordIdempotency(store: AartStore, resolvedKey: string, r
 export async function revokeSecretTaintedIdempotency(
   store: AartStore,
   redact: RedactFn,
-  runId: string,
+  run: import("@aart/types").RunRecord,
   resolvedSecretRefs: ReadonlySet<string>,
 ): Promise<void> {
   if (resolvedSecretRefs.size === 0) return;
-  const entries = await store.idempotencyLedger.listByRun(runId);
+  const entriesByKey = new Map(
+    (await store.idempotencyLedger.listByRun(run.runId)).map((entry) => [
+      entry.resolvedKey,
+      entry,
+    ]),
+  );
+  for (const trace of run.trace) {
+    if (trace.idempotencyLedgerKey === undefined) continue;
+    const entry = await store.idempotencyLedger.get(
+      trace.idempotencyLedgerKey,
+    );
+    if (entry) entriesByKey.set(entry.resolvedKey, entry);
+  }
   await Promise.all(
-    entries.map(async (entry) => {
-      const redacted = applyRedaction(
+    [...entriesByKey.values()].map(async (entry) => {
+      const redactedOutput = applyRedaction(
         redact,
         entry.recordedOutput,
         resolvedSecretRefs,
       );
+      const redactedKey = applyRedaction(
+        redact,
+        entry.resolvedKey,
+        resolvedSecretRefs,
+      );
+      const consumedByTaintedTrace = run.trace.some(
+        (trace) =>
+          trace.idempotencyLedgerKey === entry.resolvedKey &&
+          (trace.secretTainted === true ||
+            trace.controlSecretTainted === true),
+      );
       if (
-        changedJsonPointers(entry.recordedOutput, redacted).length > 0
+        consumedByTaintedTrace ||
+        changedJsonPointers(entry.recordedOutput, redactedOutput).length > 0 ||
+        redactedKey !== entry.resolvedKey
       ) {
         await store.idempotencyLedger.delete(entry.resolvedKey);
       }

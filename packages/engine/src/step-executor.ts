@@ -9,7 +9,7 @@ import { AartError, DEFAULT_EFFECTFUL_CAPABILITIES, isEffectfulCapability, Itera
 import { checkCapabilityDispatch, alwaysEmptyGrantedCapabilities } from "./capability.js";
 import { parseDurationMs } from "./duration.js";
 import { buildExprContext, resolveArrayExpression, resolveBooleanExpression, resolveStringExpression, resolveWithRecord } from "./expr-context.js";
-import { checkIdempotency, recordIdempotency, revokeSecretTaintedIdempotency } from "./idempotency.js";
+import { checkIdempotency, idempotencyStorageKey, recordIdempotency, revokeSecretTaintedIdempotency } from "./idempotency.js";
 import { jsonCompatibilityProblem, jsonValuesEqual } from "./output-validation.js";
 import { applyRedaction, applyRunRedaction, changedJsonPointers, createTrackingSecretResolver, isTextMime, throwingSecretResolver } from "./redaction.js";
 import { CURRENT_ENGINE_SCHEMA_VERSION } from "./schema-version.js";
@@ -220,6 +220,7 @@ async function dispatchOnce(
   resolveOptions: ResolveOptions,
   resolvedSecretRefs: Set<string>,
   dataSecretTaintedBeforeDispatch = false,
+  controlSecretTaintedBeforeDispatch = false,
 ): Promise<StepTrace> {
   const impl = config.resolveBlockForRun?.(run, step.uses) ?? config.blocks[step.uses];
   if (!impl) {
@@ -229,9 +230,14 @@ async function dispatchOnce(
   const startedAt = now().toISOString();
 
   const resolvedIdempotencyKey = await resolveStringExpression(step.idempotencyKey, exprContext, resolveOptions);
+  const idempotencyLedgerKey =
+    resolvedIdempotencyKey === undefined
+      ? undefined
+      : idempotencyStorageKey(resolvedIdempotencyKey);
   if (
     resolvedIdempotencyKey !== undefined &&
-    !dataSecretTaintedBeforeDispatch
+    !dataSecretTaintedBeforeDispatch &&
+    !controlSecretTaintedBeforeDispatch
   ) {
     const check = await checkIdempotency(config.store, resolvedIdempotencyKey);
     if (check.alreadyCompleted) {
@@ -241,7 +247,7 @@ async function dispatchOnce(
       if (compatibilityProblem) {
         return { seq, stepId: stepIdForTrace, authoredStepId: step.id, block: step.uses, status: "failed", inputs: resolvedInputs, error: compatibilityProblem, startedAt, endedAt, durationMs: 0 };
       }
-      return { seq, stepId: stepIdForTrace, authoredStepId: step.id, block: step.uses, status: "completed", inputs: resolvedInputs, outputs, startedAt, endedAt, durationMs: 0 };
+      return { seq, stepId: stepIdForTrace, authoredStepId: step.id, block: step.uses, status: "completed", inputs: resolvedInputs, outputs, startedAt, endedAt, durationMs: 0, idempotencyLedgerKey };
     }
   }
 
@@ -337,6 +343,7 @@ async function dispatchOnce(
     !shouldFake &&
     !dataSecretTaintedBeforeDispatch &&
     !dataSecretAccessed &&
+    !controlSecretTaintedBeforeDispatch &&
     !outputsContainResolvedSecret
   ) {
     await recordIdempotency(config.store, resolvedIdempotencyKey, run.runId, stepIdForTrace, outputs, now());
@@ -352,6 +359,14 @@ async function dispatchOnce(
     endedAt,
     durationMs,
     authoredStepId: step.id,
+    ...(resolvedIdempotencyKey !== undefined &&
+    !shouldFake &&
+    !dataSecretTaintedBeforeDispatch &&
+    !dataSecretAccessed &&
+    !controlSecretTaintedBeforeDispatch &&
+    !outputsContainResolvedSecret
+      ? { idempotencyLedgerKey }
+      : {}),
     ...(dataSecretAccessed
       ? { secretTainted: true, secretTaintedPaths: ["*"] }
       : {}),
@@ -365,6 +380,7 @@ async function executeForEachStep(
   step: WorkflowStep,
   resolvedSecretRefs: Set<string>,
   dataSecretTaintedBeforeDispatch: boolean,
+  controlSecretTaintedBeforeDispatch: boolean,
 ): Promise<{ traces: StepTrace[]; failed: boolean }> {
   const baseContext = buildExprContext(run);
   const secretResolver = createTrackingSecretResolver(config.resolveSecret ?? throwingSecretResolver, resolvedSecretRefs);
@@ -421,6 +437,7 @@ async function executeForEachStep(
       resolveOptions,
       resolvedSecretRefs,
       dataSecretTaintedBeforeDispatch,
+      controlSecretTaintedBeforeDispatch,
     );
     trace.authoredStepId = step.id;
     trace.iterationIndex = index;
@@ -513,14 +530,16 @@ async function appendTracesAndPersist(
     newTraces.length,
     resolvedSecretRefs,
   );
-  await revokeSecretTaintedIdempotency(
-    config.store,
-    config.redact,
-    run.runId,
-    resolvedSecretRefs,
-  );
   const redacted = applyRunRedaction(config.redact, prepared, resolvedSecretRefs);
-  await config.store.runs.put(redacted);
+  await config.store.transact(async (tx) => {
+    await revokeSecretTaintedIdempotency(
+      tx,
+      config.redact,
+      prepared,
+      resolvedSecretRefs,
+    );
+    await tx.runs.put(redacted);
+  });
   return redacted;
 }
 
@@ -662,6 +681,50 @@ function runHasSecretControlledFlow(
   run: RunRecord,
 ): boolean {
   return run.trace.some((trace) => trace.controlSecretTainted === true);
+}
+
+function annotateHistoricalDataTaint(
+  workflow: Workflow,
+  run: RunRecord,
+): RunRecord {
+  const trace: StepTrace[] = [];
+  for (const entry of run.trace) {
+    const authoredStepId = authoredStepIdForTrace(workflow, entry);
+    const step = workflow.execution.steps.find(
+      (candidate) => candidate.id === authoredStepId,
+    );
+    if (!step) {
+      trace.push(entry);
+      continue;
+    }
+    const priorRun = { ...run, trace };
+    const iterationBinding =
+      step.forEach === undefined ? undefined : (step.as ?? "item");
+    const dependencies = [
+      ...Object.values(step.with ?? {}),
+      step.idempotencyKey,
+      step.forEach,
+    ];
+    const dataTainted = dependencies.some(
+      (expression) =>
+        valueReferencesSecret(expression) ||
+        valueReferencesSecretTaintedTrace(
+          expression,
+          priorRun,
+          iterationBinding,
+        ),
+    );
+    trace.push(
+      dataTainted && entry.outputs !== undefined
+        ? {
+            ...entry,
+            secretTainted: true,
+            secretTaintedPaths: ["*"],
+          }
+        : entry,
+    );
+  }
+  return { ...run, trace };
 }
 
 function annotateHistoricalControlTaint(
@@ -841,9 +904,13 @@ export function prepareTaintAfterControlResolution(
     { ...run, trace: refreshedTrace },
     resolvedSecretRefs,
   );
-  const historicallyTaintAwareRun = annotateHistoricalControlTaint(
+  const historicallyDataTaintAwareRun = annotateHistoricalDataTaint(
     workflow,
     taintAwareRun,
+  );
+  const historicallyTaintAwareRun = annotateHistoricalControlTaint(
+    workflow,
+    historicallyDataTaintAwareRun,
   );
   refreshedTrace = historicallyTaintAwareRun.trace;
   const currentTraces = refreshedTrace.slice(
@@ -935,13 +1002,15 @@ export async function refreshTaintAfterControlResolution(
     preparedRun,
     resolvedSecretRefs,
   );
-  await revokeSecretTaintedIdempotency(
-    config.store,
-    config.redact,
-    run.runId,
-    resolvedSecretRefs,
-  );
-  await config.store.runs.put(refreshedRun);
+  await config.store.transact(async (tx) => {
+    await revokeSecretTaintedIdempotency(
+      tx,
+      config.redact,
+      preparedRun,
+      resolvedSecretRefs,
+    );
+    await tx.runs.put(refreshedRun);
+  });
   return refreshedRun;
 }
 
@@ -1141,6 +1210,7 @@ export async function executeStep(
       step,
       resolvedSecretRefs,
       dataSecretTaint,
+      controlSecretTaint,
     );
     newTraces.push(...result.traces);
     stepFailed = result.failed;
@@ -1156,6 +1226,7 @@ export async function executeStep(
       resolveOptions,
       resolvedSecretRefs,
       dataSecretTaint,
+      controlSecretTaint,
     );
     newTraces.push(trace);
     stepFailed = trace.status === "failed";

@@ -231,12 +231,16 @@ export function createSqliteAddIdempotencySchemaVersionMigration(db: DatabaseSyn
           err instanceof Error &&
           err.message.includes("duplicate column name")
         ) {
-          return;
+          // A prior interrupted/retried migration may already have added
+          // the column. Continue so the companion lookup index is repaired.
+        } else {
+          throw err;
         }
-        throw err;
       }
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_idempotency_ledger_run_id ON idempotency_ledger(run_id)`);
     },
     async down(): Promise<void> {
+      db.exec(`DROP INDEX IF EXISTS idx_idempotency_ledger_run_id`);
       db.exec(`ALTER TABLE idempotency_ledger DROP COLUMN schema_version`);
     },
   };

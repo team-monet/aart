@@ -2,7 +2,7 @@ import type { AartStore } from "@aart/store";
 import { ConcurrencyRejectedError } from "@aart/types";
 import type { BlockImplementation, Field } from "@aart/types";
 import { afterEach, describe, expect, it } from "vitest";
-import { idempotencyStorageKey } from "./idempotency.js";
+import { idempotencyStorageKey, recordIdempotency } from "./idempotency.js";
 import { cancelRun, executeRun, triggerRun } from "./run-lifecycle.js";
 import { createTestStore, echoBlock, failingBlock, fixtureTrigger, testEngineConfig, fixtureWorkflow } from "./test-utils/fixtures.js";
 import type { EngineConfig } from "./types.js";
@@ -865,6 +865,312 @@ describe("executeRun — fresh execution", () => {
     ).resolves.toBeUndefined();
   });
 
+  it("revokes a global cache entry replayed from another run when this run later discovers its output is secret", async () => {
+    const { store, config } = await setup({
+      redact: redactResolvedValues,
+      resolveSecret: () => "secret-value",
+    });
+    await recordIdempotency(
+      store,
+      "shared-result",
+      "originating-run",
+      "cached",
+      { value: "secret-value" },
+      new Date(),
+    );
+    const workflow = fixtureWorkflow({
+      outputs: [{ name: "result", type: "string", required: true }],
+      execution: {
+        type: "workflow",
+        steps: [
+          {
+            id: "cached",
+            uses: "test.echo",
+            idempotencyKey: "shared-result",
+          },
+          {
+            id: "discover",
+            uses: "test.echo",
+            with: { secret: "{{ secrets.API_KEY }}" },
+          },
+        ],
+        outputMapping: { result: "{{ steps.cached.outputs.value }}" },
+      },
+    });
+    await store.workflows.put(workflow);
+    const run = await triggerRun(config, {
+      workflow,
+      trigger: fixtureTrigger(),
+      inputs: {},
+    });
+
+    const finished = await executeRun(config, run.runId);
+
+    expect(finished.status).toBe("failed");
+    expect(finished.trace.find((trace) => trace.stepId === "cached")).toMatchObject({
+      secretTainted: true,
+    });
+    await expect(
+      store.idempotencyLedger.get(idempotencyStorageKey("shared-result")),
+    ).resolves.toBeUndefined();
+  });
+
+  it("revokes a cache entry whose key is later discovered to contain a secret even when its output is clean", async () => {
+    const constantBlock: BlockImplementation = {
+      manifest: {
+        id: "test.clean-constant",
+        version: "1.0.0",
+        capabilities: [],
+        inputSchema: {},
+        outputSchema: {},
+        description: "Returns a public constant.",
+      },
+      execute: async () => ({ value: "public" }),
+    };
+    const { store, config } = await setup({
+      blocks: { [constantBlock.manifest.id]: constantBlock },
+      redact: redactResolvedValues,
+      resolveSecret: () => "secret-key",
+    });
+    const workflow = fixtureWorkflow({
+      inputs: [{ name: "token", type: "string", required: true }],
+      execution: {
+        type: "workflow",
+        steps: [
+          {
+            id: "cached",
+            uses: constantBlock.manifest.id,
+            idempotencyKey: "{{ inputs.token }}",
+          },
+          {
+            id: "discover",
+            uses: "test.echo",
+            with: { secret: "{{ secrets.API_KEY }}" },
+          },
+        ],
+      },
+    });
+    await store.workflows.put(workflow);
+    const run = await triggerRun(config, {
+      workflow,
+      trigger: fixtureTrigger(),
+      inputs: { token: "secret-key" },
+    });
+
+    const finished = await executeRun(config, run.runId);
+
+    expect(finished.trace.find((trace) => trace.stepId === "cached")).toMatchObject({
+      secretTainted: true,
+      secretTaintedPaths: ["*"],
+    });
+    await expect(
+      store.idempotencyLedger.get(idempotencyStorageKey("secret-key")),
+    ).resolves.toBeUndefined();
+    expect(JSON.stringify(finished)).not.toContain("v2:secret-key");
+  });
+
+  it("revokes earlier cache entries when later secret resolution is followed by a thrown engine refusal", async () => {
+    const { store, config } = await setup({
+      redact: redactResolvedValues,
+      resolveSecret: () => "secret-value",
+    });
+    const workflow = fixtureWorkflow({
+      inputs: [{ name: "token", type: "string", required: true }],
+      execution: {
+        type: "workflow",
+        steps: [
+          {
+            id: "cached",
+            uses: "test.echo",
+            with: { value: "{{ inputs.token }}" },
+            idempotencyKey: "cached-before-refusal",
+          },
+          {
+            id: "refused",
+            uses: "test.missing-block",
+            with: { secret: "{{ secrets.API_KEY }}" },
+          },
+        ],
+      },
+    });
+    await store.workflows.put(workflow);
+    const run = await triggerRun(config, {
+      workflow,
+      trigger: fixtureTrigger(),
+      inputs: { token: "secret-value" },
+    });
+
+    const finished = await executeRun(config, run.runId);
+
+    expect(finished.status).toBe("failed");
+    expect(finished.error).toMatch(/No BlockImplementation/);
+    await expect(
+      store.idempotencyLedger.get(
+        idempotencyStorageKey("cached-before-refusal"),
+      ),
+    ).resolves.toBeUndefined();
+  });
+
+  it("rolls back cache revocation when the same transaction cannot persist the redacted run", async () => {
+    const { store, config } = await setup({
+      redact: redactResolvedValues,
+      resolveSecret: () => "secret-value",
+    });
+    const workflow = fixtureWorkflow({
+      inputs: [{ name: "token", type: "string", required: true }],
+      execution: {
+        type: "workflow",
+        steps: [
+          {
+            id: "cached",
+            uses: "test.echo",
+            with: { value: "{{ inputs.token }}" },
+            idempotencyKey: "atomic-revocation",
+          },
+          {
+            id: "discover",
+            uses: "test.echo",
+            with: { secret: "{{ secrets.API_KEY }}" },
+          },
+        ],
+      },
+    });
+    await store.workflows.put(workflow);
+    const run = await triggerRun(config, {
+      workflow,
+      trigger: fixtureTrigger(),
+      inputs: { token: "secret-value" },
+    });
+    const originalTransact = store.transact.bind(store);
+    store.transact = (fn) => originalTransact(async (tx) => {
+      const originalPutRun = tx.runs.put.bind(tx.runs);
+      tx.runs.put = async (record) => {
+        await originalPutRun(record);
+        if (record.trace.some((trace) => trace.stepId === "discover")) {
+          throw new Error("simulated run persistence failure");
+        }
+      };
+      return fn(tx);
+    });
+
+    await expect(executeRun(config, run.runId)).rejects.toThrow(
+      /simulated run persistence failure/,
+    );
+
+    await expect(
+      store.idempotencyLedger.get(idempotencyStorageKey("atomic-revocation")),
+    ).resolves.toBeDefined();
+    const persisted = await store.runs.get(run.runId);
+    expect(persisted?.trace.some((trace) => trace.stepId === "discover")).toBe(
+      false,
+    );
+  });
+
+  it("retroactively taints a completed forEach whose source later becomes secret", async () => {
+    const constantBlock: BlockImplementation = {
+      manifest: {
+        id: "test.for-each-constant",
+        version: "1.0.0",
+        capabilities: [],
+        inputSchema: {},
+        outputSchema: {},
+        description: "Returns a constant for every item.",
+      },
+      execute: async () => ({ value: "included" }),
+    };
+    const { store, config } = await setup({
+      blocks: { [constantBlock.manifest.id]: constantBlock },
+      redact: redactResolvedValues,
+      resolveSecret: () => "secret-item",
+    });
+    const workflow = fixtureWorkflow({
+      inputs: [{ name: "tokens", type: "json", required: true }],
+      outputs: [{ name: "result", type: "json", required: true }],
+      execution: {
+        type: "workflow",
+        steps: [
+          {
+            id: "map",
+            uses: constantBlock.manifest.id,
+            forEach: "{{ inputs.tokens }}",
+          },
+          {
+            id: "discover",
+            uses: "test.echo",
+            with: { secret: "{{ secrets.API_KEY }}" },
+          },
+        ],
+        outputMapping: { result: "{{ steps.map.outputs.items }}" },
+      },
+    });
+    await store.workflows.put(workflow);
+    const run = await triggerRun(config, {
+      workflow,
+      trigger: fixtureTrigger(),
+      inputs: { tokens: ["secret-item"] },
+    });
+
+    const finished = await executeRun(config, run.runId);
+
+    expect(finished.status).toBe("failed");
+    expect(
+      finished.trace.find(
+        (trace) => trace.stepId === "map" && trace.iterationIndex === undefined,
+      ),
+    ).toMatchObject({
+      secretTainted: true,
+      secretTaintedPaths: ["*"],
+    });
+  });
+
+  it("does not admit a secret-control-selected successor into the global cache", async () => {
+    const constantBlock: BlockImplementation = {
+      manifest: {
+        id: "test.control-selected-constant",
+        version: "1.0.0",
+        capabilities: [],
+        inputSchema: {},
+        outputSchema: {},
+        description: "Returns a public branch label.",
+      },
+      execute: async () => ({ value: "selected" }),
+    };
+    const { store, config } = await setup({
+      blocks: { [constantBlock.manifest.id]: constantBlock },
+      redact: redactResolvedValues,
+      resolveSecret: () => true,
+    });
+    const workflow = fixtureWorkflow({
+      execution: {
+        type: "workflow",
+        steps: [
+          {
+            id: "gate",
+            uses: "test.echo",
+            if: "{{ secrets.FLAG }}",
+          },
+          {
+            id: "selected",
+            uses: constantBlock.manifest.id,
+            idempotencyKey: "selected-result",
+          },
+        ],
+      },
+    });
+    await store.workflows.put(workflow);
+    const run = await triggerRun(config, {
+      workflow,
+      trigger: fixtureTrigger(),
+      inputs: {},
+    });
+
+    await executeRun(config, run.runId);
+
+    await expect(
+      store.idempotencyLedger.get(idempotencyStorageKey("selected-result")),
+    ).resolves.toBeUndefined();
+  });
+
   it("retroactively propagates a later-discovered secret through an earlier control decision", async () => {
     const constantBlock: BlockImplementation = {
       manifest: {
@@ -1286,12 +1592,16 @@ describe("executeRun — fresh execution", () => {
     await store.workflows.put(workflow);
     const run = await triggerRun(config, { workflow, trigger: fixtureTrigger(), inputs: {} });
     const persistedPollValues: unknown[] = [];
-    const originalPutRun = store.runs.put.bind(store.runs);
-    store.runs.put = async (record) => {
-      const poll = record.trace.find((trace) => trace.stepId === "poll");
-      if (poll?.outputs) persistedPollValues.push(poll.outputs["value"]);
-      return originalPutRun(record);
-    };
+    const originalTransact = store.transact.bind(store);
+    store.transact = (fn) => originalTransact(async (tx) => {
+      const originalPutRun = tx.runs.put.bind(tx.runs);
+      tx.runs.put = async (record) => {
+        const poll = record.trace.find((trace) => trace.stepId === "poll");
+        if (poll?.outputs) persistedPollValues.push(poll.outputs["value"]);
+        return originalPutRun(record);
+      };
+      return fn(tx);
+    });
 
     const finished = await executeRun(config, run.runId);
 

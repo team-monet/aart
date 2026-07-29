@@ -17,9 +17,11 @@ import {
   authoredStepIdForTrace,
   determineNextStepId,
   executeStep,
+  prepareTaintAfterControlResolution,
   refreshTaintAfterControlResolution,
   type StepOutcome,
 } from "./step-executor.js";
+import { revokeSecretTaintedIdempotency } from "./idempotency.js";
 import type { EngineConfig, TriggerRunInput } from "./types.js";
 import { isWaitBlockId } from "./wait/wait-blocks.js";
 import { materializeWorkflowOutputs } from "./workflow-outputs.js";
@@ -192,7 +194,15 @@ export async function finalizeTerminal(
   }
   updated = { ...updated, status: terminalStatus, outputs, error: terminalError, endedAt: now.toISOString(), updatedAt: now.toISOString() };
   const redacted = applyRunRedaction(config.redact, updated, resolvedSecretRefs);
-  await config.store.runs.put(redacted);
+  await config.store.transact(async (tx) => {
+    await revokeSecretTaintedIdempotency(
+      tx,
+      config.redact,
+      updated,
+      resolvedSecretRefs,
+    );
+    await tx.runs.put(redacted);
+  });
 
   if (typeof concurrencyKey === "string") {
     await releaseQueuedRuns(config.store, redacted.workflowId, concurrencyKey, concurrencyKeyFormat);
@@ -234,7 +244,15 @@ async function recordThrownFailureAndFinalize(
   // normal dispatch failure gets.
   const trace: StepTrace = { seq: run.trace.length, stepId: step.id, block: step.uses, status: "failed", inputs: {}, error: message, startedAt: now, endedAt: now, durationMs: 0 };
   const withTrace: RunRecord = { ...run, trace: [...run.trace, trace] };
-  return finalizeTerminal(config, withTrace, workflow, "failed", resolvedSecretRefs, message);
+  const prepared = prepareTaintAfterControlResolution(
+    config,
+    workflow,
+    step,
+    withTrace,
+    1,
+    resolvedSecretRefs,
+  );
+  return finalizeTerminal(config, prepared, workflow, "failed", resolvedSecretRefs, message);
 }
 
 /**
