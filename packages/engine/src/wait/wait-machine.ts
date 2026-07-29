@@ -15,6 +15,7 @@ import {
 } from "../idempotency.js";
 import {
   applyRunRedaction,
+  mergeActiveRunProtection,
   mergeOperationalRunTaint,
   mergePersistedRunTaint,
   redactSignalAudit,
@@ -144,8 +145,13 @@ export async function enterWait(config: WaitMachineConfig, options: EnterWaitOpt
   // `markConsumed` are "deliberately NOT staged" — see types.ts's
   // `SignalStore` doc comment), not to this check-then-act sequence itself.
   const result = await config.store.transact(async (tx) => {
+    const activeAwareRun = await mergeActiveRunProtection(
+      tx,
+      run,
+      resolvedSecretRefs,
+    );
     const persistenceAwareRun =
-      await mergePersistedRunTaint(tx, run);
+      await mergePersistedRunTaint(tx, activeAwareRun);
     if (correlation) {
       const existingSignal = await tx.signals.findUnconsumedMatch(correlation.name, correlation.correlationId);
       if (existingSignal) {
@@ -223,7 +229,7 @@ export async function enterWait(config: WaitMachineConfig, options: EnterWaitOpt
           resolvedSecretRefs,
         );
         await tx.runs.put(redacted);
-        await tx.runs.replaceOperationalState(
+        await tx.runs.putOperationalState(
           repairedRun.runId,
           {
             run: repairedRun,

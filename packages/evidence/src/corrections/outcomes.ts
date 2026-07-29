@@ -36,27 +36,11 @@ function setByPath(target: Record<string, unknown>, path: string, value: unknown
  * §23.3's own example) and flags that trace `postHocCorrected: true`
  * (architecture §5.3 `step_traces.post_hoc_corrected`, F5 fix).
  */
-export async function updateRunOutput(store: AartStore, correction: Correction): Promise<RunRecord> {
-  const protectedTraceFields = [
-    "secretTainted",
-    "secretTaintedPaths",
-    "controlSecretTainted",
-    "authoredStepId",
-    "iterationIndex",
-    "idempotencyLedgerKey",
-    "idempotencyLedgerFingerprint",
-  ];
-  if (protectedTraceFields.some(
-    (field) =>
-      correction.fieldPath === field ||
-      correction.fieldPath.startsWith(`${field}.`),
-  )) {
-    throw new Error(
-      `updateRunOutput: "${correction.fieldPath}" is protected engine security metadata and cannot be changed by a correction`,
-    );
-  }
-  const run = await store.runs.get(correction.runId);
-  if (!run) throw new Error(`updateRunOutput: no such run "${correction.runId}"`);
+function applyTraceCorrection(
+  run: RunRecord,
+  correction: Correction,
+  updatedAt: string,
+): RunRecord {
   // A step may have more than one trace after a loop/back-edge or reclaim.
   // Expression projection uses the latest matching trace, so corrections
   // without an explicit sequence target that same observable occurrence.
@@ -103,30 +87,117 @@ export async function updateRunOutput(store: AartStore, correction: Correction):
       trace = trace.map((candidate, index) => (index === aggregateIndex ? aggregate : candidate));
     }
   }
-  let outputs = run.outputs;
+  return {
+    ...run,
+    trace,
+    updatedAt,
+  };
+}
+
+async function refreshCompletedCorrectionOutputs(
+  store: AartStore,
+  run: RunRecord,
+): Promise<RunRecord> {
   // Failed/cancelled runs are intentionally partial evidence: correcting a
   // trace must remain possible even when required output sources never ran.
   // Modern completed runs with a public projection promise a fully
   // materialized contract. Legacy completed records may predate that field
   // and carry no parseable workflow definition in their old snapshots; in
   // that case the trace correction remains valid without inventing outputs.
-  if (run.status === "completed" && run.outputs !== undefined) {
-    const workflow = await resolveWorkflowForRun(store, run);
-    const correctedProjection = { ...run, trace };
-    if (workflow.execution.outputMapping) {
-      outputs = await materializeWorkflowOutputs(workflow, correctedProjection);
-      validateWorkflowOutputs(workflow, outputs);
-    }
+  if (run.status !== "completed" || run.outputs === undefined) {
+    return run;
+  }
+  const workflow = await resolveWorkflowForRun(store, run);
+  if (!workflow.execution.outputMapping) return run;
+  const outputs = await materializeWorkflowOutputs(workflow, run);
+  validateWorkflowOutputs(workflow, outputs);
+  return { ...run, outputs };
+}
+
+export async function updateRunOutput(store: AartStore, correction: Correction): Promise<RunRecord> {
+  const protectedTraceFields = [
+    "secretTainted",
+    "secretTaintedPaths",
+    "controlSecretTainted",
+    "authoredStepId",
+    "iterationIndex",
+    "idempotencyLedgerKey",
+    "idempotencyLedgerFingerprint",
+  ];
+  if (protectedTraceFields.some(
+    (field) =>
+      correction.fieldPath === field ||
+      correction.fieldPath.startsWith(`${field}.`),
+  )) {
+    throw new Error(
+      `updateRunOutput: "${correction.fieldPath}" is protected engine security metadata and cannot be changed by a correction`,
+    );
   }
 
-  const updatedRun: RunRecord = {
-    ...run,
-    trace,
-    outputs,
-    updatedAt: new Date().toISOString(),
-  };
-  await store.runs.put(updatedRun);
-  return updatedRun;
+  return store.transact(async (tx) => {
+    const publicRun = await tx.runs.get(correction.runId);
+    if (!publicRun) {
+      throw new Error(
+        `updateRunOutput: no such run "${correction.runId}"`,
+      );
+    }
+    if (
+      publicRun.status === "pending" ||
+      publicRun.status === "running"
+    ) {
+      throw new Error(
+        `updateRunOutput: run "${correction.runId}" is actively executing; corrections are accepted only at a durable wait or terminal boundary`,
+      );
+    }
+
+    const updatedAt = new Date().toISOString();
+    let updatedPublic = applyTraceCorrection(
+      publicRun,
+      correction,
+      updatedAt,
+    );
+    updatedPublic = await refreshCompletedCorrectionOutputs(
+      tx,
+      updatedPublic,
+    );
+
+    if (publicRun.status === "waiting") {
+      const waits = await tx.waits.list({
+        runId: correction.runId,
+      });
+      const firstWait = waits[0];
+      if (firstWait === undefined) {
+        throw new Error(
+          `updateRunOutput: waiting run "${correction.runId}" has no durable wait boundary`,
+        );
+      }
+      const protectedState =
+        await tx.waits.getOperationalRunState(
+          firstWait.runId,
+          firstWait.stepId,
+        );
+      const updatedProtected = applyTraceCorrection(
+        protectedState?.run ?? publicRun,
+        correction,
+        updatedAt,
+      );
+      // The exact continuation lands first for the filesystem adapter's
+      // cross-file flush order. A crash can leave a temporarily stale
+      // public audit, but never an accepted correction that execution loses.
+      await tx.waits.replaceOperationalRunState(
+        correction.runId,
+        {
+          run: updatedProtected,
+          resolvedSecretValues:
+            protectedState?.resolvedSecretValues ?? [],
+        },
+      );
+    }
+
+    await tx.runs.put(updatedPublic);
+    await tx.runs.deleteOperationalState(correction.runId);
+    return updatedPublic;
+  });
 }
 
 export interface CreateEvalExampleOptions {

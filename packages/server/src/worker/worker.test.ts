@@ -406,7 +406,15 @@ describe("mid-step worker-kill (architecture §4.7 reliability BLOCKER fix) — 
   it("exceeding the bounded reclaim count flags the run reclaim_exhausted instead of requeuing forever (architecture §4.7)", async () => {
     const clock = createFakeClock();
     fx = await createTestFixture(clock);
-    await fx.store.runs.put(fixtureRunRecord("run_forever_stuck", clock));
+    const stuckRun = {
+      ...fixtureRunRecord("run_forever_stuck", clock),
+      status: "running" as const,
+    };
+    await fx.store.runs.put(stuckRun);
+    await fx.store.runs.putOperationalState(stuckRun.runId, {
+      run: stuckRun,
+      resolvedSecretValues: ["protected-before-exhaustion"],
+    });
     await fx.store.jobQueue.enqueue("run_forever_stuck");
 
     const maxReclaimCount = 2;
@@ -431,6 +439,9 @@ describe("mid-step worker-kill (architecture §4.7 reliability BLOCKER fix) — 
     const run = await fx.store.runs.get("run_forever_stuck");
     expect(run?.status).toBe("failed");
     expect(run?.flag?.kind).toBe("reclaim_exhausted");
+    await expect(
+      fx.store.runs.getOperationalState("run_forever_stuck"),
+    ).resolves.toBeUndefined();
     // No longer claimable at all — a human must clear the flag (architecture §6.2/§13.3).
     await expect(fx.store.jobQueue.get("run_forever_stuck")).resolves.toBeUndefined();
 
@@ -438,8 +449,9 @@ describe("mid-step worker-kill (architecture §4.7 reliability BLOCKER fix) — 
     // 4th of this session's four real "a run reaches a terminal status"
     // entry points (CLI aart run / MCP aart_run_workflow / trigger-fired
     // via server all share @aart/engine's onRunTerminal hook; this one
-    // does NOT — runReclaimSweep writes store.runs.put directly, bypassing
-    // the engine entirely, so it needs its own explicit run.failed write).
+    // does NOT — runReclaimSweep writes its own terminal transaction,
+    // bypassing the engine entirely, so it needs its own explicit
+    // run.failed write).
     const events = await fx.store.events.list();
     expect(events).toContainEqual(expect.objectContaining({ type: "run.failed", workflowId: "wf", workflowVersion: "1", runId: "run_forever_stuck" }));
   }, 15000);

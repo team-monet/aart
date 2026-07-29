@@ -13,7 +13,7 @@ import { buildExprContext, resolveArrayExpression, resolveBooleanExpression, res
 import { checkIdempotency, idempotencyStorageKey, recordIdempotency, revokeSecretTaintedIdempotency } from "./idempotency.js";
 import { idempotencyAssociationFingerprint } from "./idempotency-association.js";
 import { jsonCompatibilityProblem, jsonValuesEqual, validateWorkflowOutputs } from "./output-validation.js";
-import { applyRedaction, applyRunRedaction, changedJsonPointers, createTrackingSecretResolver, isTextMime, mergeOperationalRunTaint, mergePersistedRunTaint, redactStoredTextArtifacts, repairCustomerVisibleAudits, repairGlobalAuditsForNewSecrets, throwingSecretResolver } from "./redaction.js";
+import { applyRedaction, applyRunRedaction, changedJsonPointers, createTrackingSecretResolver, isTextMime, mergeActiveRunProtection, mergeOperationalRunTaint, mergePersistedRunTaint, redactStoredTextArtifacts, repairCustomerVisibleAudits, repairGlobalAuditsForNewSecrets, throwingSecretResolver } from "./redaction.js";
 import { CURRENT_ENGINE_SCHEMA_VERSION } from "./schema-version.js";
 import {
   captureExecutionSnapshot,
@@ -562,9 +562,14 @@ async function appendTracesAndPersist(
   workflow: Workflow,
   step: WorkflowStep,
   newTraces: StepTrace[],
-  resolvedSecretRefs: ReadonlySet<string>,
+  resolvedSecretRefs: Set<string>,
   secretCountBeforeStep: number,
 ): Promise<RunRecord> {
+  run = await mergeActiveRunProtection(
+    config.store,
+    run,
+    resolvedSecretRefs,
+  );
   await repairGlobalAuditsForNewSecrets(
     config.store,
     config.redact,
@@ -589,8 +594,14 @@ async function appendTracesAndPersist(
     resolvedSecretRefs,
   );
   return config.store.transact(async (tx) => {
+    const activeAwarePrepared =
+      await mergeActiveRunProtection(
+        tx,
+        prepared,
+        resolvedSecretRefs,
+      );
     const persistenceAwarePrepared =
-      await mergePersistedRunTaint(tx, prepared);
+      await mergePersistedRunTaint(tx, activeAwarePrepared);
     const repaired = await revokeSecretTaintedIdempotency(
       tx,
       config.redact,
@@ -619,7 +630,7 @@ async function appendTracesAndPersist(
       resolvedSecretRefs,
     );
     await tx.runs.put(redacted);
-    await tx.runs.replaceOperationalState(repaired.runId, {
+    await tx.runs.putOperationalState(repaired.runId, {
       run: repaired,
       resolvedSecretValues: [...resolvedSecretRefs],
     });
@@ -1259,9 +1270,14 @@ export async function refreshTaintAfterControlResolution(
   step: WorkflowStep,
   run: RunRecord,
   currentTraceCount: number,
-  resolvedSecretRefs: ReadonlySet<string>,
+  resolvedSecretRefs: Set<string>,
   secretCountBeforeResolution: number,
 ): Promise<RunRecord> {
+  run = await mergeActiveRunProtection(
+    config.store,
+    run,
+    resolvedSecretRefs,
+  );
   await repairGlobalAuditsForNewSecrets(
     config.store,
     config.redact,
@@ -1308,8 +1324,14 @@ export async function refreshTaintAfterControlResolution(
   }
 
   return config.store.transact(async (tx) => {
+    const activeAwarePrepared =
+      await mergeActiveRunProtection(
+        tx,
+        preparedRun,
+        resolvedSecretRefs,
+      );
     const persistenceAwarePrepared =
-      await mergePersistedRunTaint(tx, preparedRun);
+      await mergePersistedRunTaint(tx, activeAwarePrepared);
     const repaired = await revokeSecretTaintedIdempotency(
       tx,
       config.redact,
@@ -1338,7 +1360,7 @@ export async function refreshTaintAfterControlResolution(
       resolvedSecretRefs,
     );
     await tx.runs.put(refreshedRun);
-    await tx.runs.replaceOperationalState(repaired.runId, {
+    await tx.runs.putOperationalState(repaired.runId, {
       run: repaired,
       resolvedSecretValues: [...resolvedSecretRefs],
     });
@@ -1434,6 +1456,11 @@ export async function executeStep(
   resolvedSecretRefs: Set<string>,
   environment: string | undefined,
 ): Promise<StepOutcome> {
+  run = await mergeActiveRunProtection(
+    config.store,
+    run,
+    resolvedSecretRefs,
+  );
   const secretCountBeforeStep = resolvedSecretRefs.size;
   const secretResolver = createTrackingSecretResolver(config.resolveSecret ?? throwingSecretResolver, resolvedSecretRefs);
   const resolveOptions: ResolveOptions = { secretResolver };

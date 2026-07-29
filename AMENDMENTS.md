@@ -2024,12 +2024,17 @@ the isolated reuse-and-execute acceptance loop above.
 ### A75 — Secret taint survives trace persistence without retaining secret values
 
 Step traces are redacted before they are persisted, while exact execution
-state is kept separately from the public audit. A claimed running segment
-stores an AES-GCM-sealed active continuation and atomically refreshes it with
-every public progress write. At a durable wait boundary that state transfers
-to the sealed wait continuation; at terminal completion it is deleted. A
-worker crashing immediately after wait resumption, or between later steps,
-can therefore continue with the values and frozen workflow it actually had
+state is kept separately from the public audit. The engine creates an
+AES-GCM-sealed executable continuation atomically with the initial pending
+run, carries it through queue release and claim, and refreshes it with every
+public running-progress write. A late global audit repair initializes the
+same protection for legacy pending/running rows before it rewrites their
+public values, and each worker rejoins newly protected secret literals before
+its next effect or persistence boundary. At a durable wait boundary that
+state transfers to the sealed wait continuation; at every terminal boundary,
+including reclaim exhaustion outside the engine, it is deleted. A worker
+crashing immediately after wait resumption, or between later steps, can
+therefore continue with the values and frozen workflow it actually had
 without exposing either through `RunStore.get()`/`list()`.
 `StepTrace.secretTainted` remains the
 backward-compatible summary bit. `secretTaintedPaths` records output JSON
@@ -2184,6 +2189,11 @@ decision values are re-redacted for the affected run. Run-linked correction
 field paths, observed/corrected values, reason, and reviewer receive the same
 security rewrite; changing a secret-bearing correction key replaces the old
 row, with a non-secret ordinal suffix if two redacted paths collide.
+Applying a correction to a durably waiting run updates its sealed exact
+continuation before the public audit, so downstream execution observes the
+accepted value after resume. Corrections against pending/running runs fail
+clearly instead of racing an in-flight effect and appearing accepted before
+being overwritten; terminal evidence remains directly correctable.
 Activity-event summary/actor fields are rewritten while their structural
 identity and ordering fields remain stable. An outstanding wait keeps a
 redacted user-visible condition while its signal correlation remains matchable

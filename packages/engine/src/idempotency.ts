@@ -17,6 +17,7 @@ import {
   applyRedaction,
   applyRunRedaction,
   changedJsonPointers,
+  mergeActiveRunProtection,
   mergeOperationalRunTaint,
 } from "./redaction.js";
 import { CURRENT_ENGINE_SCHEMA_VERSION } from "./schema-version.js";
@@ -154,7 +155,20 @@ async function redactAndPersistRun(
   run: RunRecord,
   resolvedSecretRefs: ReadonlySet<string>,
 ): Promise<RunRecord> {
-  const redacted = applyRunRedaction(redact, run, resolvedSecretRefs);
+  const effectiveSecretRefs = new Set(resolvedSecretRefs);
+  const operationalRun =
+    run.status === "pending" || run.status === "running"
+      ? await mergeActiveRunProtection(
+          store,
+          run,
+          effectiveSecretRefs,
+        )
+      : run;
+  const redacted = applyRunRedaction(
+    redact,
+    operationalRun,
+    effectiveSecretRefs,
+  );
   if (run.status === "waiting") {
     const waits = await store.waits.list({ runId: run.runId });
     const existing =
@@ -173,17 +187,24 @@ async function redactAndPersistRun(
         resolvedSecretValues: [
           ...new Set([
             ...(existing?.resolvedSecretValues ?? []),
-            ...resolvedSecretRefs,
+            ...effectiveSecretRefs,
           ]),
         ],
       });
     }
   }
   await store.runs.put(redacted);
-  await store.runs.replaceOperationalState(run.runId, {
-    run,
-    resolvedSecretValues: [...resolvedSecretRefs],
-  });
+  if (
+    operationalRun.status === "pending" ||
+    operationalRun.status === "running"
+  ) {
+    await store.runs.putOperationalState(run.runId, {
+      run: operationalRun,
+      resolvedSecretValues: [...effectiveSecretRefs],
+    });
+  } else {
+    await store.runs.deleteOperationalState(run.runId);
+  }
   return redacted;
 }
 

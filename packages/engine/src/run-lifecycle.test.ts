@@ -4,7 +4,10 @@ import type { BlockImplementation, Field } from "@aart/types";
 import { afterEach, describe, expect, it } from "vitest";
 import { idempotencyStorageKey, recordIdempotency } from "./idempotency.js";
 import { cancelRun, executeRun, triggerRun } from "./run-lifecycle.js";
-import { applyRunRedaction } from "./redaction.js";
+import {
+  applyRunRedaction,
+  repairGlobalAuditsForNewSecrets,
+} from "./redaction.js";
 import { createTestStore, echoBlock, failingBlock, fixtureTrigger, testEngineConfig, fixtureWorkflow } from "./test-utils/fixtures.js";
 import type { EngineConfig } from "./types.js";
 
@@ -50,6 +53,76 @@ describe("triggerRun — run intake (architecture §4.3)", () => {
     expect(persisted).toEqual(run);
     const claimable = await store.jobQueue.listClaimable(new Date().toISOString());
     expect(claimable.map((c) => c.runId)).toContain(run.runId);
+  });
+
+  it("keeps a pending run executable when another run later classifies one of its inputs as secret", async () => {
+    const secret = "queued-pending-secret";
+    const requireExactInput: BlockImplementation = {
+      manifest: {
+        id: "test.require-pending-input",
+        version: "1.0.0",
+        capabilities: [],
+        inputSchema: {},
+        outputSchema: {},
+        description:
+          "Proves pending execution receives its exact submitted input.",
+      },
+      execute: async (inputs) => ({
+        accepted:
+          (inputs as Record<string, unknown>)["token"] === secret,
+      }),
+    };
+    const { store, config } = await setup({
+      blocks: {
+        [requireExactInput.manifest.id]: requireExactInput,
+      },
+      redact: redactResolvedValues,
+    });
+    const workflow = fixtureWorkflow({
+      execution: {
+        type: "workflow",
+        steps: [
+          {
+            id: "consume",
+            uses: requireExactInput.manifest.id,
+            with: { token: "{{ inputs.token }}" },
+          },
+        ],
+      },
+    });
+    await store.workflows.put(workflow);
+    const run = await triggerRun(config, {
+      workflow,
+      trigger: fixtureTrigger(),
+      inputs: { token: secret },
+    });
+
+    await repairGlobalAuditsForNewSecrets(
+      store,
+      redactResolvedValues,
+      new Set([secret]),
+    );
+
+    expect(
+      JSON.stringify(await store.runs.get(run.runId)),
+    ).not.toContain(secret);
+    await expect(
+      store.runs.getOperationalState(run.runId),
+    ).resolves.toMatchObject({
+      run: { status: "pending", inputs: { token: secret } },
+      resolvedSecretValues: [secret],
+    });
+
+    const finished = await executeRun(config, run.runId);
+
+    expect(finished.status).toBe("completed");
+    expect(finished.trace[0]).toMatchObject({
+      outputs: { accepted: true },
+      secretTainted: true,
+    });
+    await expect(
+      store.runs.getOperationalState(run.runId),
+    ).resolves.toBeUndefined();
   });
 
   it("captures approved/approvalMode from the input, defaulting to approved:true/dev", async () => {
@@ -2319,6 +2392,37 @@ describe("executeRun — fresh execution", () => {
     expect(second).toEqual(finished);
   });
 
+  it("treats public terminal status as authoritative over stale protected running state", async () => {
+    const { store, config } = await setup();
+    const workflow = fixtureWorkflow({
+      execution: {
+        type: "workflow",
+        steps: [{ id: "s1", uses: "test.echo" }],
+      },
+    });
+    await store.workflows.put(workflow);
+    const triggered = await triggerRun(config, {
+      workflow,
+      trigger: fixtureTrigger(),
+      inputs: {},
+    });
+    const finished = await executeRun(config, triggered.runId);
+    await store.runs.putOperationalState(triggered.runId, {
+      run: {
+        ...triggered,
+        status: "running",
+      },
+      resolvedSecretValues: [],
+    });
+
+    const reclaimed = await executeRun(config, triggered.runId);
+
+    expect(reclaimed).toEqual(finished);
+    await expect(
+      store.runs.getOperationalState(triggered.runId),
+    ).resolves.toBeUndefined();
+  });
+
   it("releases a queued run once the blocking run completes", async () => {
     const { store, config } = await setup();
     const workflow = fixtureWorkflow({ id: "wf-release", concurrency: { key: "{{ inputs.caseId }}", policy: "queue" }, execution: { type: "workflow", steps: [{ id: "s1", uses: "test.echo" }] } });
@@ -2333,6 +2437,11 @@ describe("executeRun — fresh execution", () => {
     expect(claimableAfter.map((c) => c.runId)).toContain(second.runId);
     const reloadedSecond = await store.runs.get(second.runId);
     expect(reloadedSecond?.params?.waitingOnConcurrency).toBe(false);
+    await expect(
+      store.runs.getOperationalState(second.runId),
+    ).resolves.toMatchObject({
+      run: { params: { waitingOnConcurrency: false } },
+    });
   });
 
   it("releases a queued run with the original concurrency key even when redaction rewrites that key in the terminal record", async () => {

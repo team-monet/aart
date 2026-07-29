@@ -60,6 +60,117 @@ describe("outcome 1/6 — updateRunOutput (spec §23.4 'update current run outpu
     await expect(store.runs.get("run_1")).resolves.toMatchObject({ trace: [{ outputs: { nmi: "6401234568" }, postHocCorrected: true }] });
   });
 
+  it("updates the sealed continuation when correcting a durably waiting run", async () => {
+    const exactRun = fixtureRunRecord({
+      runId: "run_1",
+      status: "waiting",
+      endedAt: undefined,
+      trace: [
+        {
+          seq: 0,
+          stepId: "extract",
+          block: "llm.extract",
+          status: "completed",
+          inputs: {},
+          outputs: { nmi: "6401234567" },
+          startedAt: "t",
+        },
+        {
+          seq: 1,
+          stepId: "pause",
+          block: "wait.manual",
+          status: "waiting",
+          inputs: {},
+          startedAt: "t",
+        },
+      ],
+    });
+    await store.runs.put({
+      ...exactRun,
+      trace: exactRun.trace.map((trace) =>
+        trace.stepId === "extract"
+          ? { ...trace, outputs: { nmi: "[REDACTED]" } }
+          : trace,
+      ),
+    });
+    await store.waits.put(
+      exactRun.runId,
+      "pause",
+      { type: "manual", schemaVersion: 1 },
+      "2026-01-01T00:00:00.000Z",
+      {
+        run: exactRun,
+        resolvedSecretValues: ["6401234567"],
+      },
+    );
+
+    const updated = await updateRunOutput(
+      store,
+      fixtureCorrection(),
+    );
+
+    expect(updated.trace[0]).toMatchObject({
+      outputs: { nmi: "6401234568" },
+      postHocCorrected: true,
+    });
+    const protectedState =
+      await store.waits.getOperationalRunState(
+        "run_1",
+        "pause",
+      );
+    expect(protectedState?.resolvedSecretValues).toEqual([
+      "6401234567",
+    ]);
+    expect(
+      protectedState?.run.trace.find(
+        (trace) => trace.stepId === "extract",
+      ),
+    ).toMatchObject({
+      outputs: { nmi: "6401234568" },
+      postHocCorrected: true,
+    });
+  });
+
+  it("rejects corrections while a run is actively executing instead of accepting a value that can race and disappear", async () => {
+    const run = fixtureRunRecord({
+      runId: "run_1",
+      status: "running",
+      endedAt: undefined,
+      trace: [
+        {
+          seq: 0,
+          stepId: "extract",
+          block: "llm.extract",
+          status: "completed",
+          inputs: {},
+          outputs: { nmi: "6401234567" },
+          startedAt: "t",
+        },
+      ],
+    });
+    await store.runs.put(run);
+    await store.runs.putOperationalState(run.runId, {
+      run,
+      resolvedSecretValues: [],
+    });
+
+    await expect(
+      updateRunOutput(store, fixtureCorrection()),
+    ).rejects.toThrow(/actively executing/);
+    await expect(store.runs.get("run_1")).resolves.toEqual(run);
+    await expect(
+      store.runs.getOperationalState("run_1"),
+    ).resolves.toMatchObject({
+      run: {
+        trace: [
+          expect.objectContaining({
+            outputs: { nmi: "6401234567" },
+          }),
+        ],
+      },
+    });
+  });
+
   it("preserves corrections on legacy completed runs without materialized public outputs", async () => {
     const run = fixtureRunRecord({
       runId: "run_1",

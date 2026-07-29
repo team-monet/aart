@@ -9,7 +9,7 @@ import type { RunRecord, StepTrace, Workflow, WorkflowStep } from "@aart/types";
 import { ConcurrencyRejectedError } from "@aart/types";
 import { buildExprContext, resolveBooleanExpression } from "./expr-context.js";
 import { decideConcurrency, fingerprintConcurrencyKey, releaseQueuedRuns, resolveConcurrencyKey } from "./concurrency.js";
-import { applyRedaction, applyRunRedaction, createTrackingSecretResolver, mergeOperationalRunTaint, mergePersistedRunTaint, redactStoredTextArtifacts, repairGlobalAuditsForNewSecrets, throwingSecretResolver } from "./redaction.js";
+import { applyRedaction, applyRunRedaction, createTrackingSecretResolver, mergeActiveRunProtection, mergeOperationalRunTaint, mergePersistedRunTaint, redactStoredTextArtifacts, repairGlobalAuditsForNewSecrets, throwingSecretResolver } from "./redaction.js";
 import { assertSchemaVersionCompatible, CURRENT_ENGINE_SCHEMA_VERSION } from "./schema-version.js";
 import { captureExecutionSnapshot, isSnapshotCaptured, resolveWorkflowForRun, uncapturedSnapshot } from "./snapshot.js";
 import { validateWorkflowOutputs, WorkflowOutputValidationError } from "./output-validation.js";
@@ -113,10 +113,16 @@ export async function triggerRun(config: EngineConfig, input: TriggerRunInput): 
 
   const resolvedSecretRefs = new Set<string>();
   const redacted = applyRunRedaction(config.redact, run, resolvedSecretRefs);
-  await config.store.runs.put(redacted);
-  if (!waitingOnConcurrency) {
-    await config.store.jobQueue.enqueue(redacted.runId);
-  }
+  await config.store.transact(async (tx) => {
+    await tx.runs.put(redacted);
+    await tx.runs.putOperationalState(run.runId, {
+      run,
+      resolvedSecretValues: [],
+    });
+    if (!waitingOnConcurrency) {
+      await tx.jobQueue.enqueue(redacted.runId);
+    }
+  });
   return redacted;
 }
 
@@ -145,7 +151,11 @@ export async function finalizeTerminal(
   errorMessage?: string,
 ): Promise<RunRecord> {
   const now = config.now?.() ?? new Date();
-  let updated = run;
+  let updated = await mergeActiveRunProtection(
+    config.store,
+    run,
+    resolvedSecretRefs,
+  );
   let terminalStatus = status;
   let terminalError = errorMessage;
   let outputs = updated.outputs;
@@ -208,6 +218,11 @@ export async function finalizeTerminal(
   };
   updated = { ...updated, status: terminalStatus, outputs, error: terminalError, endedAt: now.toISOString(), updatedAt: now.toISOString() };
   const redacted = await config.store.transact(async (tx) => {
+    updated = await mergeActiveRunProtection(
+      tx,
+      updated,
+      resolvedSecretRefs,
+    );
     const persistenceAwareUpdated =
       await mergePersistedRunTaint(tx, updated);
     const repaired = await revokeSecretTaintedIdempotency(
@@ -490,60 +505,100 @@ export async function runStepsLoop(config: EngineConfig, initialRun: RunRecord, 
  * restarting at step 0.
  */
 export async function executeRun(config: EngineConfig, runId: string): Promise<RunRecord> {
-  const publicRun = await config.store.runs.get(runId);
-  if (!publicRun) {
-    throw new Error(`executeRun: no RunRecord found for runId "${runId}".`);
-  }
-  const operationalState =
-    await config.store.runs.getOperationalState(runId);
-  const resolvedSecretRefs = new Set(
-    operationalState?.resolvedSecretValues ?? [],
-  );
-  const loaded =
-    operationalState === undefined
-      ? publicRun
-      : mergeOperationalRunTaint(
-          operationalState.run,
-          publicRun,
-        );
-  assertSchemaVersionCompatible(loaded.schemaVersion, { runId, recordKind: "RunRecord" });
-
-  const workflow = await resolveWorkflowForRun(config.store, loaded);
-
-  let run = loaded;
-  if (run.status === "pending") {
-    run = await config.store.transact(async (tx) => {
-      const current = await tx.runs.get(runId);
-      if (current === undefined) {
-        throw new Error(
-          `executeRun: RunRecord "${runId}" disappeared during claim.`,
-        );
-      }
-      if (current.status !== "pending") return current;
-      const now = (config.now?.() ?? new Date()).toISOString();
-      const operationalRun = {
-        ...current,
-        status: "running" as const,
-        updatedAt: now,
-      };
-      const running = applyRunRedaction(
-        config.redact,
-        operationalRun,
-        resolvedSecretRefs,
+  const initial = await config.store.transact(async (tx) => {
+    const publicRun = await tx.runs.get(runId);
+    if (!publicRun) {
+      throw new Error(
+        `executeRun: no RunRecord found for runId "${runId}".`,
       );
-      await tx.runs.put(running);
-      await tx.runs.putOperationalState(runId, {
-        run: operationalRun,
-        resolvedSecretValues: [...resolvedSecretRefs],
-      });
-      return running;
+    }
+    assertSchemaVersionCompatible(publicRun.schemaVersion, {
+      runId,
+      recordKind: "RunRecord",
     });
+    if (
+      publicRun.status !== "pending" &&
+      publicRun.status !== "running"
+    ) {
+      if (
+        publicRun.status === "completed" ||
+        publicRun.status === "failed" ||
+        publicRun.status === "cancelled"
+      ) {
+        await tx.runs.deleteOperationalState(runId);
+      }
+      return {
+        executable: false as const,
+        publicRun,
+        run: publicRun,
+        resolvedSecretValues: [] as string[],
+      };
+    }
+
+    const operationalState =
+      await tx.runs.getOperationalState(runId);
+    const resolvedSecretValues =
+      operationalState?.resolvedSecretValues ?? [];
+    const protectedBase =
+      operationalState === undefined
+        ? publicRun
+        : operationalState.run.trace.length >=
+            publicRun.trace.length
+          ? operationalState.run
+          : publicRun;
+    const exactRun = {
+      ...mergeOperationalRunTaint(
+        protectedBase,
+        publicRun,
+      ),
+      // Public lifecycle status is authoritative. A terminal value was
+      // handled above; this also self-heals a legacy/direct progress write
+      // whose protected predecessor still says pending.
+      status: publicRun.status,
+      updatedAt: publicRun.updatedAt,
+    };
+    const now = (config.now?.() ?? new Date()).toISOString();
+    const run =
+      publicRun.status === "pending"
+        ? {
+            ...exactRun,
+            status: "running" as const,
+            updatedAt: now,
+          }
+        : exactRun;
+    const publicRunning = applyRunRedaction(
+      config.redact,
+      run,
+      new Set(resolvedSecretValues),
+    );
+    if (publicRun.status === "pending") {
+      await tx.runs.put(publicRunning);
+    }
+    // Also initializes migrated running rows whose protected columns are
+    // null before any newly discovered secret can make their next public
+    // progress write irreversible.
+    await tx.runs.putOperationalState(runId, {
+      run,
+      resolvedSecretValues,
+    });
+    return {
+      executable: true as const,
+      publicRun: publicRunning,
+      run,
+      resolvedSecretValues,
+    };
+  });
+  if (!initial.executable) {
+    // Waiting and terminal public status is authoritative even if a stale
+    // active ciphertext survived an older/out-of-band transition.
+    return initial.publicRun;
   }
-  if (run.status !== "running") {
-    // Already `waiting`/`completed`/`failed`/`cancelled` — idempotent no-op
-    // for a caller that races executeRun against another resume mechanism.
-    return run;
-  }
+
+  const resolvedSecretRefs = new Set(
+    initial.resolvedSecretValues,
+  );
+  let run = initial.run;
+  const workflow = await resolveWorkflowForRun(config.store, run);
 
   const continuation = await resolveContinuation(
     config,
@@ -611,13 +666,21 @@ export async function cancelRun(config: EngineConfig, runId: string): Promise<Ru
           outstandingWaits[0].runId,
           outstandingWaits[0].stepId,
         );
-  const run =
+  const protectedBase =
     operationalState === undefined
       ? publicRun
-      : mergeOperationalRunTaint(
-          operationalState.run,
-          publicRun,
-        );
+      : operationalState.run.trace.length >=
+          publicRun.trace.length
+        ? operationalState.run
+        : publicRun;
+  const run = {
+    ...mergeOperationalRunTaint(
+      protectedBase,
+      publicRun,
+    ),
+    status: publicRun.status,
+    updatedAt: publicRun.updatedAt,
+  };
   const workflow = await resolveWorkflowForRun(config.store, run);
   const reachedStepIds = new Set(run.trace.map((t) => t.stepId.replace(/\[\d+\]$/, "")));
   const now = (config.now?.() ?? new Date()).toISOString();

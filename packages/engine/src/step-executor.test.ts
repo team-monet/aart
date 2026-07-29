@@ -4,6 +4,7 @@ import type { AartStore } from "@aart/store";
 import { afterEach, describe, expect, it } from "vitest";
 import { executeStep } from "./step-executor.js";
 import { idempotencyStorageKey } from "./idempotency.js";
+import { repairGlobalAuditsForNewSecrets } from "./redaction.js";
 import {
   capabilityBlock,
   createTestStore,
@@ -40,6 +41,146 @@ describe("executeStep — resolve with: + basic dispatch", () => {
     if (outcome.kind !== "continue") throw new Error("unreachable");
     const trace = outcome.run.trace[0];
     expect(trace).toMatchObject({ status: "completed", inputs: { target: "http://x" }, outputs: { echoed: { target: "http://x" } } });
+  });
+
+  it("establishes protected progress for a migrated running run whose active state is absent", async () => {
+    const secret = "migrated-running-secret";
+    const redact = (
+      record: unknown,
+      refs: ReadonlySet<string>,
+    ): unknown =>
+      JSON.parse(
+        [...refs].reduce(
+          (json, value) =>
+            json.replaceAll(value, "[REDACTED]"),
+          JSON.stringify(record),
+        ),
+      );
+    const { store, config } = await setup({
+      redact,
+      resolveSecret: () => secret,
+    });
+    const run = fixtureRun({ status: "running" });
+    await store.runs.put(run);
+    await expect(
+      store.runs.getOperationalState(run.runId),
+    ).resolves.toBeUndefined();
+    const workflow = fixtureWorkflow({
+      execution: {
+        type: "workflow",
+        steps: [
+          {
+            id: "s1",
+            uses: "test.echo",
+            with: { token: "{{ secrets.API_KEY }}" },
+          },
+        ],
+      },
+    });
+
+    const outcome = await executeStep(
+      config,
+      run,
+      workflow,
+      workflow.execution.steps[0]!,
+      new Set(),
+      undefined,
+    );
+
+    expect(outcome.kind).toBe("continue");
+    expect(
+      JSON.stringify(await store.runs.get(run.runId)),
+    ).not.toContain(secret);
+    await expect(
+      store.runs.getOperationalState(run.runId),
+    ).resolves.toMatchObject({
+      run: {
+        status: "running",
+        trace: [
+          expect.objectContaining({
+            outputs: { echoed: { token: secret } },
+          }),
+        ],
+      },
+      resolvedSecretValues: [secret],
+    });
+  });
+
+  it("imports secret refs discovered by another run before writing later progress", async () => {
+    const secret = "cross-run-late-secret";
+    const redact = (
+      record: unknown,
+      refs: ReadonlySet<string>,
+    ): unknown =>
+      JSON.parse(
+        [...refs].reduce(
+          (json, value) =>
+            json.replaceAll(value, "[REDACTED]"),
+          JSON.stringify(record),
+        ),
+      );
+    const { store, config } = await setup({ redact });
+    const run = fixtureRun({
+      status: "running",
+      trace: [
+        {
+          seq: 0,
+          stepId: "source",
+          block: "test.echo",
+          status: "completed",
+          inputs: {},
+          outputs: { value: secret },
+          startedAt: "t",
+        },
+      ],
+    });
+    await store.runs.put(run);
+    await store.runs.putOperationalState(run.runId, {
+      run,
+      resolvedSecretValues: [],
+    });
+    await repairGlobalAuditsForNewSecrets(
+      store,
+      redact,
+      new Set([secret]),
+    );
+    const workflow = fixtureWorkflow({
+      execution: {
+        type: "workflow",
+        steps: [
+          { id: "source", uses: "test.echo" },
+          { id: "next", uses: "test.echo" },
+        ],
+      },
+    });
+
+    const outcome = await executeStep(
+      config,
+      run,
+      workflow,
+      workflow.execution.steps[1]!,
+      new Set(),
+      undefined,
+    );
+
+    expect(outcome.kind).toBe("continue");
+    expect(
+      JSON.stringify(await store.runs.get(run.runId)),
+    ).not.toContain(secret);
+    await expect(
+      store.runs.getOperationalState(run.runId),
+    ).resolves.toMatchObject({
+      resolvedSecretValues: [secret],
+      run: {
+        trace: [
+          expect.objectContaining({
+            outputs: { value: secret },
+            secretTainted: true,
+          }),
+          expect.objectContaining({ stepId: "next" }),
+        ],
+      },
+    });
   });
 
   it("determines nextStepId as the next sequential step when no if/next present", async () => {

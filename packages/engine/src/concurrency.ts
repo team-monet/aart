@@ -123,7 +123,21 @@ export async function releaseQueuedRuns(
         waitingOnConcurrency: false,
       },
     };
+    const operationalState =
+      await tx.runs.getOperationalState(released.runId);
     await tx.runs.put(released);
+    if (operationalState !== undefined) {
+      await tx.runs.putOperationalState(released.runId, {
+        ...operationalState,
+        run: {
+          ...operationalState.run,
+          params: {
+            ...operationalState.run.params,
+            waitingOnConcurrency: false,
+          },
+        },
+      });
+    }
     await tx.jobQueue.enqueue(released.runId);
     return released;
   });

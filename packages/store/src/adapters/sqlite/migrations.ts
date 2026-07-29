@@ -460,7 +460,7 @@ export function createSqliteAddWaitOperationGenerationMigration(
 }
 
 /**
- * Separates still-actionable signal values plus suspended/active run
+ * Separates still-actionable signal values plus pending/active/suspended run
  * continuation state from their customer-visible audit copies. Existing
  * signal rows are lazily sealed before the first audit rewrite, while new
  * operational state is sealed at its lifecycle transition.

@@ -30,32 +30,47 @@ export async function runReclaimSweep(store: AartStore, clock: Clock, logger: Lo
   for (const entry of staleClaims) {
     const newCount = await store.jobQueue.incrementReclaimCount(entry.runId);
     if (newCount > maxReclaimCount) {
-      const run = await store.runs.get(entry.runId);
-      if (run) {
-        await store.runs.put({
-          ...run,
-          status: "failed",
-          error: run.error ?? `Reclaim-exhausted: the claiming worker failed to renew its lease after ${newCount} reclaim attempts.`,
-          flag: { kind: "reclaim_exhausted", flaggedAt: clock.nowIso() },
-          updatedAt: clock.nowIso(),
-          endedAt: run.endedAt ?? clock.nowIso(),
-        });
+      const failed = await store.transact(async (tx) => {
+        const run = await tx.runs.get(entry.runId);
+        const terminalRun =
+          run === undefined
+            ? undefined
+            : {
+                ...run,
+                status: "failed" as const,
+                error:
+                  run.error ??
+                  `Reclaim-exhausted: the claiming worker failed to renew its lease after ${newCount} reclaim attempts.`,
+                flag: {
+                  kind: "reclaim_exhausted" as const,
+                  flaggedAt: clock.nowIso(),
+                },
+                updatedAt: clock.nowIso(),
+                endedAt: run.endedAt ?? clock.nowIso(),
+              };
+        if (terminalRun !== undefined) {
+          await tx.runs.put(terminalRun);
+          await tx.runs.deleteOperationalState(entry.runId);
+        }
+        // Removed entirely (not merely released) — a
+        // reclaim-exhausted run is terminal and must never be claimable
+        // again, unlike an ordinary requeue below.
+        await tx.jobQueue.remove(entry.runId);
+        return terminalRun;
+      });
+      if (failed) {
         // V1 event log (AMENDMENTS.md A61, RISK 1 point 3) — this sweep
-        // writes store.runs.put directly, bypassing @aart/engine entirely
+        // writes the terminal run directly, bypassing @aart/engine entirely
         // (run-lifecycle.ts's finalizeTerminal/cancelRun, and therefore
         // EngineConfig.onRunTerminal, are never reached from here) — so
         // this needs its own explicit run.failed write; the engine's own
         // onRunTerminal-hook fix (real-context.ts) cannot see this path.
         await recordEvent(
           store,
-          { type: "run.failed", workflowId: run.workflowId, workflowVersion: run.workflowVersion, runId: run.runId, summary: `${run.workflowId}@${run.workflowVersion} run failed (${run.runId}) — reclaim-exhausted after ${newCount} attempts` },
+          { type: "run.failed", workflowId: failed.workflowId, workflowVersion: failed.workflowVersion, runId: failed.runId, summary: `${failed.workflowId}@${failed.workflowVersion} run failed (${failed.runId}) — reclaim-exhausted after ${newCount} attempts` },
           () => clock.now(),
         );
       }
-      // Removed entirely (not merely released) — a reclaim-exhausted run is
-      // terminal and must never be claimable again, unlike an ordinary
-      // requeue below.
-      await store.jobQueue.remove(entry.runId);
       exhausted.push(entry.runId);
       logger.error("run reclaim-exhausted — flagged, will not be auto-retried; requires a human clear (architecture §4.7/§6.2)", { runId: entry.runId, reclaimCount: newCount, maxReclaimCount });
     } else {

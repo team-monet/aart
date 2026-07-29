@@ -510,15 +510,18 @@ export async function repairCustomerVisibleAudits(
     );
     const activeState =
       await store.runs.getOperationalState(run.runId);
-    if (activeState !== undefined) {
+    if (
+      run.status === "pending" ||
+      run.status === "running"
+    ) {
       await store.runs.putOperationalState(run.runId, {
         run: mergeOperationalRunTaint(
-          activeState.run,
+          activeState?.run ?? run,
           repaired,
         ),
         resolvedSecretValues: [
           ...new Set([
-            ...activeState.resolvedSecretValues,
+            ...(activeState?.resolvedSecretValues ?? []),
             ...resolvedSecretRefs,
           ]),
         ],
@@ -1244,6 +1247,26 @@ export function mergeOperationalRunTaint(
       };
     }),
   };
+}
+
+/**
+ * Rejoins security provenance that another execution segment may have
+ * discovered while this worker was between durable writes. The caller's
+ * RunRecord remains the forward-progress source; only protected taint and
+ * newly known secret literals are imported.
+ */
+export async function mergeActiveRunProtection(
+  store: AartStore,
+  run: RunRecord,
+  resolvedSecretRefs: Set<string>,
+): Promise<RunRecord> {
+  const activeState =
+    await store.runs.getOperationalState(run.runId);
+  if (activeState === undefined) return run;
+  for (const value of activeState.resolvedSecretValues) {
+    resolvedSecretRefs.add(value);
+  }
+  return mergeOperationalRunTaint(run, activeState.run);
 }
 
 /**

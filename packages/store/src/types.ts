@@ -58,9 +58,10 @@ export interface RunStore {
   put(run: RunRecord): Promise<void>;
   list(filter?: { status?: RunStatus; workflowId?: string }): Promise<RunRecord[]>;
   /**
-   * Engine-only exact state for a currently-running continuation whose
-   * public RunRecord may contain redaction markers. This state is sealed at
-   * rest and updated atomically with every public progress write.
+   * Engine-only exact state for a pending or currently-running
+   * continuation whose public RunRecord may contain redaction markers.
+   * This state is sealed at rest from intake onward and updated atomically
+   * with every public progress write.
    */
   getOperationalState(
     runId: string,
