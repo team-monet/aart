@@ -56,9 +56,14 @@ export interface EnterWaitOptions {
    * Completes control-flow provenance against the in-memory early-arrival
    * trace before the first durable write. This closes the window where an
    * `until` expression could resolve a secret only after plaintext output
-   * had already been persisted.
+   * had already been persisted. The transaction-scoped store must be used
+   * for every read/write performed by the callback; re-entering
+   * `config.store` deadlocks non-reentrant adapters such as SQLite.
    */
-  prepareEarlyArrivalRun?: (run: RunRecord) => Promise<RunRecord>;
+  prepareEarlyArrivalRun?: (
+    run: RunRecord,
+    transactionStore: AartStore,
+  ) => Promise<RunRecord>;
 }
 
 export interface EnterWaitResult {
@@ -132,7 +137,7 @@ export async function enterWait(config: WaitMachineConfig, options: EnterWaitOpt
         };
         const updatedRun: RunRecord = { ...run, trace: [...run.trace, trace], updatedAt: now.toISOString() };
         const preparedRun = prepareEarlyArrivalRun
-          ? await prepareEarlyArrivalRun(updatedRun)
+          ? await prepareEarlyArrivalRun(updatedRun, tx)
           : updatedRun;
         await revokeSecretTaintedIdempotency(
           tx,
@@ -202,6 +207,7 @@ export async function enterWait(config: WaitMachineConfig, options: EnterWaitOpt
 export type PrepareCompletedRun = (
   run: RunRecord,
   stepId: string,
+  transactionStore: AartStore,
 ) => Promise<RunRecord>;
 
 interface ClaimAndCompleteArgs {
@@ -321,7 +327,7 @@ async function claimAndCompleteWait(config: WaitMachineConfig, args: ClaimAndCom
       trace: newTrace,
       updatedAt: now.toISOString(),
     };
-    const preparedRun = await prepareCompletedRun(updatedRun, stepId);
+    const preparedRun = await prepareCompletedRun(updatedRun, stepId, tx);
     await revokeSecretTaintedIdempotency(
       tx,
       config.redact,

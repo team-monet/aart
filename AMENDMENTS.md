@@ -2102,7 +2102,11 @@ cannot be safely search-and-replaced.
 The individually exported low-level resume mechanisms require this preparation
 callback and reject a missing callback before touching the transaction; callers
 that do not own the full preparation pipeline use `createEngine`'s bound resume
-methods instead.
+methods instead. Both ordinary wait completion and early-arrival preparation
+receive the transaction-scoped `AartStore` view and route workflow/artifact
+reads through it. They never re-enter the top-level store while the atomic
+claim is open, so SQLite's intentionally non-reentrant mutex cannot turn a
+resume into an indefinitely hanging customer operation.
 `authoredStepId` and `iterationIndex`
 identify forEach traces without parsing a `[n]` suffix, so an authored id such
 as `gate[0]` is never mistaken for generated iteration identity. Provenance

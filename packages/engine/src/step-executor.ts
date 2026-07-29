@@ -4,6 +4,7 @@
 // next. Wait-type block ids (wait/wait-blocks.ts) are intercepted before
 // normal dispatch and handed to wait/wait-machine.ts instead.
 import { findExpressionTokens, parseExpression, type ExprContext, type ResolveOptions } from "@aart/expr";
+import type { AartStore } from "@aart/store";
 import type { ApprovalTask, LlmCallMetadata, RetryPolicy, RunRecord, StepTrace, WaitCondition, Workflow, WorkflowStep } from "@aart/types";
 import { AartError, DEFAULT_EFFECTFUL_CAPABILITIES, isEffectfulCapability, IterationLimitExceededError, TimeoutError } from "@aart/types";
 import { checkCapabilityDispatch, alwaysEmptyGrantedCapabilities } from "./capability.js";
@@ -1470,7 +1471,10 @@ async function executeWaitDispatch(
     resolvedSecretRefs,
     secretTainted: dataSecretTainted,
     controlSecretTainted,
-    prepareEarlyArrivalRun: async (provisionalRun) => {
+    prepareEarlyArrivalRun: async (
+      provisionalRun,
+      transactionStore: AartStore,
+    ) => {
       const controlResolution = await resolveCompletedStepControl(
         workflow,
         step,
@@ -1495,7 +1499,7 @@ async function executeWaitDispatch(
       return {
         ...preparedRun,
         artifacts: await redactStoredTextArtifacts(
-          config.store,
+          transactionStore,
           config.redact,
           provisionalRun.runId,
           resolvedSecretRefs,

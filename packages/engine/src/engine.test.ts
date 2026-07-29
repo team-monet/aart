@@ -2,6 +2,7 @@ import { promises as fs } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createFsStore, type AartStore } from "@aart/store";
+import { openSqliteStore } from "@aart/store/sqlite";
 import { afterEach, describe, expect, it } from "vitest";
 import { alwaysAllowCapabilityCheck } from "./capability.js";
 import { createEngine } from "./engine.js";
@@ -14,6 +15,20 @@ import { createBlockRegistry } from "./types.js";
 async function createTestStoreWithRoot(): Promise<{ root: string; store: AartStore; cleanup: () => Promise<void> }> {
   const root = await fs.mkdtemp(join(tmpdir(), "aart-engine-durability-test-"));
   return { root, store: createFsStore(root), cleanup: () => fs.rm(root, { recursive: true, force: true }) };
+}
+
+async function createSqliteTestStore(): Promise<{ store: AartStore; cleanup: () => Promise<void> }> {
+  const root = await fs.mkdtemp(join(tmpdir(), "aart-engine-sqlite-test-"));
+  const handle = await openSqliteStore(join(root, "aart.sqlite"), {
+    blobsDir: join(root, "blobs"),
+  });
+  return {
+    store: handle.store,
+    cleanup: async () => {
+      handle.close();
+      await fs.rm(root, { recursive: true, force: true });
+    },
+  };
 }
 
 const cleanups: Array<() => Promise<void>> = [];
@@ -184,6 +199,142 @@ describe("createEngine — resume wrappers continue execution past the resumed s
     expect(outcome.run.artifacts).toContainEqual(
       await store.artifacts.getMetadata("artifact-before-resume"),
     );
+  });
+
+  it("resumes and re-redacts a text artifact without re-entering the SQLite transaction", async () => {
+    const { store, cleanup } = await createSqliteTestStore();
+    cleanups.push(cleanup);
+    const redact = (
+      record: unknown,
+      resolvedSecretRefs: ReadonlySet<string>,
+    ): unknown => {
+      let json = JSON.stringify(record);
+      for (const secret of resolvedSecretRefs) {
+        json = json.replaceAll(secret, "[REDACTED]");
+      }
+      return JSON.parse(json);
+    };
+    const engine = createEngine({
+      store,
+      redact,
+      resolveSecret: () => "late-secret",
+      capabilityCheck: alwaysAllowCapabilityCheck,
+      blocks: createBlockRegistry([echoBlock]),
+      computeRetryDelayMs: () => 0,
+    });
+    const workflow = fixtureWorkflow({
+      execution: {
+        type: "workflow",
+        steps: [
+          {
+            id: "pause",
+            uses: "wait.manual",
+            next: "pause",
+            until: "{{ secrets.STOP }}",
+            maxIterations: 1,
+          },
+        ],
+      },
+    });
+    await store.workflows.put(workflow);
+    const run = await engine.triggerRun({
+      workflow,
+      trigger: fixtureTrigger(),
+      inputs: {},
+    });
+    await engine.executeRun(run.runId);
+    const rawBytes = new TextEncoder().encode("late-secret");
+    await store.artifacts.put(
+      {
+        id: "sqlite-artifact-before-resume",
+        runId: run.runId,
+        stepId: "earlier",
+        name: "earlier.txt",
+        kind: "report",
+        mime: "text/plain",
+        path: `artifacts/${run.runId}/sqlite-artifact-before-resume`,
+        bytes: rawBytes.byteLength,
+        createdAt: new Date().toISOString(),
+      },
+      rawBytes,
+    );
+
+    const outcome = await engine.resumeManual(run.runId, "pause", {
+      received: true,
+    });
+
+    expect(outcome.kind).toBe("resumed");
+    if (outcome.kind !== "resumed") throw new Error("unreachable");
+    const protectedBytes = await store.artifacts.getBytes(
+      "sqlite-artifact-before-resume",
+    );
+    if (protectedBytes === undefined) {
+      throw new Error("artifact bytes missing");
+    }
+    expect(new TextDecoder().decode(protectedBytes)).toBe("[REDACTED]");
+    expect(outcome.run.artifacts).toContainEqual(
+      await store.artifacts.getMetadata("sqlite-artifact-before-resume"),
+    );
+  });
+
+  it("completes an early-arrival signal without re-entering the SQLite transaction", async () => {
+    const { store, cleanup } = await createSqliteTestStore();
+    cleanups.push(cleanup);
+    const engine = createEngine({
+      store,
+      redact: identityRedactFn,
+      capabilityCheck: alwaysAllowCapabilityCheck,
+      blocks: createBlockRegistry([echoBlock]),
+      computeRetryDelayMs: () => 0,
+    });
+    const workflow = fixtureWorkflow({
+      execution: {
+        type: "workflow",
+        steps: [
+          {
+            id: "pause",
+            uses: "wait.for_signal",
+            with: { name: "ready", correlationId: "sqlite-early" },
+          },
+          {
+            id: "after",
+            uses: "test.echo",
+            with: { note: "continued-after-early-arrival" },
+          },
+        ],
+      },
+    });
+    await store.workflows.put(workflow);
+    await store.signals.append({
+      id: "sqlite-early-signal",
+      name: "ready",
+      correlationId: "sqlite-early",
+      payload: { received: true },
+      receivedAt: new Date().toISOString(),
+    });
+    const run = await engine.triggerRun({
+      workflow,
+      trigger: fixtureTrigger(),
+      inputs: {},
+    });
+
+    const finished = await engine.executeRun(run.runId);
+
+    expect(finished.status).toBe("completed");
+    expect(finished.trace).toEqual([
+      expect.objectContaining({
+        stepId: "pause",
+        status: "completed",
+        outputs: { received: true },
+      }),
+      expect.objectContaining({
+        stepId: "after",
+        status: "completed",
+      }),
+    ]);
+    await expect(
+      store.signals.findUnconsumedMatch("ready", "sqlite-early"),
+    ).resolves.toBeUndefined();
   });
 
   it("carries secret taint through a persisted wait and rejects its public output after resume", async () => {
