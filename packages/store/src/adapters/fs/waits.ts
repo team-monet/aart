@@ -5,7 +5,14 @@
 import { createHash, randomUUID } from "node:crypto";
 import { join } from "node:path";
 import type { WaitCondition } from "@aart/types";
-import type { WaitStore } from "../../types.js";
+import type {
+  WaitOperationalRunState,
+  WaitStore,
+} from "../../types.js";
+import {
+  openOperationalState,
+  sealOperationalState,
+} from "../operational-state-seal.js";
 import {
   openWaitOperation,
   sealWaitOperation,
@@ -23,6 +30,8 @@ interface StoredWait {
   operationalWait?: string;
   /** Unique authenticated generation for repeated entries of one step. */
   operationalGeneration?: string;
+  /** Sealed full run continuation state, separate from public RunRecord. */
+  operationalRunState?: string;
   createdAt: string;
 }
 
@@ -79,7 +88,13 @@ export class FsWaitStore implements WaitStore {
     return stored ? this.operationalWait(stored) : undefined;
   }
 
-  async put(runId: string, stepId: string, wait: WaitCondition, createdAt: string): Promise<void> {
+  async put(
+    runId: string,
+    stepId: string,
+    wait: WaitCondition,
+    createdAt: string,
+    operationalRunState?: WaitOperationalRunState,
+  ): Promise<void> {
     const operationalGeneration = randomUUID();
     await this.collection.put(waitKey(runId, stepId), {
       runId,
@@ -94,8 +109,86 @@ export class FsWaitStore implements WaitStore {
         wait,
       ),
       operationalGeneration,
+      ...(operationalRunState !== undefined
+        ? {
+            operationalRunState: await sealOperationalState(
+              this.operationKeyPath,
+              [runId, stepId, operationalGeneration, "run-state"],
+              operationalRunState,
+            ),
+          }
+        : {}),
       createdAt,
     });
+  }
+
+  async getOperationalRunState(
+    runId: string,
+    stepId: string,
+  ): Promise<WaitOperationalRunState | undefined> {
+    const stored = await this.collection.get(
+      waitKey(runId, stepId),
+    );
+    if (!stored) return undefined;
+    await this.operationalWait(stored);
+    if (
+      stored.operationalRunState === undefined ||
+      stored.operationalGeneration === undefined
+    ) {
+      return undefined;
+    }
+    return openOperationalState<WaitOperationalRunState>(
+      this.operationKeyPath,
+      [
+        stored.runId,
+        stored.stepId,
+        stored.operationalGeneration,
+        "run-state",
+      ],
+      stored.operationalRunState,
+    );
+  }
+
+  async replaceOperationalRunState(
+    runId: string,
+    state: WaitOperationalRunState,
+  ): Promise<void> {
+    const storedRows = (await this.collection.list()).filter(
+      (entry) => entry.runId === runId,
+    );
+    for (const stored of storedRows) {
+      const operationalWait = await this.operationalWait(stored);
+      if (stored.operationalGeneration === undefined) {
+        throw new Error(
+          `Wait ${stored.runId}/${stored.stepId} has no operational generation.`,
+        );
+      }
+      const operationalGeneration = randomUUID();
+      await this.collection.put(
+        waitKey(stored.runId, stored.stepId),
+        {
+          ...stored,
+          operationalWait: await sealWaitOperation(
+            this.operationKeyPath,
+            stored.runId,
+            stored.stepId,
+            operationalGeneration,
+            operationalWait,
+          ),
+          operationalGeneration,
+          operationalRunState: await sealOperationalState(
+            this.operationKeyPath,
+            [
+              stored.runId,
+              stored.stepId,
+              operationalGeneration,
+              "run-state",
+            ],
+            state,
+          ),
+        },
+      );
+    }
   }
 
   async redactAudit(

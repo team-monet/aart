@@ -277,6 +277,66 @@ export function runAartStoreConformanceSuite(label: string, options: Conformance
         );
       });
 
+      it("round-trips and replaces sealed run continuation state independently of the wait audit", async () => {
+        const run = fixtureRun({
+          status: "waiting",
+          inputs: { token: "raw-secret" },
+        });
+        const wait = fixtureWait();
+        await store.waits.put(
+          run.runId,
+          "pause",
+          wait,
+          new Date().toISOString(),
+          {
+            run,
+            resolvedSecretValues: ["raw-secret"],
+          },
+        );
+        await expect(
+          store.waits.getOperationalRunState(
+            run.runId,
+            "pause",
+          ),
+        ).resolves.toEqual({
+          run,
+          resolvedSecretValues: ["raw-secret"],
+        });
+
+        const updated = {
+          run: {
+            ...run,
+            trace: [
+              {
+                seq: 0,
+                stepId: "source",
+                block: "test.source",
+                status: "completed" as const,
+                inputs: {},
+                outputs: { token: "raw-secret" },
+                secretTainted: true,
+                secretTaintedPaths: ["*"],
+                startedAt: new Date().toISOString(),
+              },
+            ],
+          },
+          resolvedSecretValues: [
+            "raw-secret",
+            "second-secret",
+          ],
+        };
+        await store.waits.replaceOperationalRunState(
+          run.runId,
+          updated,
+        );
+        await expect(
+          store.waits.getOperationalRunState(
+            run.runId,
+            "pause",
+          ),
+        ).resolves.toEqual(updated);
+      });
+
       it("delete removes a wait", async () => {
         const runId = uniqueId("run");
         await store.waits.put(runId, "wait_step", fixtureWait(), new Date().toISOString());
@@ -375,7 +435,7 @@ export function runAartStoreConformanceSuite(label: string, options: Conformance
         await store.signals.markConsumed(signal.id, {
           consumedBy: { runId: uniqueId("run"), stepId: "pause" },
         });
-        await store.signals.replaceConsumedAudit(signal.id, {
+        await store.signals.replaceAudit(signal.id, {
           name: "[REDACTED]",
           correlationId: "[REDACTED]",
           payload: { value: "[REDACTED]" },
@@ -390,6 +450,51 @@ export function runAartStoreConformanceSuite(label: string, options: Conformance
             },
           ]),
         );
+        await expect(
+          store.signals.findUnconsumedMatch(
+            "[REDACTED]",
+            "[REDACTED]",
+          ),
+        ).resolves.toBeUndefined();
+      });
+
+      it("redacts an unconsumed signal audit without breaking its exact early-arrival match", async () => {
+        const signal: Signal = {
+          id: uniqueId("sig"),
+          name: "late-secret-name",
+          correlationId: "late-secret-correlation",
+          payload: { value: "late-secret-payload" },
+          receivedAt: new Date().toISOString(),
+        };
+        await store.signals.append(signal);
+        await store.signals.replaceAudit(signal.id, {
+          name: "[REDACTED]",
+          correlationId: "[REDACTED]",
+          payload: { value: "[REDACTED]" },
+        }, ["late-secret-name", "late-secret-correlation"]);
+
+        await expect(store.signals.list()).resolves.toEqual(
+          expect.arrayContaining([
+            {
+              ...signal,
+              name: "[REDACTED]",
+              correlationId: "[REDACTED]",
+              payload: { value: "[REDACTED]" },
+            },
+          ]),
+        );
+        await expect(
+          store.signals.findUnconsumedMatch(
+            signal.name,
+            signal.correlationId,
+          ),
+        ).resolves.toEqual(signal);
+        await expect(
+          store.signals.getOperationalSecretValues(signal.id),
+        ).resolves.toEqual([
+          "late-secret-name",
+          "late-secret-correlation",
+        ]);
         await expect(
           store.signals.findUnconsumedMatch(
             "[REDACTED]",

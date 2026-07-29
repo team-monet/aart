@@ -4,6 +4,7 @@ import type { BlockImplementation, Field } from "@aart/types";
 import { afterEach, describe, expect, it } from "vitest";
 import { idempotencyStorageKey, recordIdempotency } from "./idempotency.js";
 import { cancelRun, executeRun, triggerRun } from "./run-lifecycle.js";
+import { applyRunRedaction } from "./redaction.js";
 import { createTestStore, echoBlock, failingBlock, fixtureTrigger, testEngineConfig, fixtureWorkflow } from "./test-utils/fixtures.js";
 import type { EngineConfig } from "./types.js";
 
@@ -2578,6 +2579,80 @@ describe("cancelRun (architecture §4.1, spec F16)", () => {
     const cancelled = await cancelRun(config, run.runId);
     expect(cancelled.status).toBe("cancelled");
     expect(calls).toEqual([run.runId]);
+  });
+
+  it("deletes the outstanding protected wait atomically and keeps cancellation redacted", async () => {
+    const secret = "cancelled-secret";
+    const { store, config } = await setup({
+      redact: redactResolvedValues,
+    });
+    const workflow = fixtureWorkflow({
+      execution: {
+        type: "workflow",
+        steps: [
+          { id: "pause", uses: "wait.manual" },
+          { id: "after", uses: "test.echo" },
+        ],
+      },
+    });
+    await store.workflows.put(workflow);
+    const created = await triggerRun(config, {
+      workflow,
+      trigger: fixtureTrigger(),
+      inputs: {},
+    });
+    const rawWaiting = {
+      ...created,
+      status: "waiting" as const,
+      inputs: { token: secret },
+      waits: [
+        {
+          type: "manual" as const,
+          schemaVersion: created.schemaVersion,
+        },
+      ],
+      trace: [
+        {
+          seq: 0,
+          stepId: "pause",
+          block: "wait.manual",
+          status: "waiting" as const,
+          inputs: { token: secret },
+          startedAt: new Date().toISOString(),
+        },
+      ],
+      snapshot: {
+        definitions: workflow,
+        resolvedVersions: {},
+        packHashes: {},
+        capturedAt: new Date().toISOString(),
+      },
+    };
+    await store.runs.put(
+      applyRunRedaction(
+        redactResolvedValues,
+        rawWaiting,
+        new Set([secret]),
+      ),
+    );
+    await store.waits.put(
+      created.runId,
+      "pause",
+      rawWaiting.waits[0]!,
+      new Date().toISOString(),
+      {
+        run: rawWaiting,
+        resolvedSecretValues: [secret],
+      },
+    );
+
+    const cancelled = await cancelRun(config, created.runId);
+
+    expect(cancelled.status).toBe("cancelled");
+    expect(JSON.stringify(cancelled)).not.toContain(secret);
+    await expect(
+      store.waits.get(created.runId, "pause"),
+    ).resolves.toBeUndefined();
   });
 
   it("is idempotent for an already-terminal run", async () => {

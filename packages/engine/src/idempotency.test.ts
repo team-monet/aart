@@ -5,6 +5,7 @@ import {
   recordIdempotency,
   revokeSecretTaintedIdempotency,
 } from "./idempotency.js";
+import { idempotencyAssociationFingerprint } from "./idempotency-association.js";
 import {
   createTestStore,
   fixtureRun,
@@ -125,5 +126,104 @@ describe("checkIdempotency / recordIdempotency (spec §30.2, architecture §4.2/
         runId.startsWith("unrelated-"),
       ),
     ).toBe(false);
+  });
+
+  it("revokes a derivative ledger output when its producer trace never committed", async () => {
+    const store = await setup();
+    const ledgerKey = "v2:crash-gap";
+    const producer = fixtureRun({
+      runId: "crashed-producer",
+      trace: [],
+    });
+    await store.runs.put(producer);
+    await store.idempotencyLedger.put({
+      resolvedKey: ledgerKey,
+      runId: producer.runId,
+      stepId: "derive",
+      traceSeq: 0,
+      recordedOutput: { length: 19 },
+      createdAt: new Date().toISOString(),
+      schemaVersion: 2,
+    });
+
+    await revokeSecretTaintedIdempotency(
+      store,
+      (record) => record,
+      fixtureRun({ runId: "active-run" }),
+      new Set(["late-secret"]),
+    );
+
+    await expect(
+      store.idempotencyLedger.get(ledgerKey),
+    ).resolves.toBeUndefined();
+  });
+
+  it("finds and taints prior consumers through the stable fingerprint after the audit key is redacted", async () => {
+    const store = await setup();
+    const ledgerKey = "v2:secret-bearing-key";
+    const fingerprint =
+      idempotencyAssociationFingerprint(ledgerKey);
+    const producer = fixtureRun({
+      runId: "producer",
+      trace: [
+        {
+          seq: 0,
+          stepId: "derive",
+          block: "test.derive",
+          status: "completed",
+          inputs: {},
+          outputs: { length: 21 },
+          idempotencyLedgerKey: "[REDACTED]",
+          idempotencyLedgerFingerprint: fingerprint,
+          secretTainted: true,
+          secretTaintedPaths: ["*"],
+          startedAt: new Date().toISOString(),
+        },
+      ],
+    });
+    const consumer = fixtureRun({
+      runId: "consumer",
+      trace: [
+        {
+          seq: 0,
+          stepId: "reuse",
+          block: "test.reuse",
+          status: "completed",
+          inputs: {},
+          outputs: { length: 21 },
+          idempotencyLedgerKey: "[REDACTED]",
+          idempotencyLedgerFingerprint: fingerprint,
+          startedAt: new Date().toISOString(),
+        },
+      ],
+    });
+    await store.runs.put(producer);
+    await store.runs.put(consumer);
+    await store.idempotencyLedger.put({
+      resolvedKey: ledgerKey,
+      runId: producer.runId,
+      stepId: "derive",
+      traceSeq: 0,
+      recordedOutput: { length: 21 },
+      createdAt: new Date().toISOString(),
+      schemaVersion: 2,
+    });
+
+    await revokeSecretTaintedIdempotency(
+      store,
+      (record) => record,
+      fixtureRun({ runId: "active-run" }),
+      new Set(["late-secret"]),
+    );
+
+    await expect(
+      store.idempotencyLedger.get(ledgerKey),
+    ).resolves.toBeUndefined();
+    expect(
+      (await store.runs.get(consumer.runId))?.trace[0],
+    ).toMatchObject({
+      secretTainted: true,
+      secretTaintedPaths: ["*"],
+    });
   });
 });

@@ -4,14 +4,23 @@
 // placement is `store.idempotencyLedger` (architecture §5.7 — a dedicated
 // collection, not folded into StepTrace rows, so a resolved key is
 // checkable before that attempt's StepTrace even exists).
-import type { AartStore } from "@aart/store";
-import type { RedactFn, RunRecord } from "@aart/types";
+import type {
+  AartStore,
+  IdempotencyLedgerEntry,
+} from "@aart/store";
+import type {
+  RedactFn,
+  RunRecord,
+  StepTrace,
+} from "@aart/types";
 import {
   applyRedaction,
   applyRunRedaction,
   changedJsonPointers,
+  mergeOperationalRunTaint,
 } from "./redaction.js";
 import { CURRENT_ENGINE_SCHEMA_VERSION } from "./schema-version.js";
+import { idempotencyAssociationFingerprint } from "./idempotency-association.js";
 
 export interface IdempotencyCheck {
   /** `true` if a prior attempt with this resolved key already completed — `recordedOutput` is that attempt's output, to replay instead of re-executing the block. */
@@ -42,12 +51,21 @@ export async function checkIdempotency(store: AartStore, resolvedKey: string): P
 }
 
 /** Records a step attempt's output under its resolved idempotency key — called ONLY after a successful (post-retry) execution, never for an attempt that exhausted its retries and ultimately failed (architecture §4.2: a genuinely-failed attempt gets no protection, so a later retry of the whole step/run tries again fresh, which is correct — the attempt truly never succeeded). */
-export async function recordIdempotency(store: AartStore, resolvedKey: string, runId: string, stepId: string, recordedOutput: unknown, now: Date): Promise<void> {
+export async function recordIdempotency(
+  store: AartStore,
+  resolvedKey: string,
+  runId: string,
+  stepId: string,
+  recordedOutput: unknown,
+  now: Date,
+  traceSeq?: number,
+): Promise<void> {
   const storageKey = idempotencyStorageKey(resolvedKey);
   await store.idempotencyLedger.put({
     resolvedKey: storageKey,
     runId,
     stepId,
+    ...(traceSeq !== undefined ? { traceSeq } : {}),
     recordedOutput,
     createdAt: now.toISOString(),
     schemaVersion: CURRENT_ENGINE_SCHEMA_VERSION,
@@ -64,26 +82,62 @@ export type PrepareRevokedIdempotencyConsumer = (
 
 function traceHasTaintedLedgerOutput(
   run: RunRecord,
-  resolvedKey: string,
+  entry: IdempotencyLedgerEntry,
+  producerAssociation = false,
 ): boolean {
-  return run.trace.some(
-    (trace) =>
-      trace.idempotencyLedgerKey === resolvedKey &&
-      (trace.secretTainted === true ||
-        trace.controlSecretTainted === true),
+  const associated = run.trace.filter((trace) =>
+    traceMatchesLedgerEntry(trace, entry),
+  );
+  if (associated.length > 0) {
+    return associated.some(
+      (trace) =>
+        trace.secretTainted === true ||
+        trace.controlSecretTainted === true,
+    );
+  }
+  if (!producerAssociation || run.runId !== entry.runId) {
+    return false;
+  }
+  const producerTrace =
+    entry.traceSeq === undefined
+      ? undefined
+      : run.trace.find(
+          (trace) =>
+            trace.seq === entry.traceSeq &&
+            trace.stepId === entry.stepId,
+        );
+  // Missing trace means the ledger commit may have won the crash race.
+  // A legacy row without traceSeq is equally unprovable once its mutable
+  // key association is unavailable.
+  if (producerTrace === undefined) return true;
+  return (
+    producerTrace.secretTainted === true ||
+    producerTrace.controlSecretTainted === true
+  );
+}
+
+function traceMatchesLedgerEntry(
+  trace: StepTrace,
+  entry: IdempotencyLedgerEntry,
+): boolean {
+  return (
+    trace.idempotencyLedgerKey === entry.resolvedKey ||
+    trace.idempotencyLedgerFingerprint ===
+      idempotencyAssociationFingerprint(entry.resolvedKey)
   );
 }
 
 function markDirectLedgerConsumers(
   run: RunRecord,
-  outputTaintedLedgerKeys: ReadonlySet<string>,
+  outputTaintedEntries: readonly IdempotencyLedgerEntry[],
 ): RunRecord {
-  if (outputTaintedLedgerKeys.size === 0) return run;
+  if (outputTaintedEntries.length === 0) return run;
   return {
     ...run,
     trace: run.trace.map((trace) =>
-      trace.idempotencyLedgerKey !== undefined &&
-      outputTaintedLedgerKeys.has(trace.idempotencyLedgerKey)
+      outputTaintedEntries.some((entry) =>
+        traceMatchesLedgerEntry(trace, entry),
+      )
         ? {
             ...trace,
             secretTainted: true,
@@ -101,6 +155,30 @@ async function redactAndPersistRun(
   resolvedSecretRefs: ReadonlySet<string>,
 ): Promise<RunRecord> {
   const redacted = applyRunRedaction(redact, run, resolvedSecretRefs);
+  if (run.status === "waiting") {
+    const waits = await store.waits.list({ runId: run.runId });
+    const existing =
+      waits[0] === undefined
+        ? undefined
+        : await store.waits.getOperationalRunState(
+            waits[0].runId,
+            waits[0].stepId,
+          );
+    if (waits.length > 0) {
+      await store.waits.replaceOperationalRunState(run.runId, {
+        run: mergeOperationalRunTaint(
+          existing?.run ?? run,
+          redacted,
+        ),
+        resolvedSecretValues: [
+          ...new Set([
+            ...(existing?.resolvedSecretValues ?? []),
+            ...resolvedSecretRefs,
+          ]),
+        ],
+      });
+    }
+  }
   await store.runs.put(redacted);
   return redacted;
 }
@@ -125,6 +203,23 @@ export async function revokeSecretTaintedIdempotency(
   const entriesByKey = new Map(
     entries.map((entry) => [entry.resolvedKey, entry]),
   );
+  const entriesByFingerprint = new Map(
+    entries.map((entry) => [
+      idempotencyAssociationFingerprint(entry.resolvedKey),
+      entry,
+    ]),
+  );
+  const entryForTrace = (
+    trace: StepTrace,
+  ): IdempotencyLedgerEntry | undefined =>
+    (trace.idempotencyLedgerKey === undefined
+      ? undefined
+      : entriesByKey.get(trace.idempotencyLedgerKey)) ??
+    (trace.idempotencyLedgerFingerprint === undefined
+      ? undefined
+      : entriesByFingerprint.get(
+          trace.idempotencyLedgerFingerprint,
+        ));
   const pendingKeys = new Set<string>();
   const outputTaintedKeys = new Set<string>();
 
@@ -140,10 +235,14 @@ export async function revokeSecretTaintedIdempotency(
         { includeUnattributedSignalAudits: true },
       )
     : run;
-  activeRun = applyRunRedaction(
+  const activeAudit = applyRunRedaction(
     redact,
     activeRun,
     resolvedSecretRefs,
+  );
+  activeRun = mergeOperationalRunTaint(
+    activeRun,
+    activeAudit,
   );
 
   // Non-literal derivatives require historical reconstruction, but only
@@ -168,12 +267,12 @@ export async function revokeSecretTaintedIdempotency(
           resolvedSecretRefs,
         )
       : persistedProducer;
-    const redactedProducer = applyRunRedaction(
+    const redactedProducer = await redactAndPersistRun(
+      store,
       redact,
       preparedProducer,
       resolvedSecretRefs,
     );
-    await store.runs.put(redactedProducer);
     runsById.set(producerRunId, redactedProducer);
   }
 
@@ -192,15 +291,18 @@ export async function revokeSecretTaintedIdempotency(
         resolvedSecretRefs,
       ) !== entry.resolvedKey;
     const producerRun = runsById.get(entry.runId);
+    const producerAssociationUnsafe =
+      producerRun === undefined ||
+      traceHasTaintedLedgerOutput(
+        producerRun,
+        entry,
+        true,
+      );
     const consumedByTaintedTrace =
-      (producerRun !== undefined &&
-        traceHasTaintedLedgerOutput(
-          producerRun,
-          entry.resolvedKey,
-        )) ||
+      producerAssociationUnsafe ||
       traceHasTaintedLedgerOutput(
         activeRun,
-        entry.resolvedKey,
+        entry,
       );
     if (outputChanged || keyChanged || consumedByTaintedTrace) {
       pendingKeys.add(entry.resolvedKey);
@@ -225,11 +327,13 @@ export async function revokeSecretTaintedIdempotency(
   const consumersByKey = new Map<string, Set<string>>();
   for (const [runId, candidateRun] of runsById) {
     for (const trace of candidateRun.trace) {
-      const key = trace.idempotencyLedgerKey;
-      if (key === undefined) continue;
-      const consumers = consumersByKey.get(key) ?? new Set<string>();
+      const entry = entryForTrace(trace);
+      if (!entry) continue;
+      const consumers =
+        consumersByKey.get(entry.resolvedKey) ??
+        new Set<string>();
       consumers.add(runId);
-      consumersByKey.set(key, consumers);
+      consumersByKey.set(entry.resolvedKey, consumers);
     }
   }
   const processedKeys = new Set<string>();
@@ -254,13 +358,15 @@ export async function revokeSecretTaintedIdempotency(
     for (const runId of consumerRunIds) {
       const persistedRun = runsById.get(runId);
       if (!persistedRun) continue;
+      const batchSet = new Set(batch);
       const consumedKeys = new Set(
-        persistedRun.trace
-          .map((trace) => trace.idempotencyLedgerKey)
-          .filter(
-            (key): key is string =>
-              key !== undefined && batch.includes(key),
-          ),
+        persistedRun.trace.flatMap((trace) => {
+          const entry = entryForTrace(trace);
+          return entry !== undefined &&
+            batchSet.has(entry.resolvedKey)
+            ? [entry.resolvedKey]
+            : [];
+        }),
       );
       if (consumedKeys.size === 0) continue;
 
@@ -269,7 +375,10 @@ export async function revokeSecretTaintedIdempotency(
       );
       const directlyMarked = markDirectLedgerConsumers(
         persistedRun,
-        taintedConsumedKeys,
+        [...taintedConsumedKeys].flatMap((key) => {
+          const entry = entriesByKey.get(key);
+          return entry === undefined ? [] : [entry];
+        }),
       );
       const prepared = prepareConsumer
         ? await prepareConsumer(
@@ -279,9 +388,16 @@ export async function revokeSecretTaintedIdempotency(
             resolvedSecretRefs,
           )
         : directlyMarked;
-      const redacted =
+      const repaired =
         runId === activeRun.runId
-          ? applyRunRedaction(redact, prepared, resolvedSecretRefs)
+          ? mergeOperationalRunTaint(
+              prepared,
+              applyRunRedaction(
+                redact,
+                prepared,
+                resolvedSecretRefs,
+              ),
+            )
           : await redactAndPersistRun(
               store,
               redact,
@@ -289,20 +405,19 @@ export async function revokeSecretTaintedIdempotency(
               resolvedSecretRefs,
             );
       if (runId === activeRun.runId) {
-        activeRun = redacted;
+        activeRun = repaired;
       }
-      runsById.set(runId, redacted);
+      runsById.set(runId, repaired);
 
       for (const trace of prepared.trace) {
-        const key = trace.idempotencyLedgerKey;
+        const entry = entryForTrace(trace);
         if (
-          key !== undefined &&
-          entriesByKey.has(key) &&
+          entry !== undefined &&
           (trace.secretTainted === true ||
             trace.controlSecretTainted === true)
         ) {
-          pendingKeys.add(key);
-          outputTaintedKeys.add(key);
+          pendingKeys.add(entry.resolvedKey);
+          outputTaintedKeys.add(entry.resolvedKey);
         }
       }
     }

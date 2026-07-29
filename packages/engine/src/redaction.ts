@@ -15,6 +15,7 @@ import type {
   WaitCondition,
 } from "@aart/types";
 import { SecretResolutionError } from "@aart/types";
+import { idempotencyAssociationFingerprint } from "./idempotency-association.js";
 import { jsonValuesEqual } from "./output-validation.js";
 
 function escapeJsonPointerSegment(value: string): string {
@@ -390,8 +391,34 @@ export async function repairCustomerVisibleAudits(
       run,
       resolvedSecretRefs,
     );
+    if (run.status === "waiting") {
+      const outstanding = waits.filter(
+        (entry) => entry.runId === run.runId,
+      );
+      const existingState =
+        outstanding[0] === undefined
+          ? undefined
+          : await store.waits.getOperationalRunState(
+              outstanding[0].runId,
+              outstanding[0].stepId,
+            );
+      if (outstanding.length > 0) {
+        await store.waits.replaceOperationalRunState(run.runId, {
+          run: mergeOperationalRunTaint(
+            existingState?.run ?? run,
+            repaired,
+          ),
+          resolvedSecretValues: [
+            ...new Set([
+              ...(existingState?.resolvedSecretValues ?? []),
+              ...resolvedSecretRefs,
+            ]),
+          ],
+        });
+      }
+    }
     if (JSON.stringify(repaired) !== JSON.stringify(run)) {
-      await store.runs.put(applyRunRedaction(redact, run, resolvedSecretRefs));
+      await store.runs.put(repaired);
     }
   }
   await redactStoredArtifacts(
@@ -451,9 +478,10 @@ export async function repairCustomerVisibleAudits(
         payload: signal.payload,
       })
     ) {
-      await store.signals.replaceConsumedAudit(
+      await store.signals.replaceAudit(
         signal.id,
         audit,
+        [...resolvedSecretRefs],
       );
     }
   }
@@ -609,15 +637,42 @@ export function applyRunRedaction(redact: RedactFn, run: RunRecord, resolvedSecr
     trigger: rawTrigger,
     secretTaintedInputPaths: existingInputPaths = [],
     secretTaintedTriggerPaths: existingTriggerPaths = [],
-    ...runWithoutTrace
+    ..._runWithoutTrace
   } = run;
-  const redactedPayload = applyRedaction(
-    redact,
-    runWithoutTrace,
-    resolvedSecretRefs,
-  );
   const inputs = applyRedaction(redact, rawInputs, resolvedSecretRefs);
-  const trigger = applyRedaction(redact, rawTrigger, resolvedSecretRefs);
+  const trigger = {
+    type: rawTrigger.type,
+    id: rawTrigger.id,
+    source: applyRedaction(
+      redact,
+      rawTrigger.source,
+      resolvedSecretRefs,
+    ),
+    payload: applyRedaction(
+      redact,
+      rawTrigger.payload,
+      resolvedSecretRefs,
+    ),
+    ...(rawTrigger.correlationId !== undefined
+      ? {
+          correlationId: applyRedaction(
+            redact,
+            rawTrigger.correlationId,
+            resolvedSecretRefs,
+          ),
+        }
+      : {}),
+    receivedAt: rawTrigger.receivedAt,
+    ...(rawTrigger.dedupeKey !== undefined
+      ? {
+          dedupeKey: applyRedaction(
+            redact,
+            rawTrigger.dedupeKey,
+            resolvedSecretRefs,
+          ),
+        }
+      : {}),
+  } as typeof rawTrigger;
   const secretTaintedInputPaths = mergeTaintPaths(
     redact,
     existingInputPaths,
@@ -630,6 +685,38 @@ export function applyRunRedaction(redact: RedactFn, run: RunRecord, resolvedSecr
     changedJsonPointers(rawTrigger, trigger),
     resolvedSecretRefs,
   );
+  const params =
+    run.params === undefined
+      ? undefined
+      : {
+          ...(applyRedaction(
+            redact,
+            run.params,
+            resolvedSecretRefs,
+          ) as Record<string, unknown>),
+          // These keys are execution control state, not workflow data.
+          // Reclaiming a redacted running run must not turn dry-run off,
+          // lose its capability environment, or strand a queued run when
+          // a resolved boolean/string happens to equal one of these values.
+          ...(typeof run.params.dryRun === "boolean"
+            ? { dryRun: run.params.dryRun }
+            : {}),
+          ...(typeof run.params.environment === "string"
+            ? { environment: run.params.environment }
+            : {}),
+          ...(typeof run.params.waitingOnConcurrency === "boolean"
+            ? {
+                waitingOnConcurrency:
+                  run.params.waitingOnConcurrency,
+              }
+            : {}),
+          ...(typeof run.params.concurrencyKeyFormat === "string"
+            ? {
+                concurrencyKeyFormat:
+                  run.params.concurrencyKeyFormat,
+              }
+            : {}),
+        };
   const redactedTrace = run.trace.map((trace): StepTrace => {
     // Reconstruct from an explicit structural allowlist rather than
     // spreading the trace. Authored/runtime identity remains stable for
@@ -699,29 +786,107 @@ export function applyRunRedaction(redact: RedactFn, run: RunRecord, resolvedSecr
         : {}),
       ...(trace.artifacts !== undefined
         ? {
-            artifacts: applyRedaction(
-              redact,
-              trace.artifacts,
-              resolvedSecretRefs,
-            ),
+            artifacts: trace.artifacts.map((artifact) => {
+              const audit = applyRedaction(
+                redact,
+                {
+                  name: artifact.name,
+                  kind: artifact.kind,
+                  mime: artifact.mime,
+                  path: artifact.path,
+                },
+                resolvedSecretRefs,
+              );
+              return {
+                id: artifact.id,
+                runId: artifact.runId,
+                ...(artifact.stepId !== undefined
+                  ? { stepId: artifact.stepId }
+                  : {}),
+                ...audit,
+                bytes: artifact.bytes,
+                createdAt: artifact.createdAt,
+              };
+            }),
           }
         : {}),
       ...(trace.llmCall !== undefined
         ? {
-            llmCall: applyRedaction(
-              redact,
-              trace.llmCall,
-              resolvedSecretRefs,
-            ),
+            llmCall: {
+              provider: applyRedaction(
+                redact,
+                trace.llmCall.provider,
+                resolvedSecretRefs,
+              ),
+              model: applyRedaction(
+                redact,
+                trace.llmCall.model,
+                resolvedSecretRefs,
+              ),
+              promptRef: applyRedaction(
+                redact,
+                trace.llmCall.promptRef,
+                resolvedSecretRefs,
+              ),
+              promptVersion: applyRedaction(
+                redact,
+                trace.llmCall.promptVersion,
+                resolvedSecretRefs,
+              ),
+              ...(trace.llmCall.schemaRef !== undefined
+                ? {
+                    schemaRef: applyRedaction(
+                      redact,
+                      trace.llmCall.schemaRef,
+                      resolvedSecretRefs,
+                    ),
+                  }
+                : {}),
+              tokensIn: trace.llmCall.tokensIn,
+              tokensOut: trace.llmCall.tokensOut,
+              latencyMs: trace.llmCall.latencyMs,
+              ...(trace.llmCall.costEstimate !== undefined
+                ? { costEstimate: trace.llmCall.costEstimate }
+                : {}),
+              ...(trace.llmCall.scorerResult !== undefined
+                ? {
+                    scorerResult: applyRedaction(
+                      redact,
+                      trace.llmCall.scorerResult,
+                      resolvedSecretRefs,
+                    ),
+                  }
+                : {}),
+            },
           }
         : {}),
       ...(trace.externalCalls !== undefined
         ? {
-            externalCalls: applyRedaction(
-              redact,
-              trace.externalCalls,
-              resolvedSecretRefs,
-            ),
+            externalCalls: trace.externalCalls.map((call) => ({
+              system: applyRedaction(
+                redact,
+                call.system,
+                resolvedSecretRefs,
+              ),
+              domain: applyRedaction(
+                redact,
+                call.domain,
+                resolvedSecretRefs,
+              ),
+              ...(call.method !== undefined
+                ? {
+                    method: applyRedaction(
+                      redact,
+                      call.method,
+                      resolvedSecretRefs,
+                    ),
+                  }
+                : {}),
+              ...(call.status !== undefined
+                ? { status: call.status }
+                : {}),
+              durationMs: call.durationMs,
+            })),
           }
         : {}),
       ...(trace.idempotencyLedgerKey !== undefined
@@ -731,6 +896,16 @@ export function applyRunRedaction(redact: RedactFn, run: RunRecord, resolvedSecr
               trace.idempotencyLedgerKey,
               resolvedSecretRefs,
             ),
+          }
+        : {}),
+      ...(trace.idempotencyLedgerFingerprint !== undefined ||
+      trace.idempotencyLedgerKey !== undefined
+        ? {
+            idempotencyLedgerFingerprint:
+              trace.idempotencyLedgerFingerprint ??
+              idempotencyAssociationFingerprint(
+                trace.idempotencyLedgerKey!,
+              ),
           }
         : {}),
       ...(secretTaintedPaths.length > 0 ||
@@ -743,11 +918,116 @@ export function applyRunRedaction(redact: RedactFn, run: RunRecord, resolvedSecr
         : {}),
     };
   });
+  const snapshotDefinitions = applyRedaction(
+    redact,
+    run.snapshot.definitions,
+    resolvedSecretRefs,
+  );
+  const snapshot = {
+    // A partially rewritten workflow is not executable and can mislead an
+    // audit reader. Withhold the public definition tree if any literal was
+    // removed; the exact copy lives only in the sealed wait continuation.
+    definitions:
+      jsonValuesEqual(
+        snapshotDefinitions,
+        run.snapshot.definitions,
+      )
+        ? run.snapshot.definitions
+        : null,
+    resolvedVersions: applyRedaction(
+      redact,
+      run.snapshot.resolvedVersions,
+      resolvedSecretRefs,
+    ),
+    packHashes: applyRedaction(
+      redact,
+      run.snapshot.packHashes,
+      resolvedSecretRefs,
+    ),
+    capturedAt: run.snapshot.capturedAt,
+  };
+  const artifacts = run.artifacts.map((artifact) => {
+    const audit = applyRedaction(
+      redact,
+      {
+        name: artifact.name,
+        kind: artifact.kind,
+        mime: artifact.mime,
+        path: artifact.path,
+      },
+      resolvedSecretRefs,
+    );
+    return {
+      id: artifact.id,
+      runId: artifact.runId,
+      ...(artifact.stepId !== undefined
+        ? { stepId: artifact.stepId }
+        : {}),
+      ...audit,
+      bytes: artifact.bytes,
+      createdAt: artifact.createdAt,
+    };
+  });
+  const flag =
+    run.flag === undefined || run.flag === null
+      ? run.flag
+      : {
+          kind: run.flag.kind,
+          flaggedAt: run.flag.flaggedAt,
+          ...(run.flag.clearedBy !== undefined
+            ? {
+                clearedBy: applyRedaction(
+                  redact,
+                  run.flag.clearedBy,
+                  resolvedSecretRefs,
+                ),
+              }
+            : {}),
+          ...(run.flag.clearedAt !== undefined
+            ? { clearedAt: run.flag.clearedAt }
+            : {}),
+        };
   const redacted: RunRecord = {
-    ...redactedPayload,
+    runId: run.runId,
+    workflowId: run.workflowId,
+    workflowVersion: run.workflowVersion,
+    status: run.status,
+    approved: run.approved,
+    approvalMode: run.approvalMode,
     inputs,
     trigger,
+    ...(params !== undefined ? { params } : {}),
     trace: redactedTrace,
+    waits: run.waits.map((wait) =>
+      redactWaitAudit(redact, wait, resolvedSecretRefs),
+    ),
+    ...(run.outputs !== undefined
+      ? {
+          outputs: applyRedaction(
+            redact,
+            run.outputs,
+            resolvedSecretRefs,
+          ),
+        }
+      : {}),
+    ...(run.error !== undefined
+      ? {
+          error: applyRedaction(
+            redact,
+            run.error,
+            resolvedSecretRefs,
+          ),
+        }
+      : {}),
+    artifacts,
+    snapshot,
+    startedAt: run.startedAt,
+    updatedAt: run.updatedAt,
+    ...(run.endedAt !== undefined
+      ? { endedAt: run.endedAt }
+      : {}),
+    ...(flag !== undefined ? { flag } : {}),
+    schemaVersion: run.schemaVersion,
     ...(secretTaintedInputPaths.length > 0
       ? { secretTaintedInputPaths }
       : {}),
@@ -772,5 +1052,65 @@ export function applyRunRedaction(redact: RedactFn, run: RunRecord, resolvedSecr
         ? { concurrencyKeyFormat: run.params.concurrencyKeyFormat }
         : {}),
     },
+  };
+}
+
+function mergeStringSets(
+  left: readonly string[] | undefined,
+  right: readonly string[] | undefined,
+): string[] | undefined {
+  const merged = [...new Set([...(left ?? []), ...(right ?? [])])];
+  return merged.length === 0 ? undefined : merged;
+}
+
+/**
+ * Carries newly discovered provenance into the protected raw continuation
+ * without replacing its executable payloads with public redaction markers.
+ */
+export function mergeOperationalRunTaint(
+  operational: RunRecord,
+  repairedAudit: RunRecord,
+): RunRecord {
+  const auditTraceBySeq = new Map(
+    repairedAudit.trace.map((trace) => [trace.seq, trace]),
+  );
+  return {
+    ...operational,
+    secretTaintedInputPaths: mergeStringSets(
+      operational.secretTaintedInputPaths,
+      repairedAudit.secretTaintedInputPaths,
+    ),
+    secretTaintedTriggerPaths: mergeStringSets(
+      operational.secretTaintedTriggerPaths,
+      repairedAudit.secretTaintedTriggerPaths,
+    ),
+    trace: operational.trace.map((trace) => {
+      const audit = auditTraceBySeq.get(trace.seq);
+      if (!audit) return trace;
+      const secretTaintedPaths = mergeStringSets(
+        trace.secretTaintedPaths,
+        audit.secretTaintedPaths,
+      );
+      return {
+        ...trace,
+        ...(trace.secretTainted === true ||
+        audit.secretTainted === true
+          ? { secretTainted: true }
+          : {}),
+        ...(secretTaintedPaths !== undefined
+          ? { secretTaintedPaths }
+          : {}),
+        ...(trace.controlSecretTainted === true ||
+        audit.controlSecretTainted === true
+          ? { controlSecretTainted: true }
+          : {}),
+        ...(audit.idempotencyLedgerFingerprint !== undefined
+          ? {
+              idempotencyLedgerFingerprint:
+                audit.idempotencyLedgerFingerprint,
+            }
+          : {}),
+      };
+    }),
   };
 }

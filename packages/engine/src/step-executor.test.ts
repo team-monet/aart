@@ -163,7 +163,7 @@ describe("executeStep — guarded back-edges: maxIterations (spec §18.2)", () =
 });
 
 describe("executeStep — guarded back-edges: until (spec §18.2, architecture §4.2)", () => {
-  it("bypasses cache replay and admission before an active secret-dependent until is evaluated", async () => {
+  it("bypasses replay/admission and revokes an unprovable prior cache entry before a secret-dependent until is evaluated", async () => {
     let executeCount = 0;
     const block: BlockImplementation = {
       manifest: {
@@ -220,7 +220,7 @@ describe("executeStep — guarded back-edges: until (spec §18.2, architecture �
     expect(outcome.run.trace[0]?.outputs).toEqual({ value: 1 });
     await expect(
       store.idempotencyLedger.get(idempotencyStorageKey("shared-until")),
-    ).resolves.toMatchObject({ recordedOutput: { value: "cached" } });
+    ).resolves.toBeUndefined();
   });
 
   it("until false: the back-edge (next) IS taken", async () => {

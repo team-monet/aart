@@ -11,8 +11,9 @@ import { checkCapabilityDispatch, alwaysEmptyGrantedCapabilities } from "./capab
 import { parseDurationMs } from "./duration.js";
 import { buildExprContext, resolveArrayExpression, resolveBooleanExpression, resolveStringExpression, resolveWithRecord, traceRepresentsAuthoredStep } from "./expr-context.js";
 import { checkIdempotency, idempotencyStorageKey, recordIdempotency, revokeSecretTaintedIdempotency } from "./idempotency.js";
+import { idempotencyAssociationFingerprint } from "./idempotency-association.js";
 import { jsonCompatibilityProblem, jsonValuesEqual, validateWorkflowOutputs } from "./output-validation.js";
-import { applyRedaction, applyRunRedaction, changedJsonPointers, createTrackingSecretResolver, isTextMime, redactStoredTextArtifacts, repairCustomerVisibleAudits, repairGlobalAuditsForNewSecrets, throwingSecretResolver } from "./redaction.js";
+import { applyRedaction, applyRunRedaction, changedJsonPointers, createTrackingSecretResolver, isTextMime, mergeOperationalRunTaint, redactStoredTextArtifacts, repairCustomerVisibleAudits, repairGlobalAuditsForNewSecrets, throwingSecretResolver } from "./redaction.js";
 import { CURRENT_ENGINE_SCHEMA_VERSION } from "./schema-version.js";
 import { resolveWorkflowForRun } from "./snapshot.js";
 import type { EngineBlockExecutionContext, EngineConfig } from "./types.js";
@@ -256,7 +257,23 @@ async function dispatchOnce(
       if (compatibilityProblem) {
         return { seq, stepId: stepIdForTrace, authoredStepId: step.id, block: step.uses, status: "failed", inputs: resolvedInputs, error: compatibilityProblem, startedAt, endedAt, durationMs: 0 };
       }
-      return { seq, stepId: stepIdForTrace, authoredStepId: step.id, block: step.uses, status: "completed", inputs: resolvedInputs, outputs, startedAt, endedAt, durationMs: 0, idempotencyLedgerKey };
+      return {
+        seq,
+        stepId: stepIdForTrace,
+        authoredStepId: step.id,
+        block: step.uses,
+        status: "completed",
+        inputs: resolvedInputs,
+        outputs,
+        startedAt,
+        endedAt,
+        durationMs: 0,
+        idempotencyLedgerKey,
+        idempotencyLedgerFingerprint:
+          idempotencyAssociationFingerprint(
+            idempotencyLedgerKey!,
+          ),
+      };
     }
   }
 
@@ -355,7 +372,15 @@ async function dispatchOnce(
     !controlSecretTaintedBeforeDispatch &&
     !outputsContainResolvedSecret
   ) {
-    await recordIdempotency(config.store, resolvedIdempotencyKey, run.runId, stepIdForTrace, outputs, now());
+    await recordIdempotency(
+      config.store,
+      resolvedIdempotencyKey,
+      run.runId,
+      stepIdForTrace,
+      outputs,
+      now(),
+      seq,
+    );
   }
   return {
     seq,
@@ -374,7 +399,13 @@ async function dispatchOnce(
     !dataSecretAccessed &&
     !controlSecretTaintedBeforeDispatch &&
     !outputsContainResolvedSecret
-      ? { idempotencyLedgerKey }
+      ? {
+          idempotencyLedgerKey,
+          idempotencyLedgerFingerprint:
+            idempotencyAssociationFingerprint(
+              idempotencyLedgerKey!,
+            ),
+        }
       : {}),
     ...(dataSecretAccessed
       ? { secretTainted: true, secretTaintedPaths: ["*"] }
@@ -582,7 +613,7 @@ async function appendTracesAndPersist(
       resolvedSecretRefs,
     );
     await tx.runs.put(redacted);
-    return redacted;
+    return repaired;
   });
 }
 
@@ -1287,7 +1318,7 @@ export async function refreshTaintAfterControlResolution(
       resolvedSecretRefs,
     );
     await tx.runs.put(refreshedRun);
-    return refreshedRun;
+    return repaired;
   });
 }
 
@@ -1725,6 +1756,7 @@ async function executeWaitDispatch(
 
   let preparedNextStepId: string | undefined;
   let preparedControlError: Error | undefined;
+  let preparedOperationalRun: RunRecord | undefined;
   const result = await enterWait(waitMachineConfig, {
     run: historicallyTaintAwareRun,
     stepId: step.id,
@@ -1759,7 +1791,7 @@ async function executeWaitDispatch(
         1,
         resolvedSecretRefs,
       );
-      return {
+      preparedOperationalRun = {
         ...preparedRun,
         artifacts: await redactStoredTextArtifacts(
           transactionStore,
@@ -1768,6 +1800,7 @@ async function executeWaitDispatch(
           resolvedSecretRefs,
         ),
       };
+      return preparedOperationalRun;
     },
   });
 
@@ -1777,13 +1810,25 @@ async function executeWaitDispatch(
     if (preparedControlError) {
       return {
         kind: "failed",
-        run: result.run,
+        run:
+          preparedOperationalRun === undefined
+            ? result.run
+            : mergeOperationalRunTaint(
+                preparedOperationalRun,
+                result.run,
+              ),
         error: preparedControlError,
       };
     }
     return {
       kind: "continue",
-      run: result.run,
+      run:
+        preparedOperationalRun === undefined
+          ? result.run
+          : mergeOperationalRunTaint(
+              preparedOperationalRun,
+              result.run,
+            ),
       nextStepId: preparedNextStepId,
     };
   }

@@ -81,7 +81,30 @@ export interface RunStore {
 
 export interface WaitStore {
   get(runId: string, stepId: string): Promise<WaitCondition | undefined>;
-  put(runId: string, stepId: string, wait: WaitCondition, createdAt: string): Promise<void>;
+  put(
+    runId: string,
+    stepId: string,
+    wait: WaitCondition,
+    createdAt: string,
+    operationalRunState?: WaitOperationalRunState,
+  ): Promise<void>;
+  /**
+   * Engine-only run state captured at suspension. Public RunRecord fields
+   * may be redacted after a later secret discovery, so exact continuation
+   * reads this sealed copy and rehydrates the segment's known literals.
+   */
+  getOperationalRunState(
+    runId: string,
+    stepId: string,
+  ): Promise<WaitOperationalRunState | undefined>;
+  /**
+   * Replaces the protected continuation state for every outstanding wait
+   * on a run. The engine uses this before rewriting its public RunRecord.
+   */
+  replaceOperationalRunState(
+    runId: string,
+    state: WaitOperationalRunState,
+  ): Promise<void>;
   /**
    * Replaces only the user-visible audit copy while preserving the
    * adapter-internal one-way match fingerprint written by `put()`.
@@ -129,6 +152,8 @@ export interface SignalStore {
   append(signal: Signal): Promise<void>;
   /** The check-at-creation lookup architecture §4.4/§5.6 requires: an unconsumed Signal matching (name, correlationId), if one already arrived before its wait was created. */
   findUnconsumedMatch(name: string, correlationId: string): Promise<Signal | undefined>;
+  /** Secret literals that caused an unconsumed signal's audit redaction. */
+  getOperationalSecretValues(signalId: string): Promise<string[]>;
   /**
    * Marks the audit copy consumed. When a resolving control expression has
    * just enlarged the known-secret set, callers also replace the payload
@@ -147,14 +172,21 @@ export interface SignalStore {
   /** Pre-provenance consumed rows from stores created before migration 0007. */
   listConsumedWithoutProvenance(): Promise<Signal[]>;
   /**
-   * Security-only audit rewrite. Consumption state, provenance, identity,
-   * and receipt time remain immutable.
+   * Security-only audit rewrite. Unconsumed signals retain a separately
+   * sealed operational copy so exact early-arrival matching still works;
+   * consumption state, provenance, identity, and receipt time are immutable.
    */
-  replaceConsumedAudit(
+  replaceAudit(
     signalId: string,
     audit: Pick<Signal, "name" | "correlationId" | "payload">,
+    resolvedSecretValues?: readonly string[],
   ): Promise<void>;
   list(): Promise<Signal[]>;
+}
+
+export interface WaitOperationalRunState {
+  run: RunRecord;
+  resolvedSecretValues: string[];
 }
 
 export interface ArtifactStore {
@@ -343,6 +375,8 @@ export interface IdempotencyLedgerEntry {
   resolvedKey: string;
   runId: string;
   stepId: string;
+  /** Stable producer occurrence; absent on legacy ledger rows. */
+  traceSeq?: number;
   recordedOutput: unknown;
   createdAt: string;
   /** Absent on legacy entries written before provenance-aware replay. */

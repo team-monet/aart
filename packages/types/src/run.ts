@@ -71,6 +71,9 @@ export const StepTraceSchema = z.object({
   // occurrence. Persisted so a later secret discovery can revoke a global
   // ledger entry even when another run originally created it.
   idempotencyLedgerKey: z.string().optional(),
+  // One-way, stable association retained when the customer-visible ledger
+  // key is later redacted. This is operational provenance, not the key.
+  idempotencyLedgerFingerprint: z.string().optional(),
 });
 export type StepTrace = z.infer<typeof StepTraceSchema>;
 

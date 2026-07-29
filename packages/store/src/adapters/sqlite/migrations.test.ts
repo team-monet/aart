@@ -521,7 +521,7 @@ describe("0007_secret_audit_provenance", () => {
       new SqliteMigrationWatermarkStore(handle.db),
       handle.store,
     );
-    await expect(all.up()).resolves.toBe(9);
+    await expect(all.up()).resolves.toBe(10);
     await handle.store.waits.redactAudit("run-audit", "pause", {
       ...wait,
       correlationId: "[REDACTED]",
@@ -633,7 +633,7 @@ describe("0008/0009 sealed operational state", () => {
       new SqliteMigrationWatermarkStore(handle.db),
       handle.store,
     );
-    await expect(all.up()).resolves.toBe(9);
+    await expect(all.up()).resolves.toBe(10);
     await handle.store.waits.redactAudit(
       "run-sealed-upgrade",
       "pause",
@@ -668,5 +668,91 @@ describe("0008/0009 sealed operational state", () => {
     await expect(
       handle.store.waits.get("run-sealed-upgrade", "pause"),
     ).resolves.toEqual(wait);
+  });
+});
+
+describe("0010 protected continuation state", () => {
+  it("lazily seals a legacy unconsumed signal before replacing its public audit", async () => {
+    dir = await fs.mkdtemp(
+      join(tmpdir(), "aart-sqlite-migration-test-"),
+    );
+    handle = await openSqliteStore(join(dir, "aart.db"), {
+      runMigrations: false,
+      blobsDir: join(dir, "blobs"),
+    });
+    const through0009 = new MigrationRunner(
+      ALL_SQLITE_MIGRATIONS(handle.db).slice(0, 9),
+      new SqliteMigrationWatermarkStore(handle.db),
+      handle.store,
+    );
+    await expect(through0009.up()).resolves.toBe(9);
+    handle.db
+      .prepare(
+        `INSERT INTO signals
+          (signal_id, name, correlation_id, payload_json, received_at, consumed_at, consumed_by_run_id, consumed_by_step_id)
+         VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL)`,
+      )
+      .run(
+        "legacy-unconsumed",
+        "late-secret",
+        "late-secret",
+        JSON.stringify({ value: "late-secret" }),
+        "2026-07-29T00:00:00.000Z",
+      );
+
+    const all = new MigrationRunner(
+      ALL_SQLITE_MIGRATIONS(handle.db),
+      new SqliteMigrationWatermarkStore(handle.db),
+      handle.store,
+    );
+    await expect(all.up()).resolves.toBe(10);
+    await handle.store.signals.replaceAudit(
+      "legacy-unconsumed",
+      {
+        name: "[REDACTED]",
+        correlationId: "[REDACTED]",
+        payload: { value: "[REDACTED]" },
+      },
+      ["late-secret"],
+    );
+
+    await expect(handle.store.signals.list()).resolves.toEqual([
+      {
+        id: "legacy-unconsumed",
+        name: "[REDACTED]",
+        correlationId: "[REDACTED]",
+        payload: { value: "[REDACTED]" },
+        receivedAt: "2026-07-29T00:00:00.000Z",
+      },
+    ]);
+    await expect(
+      handle.store.signals.findUnconsumedMatch(
+        "late-secret",
+        "late-secret",
+      ),
+    ).resolves.toMatchObject({ id: "legacy-unconsumed" });
+    await expect(
+      handle.store.signals.getOperationalSecretValues(
+        "legacy-unconsumed",
+      ),
+    ).resolves.toEqual(["late-secret"]);
+    const stored = handle.db
+      .prepare(
+        `SELECT signal_match_fingerprint,
+                operational_signal_ciphertext,
+                operational_generation
+         FROM signals WHERE signal_id = ?`,
+      )
+      .get("legacy-unconsumed") as Record<string, unknown>;
+    expect(stored.signal_match_fingerprint).toEqual(
+      expect.any(String),
+    );
+    expect(stored.operational_signal_ciphertext).toEqual(
+      expect.any(String),
+    );
+    expect(stored.operational_generation).toEqual(
+      expect.any(String),
+    );
+    expect(JSON.stringify(stored)).not.toContain("late-secret");
   });
 });

@@ -7,12 +7,52 @@ import { promises as fs } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import type { AartStore } from "../../types.js";
+import type {
+  AartStore,
+  WaitOperationalRunState,
+} from "../../types.js";
 import { createFsStore } from "./index.js";
 import * as paths from "./paths.js";
 
 let root: string;
 let store: AartStore;
+
+function continuationState(
+  secret: string,
+): WaitOperationalRunState {
+  const now = new Date().toISOString();
+  return {
+    run: {
+      runId: "run_state_replay",
+      workflowId: "wf",
+      workflowVersion: "1",
+      status: "waiting",
+      approved: true,
+      approvalMode: "governed",
+      trigger: {
+        type: "manual",
+        id: "trigger",
+        source: "cli",
+        payload: null,
+        receivedAt: now,
+      },
+      inputs: { secret },
+      trace: [],
+      waits: [{ type: "manual", schemaVersion: 1 }],
+      artifacts: [],
+      snapshot: {
+        definitions: {},
+        resolvedVersions: {},
+        packHashes: {},
+        capturedAt: now,
+      },
+      startedAt: now,
+      updatedAt: now,
+      schemaVersion: 1,
+    },
+    resolvedSecretValues: [secret],
+  };
+}
 
 beforeEach(async () => {
   root = await fs.mkdtemp(join(tmpdir(), "aart-store-fs-"));
@@ -178,6 +218,109 @@ describe("fs adapter — .aart/ layout (architecture §5.2)", () => {
       createFsStore(root).waits.get(
         "run_loop",
         "wait_loop",
+      ),
+    ).rejects.toThrow();
+  });
+
+  it("rotates the authenticated generation when continuation state is replaced", async () => {
+    const waitPath = join(
+      paths.waitsDir(root),
+      "run_state_replay__pause.json",
+    );
+    const wait = {
+      type: "manual" as const,
+      schemaVersion: 1,
+    };
+    const first = continuationState("first-secret");
+    await store.waits.put(
+      first.run.runId,
+      "pause",
+      wait,
+      new Date().toISOString(),
+      first,
+    );
+    const firstStored = JSON.parse(
+      await fs.readFile(waitPath, "utf8"),
+    ) as Record<string, unknown>;
+
+    await store.waits.replaceOperationalRunState(
+      first.run.runId,
+      continuationState("second-secret"),
+    );
+    const secondStored = JSON.parse(
+      await fs.readFile(waitPath, "utf8"),
+    ) as Record<string, unknown>;
+    expect(secondStored["operationalGeneration"]).not.toBe(
+      firstStored["operationalGeneration"],
+    );
+
+    secondStored["operationalRunState"] =
+      firstStored["operationalRunState"];
+    await fs.writeFile(
+      waitPath,
+      JSON.stringify(secondStored),
+      "utf8",
+    );
+    await expect(
+      createFsStore(root).waits.getOperationalRunState(
+        first.run.runId,
+        "pause",
+      ),
+    ).rejects.toThrow();
+  });
+
+  it("rotates the authenticated generation when an unconsumed signal audit is replaced", async () => {
+    const signal = {
+      id: "signal_state_replay",
+      name: "signal-name",
+      correlationId: "signal-correlation",
+      payload: { token: "first-secret" },
+      receivedAt: "2026-01-01T00:00:00.000Z",
+    };
+    await store.signals.append(signal);
+    const originalPath = join(
+      paths.signalsDir(root),
+      "signal-correlation__2026-01-01T00_00_00.000Z.json",
+    );
+    const firstStored = JSON.parse(
+      await fs.readFile(originalPath, "utf8"),
+    ) as Record<string, unknown>;
+
+    await store.signals.replaceAudit(
+      signal.id,
+      {
+        name: "[REDACTED]",
+        correlationId: "[REDACTED]",
+        payload: { token: "[REDACTED]" },
+      },
+      ["first-secret"],
+    );
+    const replacementName = (
+      await fs.readdir(paths.signalsDir(root))
+    ).find((name) => name.endsWith(".json"));
+    expect(replacementName).toBeDefined();
+    const replacementPath = join(
+      paths.signalsDir(root),
+      replacementName!,
+    );
+    const secondStored = JSON.parse(
+      await fs.readFile(replacementPath, "utf8"),
+    ) as Record<string, unknown>;
+    expect(secondStored["operationalGeneration"]).not.toBe(
+      firstStored["operationalGeneration"],
+    );
+
+    secondStored["operationalSignal"] =
+      firstStored["operationalSignal"];
+    await fs.writeFile(
+      replacementPath,
+      JSON.stringify(secondStored),
+      "utf8",
+    );
+    await expect(
+      createFsStore(root).signals.findUnconsumedMatch(
+        signal.name,
+        signal.correlationId,
       ),
     ).rejects.toThrow();
   });
@@ -368,7 +511,7 @@ describe("fs adapter — signals directory layout", () => {
     };
     await store.signals.append(signal);
     await store.signals.markConsumed(signal.id);
-    await store.signals.replaceConsumedAudit(signal.id, {
+    await store.signals.replaceAudit(signal.id, {
       name: "[REDACTED]",
       correlationId: "[REDACTED]",
       payload: { value: "[REDACTED]" },
@@ -395,9 +538,9 @@ describe("fs adapter — signals directory layout", () => {
     };
     await store.signals.append(signal);
     await store.signals.markConsumed(signal.id);
-    const [oldFilename] = await fs.readdir(
-      paths.signalsDir(root),
-    );
+    const [oldFilename] = (
+      await fs.readdir(paths.signalsDir(root))
+    ).filter((file) => file.endsWith(".json"));
     if (!oldFilename) throw new Error("signal file missing");
     const oldPath = join(paths.signalsDir(root), oldFilename);
     const interrupted = JSON.parse(
@@ -425,9 +568,9 @@ describe("fs adapter — signals directory layout", () => {
         payload: { value: "[REDACTED]" },
       },
     ]);
-    const recoveredFilenames = await fs.readdir(
-      paths.signalsDir(root),
-    );
+    const recoveredFilenames = (
+      await fs.readdir(paths.signalsDir(root))
+    ).filter((file) => file.endsWith(".json"));
     expect(recoveredFilenames).toHaveLength(1);
     expect(recoveredFilenames[0]).not.toContain("late-secret");
     expect(recoveredFilenames[0]).toContain("recovery-nonce");

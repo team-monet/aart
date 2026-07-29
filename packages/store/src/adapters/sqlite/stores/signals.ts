@@ -9,8 +9,14 @@
 // architecture §5.8 states the fs gap is fs-specific ("SQLite/Postgres have
 // no equivalent gap — both `signals.consumed_at` and the `runs`/
 // `step_traces` update happen inside the same native transaction").
+import { createHash, randomUUID } from "node:crypto";
+import { join } from "node:path";
 import type { Signal } from "@aart/types";
 import type { SignalStore } from "../../../types.js";
+import {
+  openOperationalState,
+  sealOperationalState,
+} from "../../operational-state-seal.js";
 import { dbAll, dbGet, dbRun, type SqlExec } from "../db.js";
 
 interface SignalRow {
@@ -22,6 +28,14 @@ interface SignalRow {
   consumed_at: string | null;
   consumed_by_run_id: string | null;
   consumed_by_step_id: string | null;
+  signal_match_fingerprint: string | null | undefined;
+  operational_signal_ciphertext: string | null | undefined;
+  operational_generation: string | null | undefined;
+}
+
+interface OperationalSignalState {
+  signal: Signal;
+  resolvedSecretValues: string[];
 }
 
 function rowToSignal(row: SignalRow): Signal {
@@ -35,27 +49,68 @@ function rowToSignal(row: SignalRow): Signal {
 }
 
 export class SqliteSignalStore implements SignalStore {
-  constructor(private readonly exec: SqlExec) {}
+  private readonly operationKeyPath: string;
+
+  constructor(
+    private readonly exec: SqlExec,
+    operationalStateDir: string,
+  ) {
+    this.operationKeyPath = join(
+      operationalStateDir,
+      ".signal-operational-key",
+    );
+  }
+
+  private fingerprint(name: string, correlationId: string): string {
+    return createHash("sha256")
+      .update(JSON.stringify([name, correlationId]))
+      .digest("hex");
+  }
 
   async append(signal: Signal): Promise<void> {
+    const operationalGeneration = randomUUID();
+    const operationalSignal = await sealOperationalState(
+      this.operationKeyPath,
+      [signal.id, operationalGeneration, "signal"],
+      { signal, resolvedSecretValues: [] },
+    );
     await this.exec((db) =>
       dbRun(
         db,
-        "INSERT INTO signals (signal_id, name, correlation_id, payload_json, received_at, consumed_at, consumed_by_run_id, consumed_by_step_id) VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL)",
-        [signal.id, signal.name, signal.correlationId, JSON.stringify(signal.payload), signal.receivedAt],
+        "INSERT INTO signals (signal_id, name, correlation_id, payload_json, received_at, consumed_at, consumed_by_run_id, consumed_by_step_id, signal_match_fingerprint, operational_signal_ciphertext, operational_generation) VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?, ?)",
+        [
+          signal.id,
+          signal.name,
+          signal.correlationId,
+          JSON.stringify(signal.payload),
+          signal.receivedAt,
+          this.fingerprint(signal.name, signal.correlationId),
+          operationalSignal,
+          operationalGeneration,
+        ],
       ),
     );
   }
 
   async findUnconsumedMatch(name: string, correlationId: string): Promise<Signal | undefined> {
-    const row = await this.exec((db) =>
-      dbGet<SignalRow>(
+    const expected = this.fingerprint(name, correlationId);
+    const rows = await this.exec((db) =>
+      dbAll<SignalRow>(
         db,
-        "SELECT * FROM signals WHERE name = ? AND correlation_id = ? AND consumed_at IS NULL ORDER BY received_at ASC LIMIT 1",
-        [name, correlationId],
+        `SELECT * FROM signals
+         WHERE consumed_at IS NULL
+           AND (signal_match_fingerprint = ? OR signal_match_fingerprint IS NULL)
+         ORDER BY received_at ASC`,
+        [expected],
       ),
     );
-    return row ? rowToSignal(row) : undefined;
+    const row = rows.find(
+      (candidate) =>
+        candidate.signal_match_fingerprint === expected ||
+        (candidate.name === name &&
+          candidate.correlation_id === correlationId),
+    );
+    return row ? this.operationalSignal(row) : undefined;
   }
 
   async markConsumed(
@@ -78,6 +133,11 @@ export class SqliteSignalStore implements SignalStore {
         options.consumedBy.stepId,
       );
     }
+    assignments.push(
+      "signal_match_fingerprint = NULL",
+      "operational_signal_ciphertext = NULL",
+      "operational_generation = NULL",
+    );
     params.push(signalId);
     await this.exec((db) =>
       dbRun(
@@ -86,6 +146,22 @@ export class SqliteSignalStore implements SignalStore {
         params,
       ),
     );
+  }
+
+  async getOperationalSecretValues(
+    signalId: string,
+  ): Promise<string[]> {
+    const row = await this.exec((db) =>
+      dbGet<SignalRow>(
+        db,
+        `SELECT * FROM signals
+         WHERE signal_id = ? AND consumed_at IS NULL`,
+        [signalId],
+      ),
+    );
+    if (!row) return [];
+    return (await this.operationalSignalState(row))
+      .resolvedSecretValues;
   }
 
   async listConsumedByRun(runId: string): Promise<Signal[]> {
@@ -109,20 +185,67 @@ export class SqliteSignalStore implements SignalStore {
     return rows.map(rowToSignal);
   }
 
-  async replaceConsumedAudit(
+  async replaceAudit(
     signalId: string,
     audit: Pick<Signal, "name" | "correlationId" | "payload">,
+    resolvedSecretValues: readonly string[] = [],
   ): Promise<void> {
+    const stored = await this.exec((db) =>
+      dbGet<SignalRow>(
+        db,
+        "SELECT * FROM signals WHERE signal_id = ?",
+        [signalId],
+      ),
+    );
+    if (!stored) return;
+    const operationalGeneration =
+      stored.consumed_at === null
+        ? randomUUID()
+        : null;
+    const priorOperationalState =
+      stored.consumed_at === null
+        ? await this.operationalSignalState(stored)
+        : undefined;
+    const operationalSignal =
+      stored.consumed_at === null
+        ? await sealOperationalState(
+            this.operationKeyPath,
+            [stored.signal_id, operationalGeneration!, "signal"],
+            {
+              signal:
+                priorOperationalState?.signal ??
+                rowToSignal(stored),
+              resolvedSecretValues: [
+                ...new Set([
+                  ...(priorOperationalState?.resolvedSecretValues ??
+                    []),
+                  ...resolvedSecretValues,
+                ]),
+              ],
+            } satisfies OperationalSignalState,
+          )
+        : null;
+    const signalMatchFingerprint =
+      stored.consumed_at === null
+        ? (stored.signal_match_fingerprint ??
+          this.fingerprint(stored.name, stored.correlation_id))
+        : null;
     await this.exec((db) =>
       dbRun(
         db,
         `UPDATE signals
-         SET name = ?, correlation_id = ?, payload_json = ?
-         WHERE signal_id = ? AND consumed_at IS NOT NULL`,
+         SET name = ?, correlation_id = ?, payload_json = ?,
+             signal_match_fingerprint = ?,
+             operational_signal_ciphertext = ?,
+             operational_generation = ?
+         WHERE signal_id = ?`,
         [
           audit.name,
           audit.correlationId,
           JSON.stringify(audit.payload) ?? "null",
+          signalMatchFingerprint,
+          operationalSignal,
+          operationalGeneration,
           signalId,
         ],
       ),
@@ -132,5 +255,35 @@ export class SqliteSignalStore implements SignalStore {
   async list(): Promise<Signal[]> {
     const rows = await this.exec((db) => dbAll<SignalRow>(db, "SELECT * FROM signals"));
     return rows.map(rowToSignal);
+  }
+
+  private async operationalSignal(row: SignalRow): Promise<Signal> {
+    return (await this.operationalSignalState(row)).signal;
+  }
+
+  private async operationalSignalState(
+    row: SignalRow,
+  ): Promise<OperationalSignalState> {
+    if (
+      row.operational_signal_ciphertext === null ||
+      row.operational_signal_ciphertext === undefined ||
+      row.operational_generation === null ||
+      row.operational_generation === undefined
+    ) {
+      return {
+        signal: rowToSignal(row),
+        resolvedSecretValues: [],
+      };
+    }
+    const opened = await openOperationalState<
+      OperationalSignalState | Signal
+    >(
+      this.operationKeyPath,
+      [row.signal_id, row.operational_generation, "signal"],
+      row.operational_signal_ciphertext,
+    );
+    return "signal" in opened
+      ? opened
+      : { signal: opened, resolvedSecretValues: [] };
   }
 }

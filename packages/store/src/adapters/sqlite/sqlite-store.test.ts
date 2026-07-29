@@ -11,7 +11,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { MigrationRunner } from "../../migrations/index.js";
-import type { AartStore } from "../../types.js";
+import type {
+  AartStore,
+  WaitOperationalRunState,
+} from "../../types.js";
 import { createDirectExec, openSqliteDb } from "./db.js";
 import { openSqliteStore, type SqliteStoreHandle } from "./index.js";
 import { ALL_SQLITE_MIGRATIONS } from "./migrations.js";
@@ -21,6 +24,43 @@ import { SqliteMigrationWatermarkStore } from "./watermark.js";
 let dir: string;
 let handle: SqliteStoreHandle;
 let store: AartStore;
+
+function continuationState(
+  secret: string,
+): WaitOperationalRunState {
+  const now = new Date().toISOString();
+  return {
+    run: {
+      runId: "run_state_replay",
+      workflowId: "wf",
+      workflowVersion: "1",
+      status: "waiting",
+      approved: true,
+      approvalMode: "governed",
+      trigger: {
+        type: "manual",
+        id: "trigger",
+        source: "cli",
+        payload: null,
+        receivedAt: now,
+      },
+      inputs: { secret },
+      trace: [],
+      waits: [{ type: "manual", schemaVersion: 1 }],
+      artifacts: [],
+      snapshot: {
+        definitions: {},
+        resolvedVersions: {},
+        packHashes: {},
+        capturedAt: now,
+      },
+      startedAt: now,
+      updatedAt: now,
+      schemaVersion: 1,
+    },
+    resolvedSecretValues: [secret],
+  };
+}
 
 beforeEach(async () => {
   dir = await fs.mkdtemp(join(tmpdir(), "aart-store-sqlite-"));
@@ -39,9 +79,9 @@ describe("SQLite adapter — connection setup (architecture §5.1)", () => {
     expect(row.journal_mode).toBe("wal");
   });
 
-  it("auto-runs migrations by default, advancing the watermark to the latest ordinal (9, including generation-bound wait seals)", async () => {
+  it("auto-runs migrations by default, advancing the watermark to the latest ordinal (10, including protected continuation state)", async () => {
     const watermark = new SqliteMigrationWatermarkStore(handle.db);
-    await expect(watermark.read()).resolves.toBe(9);
+    await expect(watermark.read()).resolves.toBe(10);
   });
 
   it("runMigrations: false skips DDL — store calls fail against the not-yet-created schema", async () => {
@@ -63,23 +103,141 @@ describe("SQLite adapter — connection setup (architecture §5.1)", () => {
       await expect(runner.currentVersion()).resolves.toBe(0);
       // D1 (AMENDMENTS.md A56) + D2a (AMENDMENTS.md A59) + V1 (AMENDMENTS.md
       // A61) plus secret-taint ledger, root provenance, sealed waits, and
-      // operation-generation metadata: nine migrations now
+      // operation-generation and protected-continuation metadata: ten migrations now
       // registered (0001_init,
       // 0002_deployment_promoted, 0003_approval_task_authenticated_as,
       // 0004_events_table, 0005_idempotency_schema_version,
       // 0006_run_root_taint_paths + 0007_secret_audit_provenance +
       // 0008_sealed_operational_state +
-      // 0009_wait_operation_generation) — up() from
-      // watermark 0 applies all nine in one
+      // 0009_wait_operation_generation +
+      // 0010_protected_continuation_state) — up() from
+      // watermark 0 applies all ten in one
       // call, landing on the latest ordinal.
-      await expect(runner.up()).resolves.toBe(9);
+      await expect(runner.up()).resolves.toBe(10);
       await expect(handle3.store.workflows.listWorkflowIds()).resolves.toEqual([]);
       // Idempotent re-run.
-      await expect(runner.up()).resolves.toBe(9);
+      await expect(runner.up()).resolves.toBe(10);
     } finally {
       handle3.close();
       await fs.rm(dir3, { recursive: true, force: true });
     }
+  });
+});
+
+describe("SQLite adapter — sealed operational generations", () => {
+  it("rejects a prior continuation ciphertext after replacement", async () => {
+    const first = continuationState("first-secret");
+    await store.waits.put(
+      first.run.runId,
+      "pause",
+      { type: "manual", schemaVersion: 1 },
+      new Date().toISOString(),
+      first,
+    );
+    const firstRow = handle.db
+      .prepare(
+        `SELECT operational_generation,
+                operational_run_state_ciphertext
+         FROM waits
+         WHERE run_id = ? AND step_id = ?`,
+      )
+      .get(first.run.runId, "pause") as {
+        operational_generation: string;
+        operational_run_state_ciphertext: string;
+      };
+
+    await store.waits.replaceOperationalRunState(
+      first.run.runId,
+      continuationState("second-secret"),
+    );
+    const secondRow = handle.db
+      .prepare(
+        `SELECT operational_generation
+         FROM waits
+         WHERE run_id = ? AND step_id = ?`,
+      )
+      .get(first.run.runId, "pause") as {
+        operational_generation: string;
+      };
+    expect(secondRow.operational_generation).not.toBe(
+      firstRow.operational_generation,
+    );
+
+    handle.db
+      .prepare(
+        `UPDATE waits
+         SET operational_run_state_ciphertext = ?
+         WHERE run_id = ? AND step_id = ?`,
+      )
+      .run(
+        firstRow.operational_run_state_ciphertext,
+        first.run.runId,
+        "pause",
+      );
+    await expect(
+      store.waits.getOperationalRunState(
+        first.run.runId,
+        "pause",
+      ),
+    ).rejects.toThrow();
+  });
+
+  it("rejects a prior unconsumed signal ciphertext after audit replacement", async () => {
+    const signal = {
+      id: "signal_state_replay",
+      name: "signal-name",
+      correlationId: "signal-correlation",
+      payload: { token: "first-secret" },
+      receivedAt: "2026-01-01T00:00:00.000Z",
+    };
+    await store.signals.append(signal);
+    const firstRow = handle.db
+      .prepare(
+        `SELECT operational_generation,
+                operational_signal_ciphertext
+         FROM signals
+         WHERE signal_id = ?`,
+      )
+      .get(signal.id) as {
+        operational_generation: string;
+        operational_signal_ciphertext: string;
+      };
+
+    await store.signals.replaceAudit(
+      signal.id,
+      {
+        name: "[REDACTED]",
+        correlationId: "[REDACTED]",
+        payload: { token: "[REDACTED]" },
+      },
+      ["first-secret"],
+    );
+    const secondRow = handle.db
+      .prepare(
+        `SELECT operational_generation
+         FROM signals
+         WHERE signal_id = ?`,
+      )
+      .get(signal.id) as {
+        operational_generation: string;
+      };
+    expect(secondRow.operational_generation).not.toBe(
+      firstRow.operational_generation,
+    );
+
+    handle.db
+      .prepare(
+        `UPDATE signals
+         SET operational_signal_ciphertext = ?
+         WHERE signal_id = ?`,
+      )
+      .run(firstRow.operational_signal_ciphertext, signal.id);
+    await expect(
+      store.signals.findUnconsumedMatch(
+        signal.name,
+        signal.correlationId,
+      ),
+    ).rejects.toThrow();
   });
 });
 

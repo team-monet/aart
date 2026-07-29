@@ -136,7 +136,7 @@ function buildStore(
     workflows: new SqliteWorkflowStore(exec),
     runs: new SqliteRunStore(exec),
     waits: new SqliteWaitStore(exec, blobsDir),
-    signals: new SqliteSignalStore(exec),
+    signals: new SqliteSignalStore(exec, blobsDir),
     artifacts: new SqliteArtifactStore(
       exec,
       blobsDir,
@@ -271,6 +271,7 @@ export {
   createSqliteAddSecretAuditProvenanceMigration,
   createSqliteAddSealedOperationalStateMigration,
   createSqliteAddWaitOperationGenerationMigration,
+  createSqliteAddProtectedContinuationStateMigration,
   ALL_SQLITE_MIGRATIONS,
 } from "./migrations.js";
 export { SqliteMigrationWatermarkStore } from "./watermark.js";

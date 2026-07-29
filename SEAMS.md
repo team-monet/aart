@@ -79,6 +79,12 @@ break outstanding waits. Every put uses a random, authenticated operation
 generation, preventing an earlier loop entry for the same run/step from being
 replayed into the current row; legacy v1 seals rotate to v2 on access. SQLite
 does not retain a raw `resume_at` shadow.
+`WaitStore.getOperationalRunState(runId, stepId)` opens the separately sealed
+raw suspended run and its known secret literals. The engine rehydrates both
+before resume/expiry; `replaceOperationalRunState(runId, state)` refreshes
+late-discovered taint, rotating and resealing the authenticated wait generation
+so earlier continuation ciphertext cannot be replayed, without exposing
+executable values through `RunStore`.
 `WaitStore.findSignalMatches(name, correlationId)` is the engine-only exact
 match seam backed by a one-way adapter fingerprint, and
 `WaitStore.redactAudit(runId, stepId, wait)` replaces only the audit copy
@@ -86,7 +92,12 @@ without changing either the fingerprint or sealed operation. `SignalStore.markCo
 { consumedBy: { runId, stepId } })` records internal repair provenance;
 `listConsumedByRun(runId)` retrieves only those already-consumed audit copies
 so a later secret discovery never consumes an unrelated early-arrival signal.
-`replaceConsumedAudit(...)` rewrites all public fields (and the fs filename);
+`replaceAudit(...)` rewrites all public fields (and the fs filename), including
+for an unconsumed signal. Such a signal keeps a sealed operational copy plus a
+one-way match fingerprint until consumption; `getOperationalSecretValues(id)`
+rehydrates the literals that caused its earlier audit rewrite before the
+engine completes an early-arrival wait. Each replacement rotates the signal's
+authenticated generation.
 `listConsumedWithoutProvenance()` supplies the conservative upgrade path for
 already-consumed rows written before migration `0007`.
 

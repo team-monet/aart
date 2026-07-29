@@ -1,4 +1,8 @@
-import { SecretResolutionError, type StepTrace } from "@aart/types";
+import {
+  RunRecordSchema,
+  SecretResolutionError,
+  type StepTrace,
+} from "@aart/types";
 import { describe, expect, it } from "vitest";
 import { applyRedaction, applyRunRedaction, createTrackingSecretResolver, identityRedactFn, repairGlobalAuditsForNewSecrets, throwingSecretResolver } from "./redaction.js";
 import { createTestStore, fixtureRun } from "./test-utils/fixtures.js";
@@ -38,6 +42,43 @@ describe("repairGlobalAuditsForNewSecrets", () => {
         resolved,
       );
       expect(repairTransactions).toBe(2);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it("repairs an unconsumed signal audit while its protected original remains matchable", async () => {
+    const { store, cleanup } = await createTestStore();
+    try {
+      const signal = {
+        id: "early-signal",
+        name: "late-secret",
+        correlationId: "late-secret",
+        payload: { value: "late-secret" },
+        receivedAt: "2026-07-29T00:00:00.000Z",
+      };
+      await store.signals.append(signal);
+      await repairGlobalAuditsForNewSecrets(
+        store,
+        (record, refs) => {
+          let json = JSON.stringify(record);
+          for (const value of refs) {
+            json = json.replaceAll(value, "[REDACTED]");
+          }
+          return JSON.parse(json);
+        },
+        new Set(["late-secret"]),
+      );
+
+      expect(JSON.stringify(await store.signals.list())).not.toContain(
+        "late-secret",
+      );
+      await expect(
+        store.signals.findUnconsumedMatch(
+          "late-secret",
+          "late-secret",
+        ),
+      ).resolves.toEqual(signal);
     } finally {
       await cleanup();
     }
@@ -235,6 +276,70 @@ describe("applyRunRedaction", () => {
 
     expect(redacted.trace[0]?.secretTainted).toBe(true);
     expect(redacted.trace[0]).not.toHaveProperty("[REDACTED:secret]Tainted");
+  });
+
+  it("keeps RunRecord structural fields schema-valid when boolean and numeric secrets collide with them", () => {
+    const hostileScalarRedactor = (
+      record: unknown,
+      refs: ReadonlySet<string>,
+    ): unknown => {
+      const visit = (value: unknown): unknown => {
+        if (
+          (typeof value === "string" ||
+            typeof value === "number" ||
+            typeof value === "boolean") &&
+          refs.has(String(value))
+        ) {
+          return "[REDACTED]";
+        }
+        if (Array.isArray(value)) return value.map(visit);
+        if (value !== null && typeof value === "object") {
+          return Object.fromEntries(
+            Object.entries(value).map(([key, nested]) => [
+              key,
+              visit(nested),
+            ]),
+          );
+        }
+        return value;
+      };
+      return visit(record);
+    };
+    const run = fixtureRun({
+      approved: true,
+      schemaVersion: 2,
+      params: {
+        dryRun: true,
+        waitingOnConcurrency: true,
+        environment: "true",
+        concurrencyKeyFormat: "2",
+      },
+      snapshot: {
+        definitions: {
+          execution: { enabled: true, revision: 2 },
+        },
+        resolvedVersions: {},
+        packHashes: {},
+        capturedAt: "2026-07-29T00:00:00.000Z",
+      },
+    });
+
+    const redacted = applyRunRedaction(
+      hostileScalarRedactor,
+      run,
+      new Set(["true", "2"]),
+    );
+
+    expect(redacted.approved).toBe(true);
+    expect(redacted.schemaVersion).toBe(2);
+    expect(redacted.params).toMatchObject({
+      dryRun: true,
+      waitingOnConcurrency: true,
+      environment: "true",
+      concurrencyKeyFormat: "2",
+    });
+    expect(redacted.snapshot.definitions).toBeNull();
+    expect(() => RunRecordSchema.parse(redacted)).not.toThrow();
   });
 
   it("keeps the top-level trace container outside key redaction", () => {

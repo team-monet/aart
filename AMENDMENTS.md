@@ -2023,12 +2023,14 @@ the isolated reuse-and-execute acceptance loop above.
 
 ### A75 — Secret taint survives trace persistence without retaining secret values
 
-Step traces are redacted before they are persisted. A downstream step can
-therefore receive a redaction marker instead of the original value, and
-ordinary value comparison alone cannot later distinguish that marker from an
-authored string. `StepTrace.secretTainted` remains the backward-compatible
-summary bit. `secretTaintedPaths` records output JSON pointers (or `"*"` when
-arbitrary output may be derived from secret data), while
+Step traces are redacted before they are persisted, but the active execution
+continues with its raw in-memory run rather than reading its own public audit
+copy back as operational input. At a durable wait boundary the exact raw
+continuation is AES-GCM sealed with the wait, so a restarted worker can
+continue with the values and frozen workflow it actually had without exposing
+either through `RunStore`. `StepTrace.secretTainted` remains the
+backward-compatible summary bit. `secretTaintedPaths` records output JSON
+pointers (or `"*"` when arbitrary output may be derived from secret data), while
 `controlSecretTainted` separately records that a branch, loop exit, or
 downstream occurrence was selected by secret data. None stores a secret or a
 secret name. Bare `{{ steps }}` references inspect the latest visible
@@ -2069,7 +2071,7 @@ dispatch, so a secret-controlled loop condition cannot open a cache replay or
 write window before its post-step evaluation.
 The retrospective boundary is global, not source-run-only.
 Each newly resolved literal receives one separate value-only audit scan across
-retained run records, consumed signals, artifacts, approvals, waits,
+retained run records, all signal audits, artifacts, approvals, waits,
 corrections, and activity events. That scan applies redaction without resolving
 or reconstructing any historical workflow, and its successful transaction is
 remembered only for the lifetime of the current execution segment. Thus an
@@ -2084,10 +2086,11 @@ provenance. This catches a cached non-literal derivative whose ledger key and
 output contain no literal secret text without re-running every historical
 workflow. Once an affected key is found, the engine builds a retained
 key-to-consumer index and follows only the reachable consumer graph. Changed
-entries are deleted and each reached run whose trace records that ledger key is
-re-redacted and re-tainted in the same store transaction. The active run is
-part of that graph even though it is not yet in `RunStore`; the repaired value
-is returned to its caller and is the only version subsequently persisted.
+entries are deleted and each reached run whose trace records that ledger
+association is re-redacted and re-tainted in the same store transaction. The
+active run is part of that graph even though it is not yet in `RunStore`; its
+raw operational value receives the repaired taint metadata in memory while
+only the independently redacted audit value is persisted.
 Historical data/control analysis then follows descendants; if a repaired
 consumer cached a non-literal derivative, that key is revoked and its own
 consumers are repaired until the lineage reaches closure. Waiting runs remain
@@ -2095,9 +2098,14 @@ resumable with protected provenance. A previously completed run keeps success
 only when re-materializing its public `outputMapping` proves the result
 independent of the revoked lineage; otherwise its stored result becomes failed
 with no public outputs.
-`StepTrace.idempotencyLedgerKey` is protected operational
-metadata used only to locate that entry and is itself redacted if a later
-secret matches it. Thrown finalization paths perform the same preparation and
+`StepTrace.idempotencyLedgerKey` is customer-visible audit metadata and is
+redacted if a later secret matches it. Every new trace also records
+`idempotencyLedgerFingerprint`, a one-way stable association that lets cache
+revocation find producers and prior consumers after the mutable key is
+redacted. Ledger rows record the producer trace sequence; if a process dies
+after the ledger commit but before that trace commits, the missing occurrence
+is conservatively revoked rather than treated as trusted. Thrown finalization
+paths perform the same preparation and
 revocation as normal step/wait boundaries. Idempotency storage keys remain namespaced,
 but replay safety does not rely on a string prefix: every current entry also
 carries the engine schema version, and entries without that metadata are
@@ -2119,7 +2127,7 @@ dispatch, early-arrival signals, atomic wait claims, and worker reclaim:
 operators see that the effect already happened and do not retry it as though
 the dispatch had failed. Control reconstruction failure never replaces the
 completed trace with a synthetic failed step.
-Consumed signal audit records follow the same retrospective rule. Both the
+Signal audit records follow the same retrospective rule. Both the
 ordinary signal-resume claim and the separate early-arrival path replace the
 stored name, correlation id, payload, and fs filename with their redacted audit
 values when post-completion control first discovers a matching secret.
@@ -2134,6 +2142,15 @@ adapter writes safe file content before renaming away a secret-bearing filename
 and persists an opaque recovery nonce in that content. Every fs signal-store
 operation completes any interrupted rename before exposing a row, while the
 adapter retains its already-documented signal-audit transaction non-atomicity.
+An unconsumed early-arrival signal is not exempt: its public audit is redacted
+immediately while its exact name/correlation/payload and the secret literals
+that caused the rewrite are sealed under a random authenticated generation.
+Each audit replacement rotates that generation, so an earlier operational
+ciphertext cannot be substituted after the known-secret set expands.
+Matching opens that copy only inside the engine, rehydrates those literals
+into the consuming segment, and removes the operational copy on consumption.
+Thus a signal remains actionable without publishing its original audit or
+reintroducing its payload into the completed wait trace.
 Approval and outstanding-wait audits are members of the same durable-copy
 closure. Approval title, description, reviewer, authenticated identity, and
 decision values are re-redacted for the affected run. Run-linked correction
@@ -2152,6 +2169,19 @@ Every wait `put` receives a random operational generation authenticated
 together with run/step identity, so an older loop iteration cannot be replayed
 into a later entry of the same wait step. Existing v1 seals remain readable and
 rotate to generation-bound v2 on first operational access.
+The same generation also authenticates a separately sealed full
+`WaitOperationalRunState`: the raw suspended `RunRecord`, exact frozen
+workflow snapshot, and every secret literal known before suspension. Global
+late-secret repair merges new taint metadata and literals into this protected
+copy and rotates/reseals the wait generation before rewriting the public
+RunRecord. Resume and expiry rehydrate it
+before completing the wait, so a boolean/numeric secret cannot corrupt
+structural fields such as `approved`/`schemaVersion`, a redacted snapshot
+cannot change continuation semantics, and an echoed pre-restart secret is
+redacted on its first post-restart write. The public RunRecord is reconstructed
+from a structural allowlist; if a snapshot definition tree would be partially
+rewritten, its public `definitions` becomes `null` instead of an invalid
+workflow while the exact executable tree remains sealed.
 `WaitStore.listOperational()` is the engine-only access path. A signal carrying
 the original correlation can therefore still resume the run without the
 public audit exposing the late-discovered value. SQLite migration
@@ -2161,6 +2191,10 @@ can be repaired. Migration `0008_sealed_operational_state` adds the encrypted
 wait state, removes the raw scheduling shadow during repair, and records a
 stable text-eligibility bit for existing artifacts. Migration
 `0009_wait_operation_generation` adds the per-entry generation for SQLite.
+Migration `0010_protected_continuation_state` adds sealed unconsumed-signal
+state, signal fingerprints/generations, the sealed suspended-run state, and
+the producer trace sequence used by stable cache revocation. Legacy
+unconsumed signals are sealed lazily before their first audit rewrite.
 Text artifacts obey the same retrospective discovery rule as traces and cache
 entries. Every boundary that can enlarge the resolved-secret set—normal
 dispatch, wait entry/early arrival, atomic resume, reclaim, and terminal

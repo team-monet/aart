@@ -8,7 +8,10 @@ import { afterEach, describe, expect, it } from "vitest";
 import { alwaysAllowCapabilityCheck } from "./capability.js";
 import { createEngine } from "./engine.js";
 import { idempotencyStorageKey } from "./idempotency.js";
-import { identityRedactFn } from "./redaction.js";
+import {
+  identityRedactFn,
+  repairGlobalAuditsForNewSecrets,
+} from "./redaction.js";
 import { CURRENT_ENGINE_SCHEMA_VERSION, SchemaVersionMismatchError } from "./schema-version.js";
 import { createTestStore, echoBlock, fixtureTrigger, fixtureWorkflow } from "./test-utils/fixtures.js";
 import { createBlockRegistry } from "./types.js";
@@ -1156,6 +1159,69 @@ describe("createEngine — resume wrappers continue execution past the resumed s
     expect(outcome.run.status).toBe("completed");
   });
 
+  it("consumes a late-redacted early signal without re-exposing its protected payload", async () => {
+    const { store, cleanup } = await createTestStore();
+    cleanups.push(cleanup);
+    const secret = "early-arrival-secret";
+    const redact = (
+      record: unknown,
+      refs: ReadonlySet<string>,
+    ): unknown => {
+      let json = JSON.stringify(record);
+      for (const value of refs) {
+        json = json.replaceAll(value, "[REDACTED]");
+      }
+      return JSON.parse(json);
+    };
+    const signal = {
+      id: "early-arrival",
+      name: secret,
+      correlationId: secret,
+      payload: { echoed: secret },
+      receivedAt: new Date().toISOString(),
+    };
+    await store.signals.append(signal);
+    await repairGlobalAuditsForNewSecrets(
+      store,
+      redact,
+      new Set([secret]),
+    );
+    const workflow = fixtureWorkflow({
+      execution: {
+        type: "workflow",
+        steps: [
+          {
+            id: "pause",
+            uses: "wait.for_signal",
+            with: {
+              name: secret,
+              correlationId: secret,
+            },
+          },
+        ],
+      },
+    });
+    await store.workflows.put(workflow);
+    const engine = createEngine({
+      store,
+      redact,
+      capabilityCheck: alwaysAllowCapabilityCheck,
+      blocks: createBlockRegistry([echoBlock]),
+    });
+    const run = await engine.triggerRun({
+      workflow,
+      trigger: fixtureTrigger(),
+      inputs: {},
+    });
+    const completed = await engine.executeRun(run.runId);
+
+    expect(completed.status).toBe("completed");
+    expect(completed.trace[0]?.outputs).toEqual({
+      echoed: "[REDACTED]",
+    });
+    expect(JSON.stringify(completed)).not.toContain(secret);
+  });
+
   it("redacts the consumed signal audit payload when resume control first discovers its secret", async () => {
     const { store, cleanup } = await createTestStore();
     cleanups.push(cleanup);
@@ -1812,6 +1878,136 @@ describe("createEngine — THE durable-execution proof: a real process restart, 
     const verifyStore = createFsStore(root);
     const verifyRun = await verifyStore.runs.get(run.runId);
     expect(verifyRun?.status).toBe("completed");
+  });
+
+  it("rehydrates the pre-wait secret set and exact workflow snapshot without exposing an echoed secret after restart", async () => {
+    const { root, store: originalStore, cleanup } =
+      await createTestStoreWithRoot();
+    cleanups.push(cleanup);
+    const secret = "restart-only-secret";
+    const requireSecretBlock: BlockImplementation = {
+      manifest: {
+        id: "test.require-secret",
+        version: "1.0.0",
+        capabilities: [],
+        inputSchema: {},
+        outputSchema: {},
+        description:
+          "Fails unless protected pre-wait values were restored.",
+      },
+      execute: async (inputs) => {
+        const values = inputs as Record<string, unknown>;
+        if (
+          values["prior"] !== secret ||
+          values["literalFromFrozenWorkflow"] !== secret
+        ) {
+          throw new Error("protected continuation was not restored");
+        }
+        return inputs;
+      },
+    };
+    const redact = (
+      record: unknown,
+      resolved: ReadonlySet<string>,
+    ): unknown => {
+      let json = JSON.stringify(record);
+      for (const value of resolved) {
+        json = json.replaceAll(value, "[REDACTED]");
+      }
+      return JSON.parse(json);
+    };
+    const workflow = fixtureWorkflow({
+      execution: {
+        type: "workflow",
+        steps: [
+          {
+            id: "source",
+            uses: "test.echo",
+            with: { value: "{{ secrets.API_KEY }}" },
+          },
+          {
+            id: "pause",
+            uses: "wait.manual",
+            with: {
+              prior:
+                "{{ steps.source.outputs.echoed.value }}",
+            },
+          },
+          {
+            id: "after",
+            uses: "test.require-secret",
+            with: {
+              prior:
+                "{{ steps.source.outputs.echoed.value }}",
+              literalFromFrozenWorkflow: secret,
+            },
+          },
+        ],
+      },
+    });
+    await originalStore.workflows.put(workflow);
+    const engine1 = createEngine({
+      store: originalStore,
+      redact,
+      resolveSecret: () => secret,
+      capabilityCheck: alwaysAllowCapabilityCheck,
+      blocks: createBlockRegistry([
+        echoBlock,
+        requireSecretBlock,
+      ]),
+    });
+    const run = await engine1.triggerRun({
+      workflow,
+      trigger: fixtureTrigger(),
+      inputs: {},
+    });
+    const waiting = await engine1.executeRun(run.runId);
+    expect(waiting.status).toBe("waiting");
+    expect(waiting.snapshot.definitions).toBeNull();
+    expect(JSON.stringify(waiting)).not.toContain(secret);
+    const protectedState =
+      await originalStore.waits.getOperationalRunState(
+        run.runId,
+        "pause",
+      );
+    expect(protectedState?.run.snapshot.definitions).toEqual(
+      workflow,
+    );
+    expect(protectedState?.resolvedSecretValues).toContain(secret);
+
+    const reloadedStore = createFsStore(root);
+    const engine2 = createEngine({
+      store: reloadedStore,
+      redact,
+      resolveSecret: () => {
+        throw new Error(
+          "resume must use the sealed pre-wait secret set",
+        );
+      },
+      capabilityCheck: alwaysAllowCapabilityCheck,
+      blocks: createBlockRegistry([
+        echoBlock,
+        requireSecretBlock,
+      ]),
+    });
+    const outcome = await engine2.resumeManual(
+      run.runId,
+      "pause",
+      { echoedAfterRestart: secret },
+    );
+
+    expect(outcome.kind).toBe("resumed");
+    if (outcome.kind !== "resumed") throw new Error("unreachable");
+    expect(outcome.run.status).toBe("completed");
+    expect(outcome.run.trace.map((trace) => trace.stepId)).toEqual([
+      "source",
+      "pause",
+      "after",
+    ]);
+    expect(JSON.stringify(outcome.run)).not.toContain(secret);
+    expect(
+      JSON.stringify(await reloadedStore.runs.get(run.runId)),
+    ).not.toContain(secret);
   });
 
   it("reclaim-safety: a DIFFERENT engine instance (a different worker) resumes a run the original claimant never released cleanly — a different code path than a clean same-worker restart", async () => {

@@ -459,6 +459,65 @@ export function createSqliteAddWaitOperationGenerationMigration(
   };
 }
 
+/**
+ * Separates still-actionable signal values and suspended-run continuation
+ * state from their customer-visible audit copies. Existing rows are lazily
+ * sealed before the first audit rewrite, while new rows are sealed at put.
+ */
+export function createSqliteAddProtectedContinuationStateMigration(
+  db: DatabaseSync,
+): Migration {
+  const addColumn = (table: string, definition: string): void => {
+    try {
+      db.exec(`ALTER TABLE ${table} ADD COLUMN ${definition}`);
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        error.message.includes("duplicate column name")
+      ) {
+        return;
+      }
+      throw error;
+    }
+  };
+  return {
+    id: "0010_protected_continuation_state",
+    async up(): Promise<void> {
+      addColumn("signals", "signal_match_fingerprint TEXT");
+      addColumn("signals", "operational_signal_ciphertext TEXT");
+      addColumn("signals", "operational_generation TEXT");
+      addColumn(
+        "waits",
+        "operational_run_state_ciphertext TEXT",
+      );
+      addColumn("idempotency_ledger", "trace_seq INTEGER");
+      db.exec(
+        "CREATE INDEX IF NOT EXISTS idx_signals_match_fingerprint ON signals(signal_match_fingerprint)",
+      );
+    },
+    async down(): Promise<void> {
+      db.exec(
+        "DROP INDEX IF EXISTS idx_signals_match_fingerprint",
+      );
+      db.exec(
+        "ALTER TABLE waits DROP COLUMN operational_run_state_ciphertext",
+      );
+      db.exec(
+        "ALTER TABLE idempotency_ledger DROP COLUMN trace_seq",
+      );
+      db.exec(
+        "ALTER TABLE signals DROP COLUMN operational_generation",
+      );
+      db.exec(
+        "ALTER TABLE signals DROP COLUMN operational_signal_ciphertext",
+      );
+      db.exec(
+        "ALTER TABLE signals DROP COLUMN signal_match_fingerprint",
+      );
+    },
+  };
+}
+
 export const ALL_SQLITE_MIGRATIONS = (db: DatabaseSync): Migration[] => [
   createSqliteInitMigration(db),
   createSqliteAddDeploymentPromotedMigration(db),
@@ -469,4 +528,5 @@ export const ALL_SQLITE_MIGRATIONS = (db: DatabaseSync): Migration[] => [
   createSqliteAddSecretAuditProvenanceMigration(db),
   createSqliteAddSealedOperationalStateMigration(db),
   createSqliteAddWaitOperationGenerationMigration(db),
+  createSqliteAddProtectedContinuationStateMigration(db),
 ];

@@ -903,6 +903,7 @@ interface IdempotencyLedgerRow {
   resolved_key: string;
   run_id: string;
   step_id: string;
+  trace_seq: number | null | undefined;
   recorded_output_json: string;
   created_at: string;
   schema_version: number | null;
@@ -916,6 +917,9 @@ export class SqliteIdempotencyLedgerStore implements IdempotencyLedgerStore {
       resolvedKey: row.resolved_key,
       runId: row.run_id,
       stepId: row.step_id,
+      ...(row.trace_seq !== null && row.trace_seq !== undefined
+        ? { traceSeq: row.trace_seq }
+        : {}),
       recordedOutput: JSON.parse(row.recorded_output_json) as unknown,
       createdAt: row.created_at,
       ...(row.schema_version !== null
@@ -931,16 +935,45 @@ export class SqliteIdempotencyLedgerStore implements IdempotencyLedgerStore {
   }
 
   async put(entry: IdempotencyLedgerEntry): Promise<void> {
-    await this.exec((db) =>
-      dbRun(
+    await this.exec((db) => {
+      const hasTraceSeq = dbAll<{ name: string }>(
         db,
-        `INSERT INTO idempotency_ledger (resolved_key, run_id, step_id, recorded_output_json, created_at, schema_version) VALUES (?, ?, ?, ?, ?, ?)
-         ON CONFLICT(resolved_key) DO UPDATE SET run_id = excluded.run_id, step_id = excluded.step_id,
-           recorded_output_json = excluded.recorded_output_json, created_at = excluded.created_at,
-           schema_version = excluded.schema_version`,
-        [entry.resolvedKey, entry.runId, entry.stepId, JSON.stringify(entry.recordedOutput), entry.createdAt, entry.schemaVersion ?? null],
-      ),
-    );
+        "PRAGMA table_info(idempotency_ledger)",
+      ).some((column) => column.name === "trace_seq");
+      return hasTraceSeq
+        ? dbRun(
+            db,
+            `INSERT INTO idempotency_ledger (resolved_key, run_id, step_id, trace_seq, recorded_output_json, created_at, schema_version) VALUES (?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(resolved_key) DO UPDATE SET run_id = excluded.run_id, step_id = excluded.step_id,
+               trace_seq = excluded.trace_seq,
+               recorded_output_json = excluded.recorded_output_json, created_at = excluded.created_at,
+               schema_version = excluded.schema_version`,
+            [
+              entry.resolvedKey,
+              entry.runId,
+              entry.stepId,
+              entry.traceSeq ?? null,
+              JSON.stringify(entry.recordedOutput),
+              entry.createdAt,
+              entry.schemaVersion ?? null,
+            ],
+          )
+        : dbRun(
+            db,
+            `INSERT INTO idempotency_ledger (resolved_key, run_id, step_id, recorded_output_json, created_at, schema_version) VALUES (?, ?, ?, ?, ?, ?)
+             ON CONFLICT(resolved_key) DO UPDATE SET run_id = excluded.run_id, step_id = excluded.step_id,
+               recorded_output_json = excluded.recorded_output_json, created_at = excluded.created_at,
+               schema_version = excluded.schema_version`,
+            [
+              entry.resolvedKey,
+              entry.runId,
+              entry.stepId,
+              JSON.stringify(entry.recordedOutput),
+              entry.createdAt,
+              entry.schemaVersion ?? null,
+            ],
+          );
+    });
   }
 
   async list(): Promise<IdempotencyLedgerEntry[]> {

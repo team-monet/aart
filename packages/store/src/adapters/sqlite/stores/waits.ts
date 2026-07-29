@@ -6,7 +6,14 @@
 import { createHash, randomUUID } from "node:crypto";
 import { join } from "node:path";
 import type { WaitCondition } from "@aart/types";
-import type { WaitStore } from "../../../types.js";
+import type {
+  WaitOperationalRunState,
+  WaitStore,
+} from "../../../types.js";
+import {
+  openOperationalState,
+  sealOperationalState,
+} from "../../operational-state-seal.js";
 import {
   openWaitOperation,
   sealWaitOperation,
@@ -20,6 +27,7 @@ interface WaitRow {
   signal_match_fingerprint: string | null;
   operational_wait_ciphertext: string | null;
   operational_generation: string | null | undefined;
+  operational_run_state_ciphertext: string | null | undefined;
   created_at: string;
 }
 
@@ -78,7 +86,13 @@ export class SqliteWaitStore implements WaitStore {
     return row ? this.operationalWait(row) : undefined;
   }
 
-  async put(runId: string, stepId: string, wait: WaitCondition, createdAt: string): Promise<void> {
+  async put(
+    runId: string,
+    stepId: string,
+    wait: WaitCondition,
+    createdAt: string,
+    operationalRunState?: WaitOperationalRunState,
+  ): Promise<void> {
     const operationalGeneration = randomUUID();
     const operationalWait = await sealWaitOperation(
       this.operationKeyPath,
@@ -87,16 +101,30 @@ export class SqliteWaitStore implements WaitStore {
       operationalGeneration,
       wait,
     );
+    const sealedRunState =
+      operationalRunState === undefined
+        ? null
+        : await sealOperationalState(
+            this.operationKeyPath,
+            [
+              runId,
+              stepId,
+              operationalGeneration,
+              "run-state",
+            ],
+            operationalRunState,
+          );
     await this.exec((db) =>
       dbRun(
         db,
-        `INSERT INTO waits (run_id, step_id, wait_condition_json, signal_match_fingerprint, operational_wait_ciphertext, operational_generation, wait_type, resume_at, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?)
+        `INSERT INTO waits (run_id, step_id, wait_condition_json, signal_match_fingerprint, operational_wait_ciphertext, operational_generation, operational_run_state_ciphertext, wait_type, resume_at, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)
          ON CONFLICT(run_id, step_id) DO UPDATE SET
            wait_condition_json = excluded.wait_condition_json,
            signal_match_fingerprint = excluded.signal_match_fingerprint,
            operational_wait_ciphertext = excluded.operational_wait_ciphertext,
            operational_generation = excluded.operational_generation,
+           operational_run_state_ciphertext = excluded.operational_run_state_ciphertext,
            wait_type = excluded.wait_type,
            resume_at = NULL,
            created_at = excluded.created_at`,
@@ -107,11 +135,107 @@ export class SqliteWaitStore implements WaitStore {
           fingerprintForWait(wait),
           operationalWait,
           operationalGeneration,
+          sealedRunState,
           wait.type,
           createdAt,
         ],
       ),
     );
+  }
+
+  async getOperationalRunState(
+    runId: string,
+    stepId: string,
+  ): Promise<WaitOperationalRunState | undefined> {
+    const row = await this.exec((db) =>
+      dbGet<WaitRow>(
+        db,
+        "SELECT * FROM waits WHERE run_id = ? AND step_id = ?",
+        [runId, stepId],
+      ),
+    );
+    if (!row) return undefined;
+    await this.operationalWait(row);
+    if (
+      row.operational_run_state_ciphertext === null ||
+      row.operational_run_state_ciphertext === undefined ||
+      row.operational_generation === null ||
+      row.operational_generation === undefined
+    ) {
+      return undefined;
+    }
+    return openOperationalState<WaitOperationalRunState>(
+      this.operationKeyPath,
+      [
+        row.run_id,
+        row.step_id,
+        row.operational_generation,
+        "run-state",
+      ],
+      row.operational_run_state_ciphertext,
+    );
+  }
+
+  async replaceOperationalRunState(
+    runId: string,
+    state: WaitOperationalRunState,
+  ): Promise<void> {
+    const rows = await this.exec((db) =>
+      dbAll<WaitRow>(
+        db,
+        "SELECT * FROM waits WHERE run_id = ?",
+        [runId],
+      ),
+    );
+    for (const row of rows) {
+      const operationalWait = await this.operationalWait(row);
+      if (
+        row.operational_generation === null ||
+        row.operational_generation === undefined
+      ) {
+        throw new Error(
+          `Wait ${row.run_id}/${row.step_id} has no operational generation.`,
+        );
+      }
+      const priorGeneration = row.operational_generation;
+      const operationalGeneration = randomUUID();
+      const sealedWait = await sealWaitOperation(
+        this.operationKeyPath,
+        row.run_id,
+        row.step_id,
+        operationalGeneration,
+        operationalWait,
+      );
+      const sealedRunState = await sealOperationalState(
+        this.operationKeyPath,
+        [
+          row.run_id,
+          row.step_id,
+          operationalGeneration,
+          "run-state",
+        ],
+        state,
+      );
+      await this.exec((db) =>
+        dbRun(
+          db,
+          `UPDATE waits
+           SET operational_wait_ciphertext = ?,
+               operational_generation = ?,
+               operational_run_state_ciphertext = ?
+           WHERE run_id = ? AND step_id = ?
+             AND operational_generation = ?`,
+          [
+            sealedWait,
+            operationalGeneration,
+            sealedRunState,
+            row.run_id,
+            row.step_id,
+            priorGeneration,
+          ],
+        ),
+      );
+    }
   }
 
   async redactAudit(

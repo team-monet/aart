@@ -9,7 +9,7 @@ import type { RunRecord, StepTrace, Workflow, WorkflowStep } from "@aart/types";
 import { ConcurrencyRejectedError } from "@aart/types";
 import { buildExprContext, resolveBooleanExpression } from "./expr-context.js";
 import { decideConcurrency, fingerprintConcurrencyKey, releaseQueuedRuns, resolveConcurrencyKey } from "./concurrency.js";
-import { applyRedaction, applyRunRedaction, createTrackingSecretResolver, redactStoredTextArtifacts, repairGlobalAuditsForNewSecrets, throwingSecretResolver } from "./redaction.js";
+import { applyRedaction, applyRunRedaction, createTrackingSecretResolver, mergeOperationalRunTaint, redactStoredTextArtifacts, repairGlobalAuditsForNewSecrets, throwingSecretResolver } from "./redaction.js";
 import { assertSchemaVersionCompatible, CURRENT_ENGINE_SCHEMA_VERSION } from "./schema-version.js";
 import { captureExecutionSnapshot, isSnapshotCaptured, resolveWorkflowForRun, uncapturedSnapshot } from "./snapshot.js";
 import { validateWorkflowOutputs, WorkflowOutputValidationError } from "./output-validation.js";
@@ -457,8 +457,14 @@ export async function runStepsLoop(config: EngineConfig, initialRun: RunRecord, 
     if (!isSnapshotCaptured(run.snapshot) && isWaitBlockId(step.uses)) {
       const now = config.now?.() ?? new Date();
       const withSnapshot: RunRecord = { ...run, snapshot: await captureExecutionSnapshot(workflow, config.blocks, now, config.computePackHashes) };
-      run = applyRunRedaction(config.redact, withSnapshot, resolvedSecretRefs);
-      await config.store.runs.put(run);
+      await config.store.runs.put(
+        applyRunRedaction(
+          config.redact,
+          withSnapshot,
+          resolvedSecretRefs,
+        ),
+      );
+      run = withSnapshot;
     }
 
     let outcome: StepOutcome;
@@ -552,14 +558,42 @@ export async function executeRun(config: EngineConfig, runId: string): Promise<R
  * and by `triggerRun`'s `cancel_existing` concurrency policy.
  */
 export async function cancelRun(config: EngineConfig, runId: string): Promise<RunRecord> {
-  const run = await config.store.runs.get(runId);
-  if (!run) {
+  const publicRun = await config.store.runs.get(runId);
+  if (!publicRun) {
     throw new Error(`cancelRun: no RunRecord found for runId "${runId}".`);
   }
-  if (run.status === "completed" || run.status === "failed" || run.status === "cancelled") {
-    return run;
+  const outstandingWaits = await config.store.waits.list({
+    runId,
+  });
+  if (
+    publicRun.status === "completed" ||
+    publicRun.status === "failed" ||
+    publicRun.status === "cancelled"
+  ) {
+    if (outstandingWaits.length > 0) {
+      await config.store.transact(async (tx) => {
+        for (const wait of outstandingWaits) {
+          await tx.waits.delete(wait.runId, wait.stepId);
+        }
+      });
+    }
+    return publicRun;
   }
 
+  const operationalState =
+    outstandingWaits[0] === undefined
+      ? undefined
+      : await config.store.waits.getOperationalRunState(
+          outstandingWaits[0].runId,
+          outstandingWaits[0].stepId,
+        );
+  const run =
+    operationalState === undefined
+      ? publicRun
+      : mergeOperationalRunTaint(
+          operationalState.run,
+          publicRun,
+        );
   const workflow = await resolveWorkflowForRun(config.store, run);
   const reachedStepIds = new Set(run.trace.map((t) => t.stepId.replace(/\[\d+\]$/, "")));
   const now = (config.now?.() ?? new Date()).toISOString();
@@ -567,7 +601,9 @@ export async function cancelRun(config: EngineConfig, runId: string): Promise<Ru
     .filter((s) => !reachedStepIds.has(s.id))
     .map((s, i): StepTrace => ({ seq: run.trace.length + i, stepId: s.id, block: s.uses, status: "skipped", inputs: {}, startedAt: now, endedAt: now, durationMs: 0 }));
 
-  const resolvedSecretRefs = new Set<string>();
+  const resolvedSecretRefs = new Set(
+    operationalState?.resolvedSecretValues ?? [],
+  );
   const nowDate = config.now?.() ?? new Date();
   const concurrencyKey = run.params?.concurrencyKey;
   const concurrencyKeyFormat = run.params?.concurrencyKeyFormat;
@@ -580,7 +616,12 @@ export async function cancelRun(config: EngineConfig, runId: string): Promise<Ru
     snapshot: isSnapshotCaptured(run.snapshot) ? run.snapshot : await captureExecutionSnapshot(workflow, config.blocks, nowDate, config.computePackHashes),
   };
   const redacted = applyRunRedaction(config.redact, updated, resolvedSecretRefs);
-  await config.store.runs.put(redacted);
+  await config.store.transact(async (tx) => {
+    await tx.runs.put(redacted);
+    for (const wait of outstandingWaits) {
+      await tx.waits.delete(wait.runId, wait.stepId);
+    }
+  });
 
   if (typeof concurrencyKey === "string") {
     await releaseQueuedRuns(config.store, redacted.workflowId, concurrencyKey, concurrencyKeyFormat);

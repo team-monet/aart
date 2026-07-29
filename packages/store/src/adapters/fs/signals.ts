@@ -12,11 +12,15 @@
 // Deliberately NOT staged by transact() — see the doc comment on
 // SignalStore.append/markConsumed in ../../types.ts and architecture §5.8's
 // documented non-atomic gap.
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { join } from "node:path";
 import type { Signal } from "@aart/types";
 import type { SignalStore } from "../../types.js";
+import {
+  openOperationalState,
+  sealOperationalState,
+} from "../operational-state-seal.js";
 import { JsonFileHandle } from "./json-file.js";
 
 interface StoredSignal extends Signal {
@@ -25,6 +29,17 @@ interface StoredSignal extends Signal {
   consumedByStepId?: string;
   /** Recovery identity for a late-redacted, correlation-safe filename. */
   auditFileNonce?: string;
+  /** One-way exact-match association retained after audit redaction. */
+  signalMatchFingerprint?: string;
+  /** AES-GCM-sealed unconsumed signal used only for early-arrival matching. */
+  operationalSignal?: string;
+  /** Authenticated generation preventing ciphertext replay across rewrites. */
+  operationalGeneration?: string;
+}
+
+interface OperationalSignalState {
+  signal: Signal;
+  resolvedSecretValues: string[];
 }
 
 function sanitizeForFilename(value: string): string {
@@ -32,7 +47,17 @@ function sanitizeForFilename(value: string): string {
 }
 
 export class FsSignalStore implements SignalStore {
-  constructor(private readonly dir: string) {}
+  private readonly operationKeyPath: string;
+
+  constructor(private readonly dir: string) {
+    this.operationKeyPath = join(dir, ".operational-key");
+  }
+
+  private fingerprint(name: string, correlationId: string): string {
+    return createHash("sha256")
+      .update(JSON.stringify([name, correlationId]))
+      .digest("hex");
+  }
 
   private pathFor(signal: Pick<Signal, "correlationId" | "receivedAt">): string {
     return join(this.dir, `${sanitizeForFilename(signal.correlationId)}__${sanitizeForFilename(signal.receivedAt)}.json`);
@@ -51,7 +76,21 @@ export class FsSignalStore implements SignalStore {
 
   async append(signal: Signal): Promise<void> {
     await this.normalizeLateRedactedFilenames();
-    const stored: StoredSignal = { ...signal, consumed: false };
+    const operationalGeneration = randomUUID();
+    const stored: StoredSignal = {
+      ...signal,
+      consumed: false,
+      signalMatchFingerprint: this.fingerprint(
+        signal.name,
+        signal.correlationId,
+      ),
+      operationalSignal: await sealOperationalState(
+        this.operationKeyPath,
+        [signal.id, operationalGeneration, "signal"],
+        { signal, resolvedSecretValues: [] },
+      ),
+      operationalGeneration,
+    };
     await new JsonFileHandle<StoredSignal>(this.pathFor(signal)).write(stored);
   }
 
@@ -124,10 +163,17 @@ export class FsSignalStore implements SignalStore {
   }
 
   async findUnconsumedMatch(name: string, correlationId: string): Promise<Signal | undefined> {
+    const expected = this.fingerprint(name, correlationId);
     const all = await this.listStored();
-    const match = all.find((s) => !s.consumed && s.name === name && s.correlationId === correlationId);
+    const match = all.find(
+      (signal) =>
+        !signal.consumed &&
+        (signal.signalMatchFingerprint ??
+          this.fingerprint(signal.name, signal.correlationId)) ===
+          expected,
+    );
     if (!match) return undefined;
-    return this.publicSignal(match);
+    return this.operationalSignal(match);
   }
 
   async markConsumed(
@@ -152,8 +198,22 @@ export class FsSignalStore implements SignalStore {
           }
         : {}),
       consumed: true,
+      operationalSignal: undefined,
+      operationalGeneration: undefined,
+      signalMatchFingerprint: undefined,
     };
     await new JsonFileHandle<StoredSignal>(match.path).write(updated);
+  }
+
+  async getOperationalSecretValues(
+    signalId: string,
+  ): Promise<string[]> {
+    const signal = (await this.listStored()).find(
+      (candidate) => candidate.id === signalId,
+    );
+    if (!signal || signal.consumed) return [];
+    return (await this.operationalSignalState(signal))
+      .resolvedSecretValues;
   }
 
   async listConsumedByRun(runId: string): Promise<Signal[]> {
@@ -175,22 +235,59 @@ export class FsSignalStore implements SignalStore {
       .map((signal) => this.publicSignal(signal));
   }
 
-  async replaceConsumedAudit(
+  async replaceAudit(
     signalId: string,
     audit: Pick<Signal, "name" | "correlationId" | "payload">,
+    resolvedSecretValues: readonly string[] = [],
   ): Promise<void> {
     const rows = await this.listStoredRows();
-    const match = rows.find(
-      (entry) =>
-        entry.signal.id === signalId && entry.signal.consumed,
-    );
+    const match = rows.find((entry) => entry.signal.id === signalId);
     if (!match) return;
     const auditFileNonce =
       match.signal.auditFileNonce ?? randomUUID();
+    const operationalGeneration =
+      match.signal.consumed
+        ? undefined
+        : randomUUID();
+    const priorOperationalState =
+      match.signal.consumed
+        ? undefined
+        : await this.operationalSignalState(match.signal);
+    const operationalSignal =
+      match.signal.consumed
+        ? undefined
+        : await sealOperationalState(
+            this.operationKeyPath,
+            [match.signal.id, operationalGeneration!, "signal"],
+            {
+              signal:
+                priorOperationalState?.signal ??
+                this.publicSignal(match.signal),
+              resolvedSecretValues: [
+                ...new Set([
+                  ...(priorOperationalState?.resolvedSecretValues ??
+                    []),
+                  ...resolvedSecretValues,
+                ]),
+              ],
+            } satisfies OperationalSignalState,
+          );
     const updated: StoredSignal = {
       ...match.signal,
       ...audit,
       auditFileNonce,
+      ...(match.signal.consumed
+        ? {}
+        : {
+            signalMatchFingerprint:
+              match.signal.signalMatchFingerprint ??
+              this.fingerprint(
+                match.signal.name,
+                match.signal.correlationId,
+              ),
+            operationalSignal,
+            operationalGeneration,
+          }),
     };
     const replacementPath = this.replacementPathFor({
       ...updated,
@@ -228,8 +325,41 @@ export class FsSignalStore implements SignalStore {
       consumedByRunId: _consumedByRunId,
       consumedByStepId: _consumedByStepId,
       auditFileNonce: _auditFileNonce,
+      signalMatchFingerprint: _signalMatchFingerprint,
+      operationalSignal: _operationalSignal,
+      operationalGeneration: _operationalGeneration,
       ...publicSignal
     } = signal;
     return publicSignal;
+  }
+
+  private async operationalSignal(
+    signal: StoredSignal,
+  ): Promise<Signal> {
+    return (await this.operationalSignalState(signal)).signal;
+  }
+
+  private async operationalSignalState(
+    signal: StoredSignal,
+  ): Promise<OperationalSignalState> {
+    if (
+      signal.operationalSignal === undefined ||
+      signal.operationalGeneration === undefined
+    ) {
+      return {
+        signal: this.publicSignal(signal),
+        resolvedSecretValues: [],
+      };
+    }
+    const opened = await openOperationalState<
+      OperationalSignalState | Signal
+    >(
+      this.operationKeyPath,
+      [signal.id, signal.operationalGeneration, "signal"],
+      signal.operationalSignal,
+    );
+    return "signal" in opened
+      ? opened
+      : { signal: opened, resolvedSecretValues: [] };
   }
 }

@@ -16,6 +16,7 @@ import {
 import {
   applyRedaction,
   applyRunRedaction,
+  mergeOperationalRunTaint,
   repairGlobalAuditsForNewSecrets,
 } from "../redaction.js";
 import { assertSchemaVersionCompatible } from "../schema-version.js";
@@ -90,7 +91,21 @@ export interface EnterWaitResult {
  * which skip the check entirely and always suspend).
  */
 export async function enterWait(config: WaitMachineConfig, options: EnterWaitOptions): Promise<EnterWaitResult> {
-  const { run, stepId, blockId, resolvedInputs, wait, resolvedSecretRefs, secretTainted, controlSecretTainted, prepareEarlyArrivalRun } = options;
+  const {
+    run,
+    stepId,
+    blockId,
+    resolvedInputs,
+    wait,
+    resolvedSecretRefs: suppliedSecretRefs,
+    secretTainted,
+    controlSecretTainted,
+    prepareEarlyArrivalRun,
+  } = options;
+  const resolvedSecretRefs =
+    suppliedSecretRefs instanceof Set
+      ? suppliedSecretRefs
+      : new Set(suppliedSecretRefs);
   const now = config.now();
   const correlation = waitSignalCorrelation(wait);
   await repairGlobalAuditsForNewSecrets(
@@ -121,6 +136,12 @@ export async function enterWait(config: WaitMachineConfig, options: EnterWaitOpt
     if (correlation) {
       const existingSignal = await tx.signals.findUnconsumedMatch(correlation.name, correlation.correlationId);
       if (existingSignal) {
+        for (const value of
+          await tx.signals.getOperationalSecretValues(
+            existingSignal.id,
+          )) {
+          resolvedSecretRefs.add(value);
+        }
         // Early-arrival resolution — none of the wait bookkeeping below is
         // ever persisted as outstanding; this step goes straight from
         // "about to wait" to "completed" in one hop (architecture §4.4 step
@@ -232,6 +253,10 @@ export async function enterWait(config: WaitMachineConfig, options: EnterWaitOpt
       stepId,
       wait,
       now.toISOString(),
+      {
+        run: repairedRun,
+        resolvedSecretValues: [...resolvedSecretRefs],
+      },
     );
     if (JSON.stringify(auditWait) !== JSON.stringify(wait)) {
       await tx.waits.redactAudit(run.runId, stepId, auditWait);
@@ -307,7 +332,20 @@ interface ClaimAndCompleteArgs {
  * re-entered step, so folding it in makes each cycle's dedupe key unique.
  */
 async function claimAndCompleteWait(config: WaitMachineConfig, args: ClaimAndCompleteArgs): Promise<ResumeOutcome> {
-  const { runId, stepId, dedupeKeySuffix, mechanism, outputs, resolvedSecretRefs, prepareCompletedRun, signalAudit } = args;
+  const {
+    runId,
+    stepId,
+    dedupeKeySuffix,
+    mechanism,
+    outputs,
+    resolvedSecretRefs: suppliedSecretRefs,
+    prepareCompletedRun,
+    signalAudit,
+  } = args;
+  const resolvedSecretRefs =
+    suppliedSecretRefs instanceof Set
+      ? suppliedSecretRefs
+      : new Set(suppliedSecretRefs);
   if (typeof prepareCompletedRun !== "function") {
     throw new Error(
       "A prepareCompletedRun callback is required before a resumed wait can be persisted.",
@@ -321,8 +359,8 @@ async function claimAndCompleteWait(config: WaitMachineConfig, args: ClaimAndCom
     resolvedSecretRefs,
   );
   const outcome: ResumeOutcome = await config.store.transact(async (tx) => {
-    const run = await tx.runs.get(runId);
-    if (!run) {
+    const publicRun = await tx.runs.get(runId);
+    if (!publicRun) {
       return { kind: "unmatched", mechanism };
     }
     const wait = await tx.waits.get(runId, stepId);
@@ -337,9 +375,22 @@ async function claimAndCompleteWait(config: WaitMachineConfig, args: ClaimAndCom
       // the seq-keyed dedupe check below is the PRIMARY guard for that
       // window; this covers the case where the row is ALREADY gone by the
       // time this attempt even looks.
-      const alreadyCompleted = run.trace.some((t) => t.stepId === stepId && t.status === "completed");
+      const alreadyCompleted = publicRun.trace.some((t) => t.stepId === stepId && t.status === "completed");
       return { kind: alreadyCompleted ? "duplicate" : "unmatched", mechanism };
     }
+    const operationalRunState =
+      await tx.waits.getOperationalRunState(runId, stepId);
+    for (const value of
+      operationalRunState?.resolvedSecretValues ?? []) {
+      resolvedSecretRefs.add(value);
+    }
+    const run =
+      operationalRunState === undefined
+        ? publicRun
+        : mergeOperationalRunTaint(
+            operationalRunState.run,
+            publicRun,
+          );
 
     assertSchemaVersionCompatible(run.schemaVersion, { runId, recordKind: "RunRecord" });
     assertSchemaVersionCompatible(wait.schemaVersion, { runId, stepId, recordKind: "WaitCondition" });
@@ -457,7 +508,11 @@ export async function getExpiredWaits(store: AartStore, now: Date): Promise<Arra
  * = "expired"` (spec §13.5's terminal-status set includes `"expired"`
  * precisely for this case) — not just the step trace.
  */
-export async function failExpiredWait(config: WaitMachineConfig, runId: string, stepId: string, resolvedSecretRefs: ReadonlySet<string> = new Set()): Promise<ResumeOutcome> {
+export async function failExpiredWait(config: WaitMachineConfig, runId: string, stepId: string, suppliedSecretRefs: ReadonlySet<string> = new Set()): Promise<ResumeOutcome> {
+  const resolvedSecretRefs =
+    suppliedSecretRefs instanceof Set
+      ? suppliedSecretRefs
+      : new Set(suppliedSecretRefs);
   const now = config.now();
   const mechanism: ResumeMechanism = "scheduler-tick";
 
@@ -467,15 +522,28 @@ export async function failExpiredWait(config: WaitMachineConfig, runId: string, 
     resolvedSecretRefs,
   );
   const outcome: ResumeOutcome = await config.store.transact(async (tx) => {
-    const run = await tx.runs.get(runId);
-    if (!run) {
+    const publicRun = await tx.runs.get(runId);
+    if (!publicRun) {
       return { kind: "unmatched", mechanism };
     }
     const wait = await tx.waits.get(runId, stepId);
     if (!wait) {
-      const alreadyResolved = run.trace.some((t) => t.stepId === stepId && (t.status === "completed" || t.status === "failed"));
+      const alreadyResolved = publicRun.trace.some((t) => t.stepId === stepId && (t.status === "completed" || t.status === "failed"));
       return { kind: alreadyResolved ? "duplicate" : "unmatched", mechanism };
     }
+    const operationalRunState =
+      await tx.waits.getOperationalRunState(runId, stepId);
+    for (const value of
+      operationalRunState?.resolvedSecretValues ?? []) {
+      resolvedSecretRefs.add(value);
+    }
+    const run =
+      operationalRunState === undefined
+        ? publicRun
+        : mergeOperationalRunTaint(
+            operationalRunState.run,
+            publicRun,
+          );
 
     assertSchemaVersionCompatible(run.schemaVersion, { runId, recordKind: "RunRecord" });
     assertSchemaVersionCompatible(wait.schemaVersion, { runId, stepId, recordKind: "WaitCondition" });

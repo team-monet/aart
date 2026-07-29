@@ -57,6 +57,13 @@ export const REDACTION_LINT_SUPPRESSIONS: readonly RedactionLintSuppression[] = 
   // ---- packages/engine/src/concurrency.ts ----
   { file: "packages/engine/src/concurrency.ts", snippet: "await store.runs.put(released);", reason: "releaseQueuedRuns only flips params.waitingOnConcurrency to false on an existing \"pending\" RunRecord -- every pending RunRecord in the store was already redacted at creation by triggerRun (run-lifecycle.ts:94, applyRedaction before the first store.runs.put) and is never mutated between creation and this release, so this write introduces no new, never-redacted content." },
 
+  // ---- packages/engine/src/redaction.ts ----
+  { file: "packages/engine/src/redaction.ts", snippet: "await store.runs.put(repaired);", reason: "repairCustomerVisibleAudits computes `repaired` immediately above with applyRunRedaction(redact, run, resolvedSecretRefs). The separately sealed operational continuation is written through WaitStore, never this public RunStore write." },
+
+  // ---- packages/engine/src/run-lifecycle.ts ----
+  { file: "packages/engine/src/run-lifecycle.ts", snippet: "await config.store.runs.put(", reason: "The only multiline match writes the immediate applyRunRedaction(config.redact, withSnapshot, resolvedSecretRefs) result. The raw withSnapshot remains in memory solely for active execution and is never passed to RunStore." },
+  { file: "packages/engine/src/run-lifecycle.ts", snippet: "await tx.runs.put(redacted);", reason: "cancelRun's `redacted` is the immediate applyRunRedaction(config.redact, updated, resolvedSecretRefs) result. Any exact suspended values came only from the sealed WaitOperationalRunState and are removed with the outstanding wait in this same transaction." },
+
   // ---- packages/engine/src/wait/wait-machine.ts ----
   { file: "packages/engine/src/wait/wait-machine.ts", snippet: "await tx.approvals.put({ ...task, status: \"expired\", decidedAt: now.toISOString() });", reason: "failExpiredWait spreads an existing ApprovalTask (redacted at creation by step-executor.ts's executeWaitDispatch, A41 fix) with only a static status/decidedAt pair added -- introduces no new content." },
 

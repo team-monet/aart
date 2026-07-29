@@ -4,7 +4,12 @@
 // this package's own tests) actually instantiates.
 import type { RunRecord, Signal, Workflow } from "@aart/types";
 import type { AartStore } from "@aart/store";
-import { createTrackingSecretResolver, redactStoredTextArtifacts, throwingSecretResolver } from "./redaction.js";
+import {
+  createTrackingSecretResolver,
+  mergeOperationalRunTaint,
+  redactStoredTextArtifacts,
+  throwingSecretResolver,
+} from "./redaction.js";
 import { buildExprContext, resolveBooleanExpression } from "./expr-context.js";
 import { cancelRun, executeRun, finalizeTerminal, runStepsLoop, triggerRun } from "./run-lifecycle.js";
 import { resolveWorkflowForRun } from "./snapshot.js";
@@ -85,6 +90,7 @@ function waitMachineConfig(config: EngineConfig): WaitMachineConfig {
  */
 interface PreparedResume {
   workflow?: Workflow;
+  operationalRun?: RunRecord;
   nextStepId?: string;
   controlError?: Error;
 }
@@ -139,7 +145,7 @@ async function prepareResumedRun(
     1,
     resolvedSecretRefs,
   );
-  return {
+  const operationalRun = {
     ...preparedRun,
     artifacts: await redactStoredTextArtifacts(
       transactionStore,
@@ -148,6 +154,8 @@ async function prepareResumedRun(
       resolvedSecretRefs,
     ),
   };
+  prepared.operationalRun = operationalRun;
+  return operationalRun;
 }
 
 async function resumeWithPreparation(
@@ -194,7 +202,12 @@ async function resumeWithPreparation(
   }
   const finalRun = await runStepsLoop(
     config,
-    outcome.run,
+    prepared.operationalRun === undefined
+      ? outcome.run
+      : mergeOperationalRunTaint(
+          prepared.operationalRun,
+          outcome.run,
+        ),
     prepared.workflow,
     prepared.nextStepId,
     resolvedSecretRefs,
@@ -275,14 +288,39 @@ export function createEngine(config: EngineConfig): Engine {
     getExpiredWaits: (now) => getExpiredWaitsQuery(config.store, now ?? config.now?.() ?? new Date()),
 
     failExpiredWait: async (runId, stepId) => {
-      const outcome = await failExpiredWaitMechanism(waitMachineConfig(config), runId, stepId);
+      const resolvedSecretRefs = new Set<string>();
+      const operationalRunState =
+        await config.store.waits.getOperationalRunState(
+          runId,
+          stepId,
+        );
+      for (const value of
+        operationalRunState?.resolvedSecretValues ?? []) {
+        resolvedSecretRefs.add(value);
+      }
+      const resumableRun =
+        operationalRunState?.run ??
+        (await config.store.runs.get(runId));
+      const workflow =
+        resumableRun === undefined
+          ? undefined
+          : await resolveWorkflowForRun(config.store, resumableRun);
+      const outcome = await failExpiredWaitMechanism(
+        waitMachineConfig(config),
+        runId,
+        stepId,
+        resolvedSecretRefs,
+      );
       if (outcome.kind !== "resumed") return outcome;
       // Unlike the resume wrappers above, a failed wait has no "next step"
       // to continue to — finalize the run as failed directly (the same
       // finalization path a normal step failure takes: snapshot-capture-
       // if-needed, terminal status, concurrency-queue release).
-      const workflow = await resolveWorkflowForRun(config.store, outcome.run);
-      const resolvedSecretRefs = new Set<string>();
+      if (workflow === undefined) {
+        throw new Error(
+          `Expired run "${runId}" was resolved without a workflow snapshot.`,
+        );
+      }
       const failedTrace = outcome.run.trace.find((t) => t.stepId === stepId && t.status === "failed");
       const finalRun = await finalizeTerminal(config, outcome.run, workflow, "failed", resolvedSecretRefs, failedTrace?.error ?? `Step "${stepId}" failed.`);
       return { ...outcome, run: finalRun };
