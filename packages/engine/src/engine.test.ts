@@ -3,9 +3,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createFsStore, type AartStore } from "@aart/store";
 import { openSqliteStore } from "@aart/store/sqlite";
+import type { BlockImplementation } from "@aart/types";
 import { afterEach, describe, expect, it } from "vitest";
 import { alwaysAllowCapabilityCheck } from "./capability.js";
 import { createEngine } from "./engine.js";
+import { idempotencyStorageKey } from "./idempotency.js";
 import { identityRedactFn } from "./redaction.js";
 import { CURRENT_ENGINE_SCHEMA_VERSION, SchemaVersionMismatchError } from "./schema-version.js";
 import { createTestStore, echoBlock, fixtureTrigger, fixtureWorkflow } from "./test-utils/fixtures.js";
@@ -280,9 +282,20 @@ describe("createEngine — resume wrappers continue execution past the resumed s
   it("completes an early-arrival signal without re-entering the SQLite transaction", async () => {
     const { store, cleanup } = await createSqliteTestStore();
     cleanups.push(cleanup);
+    const redact = (
+      record: unknown,
+      resolvedSecretRefs: ReadonlySet<string>,
+    ): unknown => {
+      let json = JSON.stringify(record);
+      for (const secret of resolvedSecretRefs) {
+        json = json.replaceAll(secret, "[REDACTED]");
+      }
+      return JSON.parse(json);
+    };
     const engine = createEngine({
       store,
-      redact: identityRedactFn,
+      redact,
+      resolveSecret: () => "late-secret",
       capabilityCheck: alwaysAllowCapabilityCheck,
       blocks: createBlockRegistry([echoBlock]),
       computeRetryDelayMs: () => 0,
@@ -295,6 +308,9 @@ describe("createEngine — resume wrappers continue execution past the resumed s
             id: "pause",
             uses: "wait.for_signal",
             with: { name: "ready", correlationId: "sqlite-early" },
+            next: "pause",
+            until: "{{ secrets.STOP }}",
+            maxIterations: 1,
           },
           {
             id: "after",
@@ -309,7 +325,7 @@ describe("createEngine — resume wrappers continue execution past the resumed s
       id: "sqlite-early-signal",
       name: "ready",
       correlationId: "sqlite-early",
-      payload: { received: true },
+      payload: { received: "late-secret" },
       receivedAt: new Date().toISOString(),
     });
     const run = await engine.triggerRun({
@@ -325,7 +341,7 @@ describe("createEngine — resume wrappers continue execution past the resumed s
       expect.objectContaining({
         stepId: "pause",
         status: "completed",
-        outputs: { received: true },
+        outputs: { received: "[REDACTED]" },
       }),
       expect.objectContaining({
         stepId: "after",
@@ -335,6 +351,268 @@ describe("createEngine — resume wrappers continue execution past the resumed s
     await expect(
       store.signals.findUnconsumedMatch("ready", "sqlite-early"),
     ).resolves.toBeUndefined();
+    await expect(store.signals.list()).resolves.toContainEqual({
+      id: "sqlite-early-signal",
+      name: "ready",
+      correlationId: "sqlite-early",
+      payload: { received: "[REDACTED]" },
+      receivedAt: expect.any(String),
+    });
+  });
+
+  it("repairs every persisted consumer in a transitive global-cache lineage", async () => {
+    const { store, cleanup } = await createSqliteTestStore();
+    cleanups.push(cleanup);
+    const redact = (
+      record: unknown,
+      resolvedSecretRefs: ReadonlySet<string>,
+    ): unknown => {
+      let json = JSON.stringify(record);
+      for (const secret of resolvedSecretRefs) {
+        json = json.replaceAll(secret, "[REDACTED]");
+      }
+      return JSON.parse(json);
+    };
+    let sourceExecutions = 0;
+    let derivativeExecutions = 0;
+    const sourceBlock: BlockImplementation = {
+      manifest: {
+        id: "test.late-secret-source",
+        version: "1.0.0",
+        capabilities: [],
+        inputSchema: {},
+        outputSchema: {},
+        description: "Returns a value before another step identifies it as secret.",
+      },
+      execute: async () => {
+        sourceExecutions += 1;
+        return { value: "late-secret" };
+      },
+    };
+    const derivativeBlock: BlockImplementation = {
+      manifest: {
+        id: "test.cached-secret-derivative",
+        version: "1.0.0",
+        capabilities: [],
+        inputSchema: {},
+        outputSchema: {},
+        description: "Caches a non-literal derivative of a replayed value.",
+      },
+      execute: async (inputs) => {
+        derivativeExecutions += 1;
+        return {
+          length: String(
+            (inputs as Record<string, unknown>)["source"],
+          ).length,
+        };
+      },
+    };
+    const engine = createEngine({
+      store,
+      redact,
+      resolveSecret: () => "late-secret",
+      capabilityCheck: alwaysAllowCapabilityCheck,
+      blocks: createBlockRegistry([
+        echoBlock,
+        sourceBlock,
+        derivativeBlock,
+      ]),
+      computeRetryDelayMs: () => 0,
+    });
+    const sourceWorkflow = fixtureWorkflow({
+      id: "wf-cache-source",
+      execution: {
+        type: "workflow",
+        steps: [
+          {
+            id: "cached",
+            uses: sourceBlock.manifest.id,
+            idempotencyKey: "shared-secret",
+          },
+          { id: "pause", uses: "wait.manual" },
+          {
+            id: "discover",
+            uses: "test.echo",
+            with: { secret: "{{ secrets.API_KEY }}" },
+          },
+        ],
+      },
+    });
+    const derivativeWorkflow = fixtureWorkflow({
+      id: "wf-cache-derivative",
+      execution: {
+        type: "workflow",
+        steps: [
+          {
+            id: "cached",
+            uses: sourceBlock.manifest.id,
+            idempotencyKey: "shared-secret",
+          },
+          {
+            id: "derive",
+            uses: derivativeBlock.manifest.id,
+            with: {
+              source: "{{ steps.cached.outputs.value }}",
+            },
+            idempotencyKey: "shared-derivative",
+          },
+          { id: "pause", uses: "wait.manual" },
+        ],
+      },
+    });
+    const transitiveConsumerWorkflow = fixtureWorkflow({
+      id: "wf-cache-transitive-consumer",
+      outputs: [
+        { name: "result", type: "integer", required: true },
+      ],
+      execution: {
+        type: "workflow",
+        steps: [
+          {
+            id: "derive",
+            uses: derivativeBlock.manifest.id,
+            idempotencyKey: "shared-derivative",
+          },
+        ],
+        outputMapping: {
+          result: "{{ steps.derive.outputs.length }}",
+        },
+      },
+    });
+    await Promise.all([
+      store.workflows.put(sourceWorkflow),
+      store.workflows.put(derivativeWorkflow),
+      store.workflows.put(transitiveConsumerWorkflow),
+    ]);
+
+    const sourceRun = await engine.triggerRun({
+      workflow: sourceWorkflow,
+      trigger: fixtureTrigger(),
+      inputs: {},
+    });
+    await engine.executeRun(sourceRun.runId);
+    const derivativeRun = await engine.triggerRun({
+      workflow: derivativeWorkflow,
+      trigger: fixtureTrigger(),
+      inputs: {},
+    });
+    await engine.executeRun(derivativeRun.runId);
+    const transitiveRun = await engine.triggerRun({
+      workflow: transitiveConsumerWorkflow,
+      trigger: fixtureTrigger(),
+      inputs: {},
+    });
+    await engine.executeRun(transitiveRun.runId);
+
+    expect(sourceExecutions).toBe(1);
+    expect(derivativeExecutions).toBe(1);
+    const resumedSource = await engine.resumeManual(
+      sourceRun.runId,
+      "pause",
+    );
+
+    expect(resumedSource.kind).toBe("resumed");
+    await expect(
+      store.idempotencyLedger.get(idempotencyStorageKey("shared-secret")),
+    ).resolves.toBeUndefined();
+    await expect(
+      store.idempotencyLedger.get(
+        idempotencyStorageKey("shared-derivative"),
+      ),
+    ).resolves.toBeUndefined();
+    const repairedDerivative = await store.runs.get(derivativeRun.runId);
+    expect(repairedDerivative?.status).toBe("waiting");
+    expect(
+      repairedDerivative?.trace.find((trace) => trace.stepId === "cached"),
+    ).toMatchObject({
+      outputs: { value: "[REDACTED]" },
+      secretTainted: true,
+      secretTaintedPaths: ["*"],
+    });
+    expect(
+      repairedDerivative?.trace.find((trace) => trace.stepId === "derive"),
+    ).toMatchObject({
+      outputs: { length: 11 },
+      secretTainted: true,
+      secretTaintedPaths: ["*"],
+    });
+    const repairedTransitive = await store.runs.get(transitiveRun.runId);
+    expect(repairedTransitive?.status).toBe("failed");
+    expect(repairedTransitive?.outputs).toBeUndefined();
+    expect(repairedTransitive?.error).toMatch(
+      /replayed cache result was later identified as secret-derived/,
+    );
+    expect(
+      repairedTransitive?.trace.find((trace) => trace.stepId === "derive"),
+    ).toMatchObject({
+      outputs: { length: 11 },
+      secretTainted: true,
+      secretTaintedPaths: ["*"],
+    });
+  });
+
+  it("omits an optional output for a skipped secret-input step without failing the workflow", async () => {
+    const { store, cleanup } = await createTestStore();
+    cleanups.push(cleanup);
+    const redact = (
+      record: unknown,
+      resolvedSecretRefs: ReadonlySet<string>,
+    ): unknown => {
+      let json = JSON.stringify(record);
+      for (const secret of resolvedSecretRefs) {
+        json = json.replaceAll(secret, "[REDACTED]");
+      }
+      return JSON.parse(json);
+    };
+    const engine = createEngine({
+      store,
+      redact,
+      resolveSecret: () => "unused-secret",
+      capabilityCheck: alwaysAllowCapabilityCheck,
+      blocks: createBlockRegistry([echoBlock]),
+      computeRetryDelayMs: () => 0,
+    });
+    const workflow = fixtureWorkflow({
+      inputs: [
+        { name: "shouldRun", type: "boolean", required: true },
+      ],
+      outputs: [
+        { name: "result", type: "string", required: false },
+      ],
+      execution: {
+        type: "workflow",
+        steps: [
+          {
+            id: "lookup",
+            uses: "test.echo",
+            with: { value: "{{ secrets.API_KEY }}" },
+            if: "{{ inputs.shouldRun }}",
+          },
+        ],
+        outputMapping: {
+          result: "{{ steps.lookup.outputs.echoed.value }}",
+        },
+      },
+    });
+    await store.workflows.put(workflow);
+    const run = await engine.triggerRun({
+      workflow,
+      trigger: fixtureTrigger(),
+      inputs: { shouldRun: false },
+    });
+
+    const finished = await engine.executeRun(run.runId);
+
+    expect(finished.status).toBe("completed");
+    expect(finished.outputs).toEqual({});
+    expect(finished.trace).toEqual([
+      expect.objectContaining({
+        stepId: "lookup",
+        status: "skipped",
+      }),
+    ]);
+    expect(finished.trace[0]?.secretTainted).toBeUndefined();
+    expect(JSON.stringify(finished)).not.toContain("unused-secret");
   });
 
   it("carries secret taint through a persisted wait and rejects its public output after resume", async () => {
@@ -479,6 +757,76 @@ describe("createEngine — resume wrappers continue execution past the resumed s
     expect(outcome.kind).toBe("resumed");
     if (outcome.kind !== "resumed") throw new Error("unreachable");
     expect(outcome.run.status).toBe("completed");
+  });
+
+  it("redacts the consumed signal audit payload when resume control first discovers its secret", async () => {
+    const { store, cleanup } = await createTestStore();
+    cleanups.push(cleanup);
+    const redact = (
+      record: unknown,
+      resolvedSecretRefs: ReadonlySet<string>,
+    ): unknown => {
+      let json = JSON.stringify(record);
+      for (const secret of resolvedSecretRefs) {
+        json = json.replaceAll(secret, "[REDACTED]");
+      }
+      return JSON.parse(json);
+    };
+    const engine = createEngine({
+      store,
+      redact,
+      resolveSecret: () => "late-secret",
+      capabilityCheck: alwaysAllowCapabilityCheck,
+      blocks: createBlockRegistry([echoBlock]),
+      computeRetryDelayMs: () => 0,
+    });
+    const workflow = fixtureWorkflow({
+      execution: {
+        type: "workflow",
+        steps: [
+          {
+            id: "wait_step",
+            uses: "wait.for_signal",
+            with: {
+              name: "quote.received",
+              correlationId: "secret-audit",
+            },
+            next: "wait_step",
+            until: "{{ secrets.STOP }}",
+            maxIterations: 1,
+          },
+        ],
+      },
+    });
+    await store.workflows.put(workflow);
+    const run = await engine.triggerRun({
+      workflow,
+      trigger: fixtureTrigger(),
+      inputs: {},
+    });
+    await engine.executeRun(run.runId);
+    const signal = {
+      id: "signal-secret-audit",
+      name: "quote.received",
+      correlationId: "secret-audit",
+      payload: { value: "late-secret" },
+      receivedAt: new Date().toISOString(),
+    };
+    await store.signals.append(signal);
+
+    const outcome = await engine.resumeBySignal(signal);
+
+    expect(outcome.kind).toBe("resumed");
+    await expect(store.signals.list()).resolves.toContainEqual({
+      ...signal,
+      payload: { value: "[REDACTED]" },
+    });
+    await expect(
+      store.signals.findUnconsumedMatch(
+        "quote.received",
+        "secret-audit",
+      ),
+    ).resolves.toBeUndefined();
   });
 
   it("resumeTimerWait continues execution to completion", async () => {

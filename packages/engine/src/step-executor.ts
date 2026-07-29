@@ -11,12 +11,14 @@ import { checkCapabilityDispatch, alwaysEmptyGrantedCapabilities } from "./capab
 import { parseDurationMs } from "./duration.js";
 import { buildExprContext, resolveArrayExpression, resolveBooleanExpression, resolveStringExpression, resolveWithRecord, traceRepresentsAuthoredStep } from "./expr-context.js";
 import { checkIdempotency, idempotencyStorageKey, recordIdempotency, revokeSecretTaintedIdempotency } from "./idempotency.js";
-import { jsonCompatibilityProblem, jsonValuesEqual } from "./output-validation.js";
+import { jsonCompatibilityProblem, jsonValuesEqual, validateWorkflowOutputs } from "./output-validation.js";
 import { applyRedaction, applyRunRedaction, changedJsonPointers, createTrackingSecretResolver, isTextMime, redactStoredTextArtifacts, throwingSecretResolver } from "./redaction.js";
 import { CURRENT_ENGINE_SCHEMA_VERSION } from "./schema-version.js";
+import { resolveWorkflowForRun } from "./snapshot.js";
 import type { EngineBlockExecutionContext, EngineConfig } from "./types.js";
 import { enterWait, type WaitMachineConfig } from "./wait/wait-machine.js";
 import { buildWaitConditionFromBlock, isWaitBlockId, type WaitBlockId } from "./wait/wait-blocks.js";
+import { materializeWorkflowOutputs } from "./workflow-outputs.js";
 
 export type StepOutcome =
   | { kind: "continue"; run: RunRecord; nextStepId: string | undefined }
@@ -553,6 +555,14 @@ async function appendTracesAndPersist(
       config.redact,
       prepared,
       resolvedSecretRefs,
+      (store, consumerRun, outputTaintedLedgerKeys, secretRefs) =>
+        prepareRevokedIdempotencyConsumer(
+          config,
+          store,
+          consumerRun,
+          outputTaintedLedgerKeys,
+          secretRefs,
+        ),
     );
     await tx.runs.put(redacted);
   });
@@ -817,10 +827,11 @@ function annotateSecretTaint(
         : changedJsonPointers(trace.outputs, redactedOutputs);
     const existingPaths = trace.secretTaintedPaths ?? [];
     const outputTainted =
-      dataTaint ||
-      inputTainted ||
-      existingPaths.length > 0 ||
-      discoveredPaths.length > 0;
+      trace.outputs !== undefined &&
+      (dataTaint ||
+        inputTainted ||
+        existingPaths.length > 0 ||
+        discoveredPaths.length > 0);
     if (!outputTainted && !controlTaint) return trace;
     return {
       ...trace,
@@ -906,15 +917,13 @@ function recomputeDataSecretTaint(
   );
 }
 
-export function prepareTaintAfterControlResolution(
+function prepareHistoricalSecretTaint(
   config: EngineConfig,
   workflow: Workflow,
-  step: WorkflowStep,
   run: RunRecord,
-  currentTraceCount: number,
   resolvedSecretRefs: ReadonlySet<string>,
 ): RunRecord {
-  let refreshedTrace = annotateSecretTaint(
+  const refreshedTrace = annotateSecretTaint(
     config,
     run.trace,
     resolvedSecretRefs,
@@ -929,11 +938,27 @@ export function prepareTaintAfterControlResolution(
     workflow,
     taintAwareRun,
   );
-  const historicallyTaintAwareRun = annotateHistoricalControlTaint(
+  return annotateHistoricalControlTaint(
     workflow,
     historicallyDataTaintAwareRun,
   );
-  refreshedTrace = historicallyTaintAwareRun.trace;
+}
+
+export function prepareTaintAfterControlResolution(
+  config: EngineConfig,
+  workflow: Workflow,
+  step: WorkflowStep,
+  run: RunRecord,
+  currentTraceCount: number,
+  resolvedSecretRefs: ReadonlySet<string>,
+): RunRecord {
+  const historicallyTaintAwareRun = prepareHistoricalSecretTaint(
+    config,
+    workflow,
+    run,
+    resolvedSecretRefs,
+  );
+  let refreshedTrace = historicallyTaintAwareRun.trace;
   const currentTraces = refreshedTrace.slice(
     Math.max(0, refreshedTrace.length - currentTraceCount),
   );
@@ -978,6 +1003,68 @@ export function prepareTaintAfterControlResolution(
   return {
     ...historicallyTaintAwareRun,
     trace: refreshedTrace,
+    updatedAt: (config.now?.() ?? new Date()).toISOString(),
+  };
+}
+
+/**
+ * Repairs a persisted run that replayed a cache output another execution
+ * later proved secret-derived. Direct consumers are pre-marked by
+ * `revokeSecretTaintedIdempotency`; this pass reconstructs downstream
+ * data/control provenance, re-redacts text artifacts, and re-evaluates an
+ * already-completed public result so stored success cannot survive when its
+ * outputMapping depended on the revoked value.
+ */
+export async function prepareRevokedIdempotencyConsumer(
+  config: EngineConfig,
+  store: AartStore,
+  run: RunRecord,
+  outputTaintedLedgerKeys: ReadonlySet<string>,
+  resolvedSecretRefs: ReadonlySet<string>,
+): Promise<RunRecord> {
+  if (outputTaintedLedgerKeys.size === 0) return run;
+  const workflow = await resolveWorkflowForRun(store, run);
+  let prepared = prepareHistoricalSecretTaint(
+    config,
+    workflow,
+    run,
+    resolvedSecretRefs,
+  );
+  prepared = {
+    ...prepared,
+    artifacts: await redactStoredTextArtifacts(
+      store,
+      config.redact,
+      run.runId,
+      resolvedSecretRefs,
+    ),
+  };
+
+  if (prepared.status === "completed") {
+    try {
+      const outputs = await materializeWorkflowOutputs(workflow, prepared, {
+        secretResolver: throwingSecretResolver,
+      });
+      const observableOutputs = applyRedaction(
+        config.redact,
+        outputs,
+        resolvedSecretRefs,
+      );
+      validateWorkflowOutputs(workflow, observableOutputs);
+      prepared = { ...prepared, outputs };
+    } catch {
+      prepared = {
+        ...prepared,
+        status: "failed",
+        outputs: undefined,
+        error:
+          "Run invalidated because a replayed cache result was later identified as secret-derived.",
+      };
+    }
+  }
+
+  return {
+    ...prepared,
     updatedAt: (config.now?.() ?? new Date()).toISOString(),
   };
 }
@@ -1042,6 +1129,14 @@ export async function refreshTaintAfterControlResolution(
       config.redact,
       preparedRun,
       resolvedSecretRefs,
+      (store, consumerRun, outputTaintedLedgerKeys, secretRefs) =>
+        prepareRevokedIdempotencyConsumer(
+          config,
+          store,
+          consumerRun,
+          outputTaintedLedgerKeys,
+          secretRefs,
+        ),
     );
     await tx.runs.put(refreshedRun);
   });
@@ -1410,7 +1505,24 @@ async function executeWaitDispatch(
   controlSecretTainted: boolean,
 ): Promise<StepOutcome> {
   const schemaVersion = config.schemaVersion ?? CURRENT_ENGINE_SCHEMA_VERSION;
-  const waitMachineConfig: WaitMachineConfig = { store: config.store, redact: config.redact, now: config.now ?? (() => new Date()) };
+  const waitMachineConfig: WaitMachineConfig = {
+    store: config.store,
+    redact: config.redact,
+    now: config.now ?? (() => new Date()),
+    prepareRevokedIdempotencyConsumer: (
+      store,
+      consumerRun,
+      outputTaintedLedgerKeys,
+      secretRefs,
+    ) =>
+      prepareRevokedIdempotencyConsumer(
+        config,
+        store,
+        consumerRun,
+        outputTaintedLedgerKeys,
+        secretRefs,
+      ),
+  };
   const preparedHistoricalRun = prepareTaintAfterControlResolution(
     config,
     workflow,

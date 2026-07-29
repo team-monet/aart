@@ -9,7 +9,10 @@ import type { AartStore } from "@aart/store";
 import type { RunRecord, Signal, StepTrace, WaitCondition } from "@aart/types";
 import { CorrelationError } from "@aart/types";
 import { parseDurationMs } from "../duration.js";
-import { revokeSecretTaintedIdempotency } from "../idempotency.js";
+import {
+  revokeSecretTaintedIdempotency,
+  type PrepareRevokedIdempotencyConsumer,
+} from "../idempotency.js";
 import { applyRedaction, applyRunRedaction } from "../redaction.js";
 import { assertSchemaVersionCompatible } from "../schema-version.js";
 import type { DueWait, ResumeMechanism, ResumeOutcome } from "../types.js";
@@ -19,6 +22,7 @@ export interface WaitMachineConfig {
   store: AartStore;
   redact: import("@aart/types").RedactFn;
   now: () => Date;
+  prepareRevokedIdempotencyConsumer?: PrepareRevokedIdempotencyConsumer;
 }
 
 /** Wraps an arbitrary resume payload into the `Record<string, unknown>` shape `StepTrace.outputs` requires (spec §19.2) — a payload that's already a plain object passes through; anything else (a primitive, an array, `undefined`) is wrapped under a `value` key rather than dropped. */
@@ -113,7 +117,6 @@ export async function enterWait(config: WaitMachineConfig, options: EnterWaitOpt
         // "about to wait" to "completed" in one hop (architecture §4.4 step
         // 3: "the wait resolves immediately... execution proceeds straight
         // to step 8").
-        await tx.signals.markConsumed(existingSignal.id);
         const trace: StepTrace = {
           seq: run.trace.length,
           stepId,
@@ -139,11 +142,19 @@ export async function enterWait(config: WaitMachineConfig, options: EnterWaitOpt
         const preparedRun = prepareEarlyArrivalRun
           ? await prepareEarlyArrivalRun(updatedRun, tx)
           : updatedRun;
+        await tx.signals.markConsumed(existingSignal.id, {
+          payload: applyRedaction(
+            config.redact,
+            existingSignal.payload,
+            resolvedSecretRefs,
+          ),
+        });
         await revokeSecretTaintedIdempotency(
           tx,
           config.redact,
           preparedRun,
           resolvedSecretRefs,
+          config.prepareRevokedIdempotencyConsumer,
         );
         const redacted = applyRunRedaction(config.redact, preparedRun, resolvedSecretRefs);
         await tx.runs.put(redacted);
@@ -184,6 +195,7 @@ export async function enterWait(config: WaitMachineConfig, options: EnterWaitOpt
       config.redact,
       updatedRun,
       resolvedSecretRefs,
+      config.prepareRevokedIdempotencyConsumer,
     );
     const redactedRun = applyRunRedaction(config.redact, updatedRun, resolvedSecretRefs);
     const redactedWait = applyRedaction(config.redact, wait, resolvedSecretRefs);
@@ -224,6 +236,7 @@ interface ClaimAndCompleteArgs {
   outputs: Record<string, unknown>;
   resolvedSecretRefs: ReadonlySet<string>;
   prepareCompletedRun: PrepareCompletedRun;
+  signalAudit?: Signal;
 }
 
 /**
@@ -253,7 +266,7 @@ interface ClaimAndCompleteArgs {
  * re-entered step, so folding it in makes each cycle's dedupe key unique.
  */
 async function claimAndCompleteWait(config: WaitMachineConfig, args: ClaimAndCompleteArgs): Promise<ResumeOutcome> {
-  const { runId, stepId, dedupeKeySuffix, mechanism, outputs, resolvedSecretRefs, prepareCompletedRun } = args;
+  const { runId, stepId, dedupeKeySuffix, mechanism, outputs, resolvedSecretRefs, prepareCompletedRun, signalAudit } = args;
   if (typeof prepareCompletedRun !== "function") {
     throw new Error(
       "A prepareCompletedRun callback is required before a resumed wait can be persisted.",
@@ -328,11 +341,21 @@ async function claimAndCompleteWait(config: WaitMachineConfig, args: ClaimAndCom
       updatedAt: now.toISOString(),
     };
     const preparedRun = await prepareCompletedRun(updatedRun, stepId, tx);
+    if (signalAudit !== undefined) {
+      await tx.signals.markConsumed(signalAudit.id, {
+        payload: applyRedaction(
+          config.redact,
+          signalAudit.payload,
+          resolvedSecretRefs,
+        ),
+      });
+    }
     await revokeSecretTaintedIdempotency(
       tx,
       config.redact,
       preparedRun,
       resolvedSecretRefs,
+      config.prepareRevokedIdempotencyConsumer,
     );
     const redacted = applyRunRedaction(config.redact, preparedRun, resolvedSecretRefs);
     await tx.runs.put(redacted);
@@ -431,6 +454,7 @@ export async function failExpiredWait(config: WaitMachineConfig, runId: string, 
       config.redact,
       updatedRun,
       resolvedSecretRefs,
+      config.prepareRevokedIdempotencyConsumer,
     );
     const redacted = applyRunRedaction(config.redact, updatedRun, resolvedSecretRefs);
     await tx.runs.put(redacted);
@@ -495,6 +519,7 @@ export async function resumeBySignal(
     outputs: normalizePayloadToOutputs(signal.payload),
     resolvedSecretRefs,
     prepareCompletedRun,
+    signalAudit: signal,
   });
 }
 

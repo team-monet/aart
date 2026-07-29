@@ -55,11 +55,18 @@ export class FsSignalStore implements SignalStore {
     return signal;
   }
 
-  async markConsumed(signalId: string): Promise<void> {
+  async markConsumed(
+    signalId: string,
+    options?: { payload: unknown },
+  ): Promise<void> {
     const all = await this.listStored();
     const match = all.find((s) => s.id === signalId);
     if (!match) return;
-    const updated: StoredSignal = { ...match, consumed: true };
+    const updated: StoredSignal = {
+      ...match,
+      ...(options !== undefined ? { payload: options.payload } : {}),
+      consumed: true,
+    };
     await new JsonFileHandle<StoredSignal>(this.pathFor(match)).write(updated);
   }
 

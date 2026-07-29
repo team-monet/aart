@@ -16,6 +16,7 @@ import { validateWorkflowOutputs, WorkflowOutputValidationError } from "./output
 import {
   authoredStepIdForTrace,
   executeStep,
+  prepareRevokedIdempotencyConsumer,
   prepareTaintAfterControlResolution,
   refreshTaintAfterControlResolution,
   resolveCompletedStepControl,
@@ -209,6 +210,14 @@ export async function finalizeTerminal(
       config.redact,
       updated,
       resolvedSecretRefs,
+      (store, consumerRun, outputTaintedLedgerKeys, secretRefs) =>
+        prepareRevokedIdempotencyConsumer(
+          config,
+          store,
+          consumerRun,
+          outputTaintedLedgerKeys,
+          secretRefs,
+        ),
     );
     await tx.runs.put(redacted);
   });

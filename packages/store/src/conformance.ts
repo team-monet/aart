@@ -237,6 +237,28 @@ export function runAartStoreConformanceSuite(label: string, options: Conformance
         await store.signals.markConsumed(signal.id);
         await expect(store.signals.list()).resolves.toEqual(expect.arrayContaining([signal]));
       });
+
+      it("markConsumed can replace the persisted audit payload", async () => {
+        const signal: Signal = {
+          id: uniqueId("sig"),
+          name: "x",
+          correlationId: "corr-redacted",
+          payload: { token: "plaintext" },
+          receivedAt: new Date().toISOString(),
+        };
+        await store.signals.append(signal);
+        await store.signals.markConsumed(signal.id, {
+          payload: { token: "[REDACTED]" },
+        });
+        await expect(store.signals.list()).resolves.toEqual(
+          expect.arrayContaining([
+            { ...signal, payload: { token: "[REDACTED]" } },
+          ]),
+        );
+        await expect(
+          store.signals.findUnconsumedMatch("x", "corr-redacted"),
+        ).resolves.toBeUndefined();
+      });
     });
 
     describe("artifacts", () => {
@@ -679,7 +701,7 @@ export function runAartStoreConformanceSuite(label: string, options: Conformance
         await expect(store.idempotencyLedger.get("never-seen-key")).resolves.toBeUndefined();
       });
 
-      it("lists entries by run and deletes by resolved key", async () => {
+      it("lists all entries, lists entries by run, and deletes by resolved key", async () => {
         const runId = uniqueId("run");
         const resolvedKey = `${runId}:send_email`;
         await store.idempotencyLedger.put({
@@ -695,6 +717,11 @@ export function runAartStoreConformanceSuite(label: string, options: Conformance
         ).resolves.toEqual([
           expect.objectContaining({ resolvedKey, schemaVersion: 2 }),
         ]);
+        await expect(store.idempotencyLedger.list()).resolves.toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({ resolvedKey, schemaVersion: 2 }),
+          ]),
+        );
         await store.idempotencyLedger.delete(resolvedKey);
         await expect(
           store.idempotencyLedger.get(resolvedKey),

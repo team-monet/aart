@@ -1892,6 +1892,13 @@ describe("executeRun — fresh execution", () => {
     expect(finished.trace.find((trace) => trace.stepId === "pause")).toMatchObject({
       secretTainted: true,
     });
+    await expect(store.signals.list()).resolves.toContainEqual({
+      id: "early-secret-signal",
+      name: "ready",
+      correlationId: "early",
+      payload: { value: "[REDACTED:secret-1]" },
+      receivedAt: expect.any(String),
+    });
   });
 
   it("keeps an early-arrival event completed when its post-event until cannot resolve", async () => {

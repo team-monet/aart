@@ -105,8 +105,16 @@ export interface SignalStore {
   append(signal: Signal): Promise<void>;
   /** The check-at-creation lookup architecture §4.4/§5.6 requires: an unconsumed Signal matching (name, correlationId), if one already arrived before its wait was created. */
   findUnconsumedMatch(name: string, correlationId: string): Promise<Signal | undefined>;
-  /** Marks the audit copy consumed — see `append`'s doc comment on the same non-atomicity. */
-  markConsumed(signalId: string): Promise<void>;
+  /**
+   * Marks the audit copy consumed. When a resolving control expression has
+   * just enlarged the known-secret set, callers also replace the payload
+   * with its redacted form in the same adapter operation.
+   * See `append`'s doc comment on the fs adapter's non-atomicity.
+   */
+  markConsumed(
+    signalId: string,
+    options?: { payload: unknown },
+  ): Promise<void>;
   list(): Promise<Signal[]>;
 }
 
@@ -268,6 +276,7 @@ export interface IdempotencyLedgerEntry {
 export interface IdempotencyLedgerStore {
   get(resolvedKey: string): Promise<IdempotencyLedgerEntry | undefined>;
   put(entry: IdempotencyLedgerEntry): Promise<void>;
+  list(): Promise<IdempotencyLedgerEntry[]>;
   listByRun(runId: string): Promise<IdempotencyLedgerEntry[]>;
   delete(resolvedKey: string): Promise<void>;
 }

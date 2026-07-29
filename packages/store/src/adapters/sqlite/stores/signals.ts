@@ -56,8 +56,27 @@ export class SqliteSignalStore implements SignalStore {
     return row ? rowToSignal(row) : undefined;
   }
 
-  async markConsumed(signalId: string): Promise<void> {
-    await this.exec((db) => dbRun(db, "UPDATE signals SET consumed_at = ? WHERE signal_id = ?", [new Date().toISOString(), signalId]));
+  async markConsumed(
+    signalId: string,
+    options?: { payload: unknown },
+  ): Promise<void> {
+    await this.exec((db) =>
+      options === undefined
+        ? dbRun(
+            db,
+            "UPDATE signals SET consumed_at = ? WHERE signal_id = ?",
+            [new Date().toISOString(), signalId],
+          )
+        : dbRun(
+            db,
+            "UPDATE signals SET consumed_at = ?, payload_json = ? WHERE signal_id = ?",
+            [
+              new Date().toISOString(),
+              JSON.stringify(options.payload) ?? "null",
+              signalId,
+            ],
+          ),
+    );
   }
 
   async list(): Promise<Signal[]> {

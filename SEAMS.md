@@ -48,6 +48,15 @@ function resumeApproval(config: WaitMachineConfig, runId: string, stepId: string
 
 **IMPORTANT — these standalone functions only perform the atomic CLAIM, they do NOT continue execution past the resumed step.** They now require `prepareCompletedRun` because control expressions and secret provenance must be resolved against the completed in-memory trace before its first durable write. Omitting it fails before the claim transaction mutates storage. The callback runs inside that claim transaction and receives its `transactionStore`; every store/artifact read or write made during preparation must use this scoped view. Re-entering the top-level `config.store` can deadlock a non-reentrant adapter such as SQLite. A caller constructing this callback must own the full workflow resolver, secret resolver, and taint-preparation pipeline; passing an identity callback is test-only and is not a safe production implementation. To actually advance the run to its next step (or its next wait/terminal status), call the SAME-NAMED method on a constructed `Engine` instance instead (`engine.resumeTimerWait(runId, stepId)` etc. — see Seam 4). The `Engine`-bound versions construct the preparation callback, perform the atomic claim, and run the step-loop forward. S2's ticker and every production composition root must use those bound methods; the standalone functions remain exposed only for engine-internal tests or a future split-process architecture that supplies an equivalent trusted preparer.
 
+`WaitMachineConfig.prepareRevokedIdempotencyConsumer` is the sibling trusted
+callback used when that preparation invalidates a global cache entry already
+replayed by another persisted run. The bound `Engine` supplies it and repairs
+the full transitive consumer lineage inside the active transaction. A
+standalone caller omitting it can delete the cache entry and directly redact
+literal consumer data, but cannot reconstruct downstream workflow provenance;
+this is another reason standalone resume functions are test/split-process
+mechanisms rather than the production composition surface.
+
 **Wait-TIMEOUT-expiry sibling seam (architecture §4.4.1's "Expiry note") — a DIFFERENT terminal outcome from resume, S2's ticker should sweep this too, on the same interval:**
 ```ts
 function getExpiredWaits(store: AartStore, now: Date): Promise<Array<{ runId: string; stepId: string; wait: WaitCondition }>>

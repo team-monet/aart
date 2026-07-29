@@ -8,7 +8,11 @@ import { createTrackingSecretResolver, redactStoredTextArtifacts, throwingSecret
 import { buildExprContext, resolveBooleanExpression } from "./expr-context.js";
 import { cancelRun, executeRun, finalizeTerminal, runStepsLoop, triggerRun } from "./run-lifecycle.js";
 import { resolveWorkflowForRun } from "./snapshot.js";
-import { prepareTaintAfterControlResolution, resolveCompletedStepControl } from "./step-executor.js";
+import {
+  prepareRevokedIdempotencyConsumer,
+  prepareTaintAfterControlResolution,
+  resolveCompletedStepControl,
+} from "./step-executor.js";
 import type { DueWait, EngineConfig, ResumeOutcome, TriggerRunInput } from "./types.js";
 import {
   failExpiredWait as failExpiredWaitMechanism,
@@ -51,7 +55,24 @@ export interface Engine {
 }
 
 function waitMachineConfig(config: EngineConfig): WaitMachineConfig {
-  return { store: config.store, redact: config.redact, now: config.now ?? (() => new Date()) };
+  return {
+    store: config.store,
+    redact: config.redact,
+    now: config.now ?? (() => new Date()),
+    prepareRevokedIdempotencyConsumer: (
+      store,
+      run,
+      outputTaintedLedgerKeys,
+      resolvedSecretRefs,
+    ) =>
+      prepareRevokedIdempotencyConsumer(
+        config,
+        store,
+        run,
+        outputTaintedLedgerKeys,
+        resolvedSecretRefs,
+      ),
+  };
 }
 
 /**

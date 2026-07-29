@@ -325,8 +325,11 @@ export class FsIdempotencyLedgerStore implements IdempotencyLedgerStore {
   put(entry: IdempotencyLedgerEntry) {
     return this.collection.put(this.fileKey(entry.resolvedKey), entry);
   }
+  list() {
+    return this.collection.list();
+  }
   async listByRun(runId: string) {
-    return (await this.collection.list()).filter(
+    return (await this.list()).filter(
       (entry) => entry.runId === runId,
     );
   }

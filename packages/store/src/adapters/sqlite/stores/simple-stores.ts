@@ -883,6 +883,16 @@ export class SqliteIdempotencyLedgerStore implements IdempotencyLedgerStore {
     );
   }
 
+  async list(): Promise<IdempotencyLedgerEntry[]> {
+    const rows = await this.exec((db) =>
+      dbAll<IdempotencyLedgerRow>(
+        db,
+        "SELECT * FROM idempotency_ledger",
+      ),
+    );
+    return rows.map((row) => this.fromRow(row));
+  }
+
   async listByRun(runId: string): Promise<IdempotencyLedgerEntry[]> {
     const rows = await this.exec((db) =>
       dbAll<IdempotencyLedgerRow>(

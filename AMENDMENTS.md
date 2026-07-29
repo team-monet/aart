@@ -2067,6 +2067,17 @@ run. Control-tainted dispatches are neither replayed from nor admitted to the
 global cache. Active `next`/`until` dependencies are classified before
 dispatch, so a secret-controlled loop condition cannot open a cache replay or
 write window before its post-step evaluation.
+The retrospective boundary is global, not source-run-only.
+`IdempotencyLedgerStore.list()` exposes the current ledger closure whenever a
+segment learns a secret. Changed entries are deleted and every persisted run
+whose trace records that ledger key is re-redacted and re-tainted in the same
+store transaction. Historical data/control analysis then follows descendants;
+if a repaired consumer cached a non-literal derivative, that key is revoked and
+its own consumers are repaired until the lineage reaches closure. Waiting runs
+remain resumable with protected provenance. A previously completed run keeps
+success only when re-materializing its public `outputMapping` proves the result
+independent of the revoked lineage; otherwise its stored result becomes failed
+with no public outputs.
 `StepTrace.idempotencyLedgerKey` is protected operational
 metadata used only to locate that entry and is itself redacted if a later
 secret matches it. Thrown finalization paths perform the same preparation and
@@ -2091,6 +2102,12 @@ dispatch, early-arrival signals, atomic wait claims, and worker reclaim:
 operators see that the effect already happened and do not retry it as though
 the dispatch had failed. Control reconstruction failure never replaces the
 completed trace with a synthetic failed step.
+Consumed signal audit records follow the same retrospective rule. Both the
+ordinary signal-resume claim and the separate early-arrival path replace the
+stored payload with its redacted value when post-completion control first
+discovers a matching secret. SQLite performs payload replacement, consumed
+marking, cache cleanup, and `RunRecord` persistence in the same transaction;
+the fs adapter retains its already-documented signal-audit non-atomicity.
 Text artifacts obey the same retrospective discovery rule as traces and cache
 entries. Every boundary that can enlarge the resolved-secret set—normal
 dispatch, wait entry/early arrival, atomic resume, reclaim, and terminal
@@ -2147,6 +2164,12 @@ occurrences (`iterationIndex` present) cannot satisfy or shadow an authored
 step source; the aggregate parent is the public expression source. Bracketed
 occurrence text is also not an alternate identifier syntax in the closed
 expression grammar.
+A skipped step produced no outputs. Secret-bearing resolved `with` inputs are
+still value-redacted in its trace, but they do not create wildcard output
+provenance on an occurrence whose `outputs` field is absent. Optional workflow
+output mappings therefore keep their established omitted-field behavior
+instead of failing solely because an undispatched step would have received a
+secret input.
 
 Because this metadata changes the security interpretation of persisted
 RunRecords, the engine record schema version is bumped from 1 to 2. Version 2
