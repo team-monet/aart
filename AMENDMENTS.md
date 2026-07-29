@@ -2042,15 +2042,22 @@ marker or a non-literal derivative into a successful public result. Block
 secret access defaults to data use and therefore taints arbitrary output;
 trusted connector blocks may explicitly mark authentication-only credential
 use, which leaves a public API response clean. Secret-derived outputs are not
-written to the idempotency cache. Idempotency storage keys are namespaced by
-the engine schema version, so pre-v2 ledger entries (which have no provenance)
-are never replayed after this security upgrade.
+written to the idempotency cache. The cache decision also compares every
+successful output with its redacted form before the ledger write, covering an
+output that matches a secret resolved by an earlier step even when the current
+block did not itself consume secret data. Idempotency storage keys are
+namespaced by the engine schema version, so pre-v2 ledger entries (which have
+no provenance) are never replayed after this security upgrade.
 
 Normal dispatch now prepares the raw trace in memory, evaluates `until`
 against that provisional trace, computes data/control provenance, redacts,
 and only then performs the first durable write. Early-arrival waits use the
 same prepare-before-persist hook; ordinary wait resumes also prepare the
 completed trace inside the atomic claim transaction before its first write.
+The individually exported low-level resume mechanisms require this preparation
+callback and reject a missing callback before touching the transaction; callers
+that do not own the full preparation pipeline use `createEngine`'s bound resume
+methods instead.
 `authoredStepId` and `iterationIndex`
 identify forEach traces without parsing a `[n]` suffix, so an authored id such
 as `gate[0]` is never mistaken for generated iteration identity. Provenance

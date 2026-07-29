@@ -320,6 +320,13 @@ async function dispatchOnce(
         : {}),
     };
   }
+  const redactedOutputs = applyRedaction(
+    config.redact,
+    outputs,
+    resolvedSecretRefs,
+  );
+  const outputsContainResolvedSecret =
+    changedJsonPointers(outputs, redactedOutputs).length > 0;
   // A faked (dry-run) dispatch never records idempotency: recording a
   // synthetic "would have called X" result under the real idempotencyKey
   // would wrongly short-circuit a LATER, genuinely real invocation of this
@@ -329,7 +336,8 @@ async function dispatchOnce(
     resolvedIdempotencyKey !== undefined &&
     !shouldFake &&
     !dataSecretTaintedBeforeDispatch &&
-    !dataSecretAccessed
+    !dataSecretAccessed &&
+    !outputsContainResolvedSecret
   ) {
     await recordIdempotency(config.store, resolvedIdempotencyKey, run.runId, stepIdForTrace, outputs, now());
   }

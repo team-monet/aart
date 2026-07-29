@@ -4,12 +4,24 @@
 // hand-rolled mock, per this session's DoD ("it should pass its own tests
 // against the fs adapter from S0").
 import type { AartStore } from "@aart/store";
-import { CorrelationError, type RedactFn } from "@aart/types";
+import { CorrelationError, type RedactFn, type RunRecord, type Signal } from "@aart/types";
 import { afterEach, describe, expect, it } from "vitest";
 import { identityRedactFn } from "../redaction.js";
 import { CURRENT_ENGINE_SCHEMA_VERSION } from "../schema-version.js";
 import { createTestStore, fixtureRun, uniqueId } from "../test-utils/fixtures.js";
-import { enterWait, failExpiredWait, getDueWaits, getExpiredWaits, listExternalJobWaits, resumeApproval, resumeBySignal, resumeExternalJobResult, resumeManual, resumeTimerWait, type WaitMachineConfig } from "./wait-machine.js";
+import {
+  enterWait,
+  failExpiredWait,
+  getDueWaits,
+  getExpiredWaits,
+  listExternalJobWaits,
+  resumeApproval as resumeApprovalWithPreparation,
+  resumeBySignal as resumeBySignalWithPreparation,
+  resumeExternalJobResult as resumeExternalJobResultWithPreparation,
+  resumeManual as resumeManualWithPreparation,
+  resumeTimerWait as resumeTimerWaitWithPreparation,
+  type WaitMachineConfig,
+} from "./wait-machine.js";
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {
@@ -24,6 +36,92 @@ async function setup(): Promise<{ store: AartStore; config: WaitMachineConfig }>
 
 function redactLiteral(secret: string): RedactFn {
   return (record) => JSON.parse(JSON.stringify(record).replaceAll(secret, "[REDACTED]"));
+}
+
+const prepareCompletedRun = async (run: RunRecord): Promise<RunRecord> => run;
+
+function resumeBySignal(
+  config: WaitMachineConfig,
+  signal: Signal,
+  resolvedSecretRefs: ReadonlySet<string> = new Set(),
+) {
+  return resumeBySignalWithPreparation(
+    config,
+    signal,
+    resolvedSecretRefs,
+    prepareCompletedRun,
+  );
+}
+
+function resumeManual(
+  config: WaitMachineConfig,
+  runId: string,
+  stepId: string,
+  payload: unknown = {},
+  resolvedSecretRefs: ReadonlySet<string> = new Set(),
+) {
+  return resumeManualWithPreparation(
+    config,
+    runId,
+    stepId,
+    payload,
+    resolvedSecretRefs,
+    prepareCompletedRun,
+  );
+}
+
+function resumeApproval(
+  config: WaitMachineConfig,
+  runId: string,
+  stepId: string,
+  task: {
+    id: string;
+    status: string;
+    decision?: unknown;
+    reviewer?: string;
+  },
+  resolvedSecretRefs: ReadonlySet<string> = new Set(),
+) {
+  return resumeApprovalWithPreparation(
+    config,
+    runId,
+    stepId,
+    task,
+    resolvedSecretRefs,
+    prepareCompletedRun,
+  );
+}
+
+function resumeTimerWait(
+  config: WaitMachineConfig,
+  runId: string,
+  stepId: string,
+  resolvedSecretRefs: ReadonlySet<string> = new Set(),
+) {
+  return resumeTimerWaitWithPreparation(
+    config,
+    runId,
+    stepId,
+    resolvedSecretRefs,
+    prepareCompletedRun,
+  );
+}
+
+function resumeExternalJobResult(
+  config: WaitMachineConfig,
+  runId: string,
+  stepId: string,
+  resultPayload: unknown,
+  resolvedSecretRefs: ReadonlySet<string> = new Set(),
+) {
+  return resumeExternalJobResultWithPreparation(
+    config,
+    runId,
+    stepId,
+    resultPayload,
+    resolvedSecretRefs,
+    prepareCompletedRun,
+  );
 }
 
 describe("enterWait — no early match (architecture §4.4 steps 1-4)", () => {
@@ -304,6 +402,40 @@ describe("resumeBySignal — signal-matched mechanism (architecture §4.4.1)", (
 });
 
 describe("resumeManual — direct-lookup mechanism", () => {
+  it("refuses to persist a resumed payload when preparation is omitted", async () => {
+    const { store, config } = await setup();
+    const run = fixtureRun({ status: "running" });
+    await store.runs.put(run);
+    await enterWait(config, {
+      run,
+      stepId: "manual_step",
+      blockId: "wait.manual",
+      resolvedInputs: {},
+      wait: {
+        type: "manual",
+        schemaVersion: CURRENT_ENGINE_SCHEMA_VERSION,
+      },
+      resolvedSecretRefs: new Set(),
+    });
+
+    await expect(
+      resumeManualWithPreparation(
+        config,
+        run.runId,
+        "manual_step",
+        { secret: "plaintext" },
+        new Set(),
+        undefined as never,
+      ),
+    ).rejects.toThrow(/prepareCompletedRun callback is required/);
+
+    await expect(store.runs.get(run.runId)).resolves.toMatchObject({
+      status: "waiting",
+      trace: [expect.objectContaining({ status: "waiting" })],
+    });
+    await expect(store.waits.get(run.runId, "manual_step")).resolves.toBeDefined();
+  });
+
   it("resumes a manual wait with the supplied payload as output", async () => {
     const { store, config } = await setup();
     const run = fixtureRun({ status: "running" });

@@ -513,6 +513,60 @@ describe("executeStep — idempotencyKey (spec §30.2)", () => {
     ).resolves.toBeUndefined();
   });
 
+  it("does not cache output that matches a secret resolved earlier in the execution segment", async () => {
+    const secret = "secret-from-earlier-step";
+    const returningBlock: BlockImplementation = {
+      manifest: {
+        id: "test.return-existing-secret",
+        version: "1.0.0",
+        capabilities: [],
+        inputSchema: {},
+        outputSchema: {},
+        description: "fixture",
+      },
+      execute: async () => ({ value: secret }),
+    };
+    const { store, config } = await setup({
+      blocks: { [returningBlock.manifest.id]: returningBlock },
+      redact: (record, resolvedSecretRefs) =>
+        [...resolvedSecretRefs].reduce(
+          (redacted, value) =>
+            JSON.parse(
+              JSON.stringify(redacted).replaceAll(value, "[REDACTED]"),
+            ),
+          record,
+        ),
+    });
+    const run = fixtureRun({ runId: "run-idem-existing-secret" });
+    const workflow = fixtureWorkflow({
+      execution: {
+        type: "workflow",
+        steps: [
+          {
+            id: "echo-secret",
+            uses: returningBlock.manifest.id,
+            idempotencyKey: "stable-existing-secret-key",
+          },
+        ],
+      },
+    });
+
+    await executeStep(
+      config,
+      run,
+      workflow,
+      workflow.execution.steps[0]!,
+      new Set([secret]),
+      undefined,
+    );
+
+    await expect(
+      store.idempotencyLedger.get(
+        idempotencyStorageKey("stable-existing-secret-key"),
+      ),
+    ).resolves.toBeUndefined();
+  });
+
   it("does not replay an unversioned legacy ledger entry", async () => {
     let executeCount = 0;
     const block: BlockImplementation = {

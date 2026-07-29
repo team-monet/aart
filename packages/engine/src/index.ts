@@ -39,6 +39,7 @@ export {
   resumeExternalJobResult,
   resumeManual,
   resumeTimerWait,
+  type PrepareCompletedRun,
   type WaitMachineConfig,
 } from "./wait/wait-machine.js";
 export { isWaitBlockId, WAIT_BLOCK_IDS, waitSignalCorrelation, type WaitBlockId } from "./wait/wait-blocks.js";
