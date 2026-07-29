@@ -78,13 +78,17 @@ export async function sealWaitOperation(
   keyPath: string,
   runId: string,
   stepId: string,
+  generation: string,
   wait: WaitCondition,
 ): Promise<string> {
   const key = await loadKey(keyPath);
   const iv = randomBytes(IV_BYTES);
   const cipher = createCipheriv("aes-256-gcm", key, iv);
   cipher.setAAD(
-    Buffer.from(JSON.stringify([runId, stepId]), "utf8"),
+    Buffer.from(
+      JSON.stringify([runId, stepId, generation]),
+      "utf8",
+    ),
   );
   const ciphertext = Buffer.concat([
     cipher.update(JSON.stringify(wait), "utf8"),
@@ -92,7 +96,7 @@ export async function sealWaitOperation(
   ]);
   const tag = cipher.getAuthTag();
   return [
-    "v1",
+    "v2",
     iv.toString("base64url"),
     tag.toString("base64url"),
     ciphertext.toString("base64url"),
@@ -103,16 +107,22 @@ export async function openWaitOperation(
   keyPath: string,
   runId: string,
   stepId: string,
+  generation: string | undefined,
   sealed: string,
 ): Promise<WaitCondition> {
   const [version, ivText, tagText, ciphertextText] = sealed.split(".");
   if (
-    version !== "v1" ||
+    (version !== "v1" && version !== "v2") ||
     ivText === undefined ||
     tagText === undefined ||
     ciphertextText === undefined
   ) {
     throw new Error("Unsupported sealed wait-operation value.");
+  }
+  if (version === "v2" && generation === undefined) {
+    throw new Error(
+      "Sealed wait-operation generation is missing.",
+    );
   }
   const key = await loadKey(keyPath);
   const decipher = createDecipheriv(
@@ -121,7 +131,14 @@ export async function openWaitOperation(
     Buffer.from(ivText, "base64url"),
   );
   decipher.setAAD(
-    Buffer.from(JSON.stringify([runId, stepId]), "utf8"),
+    Buffer.from(
+      JSON.stringify([
+        runId,
+        stepId,
+        ...(version === "v2" ? [generation] : []),
+      ]),
+      "utf8",
+    ),
   );
   decipher.setAuthTag(Buffer.from(tagText, "base64url"));
   const plaintext = Buffer.concat([

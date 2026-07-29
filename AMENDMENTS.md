@@ -2068,6 +2068,14 @@ global cache. Active `next`/`until` dependencies are classified before
 dispatch, so a secret-controlled loop condition cannot open a cache replay or
 write window before its post-step evaluation.
 The retrospective boundary is global, not source-run-only.
+Each newly resolved literal receives one separate value-only audit scan across
+retained run records, consumed signals, artifacts, approvals, waits,
+corrections, and activity events. That scan applies redaction without resolving
+or reconstructing any historical workflow, and its successful transaction is
+remembered only for the lifetime of the current execution segment. Thus an
+unrelated, non-cached historical record cannot retain a newly classified
+secret, while an ordinary multi-step secret-using workflow does not rescan all
+history at every persistence boundary.
 `IdempotencyLedgerStore.list()` exposes the current ledger closure whenever a
 segment learns a secret. Before concluding that no key changed under literal
 redaction, the engine reconstructs the active run and the persisted producer
@@ -2123,7 +2131,9 @@ included when repairing the active run, so an upgraded store cannot retain an
 unrepairable legacy audit. SQLite performs audit replacement, consumed marking,
 cache cleanup, and `RunRecord` persistence in the same transaction; the fs
 adapter writes safe file content before renaming away a secret-bearing filename
-but retains its already-documented signal-audit non-atomicity.
+and persists an opaque recovery nonce in that content. Every fs signal-store
+operation completes any interrupted rename before exposing a row, while the
+adapter retains its already-documented signal-audit transaction non-atomicity.
 Approval and outstanding-wait audits are members of the same durable-copy
 closure. Approval title, description, reviewer, authenticated identity, and
 decision values are re-redacted for the affected run. Run-linked correction
@@ -2138,6 +2148,10 @@ condition is separately sealed with AES-256-GCM under an adapter-local,
 mode-0600 key, so timer deadlines, timeout policy, and external-job identifiers
 still work after audit repair and process restart without appearing in
 `WaitStore.list()`, `/waiting-runs`, or the SQLite `resume_at` column.
+Every wait `put` receives a random operational generation authenticated
+together with run/step identity, so an older loop iteration cannot be replayed
+into a later entry of the same wait step. Existing v1 seals remain readable and
+rotate to generation-bound v2 on first operational access.
 `WaitStore.listOperational()` is the engine-only access path. A signal carrying
 the original correlation can therefore still resume the run without the
 public audit exposing the late-discovered value. SQLite migration
@@ -2145,7 +2159,8 @@ public audit exposing the late-discovered value. SQLite migration
 run/step link, backfilling existing outstanding waits before their audit copy
 can be repaired. Migration `0008_sealed_operational_state` adds the encrypted
 wait state, removes the raw scheduling shadow during repair, and records a
-stable text-eligibility bit for existing artifacts.
+stable text-eligibility bit for existing artifacts. Migration
+`0009_wait_operation_generation` adds the per-entry generation for SQLite.
 Text artifacts obey the same retrospective discovery rule as traces and cache
 entries. Every boundary that can enlarge the resolved-secret set—normal
 dispatch, wait entry/early arrival, atomic resume, reclaim, and terminal
@@ -2156,6 +2171,12 @@ when the artifact is first stored and survives MIME audit redaction, so a
 second, later secret discovery still scans the bytes. Binary artifacts retain
 the existing pre-capture masking/explicit-read boundary because arbitrary
 encoded bytes cannot be safely search-and-replaced.
+Both filesystem and SQLite artifact adapters durably journal the safe metadata
+and staged byte generation before replacing either customer-visible copy.
+Filesystem access completes an interrupted journal before returning data;
+SQLite replays journals at startup and after both transaction commit and
+rollback. A process exit or a later failing repair therefore cannot leave raw
+metadata beside safe bytes, or safe metadata beside raw bytes.
 The individually exported low-level resume mechanisms require this preparation
 callback and reject a missing callback before touching the transaction; callers
 that do not own the full preparation pipeline use `createEngine`'s bound resume

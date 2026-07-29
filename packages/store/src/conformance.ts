@@ -436,6 +436,12 @@ export function runAartStoreConformanceSuite(label: string, options: Conformance
         const list = await store.artifacts.listByRun(runId);
         expect(list).toHaveLength(1);
         expect(list[0]?.runId).toBe(runId);
+        await expect(store.artifacts.list()).resolves.toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({ runId }),
+            expect.objectContaining({ runId: other }),
+          ]),
+        );
       });
 
       it("replaces artifact audit metadata and text bytes without changing structural ownership", async () => {

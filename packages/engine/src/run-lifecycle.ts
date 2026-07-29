@@ -9,7 +9,7 @@ import type { RunRecord, StepTrace, Workflow, WorkflowStep } from "@aart/types";
 import { ConcurrencyRejectedError } from "@aart/types";
 import { buildExprContext, resolveBooleanExpression } from "./expr-context.js";
 import { decideConcurrency, fingerprintConcurrencyKey, releaseQueuedRuns, resolveConcurrencyKey } from "./concurrency.js";
-import { applyRedaction, applyRunRedaction, createTrackingSecretResolver, redactStoredTextArtifacts, throwingSecretResolver } from "./redaction.js";
+import { applyRedaction, applyRunRedaction, createTrackingSecretResolver, redactStoredTextArtifacts, repairGlobalAuditsForNewSecrets, throwingSecretResolver } from "./redaction.js";
 import { assertSchemaVersionCompatible, CURRENT_ENGINE_SCHEMA_VERSION } from "./schema-version.js";
 import { captureExecutionSnapshot, isSnapshotCaptured, resolveWorkflowForRun, uncapturedSnapshot } from "./snapshot.js";
 import { validateWorkflowOutputs, WorkflowOutputValidationError } from "./output-validation.js";
@@ -193,6 +193,11 @@ export async function finalizeTerminal(
   if (!isSnapshotCaptured(updated.snapshot)) {
     updated = { ...updated, snapshot: await captureExecutionSnapshot(workflow, config.blocks, now, config.computePackHashes) };
   }
+  await repairGlobalAuditsForNewSecrets(
+    config.store,
+    config.redact,
+    resolvedSecretRefs,
+  );
   updated = {
     ...updated,
     artifacts: await redactStoredTextArtifacts(

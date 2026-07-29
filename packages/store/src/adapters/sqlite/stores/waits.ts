@@ -3,7 +3,7 @@
 // AES-GCM-sealed operational condition. Scheduling and polling open only that
 // sealed copy; `resume_at` is deliberately NULL after audit repair so a
 // late-discovered secret cannot survive in a query-optimization shadow.
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { join } from "node:path";
 import type { WaitCondition } from "@aart/types";
 import type { WaitStore } from "../../../types.js";
@@ -19,6 +19,7 @@ interface WaitRow {
   wait_condition_json: string;
   signal_match_fingerprint: string | null;
   operational_wait_ciphertext: string | null;
+  operational_generation: string | null | undefined;
   created_at: string;
 }
 
@@ -78,21 +79,24 @@ export class SqliteWaitStore implements WaitStore {
   }
 
   async put(runId: string, stepId: string, wait: WaitCondition, createdAt: string): Promise<void> {
+    const operationalGeneration = randomUUID();
     const operationalWait = await sealWaitOperation(
       this.operationKeyPath,
       runId,
       stepId,
+      operationalGeneration,
       wait,
     );
     await this.exec((db) =>
       dbRun(
         db,
-        `INSERT INTO waits (run_id, step_id, wait_condition_json, signal_match_fingerprint, operational_wait_ciphertext, wait_type, resume_at, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, NULL, ?)
+        `INSERT INTO waits (run_id, step_id, wait_condition_json, signal_match_fingerprint, operational_wait_ciphertext, operational_generation, wait_type, resume_at, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?)
          ON CONFLICT(run_id, step_id) DO UPDATE SET
            wait_condition_json = excluded.wait_condition_json,
            signal_match_fingerprint = excluded.signal_match_fingerprint,
            operational_wait_ciphertext = excluded.operational_wait_ciphertext,
+           operational_generation = excluded.operational_generation,
            wait_type = excluded.wait_type,
            resume_at = NULL,
            created_at = excluded.created_at`,
@@ -102,6 +106,7 @@ export class SqliteWaitStore implements WaitStore {
           toJson(wait)!,
           fingerprintForWait(wait),
           operationalWait,
+          operationalGeneration,
           wait.type,
           createdAt,
         ],
@@ -125,23 +130,29 @@ export class SqliteWaitStore implements WaitStore {
     const priorWait = fromJson<WaitCondition>(
       stored.wait_condition_json,
     )!;
+    const openedOperationalWait =
+      await this.operationalWait(stored);
+    const operationalGeneration =
+      stored.operational_generation ?? randomUUID();
     const operationalWait =
       stored.operational_wait_ciphertext ??
       (await sealWaitOperation(
         this.operationKeyPath,
         runId,
         stepId,
-        priorWait,
+        operationalGeneration,
+        openedOperationalWait,
       ));
     await this.exec((db) => {
       dbRun(
         db,
-        "UPDATE waits SET wait_condition_json = ?, signal_match_fingerprint = ?, operational_wait_ciphertext = ?, resume_at = NULL WHERE run_id = ? AND step_id = ?",
+        "UPDATE waits SET wait_condition_json = ?, signal_match_fingerprint = ?, operational_wait_ciphertext = ?, operational_generation = ?, resume_at = NULL WHERE run_id = ? AND step_id = ?",
         [
           toJson(wait)!,
           stored.signal_match_fingerprint ??
             fingerprintForWait(priorWait),
           operationalWait,
+          operationalGeneration,
           runId,
           stepId,
         ],
@@ -260,13 +271,47 @@ export class SqliteWaitStore implements WaitStore {
   }
 
   private async operationalWait(row: WaitRow): Promise<WaitCondition> {
-    return row.operational_wait_ciphertext === null
-      ? fromJson<WaitCondition>(row.wait_condition_json)!
-      : openWaitOperation(
-          this.operationKeyPath,
-          row.run_id,
-          row.step_id,
-          row.operational_wait_ciphertext,
-        );
+    if (row.operational_wait_ciphertext === null) {
+      return fromJson<WaitCondition>(row.wait_condition_json)!;
+    }
+    const wait = await openWaitOperation(
+      this.operationKeyPath,
+      row.run_id,
+      row.step_id,
+      row.operational_generation ?? undefined,
+      row.operational_wait_ciphertext,
+    );
+    if (
+      row.operational_generation === null ||
+      row.operational_generation === undefined
+    ) {
+      const operationalGeneration = randomUUID();
+      const operationalWait = await sealWaitOperation(
+        this.operationKeyPath,
+        row.run_id,
+        row.step_id,
+        operationalGeneration,
+        wait,
+      );
+      await this.exec((db) =>
+        dbRun(
+          db,
+          `UPDATE waits
+           SET operational_wait_ciphertext = ?,
+               operational_generation = ?
+           WHERE run_id = ? AND step_id = ?
+             AND operational_generation IS NULL`,
+          [
+            operationalWait,
+            operationalGeneration,
+            row.run_id,
+            row.step_id,
+          ],
+        ),
+      );
+      row.operational_wait_ciphertext = operationalWait;
+      row.operational_generation = operationalGeneration;
+    }
+    return wait;
   }
 }

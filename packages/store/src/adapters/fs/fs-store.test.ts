@@ -2,6 +2,7 @@
 // conformance suite: the documented non-atomic signals-audit-copy gap
 // (architecture §5.8), atomic write-temp-then-rename hygiene, and the
 // concrete .aart/ directory layout (architecture §5.2).
+import { createCipheriv, randomBytes } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -135,6 +136,173 @@ describe("fs adapter — .aart/ layout (architecture §5.2)", () => {
     ).rejects.toThrow();
   });
 
+  it("rejects replay of an older generation for the same wait step", async () => {
+    const waitPath = join(
+      paths.waitsDir(root),
+      "run_loop__wait_loop.json",
+    );
+    await store.waits.put(
+      "run_loop",
+      "wait_loop",
+      {
+        type: "timer",
+        resumeAt: "2026-01-01T00:00:00.000Z",
+        schemaVersion: 1,
+      },
+      "2026-01-01T00:00:00.000Z",
+    );
+    const firstGeneration = JSON.parse(
+      await fs.readFile(waitPath, "utf8"),
+    ) as Record<string, unknown>;
+    await store.waits.put(
+      "run_loop",
+      "wait_loop",
+      {
+        type: "timer",
+        resumeAt: "2026-01-02T00:00:00.000Z",
+        schemaVersion: 1,
+      },
+      "2026-01-02T00:00:00.000Z",
+    );
+    const secondGeneration = JSON.parse(
+      await fs.readFile(waitPath, "utf8"),
+    ) as Record<string, unknown>;
+    secondGeneration["operationalWait"] =
+      firstGeneration["operationalWait"];
+    await fs.writeFile(
+      waitPath,
+      JSON.stringify(secondGeneration),
+      "utf8",
+    );
+    await expect(
+      createFsStore(root).waits.get(
+        "run_loop",
+        "wait_loop",
+      ),
+    ).rejects.toThrow();
+  });
+
+  it("reads a v1 wait seal and rotates it to a generation-bound v2 seal", async () => {
+    const runId = "run-v1-wait";
+    const stepId = "wait-v1";
+    const createdAt = "2026-01-01T00:00:00.000Z";
+    const wait = {
+      type: "timer" as const,
+      resumeAt: "2026-01-02T00:00:00.000Z",
+      schemaVersion: 1,
+    };
+    await store.waits.put(runId, stepId, wait, createdAt);
+    const keyPath = join(
+      paths.waitsDir(root),
+      ".operational-key",
+    );
+    const key = await fs.readFile(keyPath);
+    const iv = randomBytes(12);
+    const cipher = createCipheriv("aes-256-gcm", key, iv);
+    cipher.setAAD(
+      Buffer.from(JSON.stringify([runId, stepId]), "utf8"),
+    );
+    const ciphertext = Buffer.concat([
+      cipher.update(JSON.stringify(wait), "utf8"),
+      cipher.final(),
+    ]);
+    const v1 = [
+      "v1",
+      iv.toString("base64url"),
+      cipher.getAuthTag().toString("base64url"),
+      ciphertext.toString("base64url"),
+    ].join(".");
+    const waitPath = join(
+      paths.waitsDir(root),
+      `${runId}__${stepId}.json`,
+    );
+    const stored = JSON.parse(
+      await fs.readFile(waitPath, "utf8"),
+    ) as Record<string, unknown>;
+    stored["operationalWait"] = v1;
+    delete stored["operationalGeneration"];
+    await fs.writeFile(waitPath, JSON.stringify(stored), "utf8");
+
+    await expect(
+      createFsStore(root).waits.get(runId, stepId),
+    ).resolves.toEqual(wait);
+    const rotated = JSON.parse(
+      await fs.readFile(waitPath, "utf8"),
+    ) as Record<string, unknown>;
+    expect(rotated["operationalWait"]).toEqual(
+      expect.stringMatching(/^v2\./),
+    );
+    expect(typeof rotated["operationalGeneration"]).toBe("string");
+  });
+
+  it("recovers an interrupted artifact redaction before exposing metadata or bytes", async () => {
+    const artifact = {
+      id: "artifact-interrupted-redaction",
+      runId: "run-artifact-recovery",
+      stepId: "capture",
+      name: "late-secret",
+      kind: "late-secret",
+      mime: "text/late-secret",
+      path: "late-secret/report.txt",
+      bytes: 11,
+      createdAt: "2026-01-01T00:00:00.000Z",
+    };
+    await store.artifacts.put(
+      artifact,
+      new TextEncoder().encode("late-secret"),
+    );
+    const runDir = join(
+      paths.artifactsDir(root),
+      artifact.runId,
+    );
+    const stagedBlobName = ".staged-redacted.blob";
+    await fs.writeFile(
+      join(runDir, stagedBlobName),
+      new TextEncoder().encode("[REDACTED]"),
+    );
+    const journalDir = join(
+      paths.artifactsDir(root),
+      ".redaction-journal",
+    );
+    await fs.mkdir(journalDir, { recursive: true });
+    await fs.writeFile(
+      join(journalDir, "interrupted.json"),
+      JSON.stringify({
+        version: 1,
+        artifactId: artifact.id,
+        runId: artifact.runId,
+        updated: {
+          ...artifact,
+          name: "[REDACTED]",
+          kind: "[REDACTED]",
+          mime: "text/[REDACTED]",
+          path: "[REDACTED]/report.txt",
+          bytes: 10,
+          redactionTextEligible: true,
+        },
+        stagedBlobName,
+      }),
+      "utf8",
+    );
+
+    const restartedStore = createFsStore(root);
+    await expect(
+      restartedStore.artifacts.getMetadata(artifact.id),
+    ).resolves.toMatchObject({
+      name: "[REDACTED]",
+      kind: "[REDACTED]",
+      mime: "text/[REDACTED]",
+      path: "[REDACTED]/report.txt",
+      bytes: 10,
+    });
+    await expect(
+      restartedStore.artifacts.getBytes(artifact.id),
+    ).resolves.toEqual(
+      new TextEncoder().encode("[REDACTED]"),
+    );
+    await expect(fs.readdir(journalDir)).resolves.toEqual([]);
+  });
+
   it("writes a workflow under registry/workflows/<workflowId>/<version>.json", async () => {
     await store.workflows.put({
       id: "wf_layout",
@@ -215,5 +383,53 @@ describe("fs adapter — signals directory layout", () => {
       ),
     );
     expect(persisted.join("\n")).not.toContain("late-secret");
+  });
+
+  it("finishes an interrupted late-redaction filename move before exposing the signal store", async () => {
+    const signal = {
+      id: "sig_interrupted_redaction",
+      name: "late-secret",
+      correlationId: "late-secret",
+      payload: { value: "late-secret" },
+      receivedAt: "2026-01-01T00:00:00.000Z",
+    };
+    await store.signals.append(signal);
+    await store.signals.markConsumed(signal.id);
+    const [oldFilename] = await fs.readdir(
+      paths.signalsDir(root),
+    );
+    if (!oldFilename) throw new Error("signal file missing");
+    const oldPath = join(paths.signalsDir(root), oldFilename);
+    const interrupted = JSON.parse(
+      await fs.readFile(oldPath, "utf8"),
+    ) as Record<string, unknown>;
+    Object.assign(interrupted, {
+      name: "[REDACTED]",
+      correlationId: "[REDACTED]",
+      payload: { value: "[REDACTED]" },
+      auditFileNonce: "recovery-nonce",
+    });
+    await fs.writeFile(
+      oldPath,
+      JSON.stringify(interrupted),
+      "utf8",
+    );
+
+    await expect(
+      createFsStore(root).signals.list(),
+    ).resolves.toEqual([
+      {
+        ...signal,
+        name: "[REDACTED]",
+        correlationId: "[REDACTED]",
+        payload: { value: "[REDACTED]" },
+      },
+    ]);
+    const recoveredFilenames = await fs.readdir(
+      paths.signalsDir(root),
+    );
+    expect(recoveredFilenames).toHaveLength(1);
+    expect(recoveredFilenames[0]).not.toContain("late-secret");
+    expect(recoveredFilenames[0]).toContain("recovery-nonce");
   });
 });

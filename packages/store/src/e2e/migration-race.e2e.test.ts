@@ -111,8 +111,9 @@ describe("sqlite adapter — concurrent-startup migration race (AMENDMENTS.md A5
           // +0005_idempotency_schema_version, and
           // +0006_run_root_taint_paths
           // +0007_secret_audit_provenance
-          // +0008_sealed_operational_state).
-          expect(result.watermark, `worker ${label} (iteration ${i}) watermark`).toBe(8);
+          // +0008_sealed_operational_state
+          // +0009_wait_operation_generation).
+          expect(result.watermark, `worker ${label} (iteration ${i}) watermark`).toBe(9);
           expect(result.hasPromotedColumn, `worker ${label} (iteration ${i}) deployments.promoted column`).toBe(true);
           expect(result.hasAuthenticatedAsColumn, `worker ${label} (iteration ${i}) approval_tasks.authenticated_as column`).toBe(true);
           expect(result.hasEventsTable, `worker ${label} (iteration ${i}) events table`).toBe(true);

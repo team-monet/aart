@@ -161,6 +161,8 @@ export interface ArtifactStore {
   put(artifact: Artifact, bytes: Uint8Array): Promise<void>;
   getMetadata(artifactId: string): Promise<Artifact | undefined>;
   getBytes(artifactId: string): Promise<Uint8Array | undefined>;
+  /** All customer-visible artifact audit rows. */
+  list(): Promise<Artifact[]>;
   listByRun(runId: string): Promise<Artifact[]>;
   /** Stable classification retained before audit MIME values are redacted. */
   isTextEligible(artifactId: string): Promise<boolean>;

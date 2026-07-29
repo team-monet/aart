@@ -17,6 +17,7 @@
 // fidelity — proven by the conformance suite's toEqual check), while this
 // adapter's OWN physical blob-file location is a separate, adapter-internal
 // pure function of `(runId, artifactId)` that is never persisted anywhere.
+import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { dirname, join } from "node:path";
 import type { Artifact } from "@aart/types";
@@ -34,6 +35,16 @@ interface ArtifactRow {
   bytes: number;
   created_at: string;
   redaction_text_eligible: number | null;
+}
+
+interface ArtifactRedactionJournal {
+  version: 1;
+  artifactId: string;
+  runId: string;
+  audit: Pick<Artifact, "name" | "kind" | "mime" | "path">;
+  byteCount: number;
+  textEligible: number;
+  stagedBlobName?: string;
 }
 
 function isTextMime(mime: string): boolean {
@@ -61,18 +72,182 @@ function rowToArtifact(row: ArtifactRow): Artifact {
   };
 }
 
+function redactionJournalDir(blobsDir: string): string {
+  return join(blobsDir, ".artifact-redaction-journal");
+}
+
+function artifactBlobPath(
+  blobsDir: string,
+  runId: string,
+  artifactId: string,
+): string {
+  return join(blobsDir, runId, `${artifactId}.blob`);
+}
+
+async function writeRedactionJournal(
+  blobsDir: string,
+  journal: ArtifactRedactionJournal,
+): Promise<string> {
+  const dir = redactionJournalDir(blobsDir);
+  await fs.mkdir(dir, { recursive: true });
+  const nonce = randomUUID();
+  const path = join(dir, `${nonce}.json`);
+  const temporaryPath = join(dir, `.tmp-${nonce}.json`);
+  await fs.writeFile(
+    temporaryPath,
+    JSON.stringify(journal),
+    { encoding: "utf8", mode: 0o600 },
+  );
+  await fs.rename(temporaryPath, path);
+  return path;
+}
+
+async function readRedactionJournals(
+  blobsDir: string,
+): Promise<Array<{
+  path: string;
+  journal: ArtifactRedactionJournal;
+}>> {
+  const dir = redactionJournalDir(blobsDir);
+  let files: string[];
+  try {
+    files = (await fs.readdir(dir)).filter(
+      (file) => file.endsWith(".json") && !file.startsWith(".tmp-"),
+    );
+  } catch (error) {
+    if (
+      typeof error === "object" &&
+      error !== null &&
+      "code" in error &&
+      error.code === "ENOENT"
+    ) {
+      return [];
+    }
+    throw error;
+  }
+  return Promise.all(
+    files.map(async (file) => {
+      const path = join(dir, file);
+      return {
+        path,
+        journal: JSON.parse(
+          await fs.readFile(path, "utf8"),
+        ) as ArtifactRedactionJournal,
+      };
+    }),
+  );
+}
+
+async function moveStagedBlob(
+  stagedPath: string,
+  canonicalPath: string,
+): Promise<void> {
+  try {
+    await fs.rename(stagedPath, canonicalPath);
+  } catch (error) {
+    if (
+      typeof error !== "object" ||
+      error === null ||
+      !("code" in error) ||
+      error.code !== "ENOENT"
+    ) {
+      throw error;
+    }
+    await fs.access(canonicalPath);
+  }
+}
+
+async function removeFileIfPresent(path: string): Promise<void> {
+  try {
+    await fs.unlink(path);
+  } catch (error) {
+    if (
+      typeof error !== "object" ||
+      error === null ||
+      !("code" in error) ||
+      error.code !== "ENOENT"
+    ) {
+      throw error;
+    }
+  }
+}
+
+/**
+ * Completes redaction intents that survived a process exit or an enclosing
+ * SQLite transaction rollback. Callers run this before exposing the store
+ * and after every transaction outcome.
+ */
+export async function recoverSqliteArtifactRedactions(
+  exec: SqlExec,
+  blobsDir: string,
+): Promise<void> {
+  for (const { path, journal } of await readRedactionJournals(blobsDir)) {
+    if (journal.version !== 1) {
+      throw new Error(
+        `Unsupported SQLite artifact redaction journal at ${path}.`,
+      );
+    }
+    if (journal.stagedBlobName !== undefined) {
+      const stagedPath = join(
+        blobsDir,
+        journal.runId,
+        journal.stagedBlobName,
+      );
+      await moveStagedBlob(
+        stagedPath,
+        artifactBlobPath(
+          blobsDir,
+          journal.runId,
+          journal.artifactId,
+        ),
+      );
+    }
+    await exec((db) =>
+      dbRun(
+        db,
+        `UPDATE artifacts
+         SET name = ?, kind = ?, mime = ?, path_or_uri = ?, bytes = ?,
+             redaction_text_eligible = ?
+         WHERE artifact_id = ? AND run_id = ?`,
+        [
+          journal.audit.name,
+          journal.audit.kind,
+          journal.audit.mime,
+          journal.audit.path,
+          journal.byteCount,
+          journal.textEligible,
+          journal.artifactId,
+          journal.runId,
+        ],
+      ),
+    );
+    await removeFileIfPresent(path);
+  }
+}
+
 export class SqliteArtifactStore implements ArtifactStore {
   constructor(
     private readonly exec: SqlExec,
     private readonly blobsDir: string,
+    private readonly transactionScoped = false,
   ) {}
 
   /** This adapter's own physical blob-file location — a pure function of (runId, artifactId), never persisted (see module doc comment). */
   private blobFilePath(runId: string, artifactId: string): string {
-    return join(this.blobsDir, runId, `${artifactId}.blob`);
+    return artifactBlobPath(this.blobsDir, runId, artifactId);
+  }
+
+  private async recoverPending(): Promise<void> {
+    if (!this.transactionScoped) {
+      await recoverSqliteArtifactRedactions(
+        this.exec,
+        this.blobsDir,
+      );
+    }
   }
 
   async put(artifact: Artifact, bytes: Uint8Array): Promise<void> {
+    await this.recoverPending();
     const blobFilePath = this.blobFilePath(artifact.runId, artifact.id);
     await fs.mkdir(dirname(blobFilePath), { recursive: true });
     await fs.writeFile(blobFilePath, bytes);
@@ -103,11 +278,13 @@ export class SqliteArtifactStore implements ArtifactStore {
   }
 
   async getMetadata(artifactId: string): Promise<Artifact | undefined> {
+    await this.recoverPending();
     const row = await this.exec((db) => dbGet<ArtifactRow>(db, "SELECT * FROM artifacts WHERE artifact_id = ?", [artifactId]));
     return row ? rowToArtifact(row) : undefined;
   }
 
   async getBytes(artifactId: string): Promise<Uint8Array | undefined> {
+    await this.recoverPending();
     const row = await this.exec((db) => dbGet<ArtifactRow>(db, "SELECT * FROM artifacts WHERE artifact_id = ?", [artifactId]));
     if (!row) return undefined;
     try {
@@ -122,12 +299,22 @@ export class SqliteArtifactStore implements ArtifactStore {
     }
   }
 
+  async list(): Promise<Artifact[]> {
+    await this.recoverPending();
+    const rows = await this.exec((db) =>
+      dbAll<ArtifactRow>(db, "SELECT * FROM artifacts"),
+    );
+    return rows.map(rowToArtifact);
+  }
+
   async listByRun(runId: string): Promise<Artifact[]> {
+    await this.recoverPending();
     const rows = await this.exec((db) => dbAll<ArtifactRow>(db, "SELECT * FROM artifacts WHERE run_id = ?", [runId]));
     return rows.map(rowToArtifact);
   }
 
   async isTextEligible(artifactId: string): Promise<boolean> {
+    await this.recoverPending();
     const row = await this.exec((db) =>
       dbGet<ArtifactRow>(
         db,
@@ -146,6 +333,7 @@ export class SqliteArtifactStore implements ArtifactStore {
     audit: Pick<Artifact, "name" | "kind" | "mime" | "path">,
     bytes?: Uint8Array,
   ): Promise<Artifact | undefined> {
+    await this.recoverPending();
     const row = await this.exec((db) =>
       dbGet<ArtifactRow>(
         db,
@@ -154,15 +342,43 @@ export class SqliteArtifactStore implements ArtifactStore {
       ),
     );
     if (!row) return undefined;
-    if (bytes !== undefined) {
-      const blobFilePath = this.blobFilePath(row.run_id, artifactId);
-      await fs.mkdir(dirname(blobFilePath), { recursive: true });
-      await fs.writeFile(blobFilePath, bytes);
-    }
     const byteCount = bytes?.byteLength ?? row.bytes;
     const textEligible =
       row.redaction_text_eligible ??
       (isTextMime(row.mime) ? 1 : 0);
+    let stagedBlobName: string | undefined;
+    if (bytes !== undefined) {
+      const blobDir = dirname(
+        this.blobFilePath(row.run_id, artifactId),
+      );
+      await fs.mkdir(blobDir, { recursive: true });
+      stagedBlobName =
+        `.${artifactId}.redacted-${randomUUID()}.blob`;
+      await fs.writeFile(
+        join(blobDir, stagedBlobName),
+        bytes,
+      );
+    }
+    const journalPath = await writeRedactionJournal(
+      this.blobsDir,
+      {
+        version: 1,
+        artifactId,
+        runId: row.run_id,
+        audit,
+        byteCount,
+        textEligible,
+        ...(stagedBlobName !== undefined
+          ? { stagedBlobName }
+          : {}),
+      },
+    );
+    if (stagedBlobName !== undefined) {
+      await moveStagedBlob(
+        join(this.blobsDir, row.run_id, stagedBlobName),
+        this.blobFilePath(row.run_id, artifactId),
+      );
+    }
     await this.exec((db) =>
       dbRun(
         db,
@@ -181,6 +397,9 @@ export class SqliteArtifactStore implements ArtifactStore {
         ],
       ),
     );
+    if (!this.transactionScoped) {
+      await removeFileIfPresent(journalPath);
+    }
     return rowToArtifact({
       ...row,
       name: audit.name,

@@ -6,7 +6,14 @@
 // package goes through `applyRedaction`, never `config.redact` directly.
 import type { SecretResolver } from "@aart/expr";
 import type { AartStore } from "@aart/store";
-import type { Artifact, RedactFn, RunRecord, StepTrace } from "@aart/types";
+import type {
+  ApprovalTask,
+  Artifact,
+  RedactFn,
+  RunRecord,
+  StepTrace,
+  WaitCondition,
+} from "@aart/types";
 import { SecretResolutionError } from "@aart/types";
 import { jsonValuesEqual } from "./output-validation.js";
 
@@ -186,6 +193,20 @@ export async function redactStoredTextArtifacts(
   resolvedSecretRefs: ReadonlySet<string>,
 ): Promise<Artifact[]> {
   const artifacts = await store.artifacts.listByRun(runId);
+  return redactStoredArtifacts(
+    store,
+    redact,
+    artifacts,
+    resolvedSecretRefs,
+  );
+}
+
+async function redactStoredArtifacts(
+  store: Pick<AartStore, "artifacts">,
+  redact: RedactFn,
+  artifacts: Artifact[],
+  resolvedSecretRefs: ReadonlySet<string>,
+): Promise<Artifact[]> {
   if (resolvedSecretRefs.size === 0) return artifacts;
 
   const refreshed: Artifact[] = [];
@@ -235,6 +256,314 @@ export async function redactStoredTextArtifacts(
     refreshed.push(updated ?? artifact);
   }
   return refreshed;
+}
+
+export function redactApprovalAudit(
+  redact: RedactFn,
+  task: ApprovalTask,
+  resolvedSecretRefs: ReadonlySet<string>,
+): ApprovalTask {
+  return {
+    ...task,
+    title: applyRedaction(
+      redact,
+      task.title,
+      resolvedSecretRefs,
+    ),
+    description: applyRedaction(
+      redact,
+      task.description,
+      resolvedSecretRefs,
+    ),
+    ...(task.decision !== undefined
+      ? {
+          decision: applyRedaction(
+            redact,
+            task.decision,
+            resolvedSecretRefs,
+          ),
+        }
+      : {}),
+    ...(task.reviewer !== undefined
+      ? {
+          reviewer: applyRedaction(
+            redact,
+            task.reviewer,
+            resolvedSecretRefs,
+          ) as string,
+        }
+      : {}),
+    ...(task.authenticatedAs !== undefined
+      ? {
+          authenticatedAs: applyRedaction(
+            redact,
+            task.authenticatedAs,
+            resolvedSecretRefs,
+          ) as string,
+        }
+      : {}),
+  };
+}
+
+export function redactWaitAudit(
+  redact: RedactFn,
+  wait: WaitCondition,
+  resolvedSecretRefs: ReadonlySet<string>,
+): WaitCondition {
+  const redacted = applyRedaction(
+    redact,
+    wait,
+    resolvedSecretRefs,
+  ) as WaitCondition;
+  return {
+    ...redacted,
+    type: wait.type,
+    schemaVersion: wait.schemaVersion,
+  } as WaitCondition;
+}
+
+interface CustomerVisibleAuditRepairOptions {
+  runId?: string;
+  includeRuns?: boolean;
+  includeArtifacts?: boolean;
+  includeUnattributedSignalAudits?: boolean;
+}
+
+/**
+ * Literal-only security repair. This intentionally does not reconstruct
+ * workflow provenance; callers use it for the cheap global pass and pair it
+ * with graph-limited provenance repair where a cache lineage is affected.
+ */
+export async function repairCustomerVisibleAudits(
+  store: AartStore,
+  redact: RedactFn,
+  resolvedSecretRefs: ReadonlySet<string>,
+  options: CustomerVisibleAuditRepairOptions = {},
+): Promise<void> {
+  if (resolvedSecretRefs.size === 0) return;
+  const runId = options.runId;
+  const [
+    runs,
+    artifacts,
+    approvals,
+    waits,
+    signals,
+    unattributedSignals,
+    corrections,
+    events,
+  ] = await Promise.all([
+    options.includeRuns === false
+      ? Promise.resolve([])
+      : runId === undefined
+        ? store.runs.list()
+        : store.runs.get(runId).then((run) =>
+            run === undefined ? [] : [run],
+          ),
+    options.includeArtifacts === false
+      ? Promise.resolve([])
+      : runId === undefined
+        ? store.artifacts.list()
+        : store.artifacts.listByRun(runId),
+    store.approvals.list(
+      runId === undefined ? undefined : { runId },
+    ),
+    store.waits.list(
+      runId === undefined ? undefined : { runId },
+    ),
+    runId === undefined
+      ? store.signals.list()
+      : store.signals.listConsumedByRun(runId),
+    options.includeUnattributedSignalAudits
+      ? store.signals.listConsumedWithoutProvenance()
+      : Promise.resolve([]),
+    store.corrections.list(
+      runId === undefined ? undefined : { runId },
+    ),
+    store.events.list(
+      runId === undefined ? undefined : { runId },
+    ),
+  ]);
+
+  for (const run of runs) {
+    const repaired = applyRunRedaction(
+      redact,
+      run,
+      resolvedSecretRefs,
+    );
+    if (JSON.stringify(repaired) !== JSON.stringify(run)) {
+      await store.runs.put(applyRunRedaction(redact, run, resolvedSecretRefs));
+    }
+  }
+  await redactStoredArtifacts(
+    store,
+    redact,
+    artifacts,
+    resolvedSecretRefs,
+  );
+  for (const task of approvals) {
+    const repaired = redactApprovalAudit(
+      redact,
+      task,
+      resolvedSecretRefs,
+    );
+    if (JSON.stringify(repaired) !== JSON.stringify(task)) {
+      await store.approvals.put(redactApprovalAudit(redact, task, resolvedSecretRefs));
+    }
+  }
+  for (const entry of waits) {
+    const repaired = redactWaitAudit(
+      redact,
+      entry.wait,
+      resolvedSecretRefs,
+    );
+    if (JSON.stringify(repaired) !== JSON.stringify(entry.wait)) {
+      await store.waits.redactAudit(
+        entry.runId,
+        entry.stepId,
+        repaired,
+      );
+    }
+  }
+  const signalsById = new Map(
+    [...signals, ...unattributedSignals].map((signal) => [
+      signal.id,
+      signal,
+    ]),
+  );
+  for (const signal of signalsById.values()) {
+    const audit = applyRedaction(
+      redact,
+      {
+        name: signal.name,
+        correlationId: signal.correlationId,
+        payload: signal.payload,
+      },
+      resolvedSecretRefs,
+    ) as Pick<
+      typeof signal,
+      "name" | "correlationId" | "payload"
+    >;
+    if (
+      JSON.stringify(audit) !==
+      JSON.stringify({
+        name: signal.name,
+        correlationId: signal.correlationId,
+        payload: signal.payload,
+      })
+    ) {
+      await store.signals.replaceConsumedAudit(
+        signal.id,
+        audit,
+      );
+    }
+  }
+  for (const correction of corrections) {
+    const audit = {
+      fieldPath: applyRedaction(
+        redact,
+        correction.fieldPath,
+        resolvedSecretRefs,
+      ) as string,
+      observed: applyRedaction(
+        redact,
+        correction.observed,
+        resolvedSecretRefs,
+      ),
+      corrected: applyRedaction(
+        redact,
+        correction.corrected,
+        resolvedSecretRefs,
+      ),
+      reason: applyRedaction(
+        redact,
+        correction.reason,
+        resolvedSecretRefs,
+      ) as string,
+      reviewer: applyRedaction(
+        redact,
+        correction.reviewer,
+        resolvedSecretRefs,
+      ) as string,
+    };
+    if (
+      JSON.stringify(audit) !==
+      JSON.stringify({
+        fieldPath: correction.fieldPath,
+        observed: correction.observed,
+        corrected: correction.corrected,
+        reason: correction.reason,
+        reviewer: correction.reviewer,
+      })
+    ) {
+      await store.corrections.replaceAudit(
+        correction,
+        audit,
+      );
+    }
+  }
+  for (const event of events) {
+    const summary = applyRedaction(
+      redact,
+      event.summary,
+      resolvedSecretRefs,
+    ) as string;
+    const actor =
+      event.actor === undefined
+        ? undefined
+        : (applyRedaction(
+            redact,
+            event.actor,
+            resolvedSecretRefs,
+          ) as string);
+    if (summary !== event.summary || actor !== event.actor) {
+      await store.events.replaceAudit(event.id, {
+        summary,
+        ...(actor !== undefined ? { actor } : {}),
+      });
+    }
+  }
+}
+
+const globallyRepairedSecretValues = new WeakMap<
+  ReadonlySet<string>,
+  Set<string>
+>();
+
+/**
+ * Runs one cheap global literal scan per newly resolved value in an
+ * execution segment. This must be called outside another store transaction:
+ * its successful transaction is the durable boundary that lets the
+ * in-memory watermark advance without a later run-write rollback undoing
+ * the audit repair.
+ */
+export async function repairGlobalAuditsForNewSecrets(
+  store: AartStore,
+  redact: RedactFn,
+  resolvedSecretRefs: ReadonlySet<string>,
+): Promise<void> {
+  const alreadyRepaired =
+    globallyRepairedSecretValues.get(resolvedSecretRefs) ??
+    new Set<string>();
+  const newlyResolved = new Set(
+    [...resolvedSecretRefs].filter(
+      (value) => !alreadyRepaired.has(value),
+    ),
+  );
+  if (newlyResolved.size === 0) return;
+  await store.transact((transactionStore) =>
+    repairCustomerVisibleAudits(
+      transactionStore,
+      redact,
+      newlyResolved,
+    ),
+  );
+  for (const value of newlyResolved) {
+    alreadyRepaired.add(value);
+  }
+  globallyRepairedSecretValues.set(
+    resolvedSecretRefs,
+    alreadyRepaired,
+  );
 }
 
 function mergeTaintPaths(

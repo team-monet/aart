@@ -5,14 +5,14 @@
 // normal dispatch and handed to wait/wait-machine.ts instead.
 import { findExpressionTokens, parseExpression, type ExprContext, type ResolveOptions } from "@aart/expr";
 import type { AartStore } from "@aart/store";
-import type { ApprovalTask, LlmCallMetadata, RedactFn, RetryPolicy, RunRecord, StepTrace, WaitCondition, Workflow, WorkflowStep } from "@aart/types";
+import type { ApprovalTask, LlmCallMetadata, RetryPolicy, RunRecord, StepTrace, WaitCondition, Workflow, WorkflowStep } from "@aart/types";
 import { AartError, DEFAULT_EFFECTFUL_CAPABILITIES, isEffectfulCapability, IterationLimitExceededError, TimeoutError } from "@aart/types";
 import { checkCapabilityDispatch, alwaysEmptyGrantedCapabilities } from "./capability.js";
 import { parseDurationMs } from "./duration.js";
 import { buildExprContext, resolveArrayExpression, resolveBooleanExpression, resolveStringExpression, resolveWithRecord, traceRepresentsAuthoredStep } from "./expr-context.js";
 import { checkIdempotency, idempotencyStorageKey, recordIdempotency, revokeSecretTaintedIdempotency } from "./idempotency.js";
 import { jsonCompatibilityProblem, jsonValuesEqual, validateWorkflowOutputs } from "./output-validation.js";
-import { applyRedaction, applyRunRedaction, changedJsonPointers, createTrackingSecretResolver, isTextMime, redactStoredTextArtifacts, throwingSecretResolver } from "./redaction.js";
+import { applyRedaction, applyRunRedaction, changedJsonPointers, createTrackingSecretResolver, isTextMime, redactStoredTextArtifacts, repairCustomerVisibleAudits, repairGlobalAuditsForNewSecrets, throwingSecretResolver } from "./redaction.js";
 import { CURRENT_ENGINE_SCHEMA_VERSION } from "./schema-version.js";
 import { resolveWorkflowForRun } from "./snapshot.js";
 import type { EngineBlockExecutionContext, EngineConfig } from "./types.js";
@@ -530,6 +530,11 @@ async function appendTracesAndPersist(
   resolvedSecretRefs: ReadonlySet<string>,
   secretCountBeforeStep: number,
 ): Promise<RunRecord> {
+  await repairGlobalAuditsForNewSecrets(
+    config.store,
+    config.redact,
+    resolvedSecretRefs,
+  );
   const artifacts =
     resolvedSecretRefs.size > secretCountBeforeStep
       ? await redactStoredTextArtifacts(
@@ -1071,73 +1076,6 @@ export function prepareTaintAfterControlResolution(
   };
 }
 
-function redactApprovalAudit(
-  redact: RedactFn,
-  task: ApprovalTask,
-  resolvedSecretRefs: ReadonlySet<string>,
-): ApprovalTask {
-  return {
-    ...task,
-    title: applyRedaction(
-      redact,
-      task.title,
-      resolvedSecretRefs,
-    ) as string,
-    description: applyRedaction(
-      redact,
-      task.description,
-      resolvedSecretRefs,
-    ) as string,
-    ...(task.reviewer !== undefined
-      ? {
-          reviewer: applyRedaction(
-            redact,
-            task.reviewer,
-            resolvedSecretRefs,
-          ) as string,
-        }
-      : {}),
-    ...(task.decision !== undefined
-      ? {
-          decision: applyRedaction(
-            redact,
-            task.decision,
-            resolvedSecretRefs,
-          ),
-        }
-      : {}),
-    ...(task.authenticatedAs !== undefined
-      ? {
-          authenticatedAs: applyRedaction(
-            redact,
-            task.authenticatedAs,
-            resolvedSecretRefs,
-          ) as string,
-        }
-      : {}),
-  };
-}
-
-function redactWaitAudit(
-  config: EngineConfig,
-  wait: WaitCondition,
-  resolvedSecretRefs: ReadonlySet<string>,
-): WaitCondition {
-  const redacted = applyRedaction(
-    config.redact,
-    wait,
-    resolvedSecretRefs,
-  ) as WaitCondition;
-  // The discriminant and schema tag are engine identity, not value
-  // channels. Keep them valid while redacting every authored identifier or
-  // payload field in the user-visible audit copy.
-  return {
-    ...redacted,
-    type: wait.type,
-    schemaVersion: wait.schemaVersion,
-  } as WaitCondition;
-}
-
 async function repairRunDurableAudits(
   config: EngineConfig,
   store: AartStore,
@@ -1145,143 +1083,17 @@ async function repairRunDurableAudits(
   resolvedSecretRefs: ReadonlySet<string>,
   includeUnattributedSignalAudits: boolean,
 ): Promise<void> {
-  const [
-    approvals,
-    waits,
-    consumedSignals,
-    legacyConsumedSignals,
-    corrections,
-    events,
-  ] =
-    await Promise.all([
-      store.approvals.list({ runId }),
-      store.waits.list({ runId }),
-      store.signals.listConsumedByRun(runId),
-      includeUnattributedSignalAudits
-        ? store.signals.listConsumedWithoutProvenance()
-        : Promise.resolve([]),
-      store.corrections.list({ runId }),
-      store.events.list({ runId }),
-    ]);
-  for (const task of approvals) {
-    const redacted = redactApprovalAudit(
-      config.redact,
-      task,
-      resolvedSecretRefs,
-    );
-    if (JSON.stringify(redacted) === JSON.stringify(task)) continue;
-    await store.approvals.put(redacted);
-  }
-  for (const entry of waits) {
-    const redacted = redactWaitAudit(
-      config,
-      entry.wait,
-      resolvedSecretRefs,
-    );
-    if (JSON.stringify(redacted) !== JSON.stringify(entry.wait)) {
-      await store.waits.redactAudit(
-        entry.runId,
-        entry.stepId,
-        redacted,
-      );
-    }
-  }
-  const signalsById = new Map(
-    [...consumedSignals, ...legacyConsumedSignals].map((signal) => [
-      signal.id,
-      signal,
-    ]),
+  await repairCustomerVisibleAudits(
+    store,
+    config.redact,
+    resolvedSecretRefs,
+    {
+      runId,
+      includeRuns: false,
+      includeArtifacts: false,
+      includeUnattributedSignalAudits,
+    },
   );
-  for (const signal of signalsById.values()) {
-    const audit = applyRedaction(
-      config.redact,
-      {
-        name: signal.name,
-        correlationId: signal.correlationId,
-        payload: signal.payload,
-      },
-      resolvedSecretRefs,
-    ) as Pick<
-      typeof signal,
-      "name" | "correlationId" | "payload"
-    >;
-    if (
-      JSON.stringify(audit) ===
-      JSON.stringify({
-        name: signal.name,
-        correlationId: signal.correlationId,
-        payload: signal.payload,
-      })
-    ) continue;
-    await store.signals.replaceConsumedAudit(signal.id, audit);
-  }
-  for (const correction of corrections) {
-    const redacted = {
-      fieldPath: applyRedaction(
-        config.redact,
-        correction.fieldPath,
-        resolvedSecretRefs,
-      ) as string,
-      observed: applyRedaction(
-        config.redact,
-        correction.observed,
-        resolvedSecretRefs,
-      ),
-      corrected: applyRedaction(
-        config.redact,
-        correction.corrected,
-        resolvedSecretRefs,
-      ),
-      reason: applyRedaction(
-        config.redact,
-        correction.reason,
-        resolvedSecretRefs,
-      ) as string,
-      reviewer: applyRedaction(
-        config.redact,
-        correction.reviewer,
-        resolvedSecretRefs,
-      ) as string,
-    };
-    if (
-      JSON.stringify(redacted) ===
-      JSON.stringify({
-        fieldPath: correction.fieldPath,
-        observed: correction.observed,
-        corrected: correction.corrected,
-        reason: correction.reason,
-        reviewer: correction.reviewer,
-      })
-    ) continue;
-    await store.corrections.replaceAudit(correction, redacted);
-  }
-  for (const event of events) {
-    const redacted = {
-      ...event,
-      summary: applyRedaction(
-        config.redact,
-        event.summary,
-        resolvedSecretRefs,
-      ) as string,
-      ...(event.actor !== undefined
-        ? {
-            actor: applyRedaction(
-              config.redact,
-              event.actor,
-              resolvedSecretRefs,
-            ) as string,
-          }
-        : {}),
-    };
-    if (JSON.stringify(redacted) !== JSON.stringify(event)) {
-      await store.events.replaceAudit(event.id, {
-        summary: redacted.summary,
-        ...(redacted.actor !== undefined
-          ? { actor: redacted.actor }
-          : {}),
-      });
-    }
-  }
 }
 
 /**
@@ -1401,6 +1213,11 @@ export async function refreshTaintAfterControlResolution(
   resolvedSecretRefs: ReadonlySet<string>,
   secretCountBeforeResolution: number,
 ): Promise<RunRecord> {
+  await repairGlobalAuditsForNewSecrets(
+    config.store,
+    config.redact,
+    resolvedSecretRefs,
+  );
   let preparedRun = prepareTaintAfterControlResolution(
     config,
     workflow,

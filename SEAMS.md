@@ -64,12 +64,21 @@ standalone caller omitting it can delete the cache entry and directly redact
 literal consumer data, but cannot reconstruct downstream workflow provenance;
 this is another reason standalone resume functions are test/split-process
 mechanisms rather than the production composition surface.
+Separately, the bound engine performs one literal-only global audit scan for
+each newly resolved value in an execution segment. That pass covers unrelated
+non-cached runs and their customer-visible audits but never reconstructs their
+workflow provenance; expensive reconstruction remains producer/reachable-
+consumer-only. Artifact byte/metadata rewrites are recovery-journaled by both
+local adapters, including SQLite rollback and startup recovery.
 
 `WaitStore.list()` returns the redacted audit condition.
 `WaitStore.listOperational()` is the engine-only view that opens the complete
 AES-256-GCM-sealed condition used for timer/timeout scheduling and external-job
 polling; the adapter-local key is persisted mode `0600` so restart does not
-break outstanding waits. SQLite does not retain a raw `resume_at` shadow.
+break outstanding waits. Every put uses a random, authenticated operation
+generation, preventing an earlier loop entry for the same run/step from being
+replayed into the current row; legacy v1 seals rotate to v2 on access. SQLite
+does not retain a raw `resume_at` shadow.
 `WaitStore.findSignalMatches(name, correlationId)` is the engine-only exact
 match seam backed by a one-way adapter fingerprint, and
 `WaitStore.redactAudit(runId, stepId, wait)` replaces only the audit copy

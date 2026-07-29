@@ -1537,6 +1537,162 @@ describe("createEngine — resume wrappers continue execution past the resumed s
     ).resolves.toEqual(new TextEncoder().encode("[REDACTED]"));
   });
 
+  it("redacts unrelated non-cached durable audits when another run first discovers the literal secret", async () => {
+    const { store, cleanup } = await createSqliteTestStore();
+    cleanups.push(cleanup);
+    const redact = (
+      record: unknown,
+      resolvedSecretRefs: ReadonlySet<string>,
+    ): unknown => {
+      let json = JSON.stringify(record);
+      for (const secret of resolvedSecretRefs) {
+        json = json.replaceAll(secret, "[REDACTED]");
+      }
+      return JSON.parse(json);
+    };
+    const engine = createEngine({
+      store,
+      redact,
+      resolveSecret: () => "late-secret",
+      capabilityCheck: alwaysAllowCapabilityCheck,
+      blocks: createBlockRegistry([echoBlock]),
+      computeRetryDelayMs: () => 0,
+    });
+    const oldWorkflow = fixtureWorkflow({
+      id: "wf-old-noncached-audits",
+      execution: {
+        type: "workflow",
+        steps: [
+          {
+            id: "echo",
+            uses: "test.echo",
+            with: { value: "{{ inputs.value }}" },
+          },
+        ],
+      },
+    });
+    await store.workflows.put(oldWorkflow);
+    const oldRun = await engine.triggerRun({
+      workflow: oldWorkflow,
+      trigger: fixtureTrigger(),
+      inputs: { value: "late-secret" },
+    });
+    await engine.executeRun(oldRun.runId);
+    const createdAt = "2026-01-01T00:00:00.000Z";
+    await store.artifacts.put(
+      {
+        id: "old-global-artifact",
+        runId: oldRun.runId,
+        stepId: "echo",
+        name: "late-secret",
+        kind: "late-secret",
+        mime: "text/late-secret",
+        path: "late-secret/report.txt",
+        bytes: 11,
+        createdAt,
+      },
+      new TextEncoder().encode("late-secret"),
+    );
+    await store.approvals.put({
+      id: "old-global-approval",
+      runId: oldRun.runId,
+      stepId: "echo",
+      title: "late-secret",
+      description: "late-secret",
+      status: "approved",
+      reviewer: "late-secret",
+      authenticatedAs: "late-secret",
+      createdAt,
+      decidedAt: createdAt,
+    });
+    await store.corrections.put({
+      runId: oldRun.runId,
+      stepId: "echo",
+      fieldPath: "outputs.late-secret",
+      observed: "late-secret",
+      corrected: "late-secret",
+      reason: "late-secret",
+      reviewer: "late-secret",
+      createdAt,
+    });
+    await store.events.append({
+      id: "old-global-event",
+      type: "run.completed",
+      occurredAt: createdAt,
+      summary: "late-secret",
+      runId: oldRun.runId,
+      actor: "late-secret",
+    });
+    const operationalWait = {
+      type: "external_job" as const,
+      provider: "late-secret",
+      jobId: "late-secret",
+      timeout: "late-secret",
+      schemaVersion: 1,
+    };
+    await store.waits.put(
+      oldRun.runId,
+      "old-global-wait",
+      operationalWait,
+      createdAt,
+    );
+    await store.signals.append({
+      id: "old-global-signal",
+      name: "late-secret",
+      correlationId: "late-secret",
+      payload: { value: "late-secret" },
+      receivedAt: createdAt,
+    });
+    await store.signals.markConsumed("old-global-signal", {
+      consumedBy: {
+        runId: oldRun.runId,
+        stepId: "echo",
+      },
+    });
+
+    const discoveringWorkflow = fixtureWorkflow({
+      id: "wf-discovers-unrelated-secret",
+      execution: {
+        type: "workflow",
+        steps: [
+          {
+            id: "discover",
+            uses: "test.echo",
+            with: { secret: "{{ secrets.API_KEY }}" },
+          },
+        ],
+      },
+    });
+    await store.workflows.put(discoveringWorkflow);
+    const discoveringRun = await engine.triggerRun({
+      workflow: discoveringWorkflow,
+      trigger: fixtureTrigger(),
+      inputs: {},
+    });
+    await engine.executeRun(discoveringRun.runId);
+
+    const customerVisible = [
+      await store.runs.get(oldRun.runId),
+      await store.artifacts.getMetadata("old-global-artifact"),
+      await store.approvals.get("old-global-approval"),
+      await store.corrections.list({ runId: oldRun.runId }),
+      await store.events.list({ runId: oldRun.runId }),
+      await store.waits.list({ runId: oldRun.runId }),
+      await store.signals.list(),
+    ];
+    expect(JSON.stringify(customerVisible)).not.toContain(
+      "late-secret",
+    );
+    await expect(
+      store.artifacts.getBytes("old-global-artifact"),
+    ).resolves.toEqual(new TextEncoder().encode("[REDACTED]"));
+    await expect(
+      store.waits.listOperational({ runId: oldRun.runId }),
+    ).resolves.toEqual([
+      expect.objectContaining({ wait: operationalWait }),
+    ]);
+  });
+
   it("resumeExternalJobResult continues execution to completion", async () => {
     const { store, engine } = await setup();
     const workflow = fixtureWorkflow({ execution: { type: "workflow", steps: [{ id: "wait_batch", uses: "wait.for_external_job", with: { provider: "openai_batch", jobId: "job-1" } }, { id: "after", uses: "test.echo" }] } });

@@ -10,6 +10,7 @@
 // either doc requires artifact blob writes to participate in it, and
 // buffering large binary blobs in memory for the lifetime of a transaction
 // would be a real cost for no documented benefit).
+import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { join } from "node:path";
 import type { Artifact } from "@aart/types";
@@ -18,6 +19,14 @@ import { JsonFileHandle } from "./json-file.js";
 
 interface StoredArtifact extends Artifact {
   redactionTextEligible?: boolean;
+}
+
+interface ArtifactRedactionJournal {
+  version: 1;
+  artifactId: string;
+  runId: string;
+  updated: StoredArtifact;
+  stagedBlobName?: string;
 }
 
 function isTextMime(mime: string): boolean {
@@ -29,6 +38,40 @@ function isTextMime(mime: string): boolean {
     normalized.includes("javascript") ||
     normalized.includes("yaml")
   );
+}
+
+async function moveStagedBlob(
+  stagedPath: string,
+  canonicalPath: string,
+): Promise<void> {
+  try {
+    await fs.rename(stagedPath, canonicalPath);
+  } catch (error) {
+    if (
+      typeof error !== "object" ||
+      error === null ||
+      !("code" in error) ||
+      error.code !== "ENOENT"
+    ) {
+      throw error;
+    }
+    await fs.access(canonicalPath);
+  }
+}
+
+async function removeFileIfPresent(path: string): Promise<void> {
+  try {
+    await fs.unlink(path);
+  } catch (error) {
+    if (
+      typeof error !== "object" ||
+      error === null ||
+      !("code" in error) ||
+      error.code !== "ENOENT"
+    ) {
+      throw error;
+    }
+  }
 }
 
 export class FsArtifactStore implements ArtifactStore {
@@ -43,8 +86,62 @@ export class FsArtifactStore implements ArtifactStore {
   private blobPath(runId: string, artifactId: string): string {
     return join(this.runDir(runId), `${artifactId}.blob`);
   }
+  private redactionJournalDir(): string {
+    return join(this.dir, ".redaction-journal");
+  }
+
+  private async recoverPendingRedactions(): Promise<void> {
+    let files: string[];
+    try {
+      files = (await fs.readdir(
+        this.redactionJournalDir(),
+      )).filter(
+        (file) =>
+          file.endsWith(".json") && !file.startsWith(".tmp-"),
+      );
+    } catch (error) {
+      if (
+        typeof error === "object" &&
+        error !== null &&
+        "code" in error &&
+        error.code === "ENOENT"
+      ) {
+        return;
+      }
+      throw error;
+    }
+    for (const file of files) {
+      const journalPath = join(
+        this.redactionJournalDir(),
+        file,
+      );
+      const journal = JSON.parse(
+        await fs.readFile(journalPath, "utf8"),
+      ) as ArtifactRedactionJournal;
+      if (journal.version !== 1) {
+        throw new Error(
+          `Unsupported fs artifact redaction journal at ${journalPath}.`,
+        );
+      }
+      await new JsonFileHandle<StoredArtifact>(
+        this.metaPath(journal.runId, journal.artifactId),
+      ).write(journal.updated);
+      if (journal.stagedBlobName !== undefined) {
+        const stagedPath = join(
+          this.runDir(journal.runId),
+          journal.stagedBlobName,
+        );
+        await moveStagedBlob(
+          stagedPath,
+          this.blobPath(journal.runId, journal.artifactId),
+        );
+      }
+      await removeFileIfPresent(journalPath);
+    }
+  }
 
   async put(artifact: Artifact, bytes: Uint8Array): Promise<void> {
+    await this.recoverPendingRedactions();
     await fs.mkdir(this.runDir(artifact.runId), { recursive: true });
     const existing =
       await new JsonFileHandle<StoredArtifact>(
@@ -62,6 +159,7 @@ export class FsArtifactStore implements ArtifactStore {
   }
 
   async getMetadata(artifactId: string): Promise<Artifact | undefined> {
+    await this.recoverPendingRedactions();
     const found = await this.findByArtifactId(artifactId);
     return found
       ? this.publicArtifact(found.metadata)
@@ -69,6 +167,7 @@ export class FsArtifactStore implements ArtifactStore {
   }
 
   async getBytes(artifactId: string): Promise<Uint8Array | undefined> {
+    await this.recoverPendingRedactions();
     const found = await this.findByArtifactId(artifactId);
     if (!found) return undefined;
     try {
@@ -84,7 +183,23 @@ export class FsArtifactStore implements ArtifactStore {
     }
   }
 
+  async list(): Promise<Artifact[]> {
+    await this.recoverPendingRedactions();
+    let runIds: string[];
+    try {
+      runIds = await fs.readdir(this.dir);
+    } catch {
+      return [];
+    }
+    return (
+      await Promise.all(
+        runIds.map((runId) => this.listByRun(runId)),
+      )
+    ).flat();
+  }
+
   async listByRun(runId: string): Promise<Artifact[]> {
+    await this.recoverPendingRedactions();
     let files: string[];
     try {
       files = (await fs.readdir(this.runDir(runId))).filter((f) => f.endsWith(".meta.json"));
@@ -104,6 +219,7 @@ export class FsArtifactStore implements ArtifactStore {
   }
 
   async isTextEligible(artifactId: string): Promise<boolean> {
+    await this.recoverPendingRedactions();
     const found = await this.findByArtifactId(artifactId);
     if (!found) return false;
     return (
@@ -117,14 +233,9 @@ export class FsArtifactStore implements ArtifactStore {
     audit: Pick<Artifact, "name" | "kind" | "mime" | "path">,
     bytes?: Uint8Array,
   ): Promise<Artifact | undefined> {
+    await this.recoverPendingRedactions();
     const found = await this.findByArtifactId(artifactId);
     if (!found) return undefined;
-    if (bytes !== undefined) {
-      await fs.writeFile(
-        this.blobPath(found.metadata.runId, artifactId),
-        bytes,
-      );
-    }
     const updated: StoredArtifact = {
       ...found.metadata,
       ...audit,
@@ -133,9 +244,48 @@ export class FsArtifactStore implements ArtifactStore {
         found.metadata.redactionTextEligible ??
         isTextMime(found.metadata.mime),
     };
+    let stagedBlobName: string | undefined;
+    if (bytes !== undefined) {
+      stagedBlobName =
+        `.${artifactId}.redacted-${randomUUID()}.blob`;
+      await fs.writeFile(
+        join(
+          this.runDir(found.metadata.runId),
+          stagedBlobName,
+        ),
+        bytes,
+      );
+    }
+    const journal: ArtifactRedactionJournal = {
+      version: 1,
+      artifactId,
+      runId: found.metadata.runId,
+      updated,
+      ...(stagedBlobName !== undefined
+        ? { stagedBlobName }
+        : {}),
+    };
+    const journalNonce = randomUUID();
+    const journalPath = join(
+      this.redactionJournalDir(),
+      `${journalNonce}.json`,
+    );
+    await new JsonFileHandle<ArtifactRedactionJournal>(
+      journalPath,
+    ).write(journal);
     await new JsonFileHandle<StoredArtifact>(
       this.metaPath(found.metadata.runId, artifactId),
     ).write(updated);
+    if (stagedBlobName !== undefined) {
+      await moveStagedBlob(
+        join(
+          this.runDir(found.metadata.runId),
+          stagedBlobName,
+        ),
+        this.blobPath(found.metadata.runId, artifactId),
+      );
+    }
+    await removeFileIfPresent(journalPath);
     return this.publicArtifact(updated);
   }
 

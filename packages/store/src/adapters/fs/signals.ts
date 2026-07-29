@@ -23,6 +23,8 @@ interface StoredSignal extends Signal {
   consumed: boolean;
   consumedByRunId?: string;
   consumedByStepId?: string;
+  /** Recovery identity for a late-redacted, correlation-safe filename. */
+  auditFileNonce?: string;
 }
 
 function sanitizeForFilename(value: string): string {
@@ -37,20 +39,23 @@ export class FsSignalStore implements SignalStore {
   }
 
   private replacementPathFor(
-    signal: Pick<Signal, "correlationId" | "receivedAt">,
+    signal: Pick<Signal, "correlationId" | "receivedAt"> & {
+      auditFileNonce: string;
+    },
   ): string {
     return join(
       this.dir,
-      `${sanitizeForFilename(signal.correlationId)}__${sanitizeForFilename(signal.receivedAt)}__${randomUUID()}.json`,
+      `${sanitizeForFilename(signal.correlationId)}__${sanitizeForFilename(signal.receivedAt)}__${signal.auditFileNonce}.json`,
     );
   }
 
   async append(signal: Signal): Promise<void> {
+    await this.normalizeLateRedactedFilenames();
     const stored: StoredSignal = { ...signal, consumed: false };
     await new JsonFileHandle<StoredSignal>(this.pathFor(signal)).write(stored);
   }
 
-  private async listStoredRows(): Promise<
+  private async readStoredRows(): Promise<
     Array<{ signal: StoredSignal; path: string }>
   > {
     let files: string[];
@@ -73,6 +78,45 @@ export class FsSignalStore implements SignalStore {
         ? []
         : [{ signal: entry.signal, path: entry.path }],
     );
+  }
+
+  /**
+   * Completes a filename move interrupted after the safe JSON rewrite.
+   * Every public operation runs this gate before exposing or mutating the
+   * signal store, so a restarted process repairs a secret-bearing legacy
+   * path before the store becomes observable.
+   */
+  private async normalizeLateRedactedFilenames(): Promise<void> {
+    const rows = await this.readStoredRows();
+    for (const row of rows) {
+      if (row.signal.auditFileNonce === undefined) continue;
+      const replacementPath = this.replacementPathFor({
+        ...row.signal,
+        auditFileNonce: row.signal.auditFileNonce,
+      });
+      if (replacementPath === row.path) continue;
+      try {
+        await fs.rename(row.path, replacementPath);
+      } catch (error) {
+        if (
+          typeof error === "object" &&
+          error !== null &&
+          "code" in error &&
+          error.code === "ENOENT"
+        ) {
+          await fs.access(replacementPath);
+          continue;
+        }
+        throw error;
+      }
+    }
+  }
+
+  private async listStoredRows(): Promise<
+    Array<{ signal: StoredSignal; path: string }>
+  > {
+    await this.normalizeLateRedactedFilenames();
+    return this.readStoredRows();
   }
 
   private async listStored(): Promise<StoredSignal[]> {
@@ -141,18 +185,35 @@ export class FsSignalStore implements SignalStore {
         entry.signal.id === signalId && entry.signal.consumed,
     );
     if (!match) return;
+    const auditFileNonce =
+      match.signal.auditFileNonce ?? randomUUID();
     const updated: StoredSignal = {
       ...match.signal,
       ...audit,
+      auditFileNonce,
     };
-    const replacementPath = this.replacementPathFor(updated);
-    // First atomically replace the old file's CONTENT, then rename that
-    // already-safe file. A crash between the two operations can at worst
-    // leave a redacted record under the old name; it cannot leave the raw
-    // payload durable while a new redacted sibling appears beside it.
+    const replacementPath = this.replacementPathFor({
+      ...updated,
+      auditFileNonce,
+    });
+    // Persist the recovery nonce together with safe content first. If the
+    // process exits before rename, the next store operation completes the
+    // move before exposing any signal row.
     await new JsonFileHandle<StoredSignal>(match.path).write(updated);
     if (replacementPath !== match.path) {
-      await fs.rename(match.path, replacementPath);
+      try {
+        await fs.rename(match.path, replacementPath);
+      } catch (error) {
+        if (
+          typeof error !== "object" ||
+          error === null ||
+          !("code" in error) ||
+          error.code !== "ENOENT"
+        ) {
+          throw error;
+        }
+        await fs.access(replacementPath);
+      }
     }
   }
 
@@ -166,6 +227,7 @@ export class FsSignalStore implements SignalStore {
       consumed: _consumed,
       consumedByRunId: _consumedByRunId,
       consumedByStepId: _consumedByStepId,
+      auditFileNonce: _auditFileNonce,
       ...publicSignal
     } = signal;
     return publicSignal;

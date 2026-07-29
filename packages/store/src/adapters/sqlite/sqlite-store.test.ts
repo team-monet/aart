@@ -12,9 +12,10 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { MigrationRunner } from "../../migrations/index.js";
 import type { AartStore } from "../../types.js";
-import { openSqliteDb } from "./db.js";
+import { createDirectExec, openSqliteDb } from "./db.js";
 import { openSqliteStore, type SqliteStoreHandle } from "./index.js";
 import { ALL_SQLITE_MIGRATIONS } from "./migrations.js";
+import { SqliteArtifactStore } from "./stores/artifacts.js";
 import { SqliteMigrationWatermarkStore } from "./watermark.js";
 
 let dir: string;
@@ -38,9 +39,9 @@ describe("SQLite adapter — connection setup (architecture §5.1)", () => {
     expect(row.journal_mode).toBe("wal");
   });
 
-  it("auto-runs migrations by default, advancing the watermark to the latest ordinal (8, including 0008_sealed_operational_state)", async () => {
+  it("auto-runs migrations by default, advancing the watermark to the latest ordinal (9, including generation-bound wait seals)", async () => {
     const watermark = new SqliteMigrationWatermarkStore(handle.db);
-    await expect(watermark.read()).resolves.toBe(8);
+    await expect(watermark.read()).resolves.toBe(9);
   });
 
   it("runMigrations: false skips DDL — store calls fail against the not-yet-created schema", async () => {
@@ -61,18 +62,20 @@ describe("SQLite adapter — connection setup (architecture §5.1)", () => {
       const runner = new MigrationRunner(ALL_SQLITE_MIGRATIONS(handle3.db), new SqliteMigrationWatermarkStore(handle3.db), handle3.store);
       await expect(runner.currentVersion()).resolves.toBe(0);
       // D1 (AMENDMENTS.md A56) + D2a (AMENDMENTS.md A59) + V1 (AMENDMENTS.md
-      // A61) plus secret-taint ledger and root provenance metadata: six migrations now
+      // A61) plus secret-taint ledger, root provenance, sealed waits, and
+      // operation-generation metadata: nine migrations now
       // registered (0001_init,
       // 0002_deployment_promoted, 0003_approval_task_authenticated_as,
       // 0004_events_table, 0005_idempotency_schema_version,
       // 0006_run_root_taint_paths + 0007_secret_audit_provenance +
-      // 0008_sealed_operational_state) — up() from
-      // watermark 0 applies all eight in one
+      // 0008_sealed_operational_state +
+      // 0009_wait_operation_generation) — up() from
+      // watermark 0 applies all nine in one
       // call, landing on the latest ordinal.
-      await expect(runner.up()).resolves.toBe(8);
+      await expect(runner.up()).resolves.toBe(9);
       await expect(handle3.store.workflows.listWorkflowIds()).resolves.toEqual([]);
       // Idempotent re-run.
-      await expect(runner.up()).resolves.toBe(8);
+      await expect(runner.up()).resolves.toBe(9);
     } finally {
       handle3.close();
       await fs.rm(dir3, { recursive: true, force: true });
@@ -132,6 +135,87 @@ describe("SQLite adapter — job_queue claim race safety across connections (arc
     const future = new Date(Date.now() + 60_000).toISOString();
     await store.jobQueue.setClaim("run_race_3", "worker-B", future);
     await expect(store.jobQueue.get("run_race_3")).resolves.toMatchObject({ claimedBy: "worker-B" });
+  });
+});
+
+describe("SQLite adapter — artifact redaction recovery", () => {
+  const artifact = {
+    id: "artifact-redaction-recovery",
+    runId: "run-redaction-recovery",
+    stepId: "write",
+    name: "late-secret",
+    kind: "late-secret",
+    mime: "text/late-secret",
+    path: "late-secret/report.txt",
+    bytes: 11,
+    createdAt: "2026-01-01T00:00:00.000Z",
+  };
+  const safeAudit = {
+    name: "[REDACTED]",
+    kind: "[REDACTED]",
+    mime: "text/[REDACTED]",
+    path: "[REDACTED]/report.txt",
+  };
+  const safeBytes = new TextEncoder().encode("[REDACTED]");
+
+  it("finishes metadata repair even when the enclosing transaction rolls back", async () => {
+    await store.artifacts.put(
+      artifact,
+      new TextEncoder().encode("late-secret"),
+    );
+    await expect(
+      store.transact(async (tx) => {
+        await tx.artifacts.replaceAudit(
+          artifact.id,
+          safeAudit,
+          safeBytes,
+        );
+        throw new Error("later repair failed");
+      }),
+    ).rejects.toThrow("later repair failed");
+
+    await expect(
+      store.artifacts.getMetadata(artifact.id),
+    ).resolves.toMatchObject({
+      ...safeAudit,
+      bytes: safeBytes.byteLength,
+    });
+    await expect(
+      store.artifacts.getBytes(artifact.id),
+    ).resolves.toEqual(safeBytes);
+  });
+
+  it("replays a durable redaction journal before a restarted store becomes available", async () => {
+    const dbPath = join(dir, "aart.db");
+    const blobsDir = `${dbPath}.blobs`;
+    await store.artifacts.put(
+      artifact,
+      new TextEncoder().encode("late-secret"),
+    );
+    handle.db.exec("BEGIN IMMEDIATE");
+    const crashScopedArtifacts = new SqliteArtifactStore(
+      createDirectExec(handle.db),
+      blobsDir,
+      true,
+    );
+    await crashScopedArtifacts.replaceAudit(
+      artifact.id,
+      safeAudit,
+      safeBytes,
+    );
+    handle.close();
+
+    handle = await openSqliteStore(dbPath);
+    store = handle.store;
+    await expect(
+      store.artifacts.getMetadata(artifact.id),
+    ).resolves.toMatchObject({
+      ...safeAudit,
+      bytes: safeBytes.byteLength,
+    });
+    await expect(
+      store.artifacts.getBytes(artifact.id),
+    ).resolves.toEqual(safeBytes);
   });
 });
 

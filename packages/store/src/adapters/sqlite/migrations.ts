@@ -426,6 +426,39 @@ export function createSqliteAddSealedOperationalStateMigration(
   };
 }
 
+/**
+ * Gives every wait entry a fresh authenticated generation. Existing v1
+ * ciphertext remains readable and is lazily rotated to generation-bound
+ * v2 on the first operational access.
+ */
+export function createSqliteAddWaitOperationGenerationMigration(
+  db: DatabaseSync,
+): Migration {
+  return {
+    id: "0009_wait_operation_generation",
+    async up(): Promise<void> {
+      try {
+        db.exec(
+          "ALTER TABLE waits ADD COLUMN operational_generation TEXT",
+        );
+      } catch (error) {
+        if (
+          error instanceof Error &&
+          error.message.includes("duplicate column name")
+        ) {
+          return;
+        }
+        throw error;
+      }
+    },
+    async down(): Promise<void> {
+      db.exec(
+        "ALTER TABLE waits DROP COLUMN operational_generation",
+      );
+    },
+  };
+}
+
 export const ALL_SQLITE_MIGRATIONS = (db: DatabaseSync): Migration[] => [
   createSqliteInitMigration(db),
   createSqliteAddDeploymentPromotedMigration(db),
@@ -435,4 +468,5 @@ export const ALL_SQLITE_MIGRATIONS = (db: DatabaseSync): Migration[] => [
   createSqliteAddRunRootTaintPathsMigration(db),
   createSqliteAddSecretAuditProvenanceMigration(db),
   createSqliteAddSealedOperationalStateMigration(db),
+  createSqliteAddWaitOperationGenerationMigration(db),
 ];

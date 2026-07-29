@@ -521,7 +521,7 @@ describe("0007_secret_audit_provenance", () => {
       new SqliteMigrationWatermarkStore(handle.db),
       handle.store,
     );
-    await expect(all.up()).resolves.toBe(8);
+    await expect(all.up()).resolves.toBe(9);
     await handle.store.waits.redactAudit("run-audit", "pause", {
       ...wait,
       correlationId: "[REDACTED]",
@@ -582,8 +582,8 @@ describe("0007_secret_audit_provenance", () => {
   });
 });
 
-describe("0008_sealed_operational_state", () => {
-  it("upgrades legacy waits on first audit repair and preserves artifact text eligibility", async () => {
+describe("0008/0009 sealed operational state", () => {
+  it("upgrades legacy waits to generation-bound seals on first audit repair and preserves artifact text eligibility", async () => {
     dir = await fs.mkdtemp(join(tmpdir(), "aart-sqlite-migration-test-"));
     const dbPath = join(dir, "aart.db");
     handle = await openSqliteStore(dbPath, { runMigrations: false });
@@ -633,7 +633,7 @@ describe("0008_sealed_operational_state", () => {
       new SqliteMigrationWatermarkStore(handle.db),
       handle.store,
     );
-    await expect(all.up()).resolves.toBe(8);
+    await expect(all.up()).resolves.toBe(9);
     await handle.store.waits.redactAudit(
       "run-sealed-upgrade",
       "pause",
@@ -646,8 +646,11 @@ describe("0008_sealed_operational_state", () => {
       .prepare(
         "SELECT * FROM waits WHERE run_id = ? AND step_id = ?",
       )
-      .get("run-sealed-upgrade", "pause");
+      .get("run-sealed-upgrade", "pause") as {
+        operational_generation?: unknown;
+      };
     expect(JSON.stringify(storedWait)).not.toContain(wait.resumeAt);
+    expect(typeof storedWait.operational_generation).toBe("string");
     await expect(
       handle.store.artifacts.isTextEligible("artifact-upgrade"),
     ).resolves.toBe(true);

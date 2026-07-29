@@ -13,7 +13,11 @@ import {
   revokeSecretTaintedIdempotency,
   type PrepareRevokedIdempotencyConsumer,
 } from "../idempotency.js";
-import { applyRedaction, applyRunRedaction } from "../redaction.js";
+import {
+  applyRedaction,
+  applyRunRedaction,
+  repairGlobalAuditsForNewSecrets,
+} from "../redaction.js";
 import { assertSchemaVersionCompatible } from "../schema-version.js";
 import type { DueWait, ResumeMechanism, ResumeOutcome } from "../types.js";
 import { waitSignalCorrelation } from "./wait-blocks.js";
@@ -89,6 +93,11 @@ export async function enterWait(config: WaitMachineConfig, options: EnterWaitOpt
   const { run, stepId, blockId, resolvedInputs, wait, resolvedSecretRefs, secretTainted, controlSecretTainted, prepareEarlyArrivalRun } = options;
   const now = config.now();
   const correlation = waitSignalCorrelation(wait);
+  await repairGlobalAuditsForNewSecrets(
+    config.store,
+    config.redact,
+    resolvedSecretRefs,
+  );
 
   // `[DECISION]` The ENTIRE check-then-act sequence below runs inside ONE
   // `store.transact()` call — architecture §4.4 step 3, verbatim: "FIRST,
@@ -108,7 +117,7 @@ export async function enterWait(config: WaitMachineConfig, options: EnterWaitOpt
   // the SignalStore *audit-copy* write specifically (`tx.signals.append`/
   // `markConsumed` are "deliberately NOT staged" — see types.ts's
   // `SignalStore` doc comment), not to this check-then-act sequence itself.
-  return config.store.transact(async (tx) => {
+  const result = await config.store.transact(async (tx) => {
     if (correlation) {
       const existingSignal = await tx.signals.findUnconsumedMatch(correlation.name, correlation.correlationId);
       if (existingSignal) {
@@ -229,6 +238,12 @@ export async function enterWait(config: WaitMachineConfig, options: EnterWaitOpt
     }
     return { run: redactedRun, suspended: true };
   });
+  await repairGlobalAuditsForNewSecrets(
+    config.store,
+    config.redact,
+    resolvedSecretRefs,
+  );
+  return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -300,7 +315,12 @@ async function claimAndCompleteWait(config: WaitMachineConfig, args: ClaimAndCom
   }
   const now = config.now();
 
-  return config.store.transact(async (tx) => {
+  await repairGlobalAuditsForNewSecrets(
+    config.store,
+    config.redact,
+    resolvedSecretRefs,
+  );
+  const outcome: ResumeOutcome = await config.store.transact(async (tx) => {
     const run = await tx.runs.get(runId);
     if (!run) {
       return { kind: "unmatched", mechanism };
@@ -392,6 +412,12 @@ async function claimAndCompleteWait(config: WaitMachineConfig, args: ClaimAndCom
     await tx.runs.put(redacted);
     return { kind: "resumed", run: redacted, mechanism };
   });
+  await repairGlobalAuditsForNewSecrets(
+    config.store,
+    config.redact,
+    resolvedSecretRefs,
+  );
+  return outcome;
 }
 
 // ---------------------------------------------------------------------------
@@ -435,7 +461,12 @@ export async function failExpiredWait(config: WaitMachineConfig, runId: string, 
   const now = config.now();
   const mechanism: ResumeMechanism = "scheduler-tick";
 
-  return config.store.transact(async (tx) => {
+  await repairGlobalAuditsForNewSecrets(
+    config.store,
+    config.redact,
+    resolvedSecretRefs,
+  );
+  const outcome: ResumeOutcome = await config.store.transact(async (tx) => {
     const run = await tx.runs.get(runId);
     if (!run) {
       return { kind: "unmatched", mechanism };
@@ -495,6 +526,12 @@ export async function failExpiredWait(config: WaitMachineConfig, runId: string, 
     await tx.runs.put(redacted);
     return { kind: "resumed", run: redacted, mechanism };
   });
+  await repairGlobalAuditsForNewSecrets(
+    config.store,
+    config.redact,
+    resolvedSecretRefs,
+  );
+  return outcome;
 }
 
 /**

@@ -1,12 +1,46 @@
 import { SecretResolutionError, type StepTrace } from "@aart/types";
 import { describe, expect, it } from "vitest";
-import { applyRedaction, applyRunRedaction, createTrackingSecretResolver, identityRedactFn, throwingSecretResolver } from "./redaction.js";
-import { fixtureRun } from "./test-utils/fixtures.js";
+import { applyRedaction, applyRunRedaction, createTrackingSecretResolver, identityRedactFn, repairGlobalAuditsForNewSecrets, throwingSecretResolver } from "./redaction.js";
+import { createTestStore, fixtureRun } from "./test-utils/fixtures.js";
 
 describe("identityRedactFn", () => {
   it("returns the record unchanged — this session's own tests wire this by default (architecture §7.9)", () => {
     const record = { a: 1, secret: "shh" };
     expect(identityRedactFn(record, new Set(["shh"]))).toBe(record);
+  });
+});
+
+describe("repairGlobalAuditsForNewSecrets", () => {
+  it("scans once per newly resolved value rather than once per persistence boundary", async () => {
+    const { store, cleanup } = await createTestStore();
+    try {
+      let repairTransactions = 0;
+      const transact = store.transact.bind(store);
+      store.transact = async (fn) => {
+        repairTransactions += 1;
+        return transact(fn);
+      };
+      const resolved = new Set(["first-secret"]);
+      await repairGlobalAuditsForNewSecrets(
+        store,
+        identityRedactFn,
+        resolved,
+      );
+      await repairGlobalAuditsForNewSecrets(
+        store,
+        identityRedactFn,
+        resolved,
+      );
+      resolved.add("second-secret");
+      await repairGlobalAuditsForNewSecrets(
+        store,
+        identityRedactFn,
+        resolved,
+      );
+      expect(repairTransactions).toBe(2);
+    } finally {
+      await cleanup();
+    }
   });
 });
 
