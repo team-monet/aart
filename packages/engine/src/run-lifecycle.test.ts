@@ -2,6 +2,7 @@ import type { AartStore } from "@aart/store";
 import { ConcurrencyRejectedError } from "@aart/types";
 import type { BlockImplementation, Field } from "@aart/types";
 import { afterEach, describe, expect, it } from "vitest";
+import { idempotencyStorageKey } from "./idempotency.js";
 import { cancelRun, executeRun, triggerRun } from "./run-lifecycle.js";
 import { createTestStore, echoBlock, failingBlock, fixtureTrigger, testEngineConfig, fixtureWorkflow } from "./test-utils/fixtures.js";
 import type { EngineConfig } from "./types.js";
@@ -795,6 +796,225 @@ describe("executeRun — fresh execution", () => {
       secretTainted: true,
       secretTaintedPaths: ["*"],
     });
+  });
+
+  it("retroactively taints an earlier transform and revokes its cache when the matching secret is discovered later", async () => {
+    const deriveLength: BlockImplementation = {
+      manifest: {
+        id: "test.early-input-length",
+        version: "1.0.0",
+        capabilities: [],
+        inputSchema: {},
+        outputSchema: {},
+        description: "Returns the length of its input.",
+      },
+      execute: async (inputs) => {
+        const source = String(
+          (inputs as Record<string, unknown>)["source"],
+        );
+        return { value: source, length: source.length };
+      },
+    };
+    const { store, config } = await setup({
+      blocks: {
+        [echoBlock.manifest.id]: echoBlock,
+        [deriveLength.manifest.id]: deriveLength,
+      },
+      redact: redactResolvedValues,
+      resolveSecret: () => "secret-value",
+    });
+    const workflow = fixtureWorkflow({
+      inputs: [{ name: "token", type: "string", required: true }],
+      outputs: [{ name: "result", type: "integer", required: true }],
+      execution: {
+        type: "workflow",
+        steps: [
+          {
+            id: "derive",
+            uses: deriveLength.manifest.id,
+            with: { source: "{{ inputs.token }}" },
+            idempotencyKey: "derive-once",
+          },
+          {
+            id: "discover",
+            uses: "test.echo",
+            with: { secret: "{{ secrets.API_KEY }}" },
+          },
+        ],
+        outputMapping: { result: "{{ steps.derive.outputs.length }}" },
+      },
+    });
+    await store.workflows.put(workflow);
+    const run = await triggerRun(config, {
+      workflow,
+      trigger: fixtureTrigger(),
+      inputs: { token: "secret-value" },
+    });
+
+    const finished = await executeRun(config, run.runId);
+
+    expect(finished.status).toBe("failed");
+    expect(finished.trace.find((trace) => trace.stepId === "derive")).toMatchObject({
+      secretTainted: true,
+      secretTaintedPaths: ["*"],
+    });
+    await expect(
+      store.idempotencyLedger.get(
+        idempotencyStorageKey("derive-once"),
+      ),
+    ).resolves.toBeUndefined();
+  });
+
+  it("retroactively propagates a later-discovered secret through an earlier control decision", async () => {
+    const constantBlock: BlockImplementation = {
+      manifest: {
+        id: "test.constant-allowed",
+        version: "1.0.0",
+        capabilities: [],
+        inputSchema: {},
+        outputSchema: {},
+        description: "Returns a public branch label.",
+      },
+      execute: async () => ({ decision: "allowed" }),
+    };
+    const { store, config } = await setup({
+      blocks: {
+        [echoBlock.manifest.id]: echoBlock,
+        [constantBlock.manifest.id]: constantBlock,
+      },
+      redact: redactResolvedValues,
+      resolveSecret: () => true,
+    });
+    const workflow = fixtureWorkflow({
+      inputs: [{ name: "flag", type: "boolean", required: true }],
+      outputs: [{ name: "decision", type: "string", required: true }],
+      execution: {
+        type: "workflow",
+        steps: [
+          {
+            id: "gate",
+            uses: "test.echo",
+            if: "{{ inputs.flag }}",
+          },
+          {
+            id: "selected",
+            uses: constantBlock.manifest.id,
+          },
+          {
+            id: "discover",
+            uses: "test.echo",
+            with: { secret: "{{ secrets.FLAG }}" },
+          },
+        ],
+        outputMapping: {
+          decision: "{{ steps.selected.outputs.decision }}",
+        },
+      },
+    });
+    await store.workflows.put(workflow);
+    const run = await triggerRun(config, {
+      workflow,
+      trigger: fixtureTrigger(),
+      inputs: { flag: true },
+    });
+
+    const finished = await executeRun(config, run.runId);
+
+    expect(finished.status).toBe("failed");
+    expect(
+      finished.trace.find((trace) => trace.stepId === "selected"),
+    ).toMatchObject({
+      controlSecretTainted: true,
+    });
+    expect(finished.error).toMatch(
+      /secret-tainted step "selected".*secret-controlled/,
+    );
+  });
+
+  it("retroactively propagates control taint through an earlier transformed trace", async () => {
+    const deriveFlag: BlockImplementation = {
+      manifest: {
+        id: "test.early-derived-flag",
+        version: "1.0.0",
+        capabilities: [],
+        inputSchema: {},
+        outputSchema: {},
+        description: "Derives a boolean from its input.",
+      },
+      execute: async (inputs) => ({
+        positive:
+          String(
+            (inputs as Record<string, unknown>)["source"],
+          ).length > 0,
+      }),
+    };
+    const constantBlock: BlockImplementation = {
+      manifest: {
+        id: "test.indirect-constant-allowed",
+        version: "1.0.0",
+        capabilities: [],
+        inputSchema: {},
+        outputSchema: {},
+        description: "Returns a public branch label.",
+      },
+      execute: async () => ({ decision: "allowed" }),
+    };
+    const { store, config } = await setup({
+      blocks: {
+        [echoBlock.manifest.id]: echoBlock,
+        [deriveFlag.manifest.id]: deriveFlag,
+        [constantBlock.manifest.id]: constantBlock,
+      },
+      redact: redactResolvedValues,
+      resolveSecret: () => "secret-value",
+    });
+    const workflow = fixtureWorkflow({
+      inputs: [{ name: "token", type: "string", required: true }],
+      outputs: [{ name: "decision", type: "string", required: true }],
+      execution: {
+        type: "workflow",
+        steps: [
+          {
+            id: "derive",
+            uses: deriveFlag.manifest.id,
+            with: { source: "{{ inputs.token }}" },
+          },
+          {
+            id: "gate",
+            uses: "test.echo",
+            if: "{{ steps.derive.outputs.positive }}",
+          },
+          {
+            id: "selected",
+            uses: constantBlock.manifest.id,
+          },
+          {
+            id: "discover",
+            uses: "test.echo",
+            with: { secret: "{{ secrets.API_KEY }}" },
+          },
+        ],
+        outputMapping: {
+          decision: "{{ steps.selected.outputs.decision }}",
+        },
+      },
+    });
+    await store.workflows.put(workflow);
+    const run = await triggerRun(config, {
+      workflow,
+      trigger: fixtureTrigger(),
+      inputs: { token: "secret-value" },
+    });
+
+    const finished = await executeRun(config, run.runId);
+
+    expect(finished.status).toBe("failed");
+    expect(
+      finished.trace.find((trace) => trace.stepId === "derive"),
+    ).toMatchObject({ secretTaintedPaths: ["*"] });
+    expect(
+      finished.trace.find((trace) => trace.stepId === "selected"),
+    ).toMatchObject({ controlSecretTainted: true });
   });
 
   it("rejects a public trigger mapping whose value is later discovered as secret", async () => {

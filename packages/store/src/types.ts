@@ -261,11 +261,15 @@ export interface IdempotencyLedgerEntry {
   stepId: string;
   recordedOutput: unknown;
   createdAt: string;
+  /** Absent on legacy entries written before provenance-aware replay. */
+  schemaVersion?: number;
 }
 
 export interface IdempotencyLedgerStore {
   get(resolvedKey: string): Promise<IdempotencyLedgerEntry | undefined>;
   put(entry: IdempotencyLedgerEntry): Promise<void>;
+  listByRun(runId: string): Promise<IdempotencyLedgerEntry[]>;
+  delete(resolvedKey: string): Promise<void>;
 }
 
 // ---------------------------------------------------------------------------

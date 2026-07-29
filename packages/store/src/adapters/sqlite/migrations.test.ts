@@ -307,7 +307,7 @@ describe("0004_events_table — pre-populated-db upgrade (V1, AMENDMENTS.md A61)
 
     // The real upgrade path: MigrationRunner sees watermark 3, applies
     // exactly 0004 (0001/0002/0003 already accounted for), advances to 4.
-    const runner = new MigrationRunner(ALL_SQLITE_MIGRATIONS(handle.db), new SqliteMigrationWatermarkStore(handle.db), handle.store);
+    const runner = new MigrationRunner(ALL_SQLITE_MIGRATIONS(handle.db).slice(0, 4), new SqliteMigrationWatermarkStore(handle.db), handle.store);
     expect(await runner.currentVersion()).toBe(3);
     await expect(runner.up()).resolves.toBe(4);
 
@@ -321,9 +321,10 @@ describe("0004_events_table — pre-populated-db upgrade (V1, AMENDMENTS.md A61)
   it("down() reverts 0004 (drops the events table) cleanly, and up() re-adds it", async () => {
     dir = await fs.mkdtemp(join(tmpdir(), "aart-sqlite-migration-test-"));
     const dbPath = join(dir, "aart.db");
-    handle = await openSqliteStore(dbPath); // default now runs 0001+0002+0003+0004 (AMENDMENTS.md A61)
+    handle = await openSqliteStore(dbPath, { runMigrations: false });
 
-    const runner = new MigrationRunner(ALL_SQLITE_MIGRATIONS(handle.db), new SqliteMigrationWatermarkStore(handle.db), handle.store);
+    const runner = new MigrationRunner(ALL_SQLITE_MIGRATIONS(handle.db).slice(0, 4), new SqliteMigrationWatermarkStore(handle.db), handle.store);
+    await expect(runner.up()).resolves.toBe(4);
     expect(await runner.currentVersion()).toBe(4);
 
     await expect(runner.down()).resolves.toBe(3);
@@ -335,5 +336,50 @@ describe("0004_events_table — pre-populated-db upgrade (V1, AMENDMENTS.md A61)
     await expect(runner.up()).resolves.toBe(4);
     expect(() => handle!.db.exec("SELECT * FROM events LIMIT 1")).not.toThrow();
     await expect(handle.store.events.list()).resolves.toEqual([]);
+  });
+});
+
+describe("0005_idempotency_schema_version", () => {
+  it("keeps legacy rows readable as unversioned and persists versioned rows", async () => {
+    dir = await fs.mkdtemp(join(tmpdir(), "aart-sqlite-migration-test-"));
+    const dbPath = join(dir, "aart.db");
+    handle = await openSqliteStore(dbPath, { runMigrations: false });
+
+    const through0004 = new MigrationRunner(
+      ALL_SQLITE_MIGRATIONS(handle.db).slice(0, 4),
+      new SqliteMigrationWatermarkStore(handle.db),
+      handle.store,
+    );
+    await expect(through0004.up()).resolves.toBe(4);
+    handle.db.exec(`
+      INSERT INTO idempotency_ledger
+        (resolved_key, run_id, step_id, recorded_output_json, created_at)
+      VALUES
+        ('v2:legacy-collision', 'legacy-run', 'work', '{"value":"legacy"}', '2026-01-01T00:00:00.000Z')
+    `);
+
+    const all = new MigrationRunner(
+      ALL_SQLITE_MIGRATIONS(handle.db),
+      new SqliteMigrationWatermarkStore(handle.db),
+      handle.store,
+    );
+    await expect(all.up()).resolves.toBe(5);
+    const legacy = await handle.store.idempotencyLedger.get(
+      "v2:legacy-collision",
+    );
+    expect(legacy?.resolvedKey).toBe("v2:legacy-collision");
+    expect(legacy?.schemaVersion).toBeUndefined();
+
+    await handle.store.idempotencyLedger.put({
+      resolvedKey: "v2:current",
+      runId: "current-run",
+      stepId: "work",
+      recordedOutput: { value: "current" },
+      createdAt: "2026-01-01T00:00:00.000Z",
+      schemaVersion: 2,
+    });
+    await expect(
+      handle.store.idempotencyLedger.get("v2:current"),
+    ).resolves.toMatchObject({ schemaVersion: 2 });
   });
 });

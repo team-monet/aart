@@ -40,4 +40,19 @@ describe("checkIdempotency / recordIdempotency (spec §30.2, architecture §4.2/
     // idempotency doesn't require one.
     expect(await checkIdempotency(store, key)).toMatchObject({ alreadyCompleted: true });
   });
+
+  it("does not replay a legacy entry that collides with the current storage-key string", async () => {
+    const store = await setup();
+    await store.idempotencyLedger.put({
+      resolvedKey: "v2:charge-123",
+      runId: "legacy-run",
+      stepId: "charge",
+      recordedOutput: { charged: "legacy" },
+      createdAt: new Date().toISOString(),
+    });
+
+    await expect(checkIdempotency(store, "charge-123")).resolves.toEqual({
+      alreadyCompleted: false,
+    });
+  });
 });

@@ -2045,9 +2045,15 @@ use, which leaves a public API response clean. Secret-derived outputs are not
 written to the idempotency cache. The cache decision also compares every
 successful output with its redacted form before the ledger write, covering an
 output that matches a secret resolved by an earlier step even when the current
-block did not itself consume secret data. Idempotency storage keys are
-namespaced by the engine schema version, so pre-v2 ledger entries (which have
-no provenance) are never replayed after this security upgrade.
+block did not itself consume secret data. If the matching secret is discovered
+only by a later step, every subsequent persistence boundary revisits the
+current run's ledger entries and atomically deletes any entry whose recorded
+output the redactor now changes. Idempotency storage keys remain namespaced,
+but replay safety does not rely on a string prefix: every current entry also
+carries the engine schema version, and entries without that metadata are
+rejected even when a legacy authored key happens to equal the v2-prefixed key.
+SQLite migration `0005_idempotency_schema_version` adds the nullable metadata
+column so upgraded legacy rows remain readable but never replayable.
 
 Normal dispatch now prepares the raw trace in memory, evaluates `until`
 against that provisional trace, computes data/control provenance, redacts,
@@ -2069,6 +2075,12 @@ provenance as step outputs. A later secret resolution that discovers a
 matching input/trigger value therefore taints downstream transforms and
 blocks direct public mappings instead of publishing a redaction marker.
 forEach aggregate traces likewise inherit child data/control provenance.
+The same retrospective rule applies to each trace's resolved inputs: if a
+later-discovered secret changes a prior trace input, that trace's outputs are
+conservatively tainted at `"*"`, including non-literal derivatives. Historical
+`if`/active-`until` dependencies are then replayed as provenance analysis over
+the persisted trace order, so a branch selected earlier through that derivative
+taints its selected continuation before terminal output materialization.
 
 Trace identity and execution metadata (`stepId`, `block`, timestamps, status,
 and the explicit authored/iteration identity) are intentionally structural,

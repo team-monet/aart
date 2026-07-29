@@ -97,6 +97,7 @@ async function prepareResumedRun(
   prepared.nextStepId = nextStepId;
   return prepareTaintAfterControlResolution(
     config,
+    workflow,
     step,
     run,
     1,

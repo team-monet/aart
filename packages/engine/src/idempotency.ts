@@ -5,6 +5,8 @@
 // collection, not folded into StepTrace rows, so a resolved key is
 // checkable before that attempt's StepTrace even exists).
 import type { AartStore } from "@aart/store";
+import type { RedactFn } from "@aart/types";
+import { applyRedaction, changedJsonPointers } from "./redaction.js";
 import { CURRENT_ENGINE_SCHEMA_VERSION } from "./schema-version.js";
 
 export interface IdempotencyCheck {
@@ -26,12 +28,53 @@ export async function checkIdempotency(store: AartStore, resolvedKey: string): P
   const entry = await store.idempotencyLedger.get(
     idempotencyStorageKey(resolvedKey),
   );
-  if (!entry) return { alreadyCompleted: false };
+  if (
+    !entry ||
+    entry.schemaVersion !== CURRENT_ENGINE_SCHEMA_VERSION
+  ) {
+    return { alreadyCompleted: false };
+  }
   return { alreadyCompleted: true, recordedOutput: entry.recordedOutput };
 }
 
 /** Records a step attempt's output under its resolved idempotency key — called ONLY after a successful (post-retry) execution, never for an attempt that exhausted its retries and ultimately failed (architecture §4.2: a genuinely-failed attempt gets no protection, so a later retry of the whole step/run tries again fresh, which is correct — the attempt truly never succeeded). */
 export async function recordIdempotency(store: AartStore, resolvedKey: string, runId: string, stepId: string, recordedOutput: unknown, now: Date): Promise<void> {
   const storageKey = idempotencyStorageKey(resolvedKey);
-  await store.idempotencyLedger.put({ resolvedKey: storageKey, runId, stepId, recordedOutput, createdAt: now.toISOString() });
+  await store.idempotencyLedger.put({
+    resolvedKey: storageKey,
+    runId,
+    stepId,
+    recordedOutput,
+    createdAt: now.toISOString(),
+    schemaVersion: CURRENT_ENGINE_SCHEMA_VERSION,
+  });
+}
+
+/**
+ * A secret may first be resolved after an earlier attempt wrote its output
+ * to the ledger. Revisit this run's entries whenever its known-secret set
+ * grows and revoke any output the real redactor now changes.
+ */
+export async function revokeSecretTaintedIdempotency(
+  store: AartStore,
+  redact: RedactFn,
+  runId: string,
+  resolvedSecretRefs: ReadonlySet<string>,
+): Promise<void> {
+  if (resolvedSecretRefs.size === 0) return;
+  const entries = await store.idempotencyLedger.listByRun(runId);
+  await Promise.all(
+    entries.map(async (entry) => {
+      const redacted = applyRedaction(
+        redact,
+        entry.recordedOutput,
+        resolvedSecretRefs,
+      );
+      if (
+        changedJsonPointers(entry.recordedOutput, redacted).length > 0
+      ) {
+        await store.idempotencyLedger.delete(entry.resolvedKey);
+      }
+    }),
+  );
 }

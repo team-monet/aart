@@ -9,7 +9,7 @@ import { AartError, DEFAULT_EFFECTFUL_CAPABILITIES, isEffectfulCapability, Itera
 import { checkCapabilityDispatch, alwaysEmptyGrantedCapabilities } from "./capability.js";
 import { parseDurationMs } from "./duration.js";
 import { buildExprContext, resolveArrayExpression, resolveBooleanExpression, resolveStringExpression, resolveWithRecord } from "./expr-context.js";
-import { checkIdempotency, recordIdempotency } from "./idempotency.js";
+import { checkIdempotency, recordIdempotency, revokeSecretTaintedIdempotency } from "./idempotency.js";
 import { jsonCompatibilityProblem, jsonValuesEqual } from "./output-validation.js";
 import { applyRedaction, applyRunRedaction, changedJsonPointers, createTrackingSecretResolver, isTextMime, throwingSecretResolver } from "./redaction.js";
 import { CURRENT_ENGINE_SCHEMA_VERSION } from "./schema-version.js";
@@ -495,10 +495,31 @@ async function executeForEachStep(
  * `dispatchOnce` has already returned, so any `writeArtifact` calls the
  * step made are already durably in the store, ready to query.
  */
-async function appendTracesAndPersist(config: EngineConfig, run: RunRecord, newTraces: StepTrace[], resolvedSecretRefs: ReadonlySet<string>): Promise<RunRecord> {
+async function appendTracesAndPersist(
+  config: EngineConfig,
+  run: RunRecord,
+  workflow: Workflow,
+  step: WorkflowStep,
+  newTraces: StepTrace[],
+  resolvedSecretRefs: ReadonlySet<string>,
+): Promise<RunRecord> {
   const artifacts = await config.store.artifacts.listByRun(run.runId);
   const updated: RunRecord = { ...run, trace: [...run.trace, ...newTraces], artifacts, updatedAt: (config.now?.() ?? new Date()).toISOString() };
-  const redacted = applyRunRedaction(config.redact, updated, resolvedSecretRefs);
+  const prepared = prepareTaintAfterControlResolution(
+    config,
+    workflow,
+    step,
+    updated,
+    newTraces.length,
+    resolvedSecretRefs,
+  );
+  await revokeSecretTaintedIdempotency(
+    config.store,
+    config.redact,
+    run.runId,
+    resolvedSecretRefs,
+  );
+  const redacted = applyRunRedaction(config.redact, prepared, resolvedSecretRefs);
   await config.store.runs.put(redacted);
   return redacted;
 }
@@ -643,6 +664,49 @@ function runHasSecretControlledFlow(
   return run.trace.some((trace) => trace.controlSecretTainted === true);
 }
 
+function annotateHistoricalControlTaint(
+  workflow: Workflow,
+  run: RunRecord,
+): RunRecord {
+  let inheritedControlTaint = false;
+  const trace: StepTrace[] = [];
+  for (const entry of run.trace) {
+    const authoredStepId = authoredStepIdForTrace(workflow, entry);
+    const step = workflow.execution.steps.find(
+      (candidate) => candidate.id === authoredStepId,
+    );
+    const priorRun = { ...run, trace };
+    const ifControlTainted =
+      step?.if !== undefined &&
+      (valueReferencesSecret(step.if) ||
+        valueReferencesSecretTaintedTrace(step.if, priorRun));
+    const untilWasEvaluated =
+      step?.next !== undefined &&
+      step.until !== undefined &&
+      entry.status === "completed";
+    const untilControlTainted =
+      untilWasEvaluated &&
+      (valueReferencesSecret(step.until) ||
+        valueReferencesSecretTaintedTrace(step.until, priorRun));
+    const controlTainted: boolean =
+      inheritedControlTaint ||
+      entry.controlSecretTainted === true ||
+      ifControlTainted ||
+      untilControlTainted;
+    const annotated = controlTainted
+      ? {
+          ...entry,
+          secretTainted: true as const,
+          secretTaintedPaths: entry.secretTaintedPaths ?? [],
+          controlSecretTainted: true as const,
+        }
+      : entry;
+    trace.push(annotated);
+    inheritedControlTaint ||= controlTainted;
+  }
+  return { ...run, trace };
+}
+
 function annotateSecretTaint(
   config: EngineConfig,
   traces: StepTrace[],
@@ -651,6 +715,14 @@ function annotateSecretTaint(
   controlTaint = false,
 ): StepTrace[] {
   return traces.map((trace) => {
+    const redactedInputs = applyRedaction(
+      config.redact,
+      trace.inputs,
+      resolvedSecretRefs,
+    );
+    const inputTainted =
+      trace.outputs !== undefined &&
+      changedJsonPointers(trace.inputs, redactedInputs).length > 0;
     const redactedOutputs =
       trace.outputs === undefined
         ? undefined
@@ -662,6 +734,7 @@ function annotateSecretTaint(
     const existingPaths = trace.secretTaintedPaths ?? [];
     const outputTainted =
       dataTaint ||
+      inputTainted ||
       existingPaths.length > 0 ||
       discoveredPaths.length > 0;
     if (!outputTainted && !controlTaint) return trace;
@@ -671,7 +744,9 @@ function annotateSecretTaint(
       ...(outputTainted
         ? {
             secretTaintedPaths:
-              dataTaint || existingPaths.includes("*")
+              dataTaint ||
+              inputTainted ||
+              existingPaths.includes("*")
                 ? ["*"]
                 : [...new Set([...existingPaths, ...discoveredPaths])],
           }
@@ -749,6 +824,7 @@ function recomputeDataSecretTaint(
 
 export function prepareTaintAfterControlResolution(
   config: EngineConfig,
+  workflow: Workflow,
   step: WorkflowStep,
   run: RunRecord,
   currentTraceCount: number,
@@ -760,18 +836,36 @@ export function prepareTaintAfterControlResolution(
     resolvedSecretRefs,
     false,
   );
-  const directlySecretControlled =
-    valueReferencesSecret(step.if) ||
-    (step.next !== undefined && valueReferencesSecret(step.until));
   const taintAwareRun = withRunRootSecretTaint(
     config,
     { ...run, trace: refreshedTrace },
     resolvedSecretRefs,
   );
+  const historicallyTaintAwareRun = annotateHistoricalControlTaint(
+    workflow,
+    taintAwareRun,
+  );
+  refreshedTrace = historicallyTaintAwareRun.trace;
+  const currentTraces = refreshedTrace.slice(
+    Math.max(0, refreshedTrace.length - currentTraceCount),
+  );
+  const untilWasEvaluated =
+    step.next !== undefined &&
+    step.until !== undefined &&
+    currentTraces.some((trace) => trace.status === "completed");
   const indirectlySecretControlled =
-    valueReferencesSecretTaintedTrace(step.if, taintAwareRun) ||
-    (step.next !== undefined &&
-      valueReferencesSecretTaintedTrace(step.until, taintAwareRun));
+    valueReferencesSecretTaintedTrace(
+      step.if,
+      historicallyTaintAwareRun,
+    ) ||
+    (untilWasEvaluated &&
+      valueReferencesSecretTaintedTrace(
+        step.until,
+        historicallyTaintAwareRun,
+      ));
+  const directlySecretControlled =
+    valueReferencesSecret(step.if) ||
+    (untilWasEvaluated && valueReferencesSecret(step.until));
   if (
     directlySecretControlled ||
     indirectlySecretControlled ||
@@ -794,7 +888,7 @@ export function prepareTaintAfterControlResolution(
   }
 
   return {
-    ...taintAwareRun,
+    ...historicallyTaintAwareRun,
     trace: refreshedTrace,
     updatedAt: (config.now?.() ?? new Date()).toISOString(),
   };
@@ -802,6 +896,7 @@ export function prepareTaintAfterControlResolution(
 
 export async function refreshTaintAfterControlResolution(
   config: EngineConfig,
+  workflow: Workflow,
   step: WorkflowStep,
   run: RunRecord,
   currentTraceCount: number,
@@ -810,6 +905,7 @@ export async function refreshTaintAfterControlResolution(
 ): Promise<RunRecord> {
   const preparedRun = prepareTaintAfterControlResolution(
     config,
+    workflow,
     step,
     run,
     currentTraceCount,
@@ -837,6 +933,12 @@ export async function refreshTaintAfterControlResolution(
   const refreshedRun = applyRunRedaction(
     config.redact,
     preparedRun,
+    resolvedSecretRefs,
+  );
+  await revokeSecretTaintedIdempotency(
+    config.store,
+    config.redact,
+    run.runId,
     resolvedSecretRefs,
   );
   await config.store.runs.put(refreshedRun);
@@ -947,6 +1049,8 @@ export async function executeStep(
       const updatedRun = await appendTracesAndPersist(
         config,
         run,
+        workflow,
+        step,
         annotateSecretTaint(
           config,
           [skippedTrace],
@@ -1079,6 +1183,8 @@ export async function executeStep(
     const updatedRun = await appendTracesAndPersist(
       config,
       run,
+      workflow,
+      step,
       taintAnnotatedTraces,
       resolvedSecretRefs,
     );
@@ -1116,6 +1222,8 @@ export async function executeStep(
   const updatedRun = await appendTracesAndPersist(
     config,
     run,
+    workflow,
+    step,
     finalTraces,
     resolvedSecretRefs,
   );
@@ -1142,6 +1250,14 @@ async function executeWaitDispatch(
 ): Promise<StepOutcome> {
   const schemaVersion = config.schemaVersion ?? CURRENT_ENGINE_SCHEMA_VERSION;
   const waitMachineConfig: WaitMachineConfig = { store: config.store, redact: config.redact, now: config.now ?? (() => new Date()) };
+  const historicallyTaintAwareRun = prepareTaintAfterControlResolution(
+    config,
+    workflow,
+    step,
+    run,
+    0,
+    resolvedSecretRefs,
+  );
 
   let wait: WaitCondition;
   if (step.uses === "human.approval") {
@@ -1176,7 +1292,7 @@ async function executeWaitDispatch(
 
   let preparedNextStepId: string | undefined;
   const result = await enterWait(waitMachineConfig, {
-    run,
+    run: historicallyTaintAwareRun,
     stepId: step.id,
     blockId: step.uses,
     resolvedInputs: resolvedWith,
@@ -1193,31 +1309,14 @@ async function executeWaitDispatch(
         resolvedSecretRefs,
         config,
       );
-      const untilSecretControlled =
-        step.next !== undefined &&
-        (valueReferencesSecret(step.until) ||
-          valueReferencesSecretTaintedTrace(
-            step.until,
-            withRunRootSecretTaint(
-              config,
-              provisionalRun,
-              resolvedSecretRefs,
-            ),
-          ));
-      if (!controlSecretTainted && !untilSecretControlled) {
-        return provisionalRun;
-      }
-      const trace = provisionalRun.trace.map((entry, index) =>
-        index === provisionalRun.trace.length - 1
-          ? {
-              ...entry,
-              secretTainted: true,
-              secretTaintedPaths: entry.secretTaintedPaths ?? [],
-              controlSecretTainted: true,
-            }
-          : entry,
+      return prepareTaintAfterControlResolution(
+        config,
+        workflow,
+        step,
+        provisionalRun,
+        1,
+        resolvedSecretRefs,
       );
-      return { ...provisionalRun, trace };
     },
   });
 

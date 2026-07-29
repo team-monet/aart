@@ -213,6 +213,10 @@ export function applyRunRedaction(redact: RedactFn, run: RunRecord, resolvedSecr
       trace.inputs,
       resolvedSecretRefs,
     );
+    const inputDiscoveredPaths = changedJsonPointers(
+      trace.inputs,
+      redactedInputs,
+    );
     const redactedOutputs =
       trace.outputs === undefined
         ? undefined
@@ -224,9 +228,17 @@ export function applyRunRedaction(redact: RedactFn, run: RunRecord, resolvedSecr
     const existingPaths =
       trace.secretTaintedPaths ??
       (trace.secretTainted === true ? ["*"] : []);
-    const secretTaintedPaths = [
-      ...new Set([...existingPaths, ...discoveredPaths]),
+    const combinedTaintedPaths = [
+      ...existingPaths,
+      ...(inputDiscoveredPaths.length > 0 &&
+      trace.outputs !== undefined
+        ? ["*"]
+        : []),
+      ...discoveredPaths,
     ];
+    const secretTaintedPaths = combinedTaintedPaths.includes("*")
+      ? ["*"]
+      : [...new Set(combinedTaintedPaths)];
     return {
       ...trace,
       inputs: redactedInputs,

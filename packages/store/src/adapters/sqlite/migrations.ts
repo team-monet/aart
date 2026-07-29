@@ -220,9 +220,32 @@ export function createSqliteAddEventsTableMigration(db: DatabaseSync): Migration
   };
 }
 
+export function createSqliteAddIdempotencySchemaVersionMigration(db: DatabaseSync): Migration {
+  return {
+    id: "0005_idempotency_schema_version",
+    async up(): Promise<void> {
+      try {
+        db.exec(`ALTER TABLE idempotency_ledger ADD COLUMN schema_version INTEGER`);
+      } catch (err) {
+        if (
+          err instanceof Error &&
+          err.message.includes("duplicate column name")
+        ) {
+          return;
+        }
+        throw err;
+      }
+    },
+    async down(): Promise<void> {
+      db.exec(`ALTER TABLE idempotency_ledger DROP COLUMN schema_version`);
+    },
+  };
+}
+
 export const ALL_SQLITE_MIGRATIONS = (db: DatabaseSync): Migration[] => [
   createSqliteInitMigration(db),
   createSqliteAddDeploymentPromotedMigration(db),
   createSqliteAddApprovalTaskAuthenticatedAsMigration(db),
   createSqliteAddEventsTableMigration(db),
+  createSqliteAddIdempotencySchemaVersionMigration(db),
 ];

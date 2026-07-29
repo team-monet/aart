@@ -666,6 +666,28 @@ export function runAartStoreConformanceSuite(label: string, options: Conformance
       it("get returns undefined for a key that was never recorded", async () => {
         await expect(store.idempotencyLedger.get("never-seen-key")).resolves.toBeUndefined();
       });
+
+      it("lists entries by run and deletes by resolved key", async () => {
+        const runId = uniqueId("run");
+        const resolvedKey = `${runId}:send_email`;
+        await store.idempotencyLedger.put({
+          resolvedKey,
+          runId,
+          stepId: "send_email",
+          recordedOutput: { sent: true },
+          createdAt: new Date().toISOString(),
+          schemaVersion: 2,
+        });
+        await expect(
+          store.idempotencyLedger.listByRun(runId),
+        ).resolves.toEqual([
+          expect.objectContaining({ resolvedKey, schemaVersion: 2 }),
+        ]);
+        await store.idempotencyLedger.delete(resolvedKey);
+        await expect(
+          store.idempotencyLedger.get(resolvedKey),
+        ).resolves.toBeUndefined();
+      });
     });
 
     describe("transact() — the transactional unit-of-work contract (architecture §5.8)", () => {

@@ -845,31 +845,61 @@ interface IdempotencyLedgerRow {
   step_id: string;
   recorded_output_json: string;
   created_at: string;
+  schema_version: number | null;
 }
 
 export class SqliteIdempotencyLedgerStore implements IdempotencyLedgerStore {
   constructor(private readonly exec: SqlExec) {}
 
-  async get(resolvedKey: string): Promise<IdempotencyLedgerEntry | undefined> {
-    const row = await this.exec((db) => dbGet<IdempotencyLedgerRow>(db, "SELECT * FROM idempotency_ledger WHERE resolved_key = ?", [resolvedKey]));
-    if (!row) return undefined;
+  private fromRow(row: IdempotencyLedgerRow): IdempotencyLedgerEntry {
     return {
       resolvedKey: row.resolved_key,
       runId: row.run_id,
       stepId: row.step_id,
       recordedOutput: JSON.parse(row.recorded_output_json) as unknown,
       createdAt: row.created_at,
+      ...(row.schema_version !== null
+        ? { schemaVersion: row.schema_version }
+        : {}),
     };
+  }
+
+  async get(resolvedKey: string): Promise<IdempotencyLedgerEntry | undefined> {
+    const row = await this.exec((db) => dbGet<IdempotencyLedgerRow>(db, "SELECT * FROM idempotency_ledger WHERE resolved_key = ?", [resolvedKey]));
+    if (!row) return undefined;
+    return this.fromRow(row);
   }
 
   async put(entry: IdempotencyLedgerEntry): Promise<void> {
     await this.exec((db) =>
       dbRun(
         db,
-        `INSERT INTO idempotency_ledger (resolved_key, run_id, step_id, recorded_output_json, created_at) VALUES (?, ?, ?, ?, ?)
+        `INSERT INTO idempotency_ledger (resolved_key, run_id, step_id, recorded_output_json, created_at, schema_version) VALUES (?, ?, ?, ?, ?, ?)
          ON CONFLICT(resolved_key) DO UPDATE SET run_id = excluded.run_id, step_id = excluded.step_id,
-           recorded_output_json = excluded.recorded_output_json, created_at = excluded.created_at`,
-        [entry.resolvedKey, entry.runId, entry.stepId, JSON.stringify(entry.recordedOutput), entry.createdAt],
+           recorded_output_json = excluded.recorded_output_json, created_at = excluded.created_at,
+           schema_version = excluded.schema_version`,
+        [entry.resolvedKey, entry.runId, entry.stepId, JSON.stringify(entry.recordedOutput), entry.createdAt, entry.schemaVersion ?? null],
+      ),
+    );
+  }
+
+  async listByRun(runId: string): Promise<IdempotencyLedgerEntry[]> {
+    const rows = await this.exec((db) =>
+      dbAll<IdempotencyLedgerRow>(
+        db,
+        "SELECT * FROM idempotency_ledger WHERE run_id = ?",
+        [runId],
+      ),
+    );
+    return rows.map((row) => this.fromRow(row));
+  }
+
+  async delete(resolvedKey: string): Promise<void> {
+    await this.exec((db) =>
+      dbRun(
+        db,
+        "DELETE FROM idempotency_ledger WHERE resolved_key = ?",
+        [resolvedKey],
       ),
     );
   }

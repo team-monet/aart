@@ -324,6 +324,7 @@ async function resolveContinuation(
   }
   const refreshedRun = await refreshTaintAfterControlResolution(
     config,
+    workflow,
     lastStep,
     run,
     currentTraceCount,

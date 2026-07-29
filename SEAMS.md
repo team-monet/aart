@@ -28,11 +28,13 @@ function listExternalJobWaits(store: AartStore): Promise<Array<{ runId: string; 
 
 **Resume calls** S2's ticker makes once it identifies a due/completed wait (standalone functions, take an explicit `runId`/`stepId` — no `Engine` instance required for the claim step itself, but see Seam 4 below for how to actually CONTINUE execution afterward):
 ```ts
-function resumeTimerWait(config: WaitMachineConfig, runId: string, stepId: string, resolvedSecretRefs?: ReadonlySet<string>): Promise<ResumeOutcome>
-function resumeExternalJobResult(config: WaitMachineConfig, runId: string, stepId: string, resultPayload: unknown, resolvedSecretRefs?: ReadonlySet<string>): Promise<ResumeOutcome>
-function resumeBySignal(config: WaitMachineConfig, signal: Signal, resolvedSecretRefs?: ReadonlySet<string>): Promise<ResumeOutcome>
-function resumeManual(config: WaitMachineConfig, runId: string, stepId: string, payload?: unknown, resolvedSecretRefs?: ReadonlySet<string>): Promise<ResumeOutcome>
-function resumeApproval(config: WaitMachineConfig, runId: string, stepId: string, task: { id: string; status: string; decision?: unknown; reviewer?: string }, resolvedSecretRefs?: ReadonlySet<string>): Promise<ResumeOutcome>
+type PrepareCompletedRun = (run: RunRecord, stepId: string) => Promise<RunRecord>
+
+function resumeTimerWait(config: WaitMachineConfig, runId: string, stepId: string, resolvedSecretRefs: ReadonlySet<string> | undefined, prepareCompletedRun: PrepareCompletedRun): Promise<ResumeOutcome>
+function resumeExternalJobResult(config: WaitMachineConfig, runId: string, stepId: string, resultPayload: unknown, resolvedSecretRefs: ReadonlySet<string> | undefined, prepareCompletedRun: PrepareCompletedRun): Promise<ResumeOutcome>
+function resumeBySignal(config: WaitMachineConfig, signal: Signal, resolvedSecretRefs: ReadonlySet<string> | undefined, prepareCompletedRun: PrepareCompletedRun): Promise<ResumeOutcome>
+function resumeManual(config: WaitMachineConfig, runId: string, stepId: string, payload: unknown | undefined, resolvedSecretRefs: ReadonlySet<string> | undefined, prepareCompletedRun: PrepareCompletedRun): Promise<ResumeOutcome>
+function resumeApproval(config: WaitMachineConfig, runId: string, stepId: string, task: { id: string; status: string; decision?: unknown; reviewer?: string }, resolvedSecretRefs: ReadonlySet<string> | undefined, prepareCompletedRun: PrepareCompletedRun): Promise<ResumeOutcome>
 
 // ResumeOutcome =
 //   | { kind: "resumed"; run: RunRecord; mechanism: ResumeMechanism }
@@ -40,7 +42,7 @@ function resumeApproval(config: WaitMachineConfig, runId: string, stepId: string
 //   | { kind: "unmatched"; mechanism: ResumeMechanism }
 ```
 
-**IMPORTANT — these standalone functions only perform the atomic CLAIM, they do NOT continue execution past the resumed step.** To actually advance the run to its next step (or its next wait/terminal status), call the SAME-NAMED method on a constructed `Engine` instance instead (`engine.resumeTimerWait(runId, stepId)` etc. — see Seam 4) — the `Engine`-bound versions wrap the standalone claim call and then run the step-loop forward. S2's ticker should use the `Engine`-bound methods in production; the standalone functions are exposed mainly for a caller that genuinely only wants the claim primitive (e.g. a lower-level test, or a future architecture where claim and continuation are split across processes).
+**IMPORTANT — these standalone functions only perform the atomic CLAIM, they do NOT continue execution past the resumed step.** They now require `prepareCompletedRun` because control expressions and secret provenance must be resolved against the completed in-memory trace before its first durable write. Omitting it fails before the claim transaction mutates storage. A caller constructing this callback must own the full workflow resolver, secret resolver, and taint-preparation pipeline; passing an identity callback is test-only and is not a safe production implementation. To actually advance the run to its next step (or its next wait/terminal status), call the SAME-NAMED method on a constructed `Engine` instance instead (`engine.resumeTimerWait(runId, stepId)` etc. — see Seam 4). The `Engine`-bound versions construct the preparation callback, perform the atomic claim, and run the step-loop forward. S2's ticker and every production composition root must use those bound methods; the standalone functions remain exposed only for engine-internal tests or a future split-process architecture that supplies an equivalent trusted preparer.
 
 **Wait-TIMEOUT-expiry sibling seam (architecture §4.4.1's "Expiry note") — a DIFFERENT terminal outcome from resume, S2's ticker should sweep this too, on the same interval:**
 ```ts

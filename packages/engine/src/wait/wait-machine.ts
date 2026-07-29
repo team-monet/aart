@@ -9,6 +9,7 @@ import type { AartStore } from "@aart/store";
 import type { RunRecord, Signal, StepTrace, WaitCondition } from "@aart/types";
 import { CorrelationError } from "@aart/types";
 import { parseDurationMs } from "../duration.js";
+import { revokeSecretTaintedIdempotency } from "../idempotency.js";
 import { applyRedaction, applyRunRedaction } from "../redaction.js";
 import { assertSchemaVersionCompatible } from "../schema-version.js";
 import type { DueWait, ResumeMechanism, ResumeOutcome } from "../types.js";
@@ -133,6 +134,12 @@ export async function enterWait(config: WaitMachineConfig, options: EnterWaitOpt
         const preparedRun = prepareEarlyArrivalRun
           ? await prepareEarlyArrivalRun(updatedRun)
           : updatedRun;
+        await revokeSecretTaintedIdempotency(
+          tx,
+          config.redact,
+          run.runId,
+          resolvedSecretRefs,
+        );
         const redacted = applyRunRedaction(config.redact, preparedRun, resolvedSecretRefs);
         await tx.runs.put(redacted);
         return { run: redacted, suspended: false };
@@ -167,6 +174,12 @@ export async function enterWait(config: WaitMachineConfig, options: EnterWaitOpt
       trace: [...run.trace, trace],
       updatedAt: now.toISOString(),
     };
+    await revokeSecretTaintedIdempotency(
+      tx,
+      config.redact,
+      run.runId,
+      resolvedSecretRefs,
+    );
     const redactedRun = applyRunRedaction(config.redact, updatedRun, resolvedSecretRefs);
     const redactedWait = applyRedaction(config.redact, wait, resolvedSecretRefs);
     await tx.runs.put(redactedRun);
@@ -309,6 +322,12 @@ async function claimAndCompleteWait(config: WaitMachineConfig, args: ClaimAndCom
       updatedAt: now.toISOString(),
     };
     const preparedRun = await prepareCompletedRun(updatedRun, stepId);
+    await revokeSecretTaintedIdempotency(
+      tx,
+      config.redact,
+      runId,
+      resolvedSecretRefs,
+    );
     const redacted = applyRunRedaction(config.redact, preparedRun, resolvedSecretRefs);
     await tx.runs.put(redacted);
     return { kind: "resumed", run: redacted, mechanism };
@@ -401,6 +420,12 @@ export async function failExpiredWait(config: WaitMachineConfig, runId: string, 
     newTrace[traceIndex] = failedTrace;
 
     const updatedRun: RunRecord = { ...run, status: "running", trace: newTrace, updatedAt: now.toISOString() };
+    await revokeSecretTaintedIdempotency(
+      tx,
+      config.redact,
+      runId,
+      resolvedSecretRefs,
+    );
     const redacted = applyRunRedaction(config.redact, updatedRun, resolvedSecretRefs);
     await tx.runs.put(redacted);
     return { kind: "resumed", run: redacted, mechanism };
