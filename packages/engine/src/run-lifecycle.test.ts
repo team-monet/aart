@@ -2424,6 +2424,73 @@ describe("executeRun — reclaim-safety: resumes mid-step from persisted trace h
     ]);
   });
 
+  it("reclaims a persisted skipped step through the same next path without evaluating until", async () => {
+    let secretResolutions = 0;
+    const { store, config } = await setup({
+      resolveSecret: () => {
+        secretResolutions += 1;
+        return true;
+      },
+    });
+    const workflow = fixtureWorkflow({
+      inputs: [{ name: "runGate", type: "boolean", required: true }],
+      execution: {
+        type: "workflow",
+        steps: [
+          {
+            id: "gate",
+            uses: "test.echo",
+            if: "{{ inputs.runGate }}",
+            next: "expected",
+            until: "{{ secrets.STOP }}",
+          },
+          {
+            id: "wrong",
+            uses: "test.echo",
+            with: { path: "wrong" },
+          },
+          {
+            id: "expected",
+            uses: "test.echo",
+            with: { path: "expected" },
+          },
+        ],
+      },
+    });
+    await store.workflows.put(workflow);
+    const run = await triggerRun(config, {
+      workflow,
+      trigger: fixtureTrigger(),
+      inputs: { runGate: false },
+    });
+    await store.runs.put({
+      ...run,
+      status: "running",
+      trace: [
+        {
+          seq: 0,
+          stepId: "gate",
+          authoredStepId: "gate",
+          block: "test.echo",
+          status: "skipped",
+          inputs: {},
+          startedAt: "t",
+          endedAt: "t",
+          durationMs: 0,
+        },
+      ],
+    });
+
+    const finished = await executeRun(config, run.runId);
+
+    expect(secretResolutions).toBe(0);
+    expect(finished.status).toBe("completed");
+    expect(finished.trace.map((trace) => trace.stepId)).toEqual([
+      "gate",
+      "expected",
+    ]);
+  });
+
   it("does not treat a normal bracket-suffixed step as a forEach occurrence during reclaim", async () => {
     const { store, config } = await setup({
       redact: redactResolvedValues,

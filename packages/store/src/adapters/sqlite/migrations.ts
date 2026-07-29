@@ -13,6 +13,7 @@
 // "written against the AartStore interface... so the same Migration/
 // MigrationRunner shapes are reusable by the SQLite/Postgres adapters Wave
 // 1 builds").
+import { createHash } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import type { Migration } from "../../migrations/types.js";
 import { runMigrationDdl } from "./db.js";
@@ -274,6 +275,95 @@ export function createSqliteAddRunRootTaintPathsMigration(db: DatabaseSync): Mig
   };
 }
 
+/**
+ * Separates redacted audit values from the operational values required to
+ * resume an outstanding wait, and records which run consumed a signal so a
+ * later secret discovery can repair that audit copy without scanning or
+ * consuming unrelated signals.
+ */
+export function createSqliteAddSecretAuditProvenanceMigration(
+  db: DatabaseSync,
+): Migration {
+  const addColumn = (table: string, definition: string): void => {
+    try {
+      db.exec(`ALTER TABLE ${table} ADD COLUMN ${definition}`);
+    } catch (err) {
+      if (
+        !(
+          err instanceof Error &&
+          err.message.includes("duplicate column name")
+        )
+      ) {
+        throw err;
+      }
+    }
+  };
+  return {
+    id: "0007_secret_audit_provenance",
+    async up(): Promise<void> {
+      addColumn("waits", "signal_match_fingerprint TEXT");
+      const waitRows = db
+        .prepare(
+          "SELECT run_id, step_id, wait_condition_json FROM waits WHERE signal_match_fingerprint IS NULL",
+        )
+        .all() as Array<{
+        run_id: string;
+        step_id: string;
+        wait_condition_json: string;
+      }>;
+      const updateWait = db.prepare(
+        "UPDATE waits SET signal_match_fingerprint = ? WHERE run_id = ? AND step_id = ?",
+      );
+      for (const row of waitRows) {
+        const wait = JSON.parse(row.wait_condition_json) as Record<
+          string,
+          unknown
+        >;
+        let name: string | undefined;
+        let correlationId: string | undefined;
+        switch (wait["type"]) {
+          case "signal":
+            name = wait["name"] as string | undefined;
+            correlationId = wait["correlationId"] as string | undefined;
+            break;
+          case "webhook":
+            name = wait["event"] as string | undefined;
+            correlationId = wait["correlationId"] as string | undefined;
+            break;
+          case "queue":
+            name = wait["queue"] as string | undefined;
+            correlationId = wait["correlationId"] as string | undefined;
+            break;
+          case "external_job":
+            name = wait["provider"] as string | undefined;
+            correlationId = wait["jobId"] as string | undefined;
+            break;
+        }
+        if (name !== undefined && correlationId !== undefined) {
+          updateWait.run(
+            createHash("sha256")
+              .update(JSON.stringify([name, correlationId]))
+              .digest("hex"),
+            row.run_id,
+            row.step_id,
+          );
+        }
+      }
+      addColumn("signals", "consumed_by_run_id TEXT");
+      addColumn("signals", "consumed_by_step_id TEXT");
+      db.exec(
+        "CREATE INDEX IF NOT EXISTS idx_signals_consumed_by_run ON signals(consumed_by_run_id)",
+      );
+    },
+    async down(): Promise<void> {
+      db.exec("DROP INDEX IF EXISTS idx_signals_consumed_by_run");
+      db.exec("ALTER TABLE signals DROP COLUMN consumed_by_step_id");
+      db.exec("ALTER TABLE signals DROP COLUMN consumed_by_run_id");
+      db.exec("ALTER TABLE waits DROP COLUMN signal_match_fingerprint");
+    },
+  };
+}
+
 export const ALL_SQLITE_MIGRATIONS = (db: DatabaseSync): Migration[] => [
   createSqliteInitMigration(db),
   createSqliteAddDeploymentPromotedMigration(db),
@@ -281,4 +371,5 @@ export const ALL_SQLITE_MIGRATIONS = (db: DatabaseSync): Migration[] => [
   createSqliteAddEventsTableMigration(db),
   createSqliteAddIdempotencySchemaVersionMigration(db),
   createSqliteAddRunRootTaintPathsMigration(db),
+  createSqliteAddSecretAuditProvenanceMigration(db),
 ];

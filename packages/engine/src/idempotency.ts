@@ -116,6 +116,46 @@ export async function revokeSecretTaintedIdempotency(
   const pendingKeys = new Set<string>();
   const outputTaintedKeys = new Set<string>();
 
+  const persistedRuns = await store.runs.list();
+  const runsById = new Map(
+    persistedRuns.map((persistedRun) => [
+      persistedRun.runId,
+      persistedRun,
+    ]),
+  );
+  // The caller's in-memory run may contain traces/taint not written yet.
+  runsById.set(run.runId, run);
+
+  // A non-literal derivative cannot be detected by redacting the ledger
+  // value itself. Reconstruct every persisted producer against the newly
+  // known secrets before deciding that no key is tainted. The same pass
+  // repairs each run's associated durable audits (waits, approvals,
+  // consumed signals, artifacts), even when no cache entry is ultimately
+  // revoked.
+  if (prepareConsumer) {
+    for (const [runId, persistedRun] of runsById) {
+      const prepared = await prepareConsumer(
+        store,
+        persistedRun,
+        new Set(),
+        resolvedSecretRefs,
+      );
+      const redacted = applyRunRedaction(
+        redact,
+        prepared,
+        resolvedSecretRefs,
+      );
+      // The caller writes its authoritative in-memory record immediately
+      // after this function returns.
+      if (runId === run.runId) {
+        runsById.set(runId, redacted);
+        continue;
+      }
+      await store.runs.put(redacted);
+      runsById.set(runId, redacted);
+    }
+  }
+
   for (const entry of entries) {
     const redactedOutput = applyRedaction(
       redact,
@@ -130,9 +170,12 @@ export async function revokeSecretTaintedIdempotency(
         entry.resolvedKey,
         resolvedSecretRefs,
       ) !== entry.resolvedKey;
-    const consumedByTaintedTrace = traceHasTaintedLedgerOutput(
-      run,
-      entry.resolvedKey,
+    const consumedByTaintedTrace = [...runsById.values()].some(
+      (candidateRun) =>
+        traceHasTaintedLedgerOutput(
+          candidateRun,
+          entry.resolvedKey,
+        ),
     );
     if (outputChanged || keyChanged || consumedByTaintedTrace) {
       pendingKeys.add(entry.resolvedKey);
@@ -143,16 +186,6 @@ export async function revokeSecretTaintedIdempotency(
   }
 
   if (pendingKeys.size === 0) return;
-
-  const persistedRuns = await store.runs.list();
-  const runsById = new Map(
-    persistedRuns.map((persistedRun) => [
-      persistedRun.runId,
-      persistedRun,
-    ]),
-  );
-  // The caller's in-memory run may contain traces/taint not written yet.
-  runsById.set(run.runId, run);
   const processedKeys = new Set<string>();
 
   while (true) {
@@ -181,7 +214,7 @@ export async function revokeSecretTaintedIdempotency(
       // preparation for this secret set, so do not race that authoritative
       // write with a second reconstruction here.
       if (runId === run.runId) {
-        for (const trace of run.trace) {
+        for (const trace of persistedRun.trace) {
           const key = trace.idempotencyLedgerKey;
           if (
             key !== undefined &&

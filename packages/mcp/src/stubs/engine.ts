@@ -226,10 +226,11 @@ export function createStubEngine(store: AartStore, now: () => Date = () => new D
     },
 
     async resumeBySignal(signal: { name: string; correlationId: string; payload?: unknown }): Promise<ResumeOutcome> {
-      const waits = await store.waits.list();
-      const match = waits.find(
-        (w) => w.wait.type === "signal" && w.wait.name === signal.name && w.wait.correlationId === signal.correlationId,
+      const matches = await store.waits.findSignalMatches(
+        signal.name,
+        signal.correlationId,
       );
+      const match = matches[0];
       if (!match) return { kind: "unmatched" };
       return this.resumeManual(match.runId, match.stepId, signal.payload);
     },

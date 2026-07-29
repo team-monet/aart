@@ -67,6 +67,19 @@ export class SqliteEventLogStore implements EventLogStore {
     );
   }
 
+  async replaceAudit(
+    eventId: string,
+    audit: { summary: string; actor?: string },
+  ): Promise<void> {
+    await this.exec((db) =>
+      dbRun(
+        db,
+        "UPDATE events SET summary = ?, actor = ? WHERE id = ?",
+        [audit.summary, audit.actor ?? null, eventId],
+      ),
+    );
+  }
+
   async list(filter?: { since?: string; limit?: number }): Promise<EventLogEntry[]> {
     const clauses: string[] = [];
     const params: SqlParam[] = [];

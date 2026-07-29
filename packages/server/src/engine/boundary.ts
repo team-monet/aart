@@ -127,12 +127,10 @@ export function createFakeEngine(store: AartStore, clock: Clock): EngineBoundary
     },
 
     async resumeWithSignal(signal: Signal): Promise<ResumeResult> {
-      const waits = await store.waits.list();
-      const matches = waits.filter((w) => {
-        if (w.wait.type === "signal" || w.wait.type === "webhook") return w.wait.correlationId === signal.correlationId;
-        if (w.wait.type === "queue") return w.wait.correlationId === signal.correlationId;
-        return false;
-      });
+      const matches = await store.waits.findSignalMatches(
+        signal.name,
+        signal.correlationId,
+      );
       if (matches.length === 0) return { kind: "no_match" };
       if (matches.length > 1) return { kind: "ambiguous", matches: matches.length };
       const match = matches[0]!;

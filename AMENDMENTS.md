@@ -2069,7 +2069,11 @@ dispatch, so a secret-controlled loop condition cannot open a cache replay or
 write window before its post-step evaluation.
 The retrospective boundary is global, not source-run-only.
 `IdempotencyLedgerStore.list()` exposes the current ledger closure whenever a
-segment learns a secret. Changed entries are deleted and every persisted run
+segment learns a secret. Before concluding that no key changed under literal
+redaction, the engine reconstructs every persisted producer run against the
+expanded root-input/trigger provenance. This catches a cached non-literal
+derivative whose ledger key and output contain no literal secret text.
+Changed entries are deleted and every persisted run
 whose trace records that ledger key is re-redacted and re-tainted in the same
 store transaction. Historical data/control analysis then follows descendants;
 if a repaired consumer cached a non-literal derivative, that key is revoked and
@@ -2105,9 +2109,26 @@ completed trace with a synthetic failed step.
 Consumed signal audit records follow the same retrospective rule. Both the
 ordinary signal-resume claim and the separate early-arrival path replace the
 stored payload with its redacted value when post-completion control first
-discovers a matching secret. SQLite performs payload replacement, consumed
-marking, cache cleanup, and `RunRecord` persistence in the same transaction;
-the fs adapter retains its already-documented signal-audit non-atomicity.
+discovers a matching secret. Consumption also records the owning run/step as
+adapter-internal provenance. If an entirely later workflow step first discovers
+the secret, the global persisted-run reconstruction uses that link to re-redact
+the already-consumed audit payload. SQLite performs payload replacement,
+consumed marking, cache cleanup, and `RunRecord` persistence in the same
+transaction; the fs adapter retains its already-documented signal-audit
+non-atomicity.
+Approval and outstanding-wait audits are members of the same durable-copy
+closure. Approval title, description, reviewer, and decision values are
+re-redacted for the affected run. Run-linked correction payloads and activity
+event summary/actor fields receive the same security rewrite while their
+structural identity and ordering fields remain stable. An outstanding wait keeps a redacted
+user-visible condition while its signal correlation remains matchable only
+through an adapter-internal SHA-256 fingerprint; no raw operational shadow copy
+is retained. A signal carrying the original correlation can therefore still
+resume the run without `/waiting-runs` or the store audit row exposing the
+late-discovered value. SQLite migration
+`0007_secret_audit_provenance` adds the wait fingerprint and consumed-signal
+run/step link, backfilling existing outstanding waits before their audit copy
+can be repaired.
 Text artifacts obey the same retrospective discovery rule as traces and cache
 entries. Every boundary that can enlarge the resolved-secret set—normal
 dispatch, wait entry/early arrival, atomic resume, reclaim, and terminal
@@ -2142,6 +2163,10 @@ persisting the secret-bearing path segment itself.
 The same collapse rule applies to per-trace output pointers, so later secret
 discovery cannot turn provenance metadata itself into a disclosure channel.
 forEach aggregate traces likewise inherit child data/control provenance.
+Historical cache repair rebuilds that child-to-aggregate edge from explicit
+`authoredStepId`/`iterationIndex` ownership, so a repaired iteration taints the
+corresponding `/items/<index>` aggregate path and every downstream public/cache
+consumer.
 The same retrospective rule applies to each trace's resolved inputs: if a
 later-discovered secret changes a prior trace input, that trace's outputs are
 conservatively tainted at `"*"`, including non-literal derivatives. Historical
@@ -2169,7 +2194,10 @@ still value-redacted in its trace, but they do not create wildcard output
 provenance on an occurrence whose `outputs` field is absent. Optional workflow
 output mappings therefore keep their established omitted-field behavior
 instead of failing solely because an undispatched step would have received a
-secret input.
+secret input. A worker reclaim treats that persisted skipped trace as the
+authoritative `if: false` result and reproduces the original transition order
+(`next`, then `else`, then array order) without evaluating `until`; restart
+cannot select a branch the first execution never considered.
 
 Because this metadata changes the security interpretation of persisted
 RunRecords, the engine record schema version is bumped from 1 to 2. Version 2

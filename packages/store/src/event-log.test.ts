@@ -19,6 +19,13 @@ function fakeEventsStore(): { store: Pick<AartStore, "events">; appended: EventL
         append: async (entry: EventLogEntry) => {
           appended.push(entry);
         },
+        replaceAudit: async (eventId, audit) => {
+          const index = appended.findIndex((candidate) => candidate.id === eventId);
+          const current = appended[index];
+          if (index !== -1 && current) {
+            appended[index] = { ...current, ...audit };
+          }
+        },
         list: async () => appended,
       },
     },
@@ -49,7 +56,13 @@ describe("recordEvent (V1 event log foundation, AMENDMENTS.md A61)", () => {
   });
 
   it("a throwing store.events.append is swallowed — the returned promise resolves, never rejects (best-effort contract)", async () => {
-    const store = { events: { append: async () => { throw new Error("disk full"); }, list: async () => [] } };
+    const store = {
+      events: {
+        append: async () => { throw new Error("disk full"); },
+        replaceAudit: async () => undefined,
+        list: async () => [],
+      },
+    };
     await expect(recordEvent(store, { type: "run.started", summary: "s" })).resolves.toBeUndefined();
   });
 

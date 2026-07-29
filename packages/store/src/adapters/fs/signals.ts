@@ -17,6 +17,8 @@ import { JsonFileHandle } from "./json-file.js";
 
 interface StoredSignal extends Signal {
   consumed: boolean;
+  consumedByRunId?: string;
+  consumedByStepId?: string;
 }
 
 function sanitizeForFilename(value: string): string {
@@ -51,27 +53,56 @@ export class FsSignalStore implements SignalStore {
     const all = await this.listStored();
     const match = all.find((s) => !s.consumed && s.name === name && s.correlationId === correlationId);
     if (!match) return undefined;
-    const { consumed: _consumed, ...signal } = match;
-    return signal;
+    return this.publicSignal(match);
   }
 
   async markConsumed(
     signalId: string,
-    options?: { payload: unknown },
+    options?: {
+      payload?: unknown;
+      consumedBy?: { runId: string; stepId: string };
+    },
   ): Promise<void> {
     const all = await this.listStored();
     const match = all.find((s) => s.id === signalId);
     if (!match) return;
     const updated: StoredSignal = {
       ...match,
-      ...(options !== undefined ? { payload: options.payload } : {}),
+      ...(options !== undefined && "payload" in options
+        ? { payload: options.payload }
+        : {}),
+      ...(options?.consumedBy !== undefined
+        ? {
+            consumedByRunId: options.consumedBy.runId,
+            consumedByStepId: options.consumedBy.stepId,
+          }
+        : {}),
       consumed: true,
     };
     await new JsonFileHandle<StoredSignal>(this.pathFor(match)).write(updated);
   }
 
+  async listConsumedByRun(runId: string): Promise<Signal[]> {
+    return (await this.listStored())
+      .filter(
+        (signal) =>
+          signal.consumed && signal.consumedByRunId === runId,
+      )
+      .map((signal) => this.publicSignal(signal));
+  }
+
   async list(): Promise<Signal[]> {
     const all = await this.listStored();
-    return all.map(({ consumed: _consumed, ...signal }) => signal);
+    return all.map((signal) => this.publicSignal(signal));
+  }
+
+  private publicSignal(signal: StoredSignal): Signal {
+    const {
+      consumed: _consumed,
+      consumedByRunId: _consumedByRunId,
+      consumedByStepId: _consumedByStepId,
+      ...publicSignal
+    } = signal;
+    return publicSignal;
   }
 }

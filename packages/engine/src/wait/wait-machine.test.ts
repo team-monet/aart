@@ -280,8 +280,10 @@ describe("enterWait — early-arrival resolution (architecture §4.4 step 3 / §
             ...tx,
             waits: {
               get: tx.waits.get.bind(tx.waits),
+              redactAudit: tx.waits.redactAudit.bind(tx.waits),
               delete: tx.waits.delete.bind(tx.waits),
               list: tx.waits.list.bind(tx.waits),
+              findSignalMatches: tx.waits.findSignalMatches.bind(tx.waits),
               listDue: tx.waits.listDue.bind(tx.waits),
               put: () => {
                 waitPutCalls += 1;

@@ -479,10 +479,32 @@ describe("createEngine — resume wrappers continue execution past the resumed s
         },
       },
     });
+    const waitingSignalConsumerWorkflow = fixtureWorkflow({
+      id: "wf-cache-wait-consumer",
+      execution: {
+        type: "workflow",
+        steps: [
+          {
+            id: "cached",
+            uses: sourceBlock.manifest.id,
+            idempotencyKey: "shared-secret",
+          },
+          {
+            id: "pause",
+            uses: "wait.for_signal",
+            with: {
+              name: "cache-ready",
+              correlationId: "{{ steps.cached.outputs.value }}",
+            },
+          },
+        ],
+      },
+    });
     await Promise.all([
       store.workflows.put(sourceWorkflow),
       store.workflows.put(derivativeWorkflow),
       store.workflows.put(transitiveConsumerWorkflow),
+      store.workflows.put(waitingSignalConsumerWorkflow),
     ]);
 
     const sourceRun = await engine.triggerRun({
@@ -503,6 +525,12 @@ describe("createEngine — resume wrappers continue execution past the resumed s
       inputs: {},
     });
     await engine.executeRun(transitiveRun.runId);
+    const waitingSignalRun = await engine.triggerRun({
+      workflow: waitingSignalConsumerWorkflow,
+      trigger: fixtureTrigger(),
+      inputs: {},
+    });
+    await engine.executeRun(waitingSignalRun.runId);
 
     expect(sourceExecutions).toBe(1);
     expect(derivativeExecutions).toBe(1);
@@ -548,6 +576,270 @@ describe("createEngine — resume wrappers continue execution past the resumed s
       outputs: { length: 11 },
       secretTainted: true,
       secretTaintedPaths: ["*"],
+    });
+    await expect(store.waits.list()).resolves.toContainEqual(
+      expect.objectContaining({
+        runId: waitingSignalRun.runId,
+        stepId: "pause",
+        wait: expect.objectContaining({
+          type: "signal",
+          name: "cache-ready",
+          correlationId: "[REDACTED]",
+        }),
+      }),
+    );
+    const repairedWaitResume = await engine.resumeBySignal({
+      id: "repaired-wait-signal",
+      name: "cache-ready",
+      correlationId: "late-secret",
+      payload: {},
+      receivedAt: new Date().toISOString(),
+    });
+    expect(repairedWaitResume.kind).toBe("resumed");
+  });
+
+  it("reconstructs persisted producers before declaring a non-literal cache entry safe", async () => {
+    const { store, cleanup } = await createSqliteTestStore();
+    cleanups.push(cleanup);
+    const redact = (
+      record: unknown,
+      resolvedSecretRefs: ReadonlySet<string>,
+    ): unknown => {
+      let json = JSON.stringify(record);
+      for (const secret of resolvedSecretRefs) {
+        json = json.replaceAll(secret, "[REDACTED]");
+      }
+      return JSON.parse(json);
+    };
+    let executions = 0;
+    const derivativeBlock: BlockImplementation = {
+      manifest: {
+        id: "test.input-derivative",
+        version: "1.0.0",
+        capabilities: [],
+        inputSchema: {},
+        outputSchema: {},
+        description: "Returns a non-literal derivative of its input.",
+      },
+      execute: async (inputs) => {
+        executions += 1;
+        return {
+          length: String(
+            (inputs as Record<string, unknown>)["source"],
+          ).length,
+        };
+      },
+    };
+    const engine = createEngine({
+      store,
+      redact,
+      resolveSecret: () => "late-secret",
+      capabilityCheck: alwaysAllowCapabilityCheck,
+      blocks: createBlockRegistry([echoBlock, derivativeBlock]),
+      computeRetryDelayMs: () => 0,
+    });
+    const producerWorkflow = fixtureWorkflow({
+      id: "wf-root-derived-producer",
+      inputs: [{ name: "raw", type: "string", required: true }],
+      outputs: [{ name: "result", type: "integer", required: true }],
+      execution: {
+        type: "workflow",
+        steps: [
+          {
+            id: "derive",
+            uses: derivativeBlock.manifest.id,
+            with: { source: "{{ inputs.raw }}" },
+            idempotencyKey: "root-derived",
+          },
+        ],
+        outputMapping: {
+          result: "{{ steps.derive.outputs.length }}",
+        },
+      },
+    });
+    const consumerWorkflow = fixtureWorkflow({
+      id: "wf-root-derived-consumer",
+      outputs: [{ name: "result", type: "integer", required: true }],
+      execution: {
+        type: "workflow",
+        steps: [
+          {
+            id: "derive",
+            uses: derivativeBlock.manifest.id,
+            idempotencyKey: "root-derived",
+          },
+        ],
+        outputMapping: {
+          result: "{{ steps.derive.outputs.length }}",
+        },
+      },
+    });
+    const discoverWorkflow = fixtureWorkflow({
+      id: "wf-unrelated-secret-discovery",
+      execution: {
+        type: "workflow",
+        steps: [
+          {
+            id: "discover",
+            uses: "test.echo",
+            with: { value: "{{ secrets.API_KEY }}" },
+          },
+        ],
+      },
+    });
+    await Promise.all([
+      store.workflows.put(producerWorkflow),
+      store.workflows.put(consumerWorkflow),
+      store.workflows.put(discoverWorkflow),
+    ]);
+    const producerRun = await engine.triggerRun({
+      workflow: producerWorkflow,
+      trigger: fixtureTrigger(),
+      inputs: { raw: "late-secret" },
+    });
+    await engine.executeRun(producerRun.runId);
+    const consumerRun = await engine.triggerRun({
+      workflow: consumerWorkflow,
+      trigger: fixtureTrigger(),
+      inputs: {},
+    });
+    await engine.executeRun(consumerRun.runId);
+    expect(executions).toBe(1);
+
+    const discoverRun = await engine.triggerRun({
+      workflow: discoverWorkflow,
+      trigger: fixtureTrigger(),
+      inputs: {},
+    });
+    await engine.executeRun(discoverRun.runId);
+
+    await expect(
+      store.idempotencyLedger.get(
+        idempotencyStorageKey("root-derived"),
+      ),
+    ).resolves.toBeUndefined();
+    await expect(store.runs.get(producerRun.runId)).resolves.toMatchObject({
+      status: "failed",
+      outputs: undefined,
+      secretTaintedInputPaths: ["/raw"],
+    });
+    await expect(store.runs.get(consumerRun.runId)).resolves.toMatchObject({
+      status: "failed",
+      outputs: undefined,
+    });
+  });
+
+  it("propagates repaired cache taint from forEach children into the persisted aggregate", async () => {
+    const { store, cleanup } = await createSqliteTestStore();
+    cleanups.push(cleanup);
+    const redact = (
+      record: unknown,
+      resolvedSecretRefs: ReadonlySet<string>,
+    ): unknown => {
+      let json = JSON.stringify(record);
+      for (const secret of resolvedSecretRefs) {
+        json = json.replaceAll(secret, "[REDACTED]");
+      }
+      return JSON.parse(json);
+    };
+    let sourceExecutions = 0;
+    const sourceBlock: BlockImplementation = {
+      manifest: {
+        id: "test.foreach-cache-source",
+        version: "1.0.0",
+        capabilities: [],
+        inputSchema: {},
+        outputSchema: {},
+        description: "Returns a value before it is known to be secret.",
+      },
+      execute: async () => {
+        sourceExecutions += 1;
+        return { value: "late-secret" };
+      },
+    };
+    const engine = createEngine({
+      store,
+      redact,
+      resolveSecret: () => "late-secret",
+      capabilityCheck: alwaysAllowCapabilityCheck,
+      blocks: createBlockRegistry([echoBlock, sourceBlock]),
+      computeRetryDelayMs: () => 0,
+    });
+    const sourceWorkflow = fixtureWorkflow({
+      id: "wf-foreach-cache-source",
+      execution: {
+        type: "workflow",
+        steps: [
+          {
+            id: "cached",
+            uses: sourceBlock.manifest.id,
+            idempotencyKey: "foreach-shared",
+          },
+          { id: "pause", uses: "wait.manual" },
+          {
+            id: "discover",
+            uses: "test.echo",
+            with: { value: "{{ secrets.API_KEY }}" },
+          },
+        ],
+      },
+    });
+    const consumerWorkflow = fixtureWorkflow({
+      id: "wf-foreach-cache-consumer",
+      inputs: [{ name: "items", type: "json", required: true }],
+      outputs: [{ name: "result", type: "json", required: true }],
+      execution: {
+        type: "workflow",
+        steps: [
+          {
+            id: "map",
+            uses: sourceBlock.manifest.id,
+            forEach: "{{ inputs.items }}",
+            idempotencyKey: "foreach-shared",
+          },
+        ],
+        outputMapping: {
+          result: "{{ steps.map.outputs.items }}",
+        },
+      },
+    });
+    await Promise.all([
+      store.workflows.put(sourceWorkflow),
+      store.workflows.put(consumerWorkflow),
+    ]);
+    const sourceRun = await engine.triggerRun({
+      workflow: sourceWorkflow,
+      trigger: fixtureTrigger(),
+      inputs: {},
+    });
+    await engine.executeRun(sourceRun.runId);
+    const consumerRun = await engine.triggerRun({
+      workflow: consumerWorkflow,
+      trigger: fixtureTrigger(),
+      inputs: { items: [1] },
+    });
+    await engine.executeRun(consumerRun.runId);
+    expect(sourceExecutions).toBe(1);
+
+    await engine.resumeManual(sourceRun.runId, "pause");
+
+    const repaired = await store.runs.get(consumerRun.runId);
+    expect(repaired?.status).toBe("failed");
+    expect(repaired?.outputs).toBeUndefined();
+    expect(
+      repaired?.trace.find((trace) => trace.stepId === "map[0]"),
+    ).toMatchObject({
+      secretTainted: true,
+      secretTaintedPaths: ["*"],
+    });
+    expect(
+      repaired?.trace.find((trace) => trace.stepId === "map"),
+    ).toMatchObject({
+      secretTainted: true,
+      secretTaintedPaths: expect.arrayContaining([
+        "/items/0",
+        "/items/0/value",
+      ]),
     });
   });
 
@@ -829,6 +1121,79 @@ describe("createEngine — resume wrappers continue execution past the resumed s
     ).resolves.toBeUndefined();
   });
 
+  it("re-redacts a consumed signal audit when a later workflow step discovers its secret", async () => {
+    const { store, cleanup } = await createSqliteTestStore();
+    cleanups.push(cleanup);
+    const redact = (
+      record: unknown,
+      resolvedSecretRefs: ReadonlySet<string>,
+    ): unknown => {
+      let json = JSON.stringify(record);
+      for (const secret of resolvedSecretRefs) {
+        json = json.replaceAll(secret, "[REDACTED]");
+      }
+      return JSON.parse(json);
+    };
+    const engine = createEngine({
+      store,
+      redact,
+      resolveSecret: () => "late-secret",
+      capabilityCheck: alwaysAllowCapabilityCheck,
+      blocks: createBlockRegistry([echoBlock]),
+      computeRetryDelayMs: () => 0,
+    });
+    const workflow = fixtureWorkflow({
+      id: "wf-late-signal-audit",
+      execution: {
+        type: "workflow",
+        steps: [
+          {
+            id: "pause",
+            uses: "wait.for_signal",
+            with: {
+              name: "ready",
+              correlationId: "late-signal",
+            },
+          },
+          {
+            id: "discover",
+            uses: "test.echo",
+            with: { secret: "{{ secrets.API_KEY }}" },
+          },
+        ],
+      },
+    });
+    await store.workflows.put(workflow);
+    const run = await engine.triggerRun({
+      workflow,
+      trigger: fixtureTrigger(),
+      inputs: {},
+    });
+    await engine.executeRun(run.runId);
+    const signal = {
+      id: "late-signal-audit",
+      name: "ready",
+      correlationId: "late-signal",
+      payload: { value: "late-secret" },
+      receivedAt: new Date().toISOString(),
+    };
+    await store.signals.append(signal);
+
+    const outcome = await engine.resumeBySignal(signal);
+
+    expect(outcome.kind).toBe("resumed");
+    await expect(store.signals.list()).resolves.toContainEqual({
+      ...signal,
+      payload: { value: "[REDACTED]" },
+    });
+    await expect(
+      store.signals.listConsumedByRun(run.runId),
+    ).resolves.toContainEqual({
+      ...signal,
+      payload: { value: "[REDACTED]" },
+    });
+  });
+
   it("resumeTimerWait continues execution to completion", async () => {
     const { store, engine } = await setup();
     const workflow = fixtureWorkflow({ execution: { type: "workflow", steps: [{ id: "wait_step", uses: "wait.until", with: { resumeAt: new Date(Date.now() - 1000).toISOString() } }, { id: "after", uses: "test.echo" }] } });
@@ -863,6 +1228,116 @@ describe("createEngine — resume wrappers continue execution past the resumed s
     expect(outcome.kind).toBe("resumed");
     if (outcome.kind !== "resumed") throw new Error("unreachable");
     expect(outcome.run.status).toBe("completed");
+  });
+
+  it("re-redacts approval copy and decision when a later workflow step discovers their secret", async () => {
+    const { store, cleanup } = await createSqliteTestStore();
+    cleanups.push(cleanup);
+    const redact = (
+      record: unknown,
+      resolvedSecretRefs: ReadonlySet<string>,
+    ): unknown => {
+      let json = JSON.stringify(record);
+      for (const secret of resolvedSecretRefs) {
+        json = json.replaceAll(secret, "[REDACTED]");
+      }
+      return JSON.parse(json);
+    };
+    const engine = createEngine({
+      store,
+      redact,
+      resolveSecret: () => "late-secret",
+      capabilityCheck: alwaysAllowCapabilityCheck,
+      blocks: createBlockRegistry([echoBlock]),
+      computeRetryDelayMs: () => 0,
+    });
+    const workflow = fixtureWorkflow({
+      id: "wf-late-approval-audit",
+      execution: {
+        type: "workflow",
+        steps: [
+          {
+            id: "review",
+            uses: "human.approval",
+            with: {
+              title: "Review late-secret",
+              description: "Decision may contain late-secret",
+            },
+          },
+          {
+            id: "discover",
+            uses: "test.echo",
+            with: { secret: "{{ secrets.API_KEY }}" },
+          },
+        ],
+      },
+    });
+    await store.workflows.put(workflow);
+    const run = await engine.triggerRun({
+      workflow,
+      trigger: fixtureTrigger(),
+      inputs: {},
+    });
+    await engine.executeRun(run.runId);
+    const [task] = await store.approvals.list({ runId: run.runId });
+    if (!task) throw new Error("approval task missing");
+    const decided = {
+      ...task,
+      status: "approved" as const,
+      reviewer: "late-secret",
+      decision: { note: "late-secret" },
+      decidedAt: new Date().toISOString(),
+    };
+    await store.approvals.put(decided);
+    await store.corrections.put({
+      runId: run.runId,
+      stepId: "review",
+      fieldPath: "outputs.note",
+      observed: { note: "late-secret" },
+      corrected: { note: "late-secret" },
+      reason: "remove late-secret",
+      reviewer: "late-secret",
+      createdAt: new Date().toISOString(),
+    });
+    await store.events.append({
+      id: "late-approval-event",
+      type: "approval.decided",
+      occurredAt: new Date().toISOString(),
+      summary: "late-secret approved by late-secret",
+      runId: run.runId,
+      actor: "late-secret",
+    });
+
+    const outcome = await engine.resumeApproval(
+      run.runId,
+      "review",
+      decided,
+    );
+
+    expect(outcome.kind).toBe("resumed");
+    await expect(store.approvals.get(task.id)).resolves.toMatchObject({
+      title: "Review [REDACTED]",
+      description: "Decision may contain [REDACTED]",
+      reviewer: "[REDACTED]",
+      decision: { note: "[REDACTED]" },
+    });
+    await expect(
+      store.corrections.list({ runId: run.runId }),
+    ).resolves.toContainEqual(
+      expect.objectContaining({
+        observed: { note: "[REDACTED]" },
+        corrected: { note: "[REDACTED]" },
+        reason: "remove [REDACTED]",
+        reviewer: "[REDACTED]",
+      }),
+    );
+    await expect(store.events.list()).resolves.toContainEqual(
+      expect.objectContaining({
+        id: "late-approval-event",
+        summary: "[REDACTED] approved by [REDACTED]",
+        actor: "[REDACTED]",
+      }),
+    );
   });
 
   it("resumeExternalJobResult continues execution to completion", async () => {

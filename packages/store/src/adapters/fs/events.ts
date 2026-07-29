@@ -1,10 +1,12 @@
 // EventLogStore's fs implementation (V1 event log foundation, AMENDMENTS.md
-// A61) — mirrors signals.ts's append-only, scan-oriented pattern: each
+// A61) — mirrors signals.ts's append-oriented, scan-oriented pattern: each
 // entry is its own file (not a KeyedJsonCollection — this store's `list`
 // contract needs newest-first ordering plus `since`/`limit` filtering,
 // which a plain "every file in this directory, insertion order" collection
 // doesn't give for free), and filenames are self-describing
-// (`<occurredAt>__<id>.json`) the same way signals.ts's are
+// (`<occurredAt>__<id>.json`) the same way signals.ts's are. The security-
+// only `replaceAudit` path rewrites that same file without changing either
+// path component or any event fact.
 // (`<correlationId>__<receivedAt>.json`) — the two fields that matter most
 // for a human skimming the directory.
 //
@@ -31,6 +33,22 @@ export class FsEventLogStore implements EventLogStore {
 
   async append(entry: EventLogEntry): Promise<void> {
     await new JsonFileHandle<EventLogEntry>(this.pathFor(entry)).write(entry);
+  }
+
+  async replaceAudit(
+    eventId: string,
+    audit: { summary: string; actor?: string },
+  ): Promise<void> {
+    const entry = (await this.listStored()).find(
+      (candidate) => candidate.id === eventId,
+    );
+    if (!entry) return;
+    const { actor: _actor, ...withoutActor } = entry;
+    await new JsonFileHandle<EventLogEntry>(this.pathFor(entry)).write({
+      ...withoutActor,
+      summary: audit.summary,
+      ...("actor" in audit ? { actor: audit.actor } : {}),
+    });
   }
 
   private async listStored(): Promise<EventLogEntry[]> {

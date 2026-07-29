@@ -195,6 +195,45 @@ export function runAartStoreConformanceSuite(label: string, options: Conformance
         await expect(store.waits.get(runId, "wait_step")).resolves.toEqual(wait);
       });
 
+      it("redacts the wait audit while preserving exact signal matching through a one-way key", async () => {
+        const runId = uniqueId("run");
+        const wait: WaitCondition = {
+          type: "signal",
+          name: "quote.received",
+          correlationId: "late-secret-correlation",
+          schemaVersion: 1,
+        };
+        await store.waits.put(
+          runId,
+          "wait_step",
+          wait,
+          new Date().toISOString(),
+        );
+        await store.waits.redactAudit(runId, "wait_step", {
+          ...wait,
+          correlationId: "[REDACTED]",
+        });
+
+        await expect(store.waits.list()).resolves.toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              runId,
+              stepId: "wait_step",
+              wait: {
+                ...wait,
+                correlationId: "[REDACTED]",
+              },
+            }),
+          ]),
+        );
+        await expect(
+          store.waits.findSignalMatches(
+            "quote.received",
+            "late-secret-correlation",
+          ),
+        ).resolves.toEqual([{ runId, stepId: "wait_step" }]);
+      });
+
       it("delete removes a wait", async () => {
         const runId = uniqueId("run");
         await store.waits.put(runId, "wait_step", fixtureWait(), new Date().toISOString());
@@ -258,6 +297,27 @@ export function runAartStoreConformanceSuite(label: string, options: Conformance
         await expect(
           store.signals.findUnconsumedMatch("x", "corr-redacted"),
         ).resolves.toBeUndefined();
+      });
+
+      it("records the consuming run without exposing provenance in the public Signal shape", async () => {
+        const runId = uniqueId("run");
+        const signal: Signal = {
+          id: uniqueId("sig"),
+          name: "x",
+          correlationId: uniqueId("corr"),
+          payload: { token: "plaintext" },
+          receivedAt: new Date().toISOString(),
+        };
+        await store.signals.append(signal);
+        await store.signals.markConsumed(signal.id, {
+          consumedBy: { runId, stepId: "pause" },
+        });
+        await expect(
+          store.signals.listConsumedByRun(runId),
+        ).resolves.toEqual([signal]);
+        await expect(store.signals.list()).resolves.toEqual(
+          expect.arrayContaining([signal]),
+        );
       });
     });
 
@@ -496,6 +556,31 @@ export function runAartStoreConformanceSuite(label: string, options: Conformance
         };
         await store.events.append(entry);
         await expect(store.events.list()).resolves.toEqual(expect.arrayContaining([entry]));
+      });
+
+      it("replaceAudit rewrites data fields without changing event identity or ordering", async () => {
+        const entry: EventLogEntry = {
+          id: uniqueId("evt"),
+          type: "approval.decided",
+          occurredAt: new Date().toISOString(),
+          summary: "approved by late-secret",
+          runId: uniqueId("run"),
+          actor: "late-secret",
+        };
+        await store.events.append(entry);
+        await store.events.replaceAudit(entry.id, {
+          summary: "approved by [REDACTED]",
+          actor: "[REDACTED]",
+        });
+        await expect(store.events.list()).resolves.toEqual(
+          expect.arrayContaining([
+            {
+              ...entry,
+              summary: "approved by [REDACTED]",
+              actor: "[REDACTED]",
+            },
+          ]),
+        );
       });
 
       it("append then list round-trips an EventLogEntry with every correlation field omitted — never collapsed into an explicit undefined/null value", async () => {

@@ -20,6 +20,8 @@ interface SignalRow {
   payload_json: string;
   received_at: string;
   consumed_at: string | null;
+  consumed_by_run_id: string | null;
+  consumed_by_step_id: string | null;
 }
 
 function rowToSignal(row: SignalRow): Signal {
@@ -39,7 +41,7 @@ export class SqliteSignalStore implements SignalStore {
     await this.exec((db) =>
       dbRun(
         db,
-        "INSERT INTO signals (signal_id, name, correlation_id, payload_json, received_at, consumed_at) VALUES (?, ?, ?, ?, ?, NULL)",
+        "INSERT INTO signals (signal_id, name, correlation_id, payload_json, received_at, consumed_at, consumed_by_run_id, consumed_by_step_id) VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL)",
         [signal.id, signal.name, signal.correlationId, JSON.stringify(signal.payload), signal.receivedAt],
       ),
     );
@@ -58,25 +60,43 @@ export class SqliteSignalStore implements SignalStore {
 
   async markConsumed(
     signalId: string,
-    options?: { payload: unknown },
+    options?: {
+      payload?: unknown;
+      consumedBy?: { runId: string; stepId: string };
+    },
   ): Promise<void> {
+    const assignments = ["consumed_at = COALESCE(consumed_at, ?)"];
+    const params: Array<string | null> = [new Date().toISOString()];
+    if (options !== undefined && "payload" in options) {
+      assignments.push("payload_json = ?");
+      params.push(JSON.stringify(options.payload) ?? "null");
+    }
+    if (options?.consumedBy !== undefined) {
+      assignments.push("consumed_by_run_id = ?", "consumed_by_step_id = ?");
+      params.push(
+        options.consumedBy.runId,
+        options.consumedBy.stepId,
+      );
+    }
+    params.push(signalId);
     await this.exec((db) =>
-      options === undefined
-        ? dbRun(
-            db,
-            "UPDATE signals SET consumed_at = ? WHERE signal_id = ?",
-            [new Date().toISOString(), signalId],
-          )
-        : dbRun(
-            db,
-            "UPDATE signals SET consumed_at = ?, payload_json = ? WHERE signal_id = ?",
-            [
-              new Date().toISOString(),
-              JSON.stringify(options.payload) ?? "null",
-              signalId,
-            ],
-          ),
+      dbRun(
+        db,
+        `UPDATE signals SET ${assignments.join(", ")} WHERE signal_id = ?`,
+        params,
+      ),
     );
+  }
+
+  async listConsumedByRun(runId: string): Promise<Signal[]> {
+    const rows = await this.exec((db) =>
+      dbAll<SignalRow>(
+        db,
+        "SELECT * FROM signals WHERE consumed_at IS NOT NULL AND consumed_by_run_id = ?",
+        [runId],
+      ),
+    );
+    return rows.map(rowToSignal);
   }
 
   async list(): Promise<Signal[]> {

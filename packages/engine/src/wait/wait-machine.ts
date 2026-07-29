@@ -148,6 +148,7 @@ export async function enterWait(config: WaitMachineConfig, options: EnterWaitOpt
             existingSignal.payload,
             resolvedSecretRefs,
           ),
+          consumedBy: { runId: run.runId, stepId },
         });
         await revokeSecretTaintedIdempotency(
           tx,
@@ -348,6 +349,7 @@ async function claimAndCompleteWait(config: WaitMachineConfig, args: ClaimAndCom
           signalAudit.payload,
           resolvedSecretRefs,
         ),
+        consumedBy: { runId, stepId },
       });
     }
     await revokeSecretTaintedIdempotency(
@@ -494,11 +496,10 @@ export async function resumeBySignal(
   resolvedSecretRefs: ReadonlySet<string> = new Set(),
   prepareCompletedRun: PrepareCompletedRun,
 ): Promise<ResumeOutcome> {
-  const allWaits = await config.store.waits.list();
-  const matches = allWaits.filter((entry) => {
-    const correlation = waitSignalCorrelation(entry.wait);
-    return correlation !== undefined && correlation.name === signal.name && correlation.correlationId === signal.correlationId;
-  });
+  const matches = await config.store.waits.findSignalMatches(
+    signal.name,
+    signal.correlationId,
+  );
 
   if (matches.length === 0) {
     return { kind: "unmatched", mechanism: "signal-matched" };

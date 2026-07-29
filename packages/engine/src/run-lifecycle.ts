@@ -217,6 +217,7 @@ export async function finalizeTerminal(
           consumerRun,
           outputTaintedLedgerKeys,
           secretRefs,
+          consumerRun.runId === updated.runId ? workflow : undefined,
         ),
     );
     await tx.runs.put(redacted);
@@ -319,6 +320,34 @@ async function resolveContinuation(
   if (!lastStep) {
     throw new Error(`Cannot resolve continuation point for run "${run.runId}": step "${ownerStepId}" (from trailing trace entry "${lastTrace.stepId}") not found in workflow ${workflow.id}@${workflow.version}.`);
   }
+
+  // A persisted skipped trace is already the authoritative result of
+  // `if: false`. Fresh execution never evaluates `until` on that path and
+  // chooses `next`, then `else`, then array order. Reclaim must reproduce
+  // that exact transition rather than feeding the skipped step through the
+  // completed-step control resolver.
+  if (lastTrace.status === "skipped") {
+    const stepIndex = workflow.execution.steps.findIndex(
+      (step) => step.id === lastStep.id,
+    );
+    const refreshedRun = await refreshTaintAfterControlResolution(
+      config,
+      workflow,
+      lastStep,
+      run,
+      1,
+      resolvedSecretRefs,
+      resolvedSecretRefs.size,
+    );
+    return {
+      run: refreshedRun,
+      nextStepId:
+        lastStep.next ??
+        lastStep.else ??
+        workflow.execution.steps[stepIndex + 1]?.id,
+    };
+  }
+
   let ifResult: boolean | undefined;
   let preDispatchControlError: Error | undefined;
   const secretCountBeforeControlResolution = resolvedSecretRefs.size;

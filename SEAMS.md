@@ -51,11 +51,25 @@ function resumeApproval(config: WaitMachineConfig, runId: string, stepId: string
 `WaitMachineConfig.prepareRevokedIdempotencyConsumer` is the sibling trusted
 callback used when that preparation invalidates a global cache entry already
 replayed by another persisted run. The bound `Engine` supplies it and repairs
-the full transitive consumer lineage inside the active transaction. A
+the full transitive consumer lineage inside the active transaction. Producer
+runs are reconstructed before the ledger is declared clean, and the callback
+also repairs run-associated artifacts, approval audits, consumed-signal audits,
+outstanding-wait audit copies, correction values, and activity-event
+summary/actor fields. A
 standalone caller omitting it can delete the cache entry and directly redact
 literal consumer data, but cannot reconstruct downstream workflow provenance;
 this is another reason standalone resume functions are test/split-process
 mechanisms rather than the production composition surface.
+
+`WaitStore.list()` returns the redacted audit condition.
+`WaitStore.findSignalMatches(name, correlationId)` is the engine-only exact
+match seam backed by a one-way adapter fingerprint, and
+`WaitStore.redactAudit(runId, stepId, wait)` replaces only the audit copy
+without changing that fingerprint. `SignalStore.markConsumed(...,
+{ consumedBy: { runId, stepId } })` records internal repair provenance;
+`listConsumedByRun(runId)` retrieves only those already-consumed audit copies
+so a later secret discovery never consumes or rewrites an unrelated
+early-arrival signal.
 
 **Wait-TIMEOUT-expiry sibling seam (architecture §4.4.1's "Expiry note") — a DIFFERENT terminal outcome from resume, S2's ticker should sweep this too, on the same interval:**
 ```ts

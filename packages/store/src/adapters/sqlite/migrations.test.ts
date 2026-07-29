@@ -404,7 +404,7 @@ describe("0006_run_root_taint_paths", () => {
     await expect(through0005.up()).resolves.toBe(5);
 
     const all = new MigrationRunner(
-      ALL_SQLITE_MIGRATIONS(handle.db),
+      ALL_SQLITE_MIGRATIONS(handle.db).slice(0, 6),
       new SqliteMigrationWatermarkStore(handle.db),
       handle.store,
     );
@@ -469,5 +469,105 @@ describe("0006_run_root_taint_paths", () => {
       secretTaintedInputPaths: ["/token"],
       secretTaintedTriggerPaths: ["*"],
     });
+  });
+});
+
+describe("0007_secret_audit_provenance", () => {
+  it("backfills wait match fingerprints and records signal consumers without retaining a raw wait correlation in the audit copy", async () => {
+    dir = await fs.mkdtemp(join(tmpdir(), "aart-sqlite-migration-test-"));
+    const dbPath = join(dir, "aart.db");
+    handle = await openSqliteStore(dbPath, { runMigrations: false });
+
+    const through0006 = new MigrationRunner(
+      ALL_SQLITE_MIGRATIONS(handle.db).slice(0, 6),
+      new SqliteMigrationWatermarkStore(handle.db),
+      handle.store,
+    );
+    await expect(through0006.up()).resolves.toBe(6);
+    const wait = {
+      type: "signal" as const,
+      name: "ready",
+      correlationId: "late-secret-correlation",
+      schemaVersion: 1,
+    };
+    handle.db
+      .prepare(
+        `INSERT INTO waits (run_id, step_id, wait_condition_json, wait_type, resume_at, created_at)
+         VALUES (?, ?, ?, ?, NULL, ?)`,
+      )
+      .run(
+        "run-audit",
+        "pause",
+        JSON.stringify(wait),
+        "signal",
+        "2026-01-01T00:00:00.000Z",
+      );
+    handle.db
+      .prepare(
+        `INSERT INTO signals (signal_id, name, correlation_id, payload_json, received_at, consumed_at)
+         VALUES (?, ?, ?, ?, ?, NULL)`,
+      )
+      .run(
+        "signal-audit",
+        "ready",
+        "late-secret-correlation",
+        JSON.stringify({ value: "secret" }),
+        "2026-01-01T00:00:00.000Z",
+      );
+
+    const all = new MigrationRunner(
+      ALL_SQLITE_MIGRATIONS(handle.db),
+      new SqliteMigrationWatermarkStore(handle.db),
+      handle.store,
+    );
+    await expect(all.up()).resolves.toBe(7);
+    await handle.store.waits.redactAudit("run-audit", "pause", {
+      ...wait,
+      correlationId: "[REDACTED]",
+    });
+    await expect(handle.store.waits.list()).resolves.toEqual([
+      expect.objectContaining({
+        runId: "run-audit",
+        stepId: "pause",
+        wait: { ...wait, correlationId: "[REDACTED]" },
+      }),
+    ]);
+    await expect(
+      handle.store.waits.findSignalMatches(
+        "ready",
+        "late-secret-correlation",
+      ),
+    ).resolves.toEqual([{ runId: "run-audit", stepId: "pause" }]);
+    const storedWait = handle.db
+      .prepare("SELECT * FROM waits WHERE run_id = ? AND step_id = ?")
+      .get("run-audit", "pause");
+    expect(JSON.stringify(storedWait)).not.toContain(
+      "late-secret-correlation",
+    );
+
+    await handle.store.signals.markConsumed("signal-audit", {
+      consumedBy: { runId: "run-audit", stepId: "pause" },
+    });
+    await expect(
+      handle.store.signals.listConsumedByRun("run-audit"),
+    ).resolves.toEqual([
+      expect.objectContaining({ id: "signal-audit" }),
+    ]);
+    const originalConsumedAt = "2026-01-02T03:04:05.000Z";
+    handle.db
+      .prepare(
+        "UPDATE signals SET consumed_at = ? WHERE signal_id = ?",
+      )
+      .run(originalConsumedAt, "signal-audit");
+    await handle.store.signals.markConsumed("signal-audit", {
+      payload: { value: "[REDACTED]" },
+    });
+    expect(
+      handle.db
+        .prepare(
+          "SELECT consumed_at FROM signals WHERE signal_id = ?",
+        )
+        .get("signal-audit"),
+    ).toEqual({ consumed_at: originalConsumedAt });
   });
 });

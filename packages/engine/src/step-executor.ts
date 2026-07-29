@@ -5,7 +5,7 @@
 // normal dispatch and handed to wait/wait-machine.ts instead.
 import { findExpressionTokens, parseExpression, type ExprContext, type ResolveOptions } from "@aart/expr";
 import type { AartStore } from "@aart/store";
-import type { ApprovalTask, LlmCallMetadata, RetryPolicy, RunRecord, StepTrace, WaitCondition, Workflow, WorkflowStep } from "@aart/types";
+import type { ApprovalTask, LlmCallMetadata, RedactFn, RetryPolicy, RunRecord, StepTrace, WaitCondition, Workflow, WorkflowStep } from "@aart/types";
 import { AartError, DEFAULT_EFFECTFUL_CAPABILITIES, isEffectfulCapability, IterationLimitExceededError, TimeoutError } from "@aart/types";
 import { checkCapabilityDispatch, alwaysEmptyGrantedCapabilities } from "./capability.js";
 import { parseDurationMs } from "./duration.js";
@@ -562,6 +562,7 @@ async function appendTracesAndPersist(
           consumerRun,
           outputTaintedLedgerKeys,
           secretRefs,
+          consumerRun.runId === prepared.runId ? workflow : undefined,
         ),
     );
     await tx.runs.put(redacted);
@@ -745,15 +746,67 @@ function annotateHistoricalDataTaint(
           iterationBinding,
         ),
     );
-    trace.push(
+    let annotated =
       dataTainted && entry.outputs !== undefined
         ? {
             ...entry,
             secretTainted: true,
             secretTaintedPaths: ["*"],
           }
-        : entry,
-    );
+        : entry;
+
+    // A forEach aggregate is a synthetic trace whose `outputs.items` are
+    // copied from the immediately preceding iteration traces. Historical
+    // reconstruction must rebuild that ownership edge explicitly; the
+    // authored `with`/`forEach` expressions do not reference those child
+    // traces and therefore cannot carry repaired cache taint on their own.
+    if (
+      step.forEach !== undefined &&
+      entry.iterationIndex === undefined &&
+      entry.stepId === step.id
+    ) {
+      const children: StepTrace[] = [];
+      for (let index = trace.length - 1; index >= 0; index -= 1) {
+        const candidate = trace[index]!;
+        if (
+          authoredStepIdForTrace(workflow, candidate) !== step.id ||
+          candidate.iterationIndex === undefined
+        ) {
+          break;
+        }
+        children.unshift(candidate);
+      }
+      const childPaths = children.flatMap((child, childIndex) => {
+        const paths =
+          child.secretTaintedPaths ??
+          (child.secretTainted === true ? ["*"] : []);
+        const itemIndex = child.iterationIndex ?? childIndex;
+        return paths.map((path) =>
+          path === "*"
+            ? `/items/${itemIndex}`
+            : `/items/${itemIndex}${path}`,
+        );
+      });
+      const childControlTainted = children.some(
+        (child) => child.controlSecretTainted === true,
+      );
+      if (childPaths.length > 0 || childControlTainted) {
+        annotated = {
+          ...annotated,
+          secretTainted: true,
+          secretTaintedPaths: [
+            ...new Set([
+              ...(annotated.secretTaintedPaths ?? []),
+              ...childPaths,
+            ]),
+          ],
+          ...(childControlTainted
+            ? { controlSecretTainted: true }
+            : {}),
+        };
+      }
+    }
+    trace.push(annotated);
   }
   return { ...run, trace };
 }
@@ -1007,6 +1060,169 @@ export function prepareTaintAfterControlResolution(
   };
 }
 
+function redactApprovalAudit(
+  redact: RedactFn,
+  task: ApprovalTask,
+  resolvedSecretRefs: ReadonlySet<string>,
+): ApprovalTask {
+  return {
+    ...task,
+    title: applyRedaction(
+      redact,
+      task.title,
+      resolvedSecretRefs,
+    ) as string,
+    description: applyRedaction(
+      redact,
+      task.description,
+      resolvedSecretRefs,
+    ) as string,
+    ...(task.reviewer !== undefined
+      ? {
+          reviewer: applyRedaction(
+            redact,
+            task.reviewer,
+            resolvedSecretRefs,
+          ) as string,
+        }
+      : {}),
+    ...(task.decision !== undefined
+      ? {
+          decision: applyRedaction(
+            redact,
+            task.decision,
+            resolvedSecretRefs,
+          ),
+        }
+      : {}),
+  };
+}
+
+function redactWaitAudit(
+  config: EngineConfig,
+  wait: WaitCondition,
+  resolvedSecretRefs: ReadonlySet<string>,
+): WaitCondition {
+  const redacted = applyRedaction(
+    config.redact,
+    wait,
+    resolvedSecretRefs,
+  ) as WaitCondition;
+  // The discriminant and schema tag are engine identity, not value
+  // channels. Keep them valid while redacting every authored identifier or
+  // payload field in the user-visible audit copy.
+  return {
+    ...redacted,
+    type: wait.type,
+    schemaVersion: wait.schemaVersion,
+  } as WaitCondition;
+}
+
+async function repairRunDurableAudits(
+  config: EngineConfig,
+  store: AartStore,
+  runId: string,
+  resolvedSecretRefs: ReadonlySet<string>,
+): Promise<void> {
+  const [approvals, waits, consumedSignals, corrections, events] =
+    await Promise.all([
+      store.approvals.list({ runId }),
+      store.waits.list(),
+      store.signals.listConsumedByRun(runId),
+      store.corrections.list({ runId }),
+      store.events.list(),
+    ]);
+  for (const task of approvals) {
+    const redacted = redactApprovalAudit(
+      config.redact,
+      task,
+      resolvedSecretRefs,
+    );
+    if (JSON.stringify(redacted) === JSON.stringify(task)) continue;
+    await store.approvals.put(redacted);
+  }
+  for (const entry of waits) {
+    if (entry.runId !== runId) continue;
+    const redacted = redactWaitAudit(
+      config,
+      entry.wait,
+      resolvedSecretRefs,
+    );
+    if (JSON.stringify(redacted) !== JSON.stringify(entry.wait)) {
+      await store.waits.redactAudit(
+        entry.runId,
+        entry.stepId,
+        redacted,
+      );
+    }
+  }
+  for (const signal of consumedSignals) {
+    const payload = applyRedaction(
+      config.redact,
+      signal.payload,
+      resolvedSecretRefs,
+    );
+    if (JSON.stringify(payload) !== JSON.stringify(signal.payload)) {
+      await store.signals.markConsumed(signal.id, { payload });
+    }
+  }
+  for (const correction of corrections) {
+    const redacted = {
+      ...correction,
+      observed: applyRedaction(
+        config.redact,
+        correction.observed,
+        resolvedSecretRefs,
+      ),
+      corrected: applyRedaction(
+        config.redact,
+        correction.corrected,
+        resolvedSecretRefs,
+      ),
+      reason: applyRedaction(
+        config.redact,
+        correction.reason,
+        resolvedSecretRefs,
+      ) as string,
+      reviewer: applyRedaction(
+        config.redact,
+        correction.reviewer,
+        resolvedSecretRefs,
+      ) as string,
+    };
+    if (JSON.stringify(redacted) === JSON.stringify(correction)) continue;
+    await store.corrections.put(redacted);
+  }
+  for (const event of events) {
+    if (event.runId !== runId) continue;
+    const redacted = {
+      ...event,
+      summary: applyRedaction(
+        config.redact,
+        event.summary,
+        resolvedSecretRefs,
+      ) as string,
+      ...(event.actor !== undefined
+        ? {
+            actor: applyRedaction(
+              config.redact,
+              event.actor,
+              resolvedSecretRefs,
+            ) as string,
+          }
+        : {}),
+    };
+    if (JSON.stringify(redacted) !== JSON.stringify(event)) {
+      await store.events.replaceAudit(event.id, {
+        summary: redacted.summary,
+        ...(redacted.actor !== undefined
+          ? { actor: redacted.actor }
+          : {}),
+      });
+    }
+  }
+}
+
 /**
  * Repairs a persisted run that replayed a cache output another execution
  * later proved secret-derived. Direct consumers are pre-marked by
@@ -1021,9 +1237,37 @@ export async function prepareRevokedIdempotencyConsumer(
   run: RunRecord,
   outputTaintedLedgerKeys: ReadonlySet<string>,
   resolvedSecretRefs: ReadonlySet<string>,
+  currentWorkflow?: Workflow,
 ): Promise<RunRecord> {
-  if (outputTaintedLedgerKeys.size === 0) return run;
-  const workflow = await resolveWorkflowForRun(store, run);
+  await repairRunDurableAudits(
+    config,
+    store,
+    run.runId,
+    resolvedSecretRefs,
+  );
+  let workflow: Workflow;
+  if (currentWorkflow) {
+    // The caller's in-memory run can precede its first durable write (and
+    // therefore have neither a stored workflow row nor a captured
+    // snapshot). Its already-resolved authored workflow is the exact
+    // execution authority for this pass.
+    workflow = currentWorkflow;
+  } else {
+    try {
+      workflow = await resolveWorkflowForRun(store, run);
+    } catch (snapshotError) {
+      // A newly known secret can coincide with a scalar inside the captured
+      // definition and make that redacted snapshot fail schema parsing. The
+      // exact persisted workflow version is still an immutable authority for
+      // historical provenance reconstruction.
+      const storedWorkflow = await store.workflows.get(
+        run.workflowId,
+        run.workflowVersion,
+      );
+      if (!storedWorkflow) throw snapshotError;
+      workflow = storedWorkflow;
+    }
+  }
   let prepared = prepareHistoricalSecretTaint(
     config,
     workflow,
@@ -1039,8 +1283,24 @@ export async function prepareRevokedIdempotencyConsumer(
       resolvedSecretRefs,
     ),
   };
+  const taintChanged =
+    prepared.trace.some(
+      (trace, index) =>
+        trace.secretTainted !== run.trace[index]?.secretTainted ||
+        trace.controlSecretTainted !==
+          run.trace[index]?.controlSecretTainted ||
+        JSON.stringify(trace.secretTaintedPaths) !==
+          JSON.stringify(run.trace[index]?.secretTaintedPaths),
+    ) ||
+    JSON.stringify(prepared.secretTaintedInputPaths) !==
+      JSON.stringify(run.secretTaintedInputPaths) ||
+    JSON.stringify(prepared.secretTaintedTriggerPaths) !==
+      JSON.stringify(run.secretTaintedTriggerPaths);
 
-  if (prepared.status === "completed") {
+  if (
+    prepared.status === "completed" &&
+    (outputTaintedLedgerKeys.size > 0 || taintChanged)
+  ) {
     try {
       const outputs = await materializeWorkflowOutputs(workflow, prepared, {
         secretResolver: throwingSecretResolver,
@@ -1136,6 +1396,7 @@ export async function refreshTaintAfterControlResolution(
           consumerRun,
           outputTaintedLedgerKeys,
           secretRefs,
+          consumerRun.runId === preparedRun.runId ? workflow : undefined,
         ),
     );
     await tx.runs.put(refreshedRun);
@@ -1521,6 +1782,7 @@ async function executeWaitDispatch(
         consumerRun,
         outputTaintedLedgerKeys,
         secretRefs,
+        consumerRun.runId === run.runId ? workflow : undefined,
       ),
   };
   const preparedHistoricalRun = prepareTaintAfterControlResolution(

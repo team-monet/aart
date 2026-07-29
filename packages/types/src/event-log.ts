@@ -44,7 +44,7 @@ export const EventLogEntrySchema = z.object({
   type: z.string(),
   /** ISO 8601 timestamp. */
   occurredAt: z.string(),
-  /** A short human string (e.g. "invoice-scan@0.3.0 passed validate") — never a resolved secret value (packages/governance's redaction-lint sweep treats every event write site's summary construction as a plain-string log line, same discipline as this codebase's other structured-log call sites). */
+  /** A short human string (e.g. "invoice-scan@0.3.0 passed validate"). Write sites avoid resolved values; if a later execution nevertheless identifies matching text as secret, EventLogStore's security rewrite redacts this presentation field without changing the event fact. */
   summary: z.string(),
   workflowId: z.string().optional(),
   workflowVersion: z.string().optional(),

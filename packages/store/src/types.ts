@@ -82,8 +82,23 @@ export interface RunStore {
 export interface WaitStore {
   get(runId: string, stepId: string): Promise<WaitCondition | undefined>;
   put(runId: string, stepId: string, wait: WaitCondition, createdAt: string): Promise<void>;
+  /**
+   * Replaces only the user-visible audit copy while preserving the
+   * adapter-internal one-way match fingerprint written by `put()`.
+   */
+  redactAudit(runId: string, stepId: string, wait: WaitCondition): Promise<void>;
   delete(runId: string, stepId: string): Promise<void>;
+  /** User-visible, persistence-safe audit rows. */
   list(): Promise<Array<{ runId: string; stepId: string; wait: WaitCondition; createdAt: string }>>;
+  /**
+   * Matches a resolving signal through an adapter-internal one-way
+   * fingerprint, so a redacted correlation value need not remain in the
+   * durable audit row.
+   */
+  findSignalMatches(
+    name: string,
+    correlationId: string,
+  ): Promise<Array<{ runId: string; stepId: string }>>;
   /**
    * The engine-owned query architecture §4.4.3/§4.7 names explicitly:
    * `getDueWaits(now)` — every `timer`-type wait (and poll-mode
@@ -113,8 +128,13 @@ export interface SignalStore {
    */
   markConsumed(
     signalId: string,
-    options?: { payload: unknown },
+    options?: {
+      payload?: unknown;
+      consumedBy?: { runId: string; stepId: string };
+    },
   ): Promise<void>;
+  /** Consumed audit copies associated with a run, for late-secret repair. */
+  listConsumedByRun(runId: string): Promise<Signal[]>;
   list(): Promise<Signal[]>;
 }
 
@@ -207,9 +227,9 @@ export interface StandingApprovalStore {
 // (AMENDMENTS.md A61, V1 "event log foundation") rather than architecture
 // §5's original 16-member enumeration above — the activity-feed +
 // live-updates spine every real write site across CLI/MCP/dashboard appends
-// to. Append-only, same shape/precedent as SignalStore/RejectedTriggerStore
-// above (`append` + filtered `list`, no `get`/`put`-by-id — an event log
-// entry is never looked up individually or mutated after the fact).
+// to. Facts are append-only: `replaceAudit` may rewrite only data-bearing
+// presentation fields after a value is learned to be secret; it cannot
+// change event identity, type, ordering, or correlation fields.
 // Deliberately NOT staged by the fs adapter's `transact()` — see that
 // method's own doc comment below and adapters/fs/events.ts's module
 // comment; every real write site goes through packages/store/src/
@@ -220,6 +240,14 @@ export interface StandingApprovalStore {
 
 export interface EventLogStore {
   append(entry: EventLogEntry): Promise<void>;
+  /**
+   * Security-only rewrite of an existing audit row after a value is learned
+   * to be secret. Structural identity and ordering fields stay unchanged.
+   */
+  replaceAudit(
+    eventId: string,
+    audit: { summary: string; actor?: string },
+  ): Promise<void>;
   /** Newest-first (descending `occurredAt`). `since` and `limit` are independent, freely-combinable optional filters. */
   list(filter?: { since?: string; limit?: number }): Promise<EventLogEntry[]>;
 }
