@@ -16,6 +16,8 @@ interface RunRow {
   approval_mode: string;
   trigger_json: string;
   inputs_json: string;
+  secret_tainted_input_paths_json: string | null;
+  secret_tainted_trigger_paths_json: string | null;
   params_json: string | null;
   trace_json: string;
   waits_json: string;
@@ -40,6 +42,20 @@ function rowToRun(row: RunRow): RunRecord {
     approvalMode: row.approval_mode as RunRecord["approvalMode"],
     trigger: fromJson(row.trigger_json)!,
     inputs: fromJson(row.inputs_json)!,
+    ...(row.secret_tainted_input_paths_json !== null
+      ? {
+          secretTaintedInputPaths: fromJson<string[]>(
+            row.secret_tainted_input_paths_json,
+          )!,
+        }
+      : {}),
+    ...(row.secret_tainted_trigger_paths_json !== null
+      ? {
+          secretTaintedTriggerPaths: fromJson<string[]>(
+            row.secret_tainted_trigger_paths_json,
+          )!,
+        }
+      : {}),
     params: fromJson(row.params_json),
     trace: fromJson(row.trace_json)!,
     waits: fromJson(row.waits_json)!,
@@ -67,8 +83,8 @@ export class SqliteRunStore implements RunStore {
     await this.exec((db) =>
       dbRun(
         db,
-        `INSERT INTO runs (run_id, workflow_id, workflow_version, status, approved, approval_mode, trigger_json, inputs_json, params_json, trace_json, waits_json, outputs_json, error, artifacts_json, snapshot_json, flag_json, schema_version, started_at, updated_at, ended_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO runs (run_id, workflow_id, workflow_version, status, approved, approval_mode, trigger_json, inputs_json, secret_tainted_input_paths_json, secret_tainted_trigger_paths_json, params_json, trace_json, waits_json, outputs_json, error, artifacts_json, snapshot_json, flag_json, schema_version, started_at, updated_at, ended_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(run_id) DO UPDATE SET
            workflow_id = excluded.workflow_id,
            workflow_version = excluded.workflow_version,
@@ -77,6 +93,8 @@ export class SqliteRunStore implements RunStore {
            approval_mode = excluded.approval_mode,
            trigger_json = excluded.trigger_json,
            inputs_json = excluded.inputs_json,
+           secret_tainted_input_paths_json = excluded.secret_tainted_input_paths_json,
+           secret_tainted_trigger_paths_json = excluded.secret_tainted_trigger_paths_json,
            params_json = excluded.params_json,
            trace_json = excluded.trace_json,
            waits_json = excluded.waits_json,
@@ -98,6 +116,8 @@ export class SqliteRunStore implements RunStore {
           run.approvalMode,
           toJson(run.trigger)!,
           toJson(run.inputs)!,
+          toJson(run.secretTaintedInputPaths),
+          toJson(run.secretTaintedTriggerPaths),
           toJson(run.params),
           toJson(run.trace)!,
           toJson(run.waits)!,

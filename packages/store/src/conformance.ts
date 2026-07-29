@@ -139,6 +139,18 @@ export function runAartStoreConformanceSuite(label: string, options: Conformance
         await expect(store.runs.get(run.runId)).resolves.toEqual(run);
       });
 
+      it("round-trips persisted input and trigger secret-taint paths", async () => {
+        const run = fixtureRun({
+          secretTaintedInputPaths: ["/token"],
+          secretTaintedTriggerPaths: ["*"],
+        });
+        await store.runs.put(run);
+        await expect(store.runs.get(run.runId)).resolves.toMatchObject({
+          secretTaintedInputPaths: ["/token"],
+          secretTaintedTriggerPaths: ["*"],
+        });
+      });
+
       it("get returns undefined for a run that was never put", async () => {
         await expect(store.runs.get("no-such-run")).resolves.toBeUndefined();
       });

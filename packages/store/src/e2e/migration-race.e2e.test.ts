@@ -48,6 +48,7 @@ interface WorkerResult {
   /** V1 event log foundation (AMENDMENTS.md A61) — proves the FOURTH migration (0004_events_table) is also correctly coordinated under this exact race — the first of the four that adds a whole TABLE, not just a column. */
   hasEventsTable?: boolean;
   hasIdempotencySchemaVersionColumn?: boolean;
+  hasRunRootTaintColumns?: boolean;
   error?: string;
 }
 
@@ -90,7 +91,7 @@ describe("sqlite adapter — concurrent-startup migration race (AMENDMENTS.md A5
   const ITERATIONS = 8;
 
   it(
-    `two genuinely separate OS processes opening the SAME fresh sqlite store at once, repeated ${ITERATIONS} times: both always come up cleanly, watermark 5, correct schema, no "duplicate column name" / "database is locked" crash`,
+    `two genuinely separate OS processes opening the SAME fresh sqlite store at once, repeated ${ITERATIONS} times: both always come up cleanly, watermark 6, correct schema, no "duplicate column name" / "database is locked" crash`,
     async () => {
       for (let i = 0; i < ITERATIONS; i++) {
         const dir = await mkdtemp(join(tmpdir(), "aart-sqlite-migration-race-"));
@@ -106,13 +107,15 @@ describe("sqlite adapter — concurrent-startup migration race (AMENDMENTS.md A5
           expect(result.ok, `worker ${label} (iteration ${i}) failed: ${result.error}`).toBe(true);
           // V1 event log foundation (AMENDMENTS.md A61) — was 3
           // (0001+0002+0003_approval_task_authenticated_as) as of D2a/A59;
-          // now 5 (+0004_events_table and
-          // +0005_idempotency_schema_version).
-          expect(result.watermark, `worker ${label} (iteration ${i}) watermark`).toBe(5);
+          // now 6 (+0004_events_table,
+          // +0005_idempotency_schema_version, and
+          // +0006_run_root_taint_paths).
+          expect(result.watermark, `worker ${label} (iteration ${i}) watermark`).toBe(6);
           expect(result.hasPromotedColumn, `worker ${label} (iteration ${i}) deployments.promoted column`).toBe(true);
           expect(result.hasAuthenticatedAsColumn, `worker ${label} (iteration ${i}) approval_tasks.authenticated_as column`).toBe(true);
           expect(result.hasEventsTable, `worker ${label} (iteration ${i}) events table`).toBe(true);
           expect(result.hasIdempotencySchemaVersionColumn, `worker ${label} (iteration ${i}) idempotency_ledger.schema_version column`).toBe(true);
+          expect(result.hasRunRootTaintColumns, `worker ${label} (iteration ${i}) run root taint columns`).toBe(true);
         }
       }
     },

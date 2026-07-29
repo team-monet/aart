@@ -246,10 +246,39 @@ export function createSqliteAddIdempotencySchemaVersionMigration(db: DatabaseSyn
   };
 }
 
+export function createSqliteAddRunRootTaintPathsMigration(db: DatabaseSync): Migration {
+  const addColumn = (name: string): void => {
+    try {
+      db.exec(`ALTER TABLE runs ADD COLUMN ${name} TEXT`);
+    } catch (err) {
+      if (
+        !(
+          err instanceof Error &&
+          err.message.includes("duplicate column name")
+        )
+      ) {
+        throw err;
+      }
+    }
+  };
+  return {
+    id: "0006_run_root_taint_paths",
+    async up(): Promise<void> {
+      addColumn("secret_tainted_input_paths_json");
+      addColumn("secret_tainted_trigger_paths_json");
+    },
+    async down(): Promise<void> {
+      db.exec(`ALTER TABLE runs DROP COLUMN secret_tainted_trigger_paths_json`);
+      db.exec(`ALTER TABLE runs DROP COLUMN secret_tainted_input_paths_json`);
+    },
+  };
+}
+
 export const ALL_SQLITE_MIGRATIONS = (db: DatabaseSync): Migration[] => [
   createSqliteInitMigration(db),
   createSqliteAddDeploymentPromotedMigration(db),
   createSqliteAddApprovalTaskAuthenticatedAsMigration(db),
   createSqliteAddEventsTableMigration(db),
   createSqliteAddIdempotencySchemaVersionMigration(db),
+  createSqliteAddRunRootTaintPathsMigration(db),
 ];

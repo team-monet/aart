@@ -1077,7 +1077,11 @@ export async function executeStep(
   let controlSecretTaint =
     runHasSecretControlledFlow(run) ||
     valueReferencesSecret(step.if) ||
-    valueReferencesSecretTaintedTrace(step.if, run);
+    valueReferencesSecretTaintedTrace(step.if, run) ||
+    (step.next !== undefined &&
+      step.until !== undefined &&
+      (valueReferencesSecret(step.until) ||
+        valueReferencesSecretTaintedTrace(step.until, run, step.id)));
 
   // 1. resolve step.with — EXCEPT for a forEach step, whose `with:` is
   // resolved per-iteration instead (executeForEachStep, below), with the

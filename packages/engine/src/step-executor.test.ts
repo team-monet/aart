@@ -163,6 +163,66 @@ describe("executeStep — guarded back-edges: maxIterations (spec §18.2)", () =
 });
 
 describe("executeStep — guarded back-edges: until (spec §18.2, architecture §4.2)", () => {
+  it("bypasses cache replay and admission before an active secret-dependent until is evaluated", async () => {
+    let executeCount = 0;
+    const block: BlockImplementation = {
+      manifest: {
+        id: "test.until-secret-cache",
+        version: "1.0.0",
+        capabilities: [],
+        inputSchema: {},
+        outputSchema: {},
+        description: "fixture",
+      },
+      execute: async () => ({ value: ++executeCount }),
+    };
+    const { store, config } = await setup({
+      blocks: { [block.manifest.id]: block },
+      resolveSecret: () => true,
+    });
+    await store.idempotencyLedger.put({
+      resolvedKey: idempotencyStorageKey("shared-until"),
+      runId: "other-run",
+      stepId: "poll",
+      recordedOutput: { value: "cached" },
+      createdAt: new Date().toISOString(),
+      schemaVersion: 2,
+    });
+    const workflow = fixtureWorkflow({
+      execution: {
+        type: "workflow",
+        steps: [
+          {
+            id: "poll",
+            uses: block.manifest.id,
+            idempotencyKey: "shared-until",
+            next: "poll",
+            until: "{{ secrets.STOP }}",
+            maxIterations: 2,
+          },
+          { id: "done", uses: "test.echo" },
+        ],
+      },
+    });
+
+    const outcome = await executeStep(
+      config,
+      fixtureRun(),
+      workflow,
+      workflow.execution.steps[0]!,
+      new Set(),
+      undefined,
+    );
+
+    expect(executeCount).toBe(1);
+    expect(outcome.kind).toBe("continue");
+    if (outcome.kind !== "continue") throw new Error("unreachable");
+    expect(outcome.run.trace[0]?.outputs).toEqual({ value: 1 });
+    await expect(
+      store.idempotencyLedger.get(idempotencyStorageKey("shared-until")),
+    ).resolves.toMatchObject({ recordedOutput: { value: "cached" } });
+  });
+
   it("until false: the back-edge (next) IS taken", async () => {
     const { config } = await setup();
     const workflow = fixtureWorkflow({

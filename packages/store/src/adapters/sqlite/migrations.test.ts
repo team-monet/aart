@@ -358,12 +358,12 @@ describe("0005_idempotency_schema_version", () => {
         ('v2:legacy-collision', 'legacy-run', 'work', '{"value":"legacy"}', '2026-01-01T00:00:00.000Z')
     `);
 
-    const all = new MigrationRunner(
-      ALL_SQLITE_MIGRATIONS(handle.db),
+    const through0005 = new MigrationRunner(
+      ALL_SQLITE_MIGRATIONS(handle.db).slice(0, 5),
       new SqliteMigrationWatermarkStore(handle.db),
       handle.store,
     );
-    await expect(all.up()).resolves.toBe(5);
+    await expect(through0005.up()).resolves.toBe(5);
     const indexes = handle.db
       .prepare("PRAGMA index_list(idempotency_ledger)")
       .all() as Array<{ name: string }>;
@@ -387,5 +387,87 @@ describe("0005_idempotency_schema_version", () => {
     await expect(
       handle.store.idempotencyLedger.get("v2:current"),
     ).resolves.toMatchObject({ schemaVersion: 2 });
+  });
+});
+
+describe("0006_run_root_taint_paths", () => {
+  it("adds nullable legacy-safe columns and round-trips both provenance arrays", async () => {
+    dir = await fs.mkdtemp(join(tmpdir(), "aart-sqlite-migration-test-"));
+    const dbPath = join(dir, "aart.db");
+    handle = await openSqliteStore(dbPath, { runMigrations: false });
+
+    const through0005 = new MigrationRunner(
+      ALL_SQLITE_MIGRATIONS(handle.db).slice(0, 5),
+      new SqliteMigrationWatermarkStore(handle.db),
+      handle.store,
+    );
+    await expect(through0005.up()).resolves.toBe(5);
+
+    const all = new MigrationRunner(
+      ALL_SQLITE_MIGRATIONS(handle.db),
+      new SqliteMigrationWatermarkStore(handle.db),
+      handle.store,
+    );
+    await expect(all.up()).resolves.toBe(6);
+    const columns = handle.db
+      .prepare("PRAGMA table_info(runs)")
+      .all() as Array<{
+        name: string;
+        notnull: number;
+        dflt_value: string | null;
+      }>;
+    expect(columns.map((column) => column.name)).toEqual(
+      expect.arrayContaining([
+        "secret_tainted_input_paths_json",
+        "secret_tainted_trigger_paths_json",
+      ]),
+    );
+    for (const name of [
+      "secret_tainted_input_paths_json",
+      "secret_tainted_trigger_paths_json",
+    ]) {
+      expect(columns.find((column) => column.name === name)).toMatchObject({
+        notnull: 0,
+        dflt_value: null,
+      });
+    }
+
+    const now = "2026-01-01T00:00:00.000Z";
+    await handle.store.runs.put({
+      runId: "root-taint-run",
+      workflowId: "wf",
+      workflowVersion: "1.0.0",
+      status: "running",
+      approved: true,
+      approvalMode: "governed",
+      trigger: {
+        type: "manual",
+        id: "trigger",
+        source: "test",
+        payload: null,
+        receivedAt: now,
+      },
+      inputs: {},
+      secretTaintedInputPaths: ["/token"],
+      secretTaintedTriggerPaths: ["*"],
+      trace: [],
+      waits: [],
+      artifacts: [],
+      snapshot: {
+        definitions: {},
+        resolvedVersions: {},
+        packHashes: {},
+        capturedAt: now,
+      },
+      schemaVersion: 2,
+      startedAt: now,
+      updatedAt: now,
+    });
+    await expect(
+      handle.store.runs.get("root-taint-run"),
+    ).resolves.toMatchObject({
+      secretTaintedInputPaths: ["/token"],
+      secretTaintedTriggerPaths: ["*"],
+    });
   });
 });

@@ -2053,7 +2053,10 @@ transaction. An entry is revoked when its key or output is changed by
 redaction, or when the consuming trace is data/control tainted; this also
 covers non-literal derivatives and cache entries originally written by another
 run. Control-tainted dispatches are neither replayed from nor admitted to the
-global cache. `StepTrace.idempotencyLedgerKey` is protected operational
+global cache. Active `next`/`until` dependencies are classified before
+dispatch, so a secret-controlled loop condition cannot open a cache replay or
+write window before its post-step evaluation.
+`StepTrace.idempotencyLedgerKey` is protected operational
 metadata used only to locate that entry and is itself redacted if a later
 secret matches it. Thrown finalization paths perform the same preparation and
 revocation as normal step/wait boundaries. Idempotency storage keys remain namespaced,
@@ -2083,6 +2086,11 @@ Run inputs and trigger payloads carry the same persisted JSON-pointer
 provenance as step outputs. A later secret resolution that discovers a
 matching input/trigger value therefore taints downstream transforms and
 blocks direct public mappings instead of publishing a redaction marker.
+SQLite migration `0006_run_root_taint_paths` persists both path arrays so
+worker reloads and server restarts preserve the same decision. If a later
+secret matches text inside an already-recorded pointer, that root's pointer
+set collapses to `"*"`; security coverage remains conservative without
+persisting the secret-bearing path segment itself.
 forEach aggregate traces likewise inherit child data/control provenance.
 The same retrospective rule applies to each trace's resolved inputs: if a
 later-discovered secret changes a prior trace input, that trace's outputs are

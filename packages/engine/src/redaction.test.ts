@@ -132,6 +132,14 @@ describe("applyRedaction", () => {
 describe("applyRunRedaction", () => {
   const redactKey = (record: unknown): unknown =>
     JSON.parse(JSON.stringify(record).replaceAll("case-secret", "[REDACTED]"));
+  const redactResolved = (
+    record: unknown,
+    refs: ReadonlySet<string>,
+  ): unknown => {
+    let json = JSON.stringify(record);
+    for (const ref of refs) json = json.replaceAll(ref, "[REDACTED]");
+    return JSON.parse(json);
+  };
 
   it("preserves a non-terminal concurrency key so rolling-upgrade intake still sees the lock", () => {
     const run = fixtureRun({
@@ -220,5 +228,36 @@ describe("applyRunRedaction", () => {
 
     expect(redacted.trace).toHaveLength(1);
     expect(redacted).not.toHaveProperty("[REDACTED]");
+  });
+
+  it("collapses persisted root pointers when a later secret matches a path segment", () => {
+    const firstPass = applyRunRedaction(
+      redactResolved,
+      fixtureRun({
+        inputs: { "future-secret": "first-secret" },
+        trigger: {
+          type: "manual",
+          id: "trigger",
+          source: "test",
+          payload: { "future-secret": "first-secret" },
+          receivedAt: "2026-07-29T00:00:00.000Z",
+        },
+      }),
+      new Set(["first-secret"]),
+    );
+    expect(firstPass.secretTaintedInputPaths).toEqual(["/future-secret"]);
+    expect(firstPass.secretTaintedTriggerPaths).toEqual([
+      "/payload/future-secret",
+    ]);
+
+    const secondPass = applyRunRedaction(
+      redactResolved,
+      firstPass,
+      new Set(["future-secret"]),
+    );
+
+    expect(secondPass.secretTaintedInputPaths).toEqual(["*"]);
+    expect(secondPass.secretTaintedTriggerPaths).toEqual(["*"]);
+    expect(JSON.stringify(secondPass)).not.toContain("future-secret");
   });
 });

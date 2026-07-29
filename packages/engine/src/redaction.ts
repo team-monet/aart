@@ -195,18 +195,32 @@ export function applyRunRedaction(redact: RedactFn, run: RunRecord, resolvedSecr
   );
   const inputs = applyRedaction(redact, rawInputs, resolvedSecretRefs);
   const trigger = applyRedaction(redact, rawTrigger, resolvedSecretRefs);
-  const secretTaintedInputPaths = [
-    ...new Set([
-      ...existingInputPaths,
-      ...changedJsonPointers(rawInputs, inputs),
-    ]),
-  ];
-  const secretTaintedTriggerPaths = [
-    ...new Set([
-      ...existingTriggerPaths,
-      ...changedJsonPointers(rawTrigger, trigger),
-    ]),
-  ];
+  const mergeRootTaintPaths = (
+    existing: string[],
+    discovered: string[],
+  ): string[] => {
+    const redactedExisting = applyRedaction(
+      redact,
+      existing,
+      resolvedSecretRefs,
+    );
+    if (
+      existing.includes("*") ||
+      discovered.includes("*") ||
+      changedJsonPointers(existing, redactedExisting).length > 0
+    ) {
+      return ["*"];
+    }
+    return [...new Set([...existing, ...discovered])];
+  };
+  const secretTaintedInputPaths = mergeRootTaintPaths(
+    existingInputPaths,
+    changedJsonPointers(rawInputs, inputs),
+  );
+  const secretTaintedTriggerPaths = mergeRootTaintPaths(
+    existingTriggerPaths,
+    changedJsonPointers(rawTrigger, trigger),
+  );
   const redactedTrace = run.trace.map((trace): StepTrace => {
     const redactedInputs = applyRedaction(
       redact,
