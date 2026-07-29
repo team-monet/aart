@@ -3,6 +3,7 @@ import type { BlockImplementation } from "@aart/types";
 import type { AartStore } from "@aart/store";
 import { afterEach, describe, expect, it } from "vitest";
 import { executeStep } from "./step-executor.js";
+import { idempotencyStorageKey } from "./idempotency.js";
 import {
   capabilityBlock,
   createTestStore,
@@ -424,7 +425,7 @@ describe("executeStep — idempotencyKey (spec §30.2)", () => {
     const outcome = await executeStep(config, run, workflow, workflow.execution.steps[0]!, new Set(), undefined);
     if (outcome.kind !== "continue") throw new Error("unreachable");
     expect(outcome.run.trace[0]?.outputs).toEqual({ echoed: { to: "a@b.com" } });
-    await expect(store.idempotencyLedger.get("run-idem-1:send")).resolves.toBeDefined();
+    await expect(store.idempotencyLedger.get(idempotencyStorageKey("run-idem-1:send"))).resolves.toBeDefined();
   });
 
   it("a second execution with the SAME resolved key replays the recorded output instead of re-executing the block", async () => {
@@ -476,7 +477,7 @@ describe("executeStep — idempotencyKey (spec §30.2)", () => {
     const run = fixtureRun({ runId: "run-idem-3" });
     const workflow = fixtureWorkflow({ execution: { type: "workflow", steps: [{ id: "s1", uses: "test.fail-idem", idempotencyKey: "{{ run.id }}:s1" }] } });
     await executeStep(config, run, workflow, workflow.execution.steps[0]!, new Set(), undefined);
-    await expect(store.idempotencyLedger.get("run-idem-3:s1")).resolves.toBeUndefined();
+    await expect(store.idempotencyLedger.get(idempotencyStorageKey("run-idem-3:s1"))).resolves.toBeUndefined();
   });
 
   it("does not cache output from an invocation that consumed secret data", async () => {
@@ -508,8 +509,58 @@ describe("executeStep — idempotencyKey (spec §30.2)", () => {
     );
 
     await expect(
-      store.idempotencyLedger.get("run-idem-secret:derive"),
+      store.idempotencyLedger.get(idempotencyStorageKey("run-idem-secret:derive")),
     ).resolves.toBeUndefined();
+  });
+
+  it("does not replay an unversioned legacy ledger entry", async () => {
+    let executeCount = 0;
+    const block: BlockImplementation = {
+      manifest: {
+        id: "test.versioned-idempotency",
+        version: "1.0.0",
+        capabilities: [],
+        inputSchema: {},
+        outputSchema: {},
+        description: "fixture",
+      },
+      execute: async () => ({ value: ++executeCount }),
+    };
+    const { store, config } = await setup({
+      blocks: { [block.manifest.id]: block },
+    });
+    await store.idempotencyLedger.put({
+      resolvedKey: "stable-key",
+      runId: "legacy-run",
+      stepId: "work",
+      recordedOutput: { value: "legacy-secret" },
+      createdAt: new Date().toISOString(),
+    });
+    const workflow = fixtureWorkflow({
+      execution: {
+        type: "workflow",
+        steps: [
+          {
+            id: "work",
+            uses: block.manifest.id,
+            idempotencyKey: "stable-key",
+          },
+        ],
+      },
+    });
+
+    const outcome = await executeStep(
+      config,
+      fixtureRun(),
+      workflow,
+      workflow.execution.steps[0]!,
+      new Set(),
+      undefined,
+    );
+
+    if (outcome.kind !== "continue") throw new Error("unreachable");
+    expect(outcome.run.trace[0]?.outputs).toEqual({ value: 1 });
+    expect(executeCount).toBe(1);
   });
 });
 
@@ -598,7 +649,7 @@ describe("executeStep — dry-run mode (S9 reconciliation ledger item 7, archite
     if (dryOutcome.kind !== "continue") throw new Error("unreachable");
     expect(dryOutcome.run.trace[0]?.outputs).toMatchObject({ dryRun: true });
     expect(realCallCount).toBe(0);
-    await expect(store.idempotencyLedger.get("run-dryrun-idem:send")).resolves.toBeUndefined();
+    await expect(store.idempotencyLedger.get(idempotencyStorageKey("run-dryrun-idem:send"))).resolves.toBeUndefined();
 
     // Second: a REAL dispatch of the SAME resolved idempotencyKey — must
     // actually call the real handler (not short-circuited by the dry run's

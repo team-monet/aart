@@ -115,6 +115,86 @@ describe("createEngine — resume wrappers continue execution past the resumed s
     expect(outcome.run.error).toMatch(/secret-tainted step "pause"/);
   });
 
+  it("resolves resume control secrets before the completed wait is first redacted for persistence", async () => {
+    const { store, cleanup } = await createTestStore();
+    cleanups.push(cleanup);
+    let sawUnprotectedCompletedPayload = false;
+    const redact = (
+      record: unknown,
+      resolvedSecretRefs: ReadonlySet<string>,
+    ): unknown => {
+      if (
+        record !== null &&
+        typeof record === "object" &&
+        (record as { value?: unknown }).value === true &&
+        resolvedSecretRefs.size === 0
+      ) {
+        sawUnprotectedCompletedPayload = true;
+      }
+      const visit = (value: unknown): unknown => {
+        if (
+          (typeof value === "boolean" ||
+            typeof value === "number" ||
+            typeof value === "string") &&
+          resolvedSecretRefs.has(String(value))
+        ) {
+          return "[REDACTED]";
+        }
+        if (Array.isArray(value)) return value.map(visit);
+        if (value !== null && typeof value === "object") {
+          return Object.fromEntries(
+            Object.entries(value).map(([key, nested]) => [
+              key,
+              visit(nested),
+            ]),
+          );
+        }
+        return value;
+      };
+      return visit(record);
+    };
+    const engine = createEngine({
+      store,
+      redact,
+      resolveSecret: () => true,
+      capabilityCheck: alwaysAllowCapabilityCheck,
+      blocks: createBlockRegistry([echoBlock]),
+      computeRetryDelayMs: () => 0,
+    });
+    const workflow = fixtureWorkflow({
+      outputs: [{ name: "result", type: "json", required: true }],
+      execution: {
+        type: "workflow",
+        steps: [
+          {
+            id: "pause",
+            uses: "wait.manual",
+            next: "pause",
+            maxIterations: 1,
+            until: "{{ secrets.STOP }}",
+          },
+        ],
+        outputMapping: { result: "{{ steps.pause.outputs.value }}" },
+      },
+    });
+    await store.workflows.put(workflow);
+    const run = await engine.triggerRun({
+      workflow,
+      trigger: fixtureTrigger(),
+      inputs: {},
+    });
+    await engine.executeRun(run.runId);
+
+    const outcome = await engine.resumeManual(run.runId, "pause", {
+      value: true,
+    });
+
+    expect(outcome.kind).toBe("resumed");
+    expect(sawUnprotectedCompletedPayload).toBe(false);
+    const persisted = await store.runs.get(run.runId);
+    expect(persisted?.trace[0]?.outputs?.["value"]).toMatch(/REDACTED/);
+  });
+
   it("resumeBySignal continues execution and reaches the workflow's actual completion", async () => {
     const { store, engine } = await setup();
     const workflow = fixtureWorkflow({ execution: { type: "workflow", steps: [{ id: "wait_step", uses: "wait.for_signal", with: { name: "quote.received", correlationId: "corr1" } }, { id: "after", uses: "test.echo" }] } });

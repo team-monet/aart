@@ -28,6 +28,16 @@ function outputPointer(path: ReturnType<typeof parseExpression>["path"]): string
     .join("");
 }
 
+function rootPointer(path: ReturnType<typeof parseExpression>["path"]): string {
+  return path
+    .map((segment) =>
+      segment.kind === "property"
+        ? `/${segment.name.replaceAll("~", "~0").replaceAll("/", "~1")}`
+        : `/${segment.index}`,
+    )
+    .join("");
+}
+
 function pathsOverlap(left: string, right: string): boolean {
   if (left === "*" || right === "") return true;
   return (
@@ -55,6 +65,19 @@ export function assertNoSecretTaintedOutputSources(
   for (const [outputName, expression] of Object.entries(workflow.execution.outputMapping)) {
     for (const token of findExpressionTokens(expression)) {
       const parsed = parseExpression(token[0]);
+      if (parsed.root === "inputs" || parsed.root === "trigger") {
+        const paths =
+          parsed.root === "inputs"
+            ? run.secretTaintedInputPaths
+            : run.secretTaintedTriggerPaths;
+        const pointer = rootPointer(parsed.path);
+        if (paths?.some((path) => pathsOverlap(path, pointer))) {
+          throw new Error(
+            `public outputMapping "${outputName}" depends on secret-tainted ${parsed.root} path "${pointer || "/"}"; expose a non-secret derived value instead`,
+          );
+        }
+        continue;
+      }
       if (parsed.root !== "steps") continue;
       const first = parsed.path[0];
       if (first === undefined) {

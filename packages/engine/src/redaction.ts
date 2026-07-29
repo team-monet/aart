@@ -180,12 +180,33 @@ export function applyRedaction<T>(redact: RedactFn, record: T, resolvedSecretRef
  * records no longer participate in matching and remain fully redacted.
  */
 export function applyRunRedaction(redact: RedactFn, run: RunRecord, resolvedSecretRefs: ReadonlySet<string>): RunRecord {
-  const { trace: _trace, ...runWithoutTrace } = run;
+  const {
+    trace: _trace,
+    inputs: rawInputs,
+    trigger: rawTrigger,
+    secretTaintedInputPaths: existingInputPaths = [],
+    secretTaintedTriggerPaths: existingTriggerPaths = [],
+    ...runWithoutTrace
+  } = run;
   const redactedPayload = applyRedaction(
     redact,
     runWithoutTrace,
     resolvedSecretRefs,
   );
+  const inputs = applyRedaction(redact, rawInputs, resolvedSecretRefs);
+  const trigger = applyRedaction(redact, rawTrigger, resolvedSecretRefs);
+  const secretTaintedInputPaths = [
+    ...new Set([
+      ...existingInputPaths,
+      ...changedJsonPointers(rawInputs, inputs),
+    ]),
+  ];
+  const secretTaintedTriggerPaths = [
+    ...new Set([
+      ...existingTriggerPaths,
+      ...changedJsonPointers(rawTrigger, trigger),
+    ]),
+  ];
   const redactedTrace = run.trace.map((trace): StepTrace => {
     const redactedInputs = applyRedaction(
       redact,
@@ -253,7 +274,15 @@ export function applyRunRedaction(redact: RedactFn, run: RunRecord, resolvedSecr
   });
   const redacted: RunRecord = {
     ...redactedPayload,
+    inputs,
+    trigger,
     trace: redactedTrace,
+    ...(secretTaintedInputPaths.length > 0
+      ? { secretTaintedInputPaths }
+      : {}),
+    ...(secretTaintedTriggerPaths.length > 0
+      ? { secretTaintedTriggerPaths }
+      : {}),
   };
   const concurrencyKey = run.params?.concurrencyKey;
   if (

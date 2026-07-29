@@ -193,6 +193,10 @@ interface ClaimAndCompleteArgs {
   mechanism: ResumeMechanism;
   outputs: Record<string, unknown>;
   resolvedSecretRefs: ReadonlySet<string>;
+  prepareCompletedRun?: (
+    run: RunRecord,
+    stepId: string,
+  ) => Promise<RunRecord>;
 }
 
 /**
@@ -222,7 +226,7 @@ interface ClaimAndCompleteArgs {
  * re-entered step, so folding it in makes each cycle's dedupe key unique.
  */
 async function claimAndCompleteWait(config: WaitMachineConfig, args: ClaimAndCompleteArgs): Promise<ResumeOutcome> {
-  const { runId, stepId, dedupeKeySuffix, mechanism, outputs, resolvedSecretRefs } = args;
+  const { runId, stepId, dedupeKeySuffix, mechanism, outputs, resolvedSecretRefs, prepareCompletedRun } = args;
   const now = config.now();
 
   return config.store.transact(async (tx) => {
@@ -291,7 +295,10 @@ async function claimAndCompleteWait(config: WaitMachineConfig, args: ClaimAndCom
       trace: newTrace,
       updatedAt: now.toISOString(),
     };
-    const redacted = applyRunRedaction(config.redact, updatedRun, resolvedSecretRefs);
+    const preparedRun = prepareCompletedRun
+      ? await prepareCompletedRun(updatedRun, stepId)
+      : updatedRun;
+    const redacted = applyRunRedaction(config.redact, preparedRun, resolvedSecretRefs);
     await tx.runs.put(redacted);
     return { kind: "resumed", run: redacted, mechanism };
   });
@@ -415,7 +422,12 @@ export async function failExpiredWait(config: WaitMachineConfig, runId: string, 
  * correctness property that actually matters — the run is never advanced
  * twice — holds under either label.
  */
-export async function resumeBySignal(config: WaitMachineConfig, signal: Signal, resolvedSecretRefs: ReadonlySet<string> = new Set()): Promise<ResumeOutcome> {
+export async function resumeBySignal(
+  config: WaitMachineConfig,
+  signal: Signal,
+  resolvedSecretRefs: ReadonlySet<string> = new Set(),
+  prepareCompletedRun?: ClaimAndCompleteArgs["prepareCompletedRun"],
+): Promise<ResumeOutcome> {
   const allWaits = await config.store.waits.list();
   const matches = allWaits.filter((entry) => {
     const correlation = waitSignalCorrelation(entry.wait);
@@ -440,11 +452,19 @@ export async function resumeBySignal(config: WaitMachineConfig, signal: Signal, 
     mechanism: "signal-matched",
     outputs: normalizePayloadToOutputs(signal.payload),
     resolvedSecretRefs,
+    prepareCompletedRun,
   });
 }
 
 /** **Direct-lookup** resume (architecture §4.4.1 mechanism 3) for a `manual` wait — `aart_resume_run` with just a `runId`+`stepId`, no signal name needed. */
-export async function resumeManual(config: WaitMachineConfig, runId: string, stepId: string, payload: unknown = {}, resolvedSecretRefs: ReadonlySet<string> = new Set()): Promise<ResumeOutcome> {
+export async function resumeManual(
+  config: WaitMachineConfig,
+  runId: string,
+  stepId: string,
+  payload: unknown = {},
+  resolvedSecretRefs: ReadonlySet<string> = new Set(),
+  prepareCompletedRun?: ClaimAndCompleteArgs["prepareCompletedRun"],
+): Promise<ResumeOutcome> {
   return claimAndCompleteWait(config, {
     runId,
     stepId,
@@ -452,11 +472,12 @@ export async function resumeManual(config: WaitMachineConfig, runId: string, ste
     mechanism: "direct-lookup",
     outputs: normalizePayloadToOutputs(payload),
     resolvedSecretRefs,
+    prepareCompletedRun,
   });
 }
 
 /** **Direct-lookup** resume (architecture §4.4.1 mechanism 3) for an `approval` wait — both authorship paths (CLI/dashboard human decision, and PR-merge-as-approval, architecture §7.2) write directly to `ApprovalStore` then call this, never a `Signal` (architecture §4.4.1's explicit statement: "approval... direct ApprovalStore write, either authorship path"). `task.status` must already be terminal (`approved`/`rejected`/`needs_changes`/`expired`) — the caller (governance's approval-write path, S4) is responsible for that state transition; this function only handles the RUN-side resume once it's happened. */
-export async function resumeApproval(config: WaitMachineConfig, runId: string, stepId: string, task: { id: string; status: string; decision?: unknown; reviewer?: string }, resolvedSecretRefs: ReadonlySet<string> = new Set()): Promise<ResumeOutcome> {
+export async function resumeApproval(config: WaitMachineConfig, runId: string, stepId: string, task: { id: string; status: string; decision?: unknown; reviewer?: string }, resolvedSecretRefs: ReadonlySet<string> = new Set(), prepareCompletedRun?: ClaimAndCompleteArgs["prepareCompletedRun"]): Promise<ResumeOutcome> {
   return claimAndCompleteWait(config, {
     runId,
     stepId,
@@ -464,11 +485,12 @@ export async function resumeApproval(config: WaitMachineConfig, runId: string, s
     mechanism: "direct-lookup",
     outputs: { status: task.status, decision: task.decision, reviewer: task.reviewer },
     resolvedSecretRefs,
+    prepareCompletedRun,
   });
 }
 
 /** **Scheduler-tick** resume (architecture §4.4.1 mechanism 2) for a `timer` wait that `getDueWaits` reported as due. S2's ticker calls `getDueWaits(now)` on its interval, then this function for each due entry. */
-export async function resumeTimerWait(config: WaitMachineConfig, runId: string, stepId: string, resolvedSecretRefs: ReadonlySet<string> = new Set()): Promise<ResumeOutcome> {
+export async function resumeTimerWait(config: WaitMachineConfig, runId: string, stepId: string, resolvedSecretRefs: ReadonlySet<string> = new Set(), prepareCompletedRun?: ClaimAndCompleteArgs["prepareCompletedRun"]): Promise<ResumeOutcome> {
   const now = config.now();
   return claimAndCompleteWait(config, {
     runId,
@@ -477,11 +499,12 @@ export async function resumeTimerWait(config: WaitMachineConfig, runId: string, 
     mechanism: "scheduler-tick",
     outputs: { resumedAt: now.toISOString() },
     resolvedSecretRefs,
+    prepareCompletedRun,
   });
 }
 
 /** **Scheduler-tick** resume (architecture §4.4.1 mechanism 2) for `external_job`'s poll sub-path — called by S2's poll mechanism (spec §21.2/architecture §6.1's `poll` trigger, shared scheduler-ticker subsystem) once its polling determines the job is complete. Labeled `scheduler-tick` per architecture §4.4.1's explicit classification of this sub-path, even though the call shape is a direct claim (there is no `Signal`/`SignalStore` involvement for poll-mode `external_job` — see `wait/wait-blocks.ts`'s doc comment and `listExternalJobWaits` below). */
-export async function resumeExternalJobResult(config: WaitMachineConfig, runId: string, stepId: string, resultPayload: unknown, resolvedSecretRefs: ReadonlySet<string> = new Set()): Promise<ResumeOutcome> {
+export async function resumeExternalJobResult(config: WaitMachineConfig, runId: string, stepId: string, resultPayload: unknown, resolvedSecretRefs: ReadonlySet<string> = new Set(), prepareCompletedRun?: ClaimAndCompleteArgs["prepareCompletedRun"]): Promise<ResumeOutcome> {
   return claimAndCompleteWait(config, {
     runId,
     stepId,
@@ -489,6 +512,7 @@ export async function resumeExternalJobResult(config: WaitMachineConfig, runId: 
     mechanism: "scheduler-tick",
     outputs: normalizePayloadToOutputs(resultPayload),
     resolvedSecretRefs,
+    prepareCompletedRun,
   });
 }
 

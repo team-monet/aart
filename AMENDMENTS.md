@@ -2042,16 +2042,34 @@ marker or a non-literal derivative into a successful public result. Block
 secret access defaults to data use and therefore taints arbitrary output;
 trusted connector blocks may explicitly mark authentication-only credential
 use, which leaves a public API response clean. Secret-derived outputs are not
-written to the idempotency cache.
+written to the idempotency cache. Idempotency storage keys are namespaced by
+the engine schema version, so pre-v2 ledger entries (which have no provenance)
+are never replayed after this security upgrade.
 
 Normal dispatch now prepares the raw trace in memory, evaluates `until`
 against that provisional trace, computes data/control provenance, redacts,
 and only then performs the first durable write. Early-arrival waits use the
-same prepare-before-persist hook. `authoredStepId` and `iterationIndex`
+same prepare-before-persist hook; ordinary wait resumes also prepare the
+completed trace inside the atomic claim transaction before its first write.
+`authoredStepId` and `iterationIndex`
 identify forEach traces without parsing a `[n]` suffix, so an authored id such
 as `gate[0]` is never mistaken for generated iteration identity. Provenance
 fields are structural engine metadata: value redaction and post-hoc
 corrections cannot rewrite them.
+
+Run inputs and trigger payloads carry the same persisted JSON-pointer
+provenance as step outputs. A later secret resolution that discovers a
+matching input/trigger value therefore taints downstream transforms and
+blocks direct public mappings instead of publishing a redaction marker.
+forEach aggregate traces likewise inherit child data/control provenance.
+
+Trace identity and execution metadata (`stepId`, `block`, timestamps, status,
+and the explicit authored/iteration identity) are intentionally structural,
+not secret-derived value channels. They remain stable across redaction so a
+persisted run can still resume and expressions can still address prior steps;
+only data-bearing trace fields are value-redacted. A coincidental equality
+between a runtime secret and an authored identifier does not make that
+identifier a derivative of the secret.
 
 Because this metadata changes the security interpretation of persisted
 RunRecords, the engine record schema version is bumped from 1 to 2. Version 2

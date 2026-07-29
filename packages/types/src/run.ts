@@ -104,6 +104,12 @@ export const RunRecordSchema = z.object({
   approvalMode: TrustModeSchema,
   trigger: TriggerSchema,
   inputs: z.record(z.string(), z.unknown()),
+  // JSON pointers within the immutable run inputs / trigger payload that
+  // were changed when a later secret resolution discovered a matching
+  // value. These roots can feed steps and public output mappings just like
+  // StepTrace.outputs, so their provenance must survive persistence too.
+  secretTaintedInputPaths: z.array(z.string()).optional(),
+  secretTaintedTriggerPaths: z.array(z.string()).optional(),
   // Per-run execution options (verbosity, step timeout overrides) —
   // operational tuning, distinct from `inputs` (the workflow's declared
   // data contract); params never affect approval or gates (spec §19.1 Fix F).

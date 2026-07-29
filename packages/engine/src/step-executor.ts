@@ -427,6 +427,15 @@ async function executeForEachStep(
 
   const now = (config.now?.() ?? new Date()).toISOString();
   const firstFailure = traces.find((t) => t.status === "failed");
+  const secretTaintedPaths = traces.flatMap((trace, index) => {
+    const paths =
+      trace.secretTaintedPaths ??
+      (trace.secretTainted === true ? ["*"] : []);
+    return paths.length > 0 ? [`/items/${index}`] : [];
+  });
+  const controlSecretTainted = traces.some(
+    (trace) => trace.controlSecretTainted === true,
+  );
   const aggregate: StepTrace = {
     seq: seq,
     stepId: step.id,
@@ -439,6 +448,15 @@ async function executeForEachStep(
     endedAt: now,
     durationMs: traces.reduce((sum, t) => sum + (t.durationMs ?? 0), 0),
     authoredStepId: step.id,
+    ...(secretTaintedPaths.length > 0 || controlSecretTainted
+      ? {
+          secretTainted: true,
+          secretTaintedPaths,
+          ...(controlSecretTainted
+            ? { controlSecretTainted: true }
+            : {}),
+        }
+      : {}),
   };
 
   return { traces: [...traces, aggregate], failed };
@@ -508,8 +526,15 @@ function pointerForOutputPath(
   ) {
     return undefined;
   }
+  return pointerForPath(path, 2);
+}
+
+function pointerForPath(
+  path: ReturnType<typeof parseExpression>["path"],
+  startIndex = 0,
+): string {
   return path
-    .slice(2)
+    .slice(startIndex)
     .map((segment) =>
       segment.kind === "property"
         ? `/${segment.name.replaceAll("~", "~0").replaceAll("/", "~1")}`
@@ -545,6 +570,20 @@ function valueReferencesSecretTaintedTrace(
     if (typeof expression !== "string") return false;
     for (const token of findExpressionTokens(expression)) {
       const parsed = parseExpression(token[0]);
+      if (parsed.root === "inputs" || parsed.root === "trigger") {
+        const paths =
+          parsed.root === "inputs"
+            ? run.secretTaintedInputPaths
+            : run.secretTaintedTriggerPaths;
+        if (
+          paths?.some((path) =>
+            pathsOverlap(path, pointerForPath(parsed.path)),
+          )
+        ) {
+          return true;
+        }
+        continue;
+      }
       const first = parsed.path[0];
       if (parsed.root !== "steps") continue;
       if (first === undefined) {
@@ -634,6 +673,40 @@ function annotateSecretTaint(
   });
 }
 
+function withRunRootSecretTaint(
+  config: EngineConfig,
+  run: RunRecord,
+  resolvedSecretRefs: ReadonlySet<string>,
+): RunRecord {
+  const inputPaths = [
+    ...new Set([
+      ...(run.secretTaintedInputPaths ?? []),
+      ...changedJsonPointers(
+        run.inputs,
+        applyRedaction(config.redact, run.inputs, resolvedSecretRefs),
+      ),
+    ]),
+  ];
+  const triggerPaths = [
+    ...new Set([
+      ...(run.secretTaintedTriggerPaths ?? []),
+      ...changedJsonPointers(
+        run.trigger,
+        applyRedaction(config.redact, run.trigger, resolvedSecretRefs),
+      ),
+    ]),
+  ];
+  return {
+    ...run,
+    ...(inputPaths.length > 0
+      ? { secretTaintedInputPaths: inputPaths }
+      : {}),
+    ...(triggerPaths.length > 0
+      ? { secretTaintedTriggerPaths: triggerPaths }
+      : {}),
+  };
+}
+
 function recomputeDataSecretTaint(
   config: EngineConfig,
   step: WorkflowStep,
@@ -646,7 +719,11 @@ function recomputeDataSecretTaint(
     resolvedSecretRefs,
     false,
   );
-  const taintAwareRun = { ...run, trace: taintAwareTrace };
+  const taintAwareRun = withRunRootSecretTaint(
+    config,
+    { ...run, trace: taintAwareTrace },
+    resolvedSecretRefs,
+  );
   const iterationBinding =
     step.forEach === undefined ? undefined : (step.as ?? "item");
   return [
@@ -662,14 +739,13 @@ function recomputeDataSecretTaint(
   );
 }
 
-export async function refreshTaintAfterControlResolution(
+export function prepareTaintAfterControlResolution(
   config: EngineConfig,
   step: WorkflowStep,
   run: RunRecord,
   currentTraceCount: number,
   resolvedSecretRefs: ReadonlySet<string>,
-  secretCountBeforeResolution: number,
-): Promise<RunRecord> {
+): RunRecord {
   let refreshedTrace = annotateSecretTaint(
     config,
     run.trace,
@@ -679,16 +755,15 @@ export async function refreshTaintAfterControlResolution(
   const directlySecretControlled =
     valueReferencesSecret(step.if) ||
     (step.next !== undefined && valueReferencesSecret(step.until));
+  const taintAwareRun = withRunRootSecretTaint(
+    config,
+    { ...run, trace: refreshedTrace },
+    resolvedSecretRefs,
+  );
   const indirectlySecretControlled =
-    valueReferencesSecretTaintedTrace(step.if, {
-      ...run,
-      trace: refreshedTrace,
-    }) ||
+    valueReferencesSecretTaintedTrace(step.if, taintAwareRun) ||
     (step.next !== undefined &&
-      valueReferencesSecretTaintedTrace(step.until, {
-        ...run,
-        trace: refreshedTrace,
-      }));
+      valueReferencesSecretTaintedTrace(step.until, taintAwareRun));
   if (
     directlySecretControlled ||
     indirectlySecretControlled ||
@@ -710,14 +785,40 @@ export async function refreshTaintAfterControlResolution(
     );
   }
 
-  const taintChanged = refreshedTrace.some(
+  return {
+    ...taintAwareRun,
+    trace: refreshedTrace,
+    updatedAt: (config.now?.() ?? new Date()).toISOString(),
+  };
+}
+
+export async function refreshTaintAfterControlResolution(
+  config: EngineConfig,
+  step: WorkflowStep,
+  run: RunRecord,
+  currentTraceCount: number,
+  resolvedSecretRefs: ReadonlySet<string>,
+  secretCountBeforeResolution: number,
+): Promise<RunRecord> {
+  const preparedRun = prepareTaintAfterControlResolution(
+    config,
+    step,
+    run,
+    currentTraceCount,
+    resolvedSecretRefs,
+  );
+  const taintChanged = preparedRun.trace.some(
     (trace, index) =>
       trace.secretTainted !== run.trace[index]?.secretTainted ||
       trace.controlSecretTainted !==
         run.trace[index]?.controlSecretTainted ||
       JSON.stringify(trace.secretTaintedPaths) !==
         JSON.stringify(run.trace[index]?.secretTaintedPaths),
-  );
+  ) ||
+    JSON.stringify(preparedRun.secretTaintedInputPaths) !==
+      JSON.stringify(run.secretTaintedInputPaths) ||
+    JSON.stringify(preparedRun.secretTaintedTriggerPaths) !==
+      JSON.stringify(run.secretTaintedTriggerPaths);
   if (
     !taintChanged &&
     resolvedSecretRefs.size === secretCountBeforeResolution
@@ -727,11 +828,7 @@ export async function refreshTaintAfterControlResolution(
 
   const refreshedRun = applyRunRedaction(
     config.redact,
-    {
-      ...run,
-      trace: refreshedTrace,
-      updatedAt: (config.now?.() ?? new Date()).toISOString(),
-    },
+    preparedRun,
     resolvedSecretRefs,
   );
   await config.store.runs.put(refreshedRun);
@@ -989,10 +1086,18 @@ export async function executeStep(
     resolvedSecretRefs,
     config,
   );
+  const provisionalTaintAwareRun = withRunRootSecretTaint(
+    config,
+    provisionalRun,
+    resolvedSecretRefs,
+  );
   controlSecretTaint ||=
     step.next !== undefined &&
     (valueReferencesSecret(step.until) ||
-      valueReferencesSecretTaintedTrace(step.until, provisionalRun));
+      valueReferencesSecretTaintedTrace(
+        step.until,
+        provisionalTaintAwareRun,
+      ));
   const finalTraces = annotateSecretTaint(
     config,
     taintAnnotatedTraces,
@@ -1083,7 +1188,14 @@ async function executeWaitDispatch(
       const untilSecretControlled =
         step.next !== undefined &&
         (valueReferencesSecret(step.until) ||
-          valueReferencesSecretTaintedTrace(step.until, provisionalRun));
+          valueReferencesSecretTaintedTrace(
+            step.until,
+            withRunRootSecretTaint(
+              config,
+              provisionalRun,
+              resolvedSecretRefs,
+            ),
+          ));
       if (!controlSecretTainted && !untilSecretControlled) {
         return provisionalRun;
       }
