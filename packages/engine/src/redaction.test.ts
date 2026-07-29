@@ -4,7 +4,7 @@ import {
   type StepTrace,
 } from "@aart/types";
 import { describe, expect, it } from "vitest";
-import { applyRedaction, applyRunRedaction, createTrackingSecretResolver, identityRedactFn, repairGlobalAuditsForNewSecrets, throwingSecretResolver } from "./redaction.js";
+import { applyRedaction, applyRunRedaction, createTrackingSecretResolver, identityRedactFn, mergePersistedRunTaint, repairGlobalAuditsForNewSecrets, throwingSecretResolver } from "./redaction.js";
 import { createTestStore, fixtureRun } from "./test-utils/fixtures.js";
 
 describe("identityRedactFn", () => {
@@ -77,6 +77,48 @@ describe("repairGlobalAuditsForNewSecrets", () => {
         store.signals.findUnconsumedMatch(
           "late-secret",
           "late-secret",
+        ),
+      ).resolves.toEqual(signal);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it("reconstructs required signal fields when the redactor also scans object keys", async () => {
+    const { store, cleanup } = await createTestStore();
+    try {
+      const signal = {
+        id: "key-scanned-signal",
+        name: "name",
+        correlationId: "correlation",
+        payload: { name: "name" },
+        receivedAt: "2026-07-29T00:00:00.000Z",
+      };
+      await store.signals.append(signal);
+      await repairGlobalAuditsForNewSecrets(
+        store,
+        (record, refs) => {
+          let json = JSON.stringify(record);
+          for (const value of refs) {
+            json = json.replaceAll(value, "[REDACTED]");
+          }
+          return JSON.parse(json);
+        },
+        new Set(["name"]),
+      );
+
+      const [audit] = await store.signals.list();
+      expect(audit).toMatchObject({
+        id: signal.id,
+        name: "[REDACTED]",
+        correlationId: signal.correlationId,
+      });
+      expect(audit).toHaveProperty("payload");
+      expect(JSON.stringify(audit)).not.toContain(':"name"');
+      await expect(
+        store.signals.findUnconsumedMatch(
+          signal.name,
+          signal.correlationId,
         ),
       ).resolves.toEqual(signal);
     } finally {
@@ -495,5 +537,66 @@ describe("applyRunRedaction", () => {
     expect(redacted.secretTaintedTriggerPaths).toEqual(["/payload"]);
     expect(redacted.trace[0]?.secretTaintedPaths).toEqual(["*"]);
     expect(JSON.stringify(redacted)).not.toContain(secretKey);
+  });
+});
+
+describe("mergePersistedRunTaint", () => {
+  it("keeps newly prepared progress while importing a concurrently committed security repair", async () => {
+    const { store, cleanup } = await createTestStore();
+    try {
+      const baseTrace: StepTrace = {
+        seq: 0,
+        stepId: "cached",
+        block: "test.echo",
+        status: "completed",
+        inputs: {},
+        outputs: { value: "raw-operational-value" },
+        startedAt: "2026-07-29T00:00:00.000Z",
+      };
+      const repairedAudit = fixtureRun({
+        runId: "merge-latest-taint",
+        trace: [
+          {
+            ...baseTrace,
+            outputs: { value: "[REDACTED]" },
+            secretTainted: true,
+            secretTaintedPaths: ["*"],
+          },
+        ],
+      });
+      await store.runs.put(repairedAudit);
+      const prepared = fixtureRun({
+        runId: repairedAudit.runId,
+        trace: [
+          baseTrace,
+          {
+            seq: 1,
+            stepId: "next",
+            block: "test.echo",
+            status: "completed",
+            inputs: {},
+            outputs: { value: "new-progress" },
+            startedAt: "2026-07-29T00:00:01.000Z",
+          },
+        ],
+      });
+
+      const merged = await mergePersistedRunTaint(
+        store,
+        prepared,
+      );
+
+      expect(merged.trace).toHaveLength(2);
+      expect(merged.trace[0]).toMatchObject({
+        outputs: { value: "raw-operational-value" },
+        secretTainted: true,
+        secretTaintedPaths: ["*"],
+      });
+      expect(merged.trace[1]?.outputs).toEqual({
+        value: "new-progress",
+      });
+    } finally {
+      await cleanup();
+    }
   });
 });

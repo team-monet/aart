@@ -13,7 +13,7 @@ import { buildExprContext, resolveArrayExpression, resolveBooleanExpression, res
 import { checkIdempotency, idempotencyStorageKey, recordIdempotency, revokeSecretTaintedIdempotency } from "./idempotency.js";
 import { idempotencyAssociationFingerprint } from "./idempotency-association.js";
 import { jsonCompatibilityProblem, jsonValuesEqual, validateWorkflowOutputs } from "./output-validation.js";
-import { applyRedaction, applyRunRedaction, changedJsonPointers, createTrackingSecretResolver, isTextMime, mergeOperationalRunTaint, redactStoredTextArtifacts, repairCustomerVisibleAudits, repairGlobalAuditsForNewSecrets, throwingSecretResolver } from "./redaction.js";
+import { applyRedaction, applyRunRedaction, changedJsonPointers, createTrackingSecretResolver, isTextMime, mergeOperationalRunTaint, mergePersistedRunTaint, redactStoredTextArtifacts, repairCustomerVisibleAudits, repairGlobalAuditsForNewSecrets, throwingSecretResolver } from "./redaction.js";
 import { CURRENT_ENGINE_SCHEMA_VERSION } from "./schema-version.js";
 import { resolveWorkflowForRun } from "./snapshot.js";
 import type { EngineBlockExecutionContext, EngineConfig } from "./types.js";
@@ -585,10 +585,12 @@ async function appendTracesAndPersist(
     resolvedSecretRefs,
   );
   return config.store.transact(async (tx) => {
+    const persistenceAwarePrepared =
+      await mergePersistedRunTaint(tx, prepared);
     const repaired = await revokeSecretTaintedIdempotency(
       tx,
       config.redact,
-      prepared,
+      persistenceAwarePrepared,
       resolvedSecretRefs,
       (
         store,
@@ -1290,10 +1292,12 @@ export async function refreshTaintAfterControlResolution(
   }
 
   return config.store.transact(async (tx) => {
+    const persistenceAwarePrepared =
+      await mergePersistedRunTaint(tx, preparedRun);
     const repaired = await revokeSecretTaintedIdempotency(
       tx,
       config.redact,
-      preparedRun,
+      persistenceAwarePrepared,
       resolvedSecretRefs,
       (
         store,

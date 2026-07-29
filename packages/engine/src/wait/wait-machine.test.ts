@@ -338,6 +338,93 @@ describe("resumeBySignal — signal-matched mechanism (architecture §4.4.1)", (
     await expect(store.waits.get(run.runId, "wait_step")).resolves.toBeUndefined();
   });
 
+  it("rewrites the complete signal audit before consumption clears protected secret state", async () => {
+    const { store, config } = await setup();
+    const secret = "signal-metadata-secret";
+    const run = fixtureRun({ status: "running" });
+    await store.runs.put(run);
+    const wait = {
+      type: "signal" as const,
+      name: secret,
+      correlationId: secret,
+      schemaVersion: CURRENT_ENGINE_SCHEMA_VERSION,
+    };
+    await enterWait(
+      { ...config, redact: redactLiteral(secret) },
+      {
+        run,
+        stepId: "wait_step",
+        blockId: "wait.for_signal",
+        resolvedInputs: {},
+        wait,
+        resolvedSecretRefs: new Set([secret]),
+      },
+    );
+    const signal = {
+      id: uniqueId("sig"),
+      name: secret,
+      correlationId: secret,
+      payload: { echoed: secret },
+      receivedAt: new Date().toISOString(),
+    };
+    await store.signals.append(signal);
+
+    let sawSafeAuditBeforeConsume = false;
+    const observingStore: AartStore = {
+      ...store,
+      transact: (fn) =>
+        store.transact((tx) => {
+          const observingSignals = new Proxy(tx.signals, {
+            get(target, property, receiver) {
+              if (property === "markConsumed") {
+                return async (...args: unknown[]) => {
+                  const audit = (await target.list()).find(
+                    (candidate) => candidate.id === signal.id,
+                  );
+                  expect(JSON.stringify(audit)).not.toContain(
+                    secret,
+                  );
+                  sawSafeAuditBeforeConsume = true;
+                  return Reflect.apply(
+                    target.markConsumed,
+                    target,
+                    args,
+                  ) as Promise<void>;
+                };
+              }
+              const value = Reflect.get(
+                target,
+                property,
+                receiver,
+              );
+              return typeof value === "function"
+                ? value.bind(target)
+                : value;
+            },
+          });
+          return fn({ ...tx, signals: observingSignals });
+        }),
+    };
+
+    const outcome = await resumeBySignal(
+      {
+        ...config,
+        store: observingStore,
+        redact: redactLiteral(secret),
+      },
+      signal,
+    );
+
+    expect(outcome.kind).toBe("resumed");
+    expect(sawSafeAuditBeforeConsume).toBe(true);
+    await expect(store.signals.list()).resolves.toContainEqual({
+      ...signal,
+      name: "[REDACTED]",
+      correlationId: "[REDACTED]",
+      payload: { echoed: "[REDACTED]" },
+    });
+  });
+
   it("redelivery of the same logical signal AFTER the wait has already been fully resolved and cleaned up does NOT double-advance the run — reported as unmatched (safe/inspectable), not an error, and critically not a second 'resumed'", async () => {
     // [DESIGN NOTE, see this session's report]: this is deliberately NOT
     // asserting `kind: "duplicate"` here. Architecture §4.4.2's dedupe

@@ -9,7 +9,7 @@ import type { RunRecord, StepTrace, Workflow, WorkflowStep } from "@aart/types";
 import { ConcurrencyRejectedError } from "@aart/types";
 import { buildExprContext, resolveBooleanExpression } from "./expr-context.js";
 import { decideConcurrency, fingerprintConcurrencyKey, releaseQueuedRuns, resolveConcurrencyKey } from "./concurrency.js";
-import { applyRedaction, applyRunRedaction, createTrackingSecretResolver, mergeOperationalRunTaint, redactStoredTextArtifacts, repairGlobalAuditsForNewSecrets, throwingSecretResolver } from "./redaction.js";
+import { applyRedaction, applyRunRedaction, createTrackingSecretResolver, mergeOperationalRunTaint, mergePersistedRunTaint, redactStoredTextArtifacts, repairGlobalAuditsForNewSecrets, throwingSecretResolver } from "./redaction.js";
 import { assertSchemaVersionCompatible, CURRENT_ENGINE_SCHEMA_VERSION } from "./schema-version.js";
 import { captureExecutionSnapshot, isSnapshotCaptured, resolveWorkflowForRun, uncapturedSnapshot } from "./snapshot.js";
 import { validateWorkflowOutputs, WorkflowOutputValidationError } from "./output-validation.js";
@@ -209,10 +209,12 @@ export async function finalizeTerminal(
   };
   updated = { ...updated, status: terminalStatus, outputs, error: terminalError, endedAt: now.toISOString(), updatedAt: now.toISOString() };
   const redacted = await config.store.transact(async (tx) => {
+    const persistenceAwareUpdated =
+      await mergePersistedRunTaint(tx, updated);
     const repaired = await revokeSecretTaintedIdempotency(
       tx,
       config.redact,
-      updated,
+      persistenceAwareUpdated,
       resolvedSecretRefs,
       (
         store,
@@ -457,14 +459,18 @@ export async function runStepsLoop(config: EngineConfig, initialRun: RunRecord, 
     if (!isSnapshotCaptured(run.snapshot) && isWaitBlockId(step.uses)) {
       const now = config.now?.() ?? new Date();
       const withSnapshot: RunRecord = { ...run, snapshot: await captureExecutionSnapshot(workflow, config.blocks, now, config.computePackHashes) };
-      await config.store.runs.put(
-        applyRunRedaction(
-          config.redact,
-          withSnapshot,
-          resolvedSecretRefs,
-        ),
-      );
-      run = withSnapshot;
+      run = await config.store.transact(async (tx) => {
+        const persistenceAwareSnapshot =
+          await mergePersistedRunTaint(tx, withSnapshot);
+        await tx.runs.put(
+          applyRunRedaction(
+            config.redact,
+            persistenceAwareSnapshot,
+            resolvedSecretRefs,
+          ),
+        );
+        return persistenceAwareSnapshot;
+      });
     }
 
     let outcome: StepOutcome;
@@ -512,10 +518,25 @@ export async function executeRun(config: EngineConfig, runId: string): Promise<R
 
   let run = loaded;
   if (run.status === "pending") {
-    const now = (config.now?.() ?? new Date()).toISOString();
-    run = applyRunRedaction(config.redact, { ...run, status: "running", updatedAt: now }, resolvedSecretRefs);
-    await config.store.runs.put(run);
-  } else if (run.status !== "running") {
+    run = await config.store.transact(async (tx) => {
+      const current = await tx.runs.get(runId);
+      if (current === undefined) {
+        throw new Error(
+          `executeRun: RunRecord "${runId}" disappeared during claim.`,
+        );
+      }
+      if (current.status !== "pending") return current;
+      const now = (config.now?.() ?? new Date()).toISOString();
+      const running = applyRunRedaction(
+        config.redact,
+        { ...current, status: "running", updatedAt: now },
+        resolvedSecretRefs,
+      );
+      await tx.runs.put(running);
+      return running;
+    });
+  }
+  if (run.status !== "running") {
     // Already `waiting`/`completed`/`failed`/`cancelled` — idempotent no-op
     // for a caller that races executeRun against another resume mechanism.
     return run;
@@ -615,12 +636,19 @@ export async function cancelRun(config: EngineConfig, runId: string): Promise<Ru
     updatedAt: now,
     snapshot: isSnapshotCaptured(run.snapshot) ? run.snapshot : await captureExecutionSnapshot(workflow, config.blocks, nowDate, config.computePackHashes),
   };
-  const redacted = applyRunRedaction(config.redact, updated, resolvedSecretRefs);
-  await config.store.transact(async (tx) => {
-    await tx.runs.put(redacted);
+  const redacted = await config.store.transact(async (tx) => {
+    const persistenceAwareUpdated =
+      await mergePersistedRunTaint(tx, updated);
+    const persistenceSafeRun = applyRunRedaction(
+      config.redact,
+      persistenceAwareUpdated,
+      resolvedSecretRefs,
+    );
+    await tx.runs.put(persistenceSafeRun);
     for (const wait of outstandingWaits) {
       await tx.waits.delete(wait.runId, wait.stepId);
     }
+    return persistenceSafeRun;
   });
 
   if (typeof concurrencyKey === "string") {

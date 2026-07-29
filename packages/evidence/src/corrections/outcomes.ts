@@ -44,6 +44,7 @@ export async function updateRunOutput(store: AartStore, correction: Correction):
     "authoredStepId",
     "iterationIndex",
     "idempotencyLedgerKey",
+    "idempotencyLedgerFingerprint",
   ];
   if (protectedTraceFields.some(
     (field) =>

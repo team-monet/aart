@@ -11,6 +11,7 @@ import type {
   Artifact,
   RedactFn,
   RunRecord,
+  Signal,
   StepTrace,
   WaitCondition,
 } from "@aart/types";
@@ -323,6 +324,33 @@ export function redactWaitAudit(
   } as WaitCondition;
 }
 
+export function redactSignalAudit(
+  redact: RedactFn,
+  signal: Pick<Signal, "name" | "correlationId" | "payload">,
+  resolvedSecretRefs: ReadonlySet<string>,
+): Pick<Signal, "name" | "correlationId" | "payload"> {
+  // Rebuild from literal field names. A whole-object redactor may scan keys
+  // as well as values; casting that result would leave required signal
+  // fields missing and could preserve the original value in adapter spreads.
+  return {
+    name: applyRedaction(
+      redact,
+      signal.name,
+      resolvedSecretRefs,
+    ) as string,
+    correlationId: applyRedaction(
+      redact,
+      signal.correlationId,
+      resolvedSecretRefs,
+    ) as string,
+    payload: applyRedaction(
+      redact,
+      signal.payload,
+      resolvedSecretRefs,
+    ),
+  };
+}
+
 interface CustomerVisibleAuditRepairOptions {
   runId?: string;
   includeRuns?: boolean;
@@ -458,18 +486,11 @@ export async function repairCustomerVisibleAudits(
     ]),
   );
   for (const signal of signalsById.values()) {
-    const audit = applyRedaction(
+    const audit = redactSignalAudit(
       redact,
-      {
-        name: signal.name,
-        correlationId: signal.correlationId,
-        payload: signal.payload,
-      },
+      signal,
       resolvedSecretRefs,
-    ) as Pick<
-      typeof signal,
-      "name" | "correlationId" | "payload"
-    >;
+    );
     if (
       JSON.stringify(audit) !==
       JSON.stringify({
@@ -1113,4 +1134,21 @@ export function mergeOperationalRunTaint(
       };
     }),
   };
+}
+
+/**
+ * Merges only security provenance from the latest public audit into a raw
+ * in-memory run immediately before a whole-record write. Filesystem
+ * transactions are serialized, but a step can prepare its next trace before
+ * it acquires that lock; this prevents a repair that committed in between
+ * from being overwritten by the prepared value.
+ */
+export async function mergePersistedRunTaint(
+  store: AartStore,
+  operational: RunRecord,
+): Promise<RunRecord> {
+  const persisted = await store.runs.get(operational.runId);
+  return persisted === undefined
+    ? operational
+    : mergeOperationalRunTaint(operational, persisted);
 }

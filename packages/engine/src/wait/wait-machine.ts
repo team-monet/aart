@@ -17,6 +17,8 @@ import {
   applyRedaction,
   applyRunRedaction,
   mergeOperationalRunTaint,
+  mergePersistedRunTaint,
+  redactSignalAudit,
   repairGlobalAuditsForNewSecrets,
 } from "../redaction.js";
 import { assertSchemaVersionCompatible } from "../schema-version.js";
@@ -133,6 +135,8 @@ export async function enterWait(config: WaitMachineConfig, options: EnterWaitOpt
   // `markConsumed` are "deliberately NOT staged" — see types.ts's
   // `SignalStore` doc comment), not to this check-then-act sequence itself.
   const result = await config.store.transact(async (tx) => {
+    const persistenceAwareRun =
+      await mergePersistedRunTaint(tx, run);
     if (correlation) {
       const existingSignal = await tx.signals.findUnconsumedMatch(correlation.name, correlation.correlationId);
       if (existingSignal) {
@@ -148,7 +152,7 @@ export async function enterWait(config: WaitMachineConfig, options: EnterWaitOpt
         // 3: "the wait resolves immediately... execution proceeds straight
         // to step 8").
         const trace: StepTrace = {
-          seq: run.trace.length,
+          seq: persistenceAwareRun.trace.length,
           stepId,
           authoredStepId: stepId,
           block: blockId,
@@ -168,17 +172,28 @@ export async function enterWait(config: WaitMachineConfig, options: EnterWaitOpt
                 }
               : {}),
         };
-        const updatedRun: RunRecord = { ...run, trace: [...run.trace, trace], updatedAt: now.toISOString() };
+        const updatedRun: RunRecord = {
+          ...persistenceAwareRun,
+          trace: [...persistenceAwareRun.trace, trace],
+          updatedAt: now.toISOString(),
+        };
         const preparedRun = prepareEarlyArrivalRun
           ? await prepareEarlyArrivalRun(updatedRun, tx)
           : updatedRun;
-        await tx.signals.markConsumed(existingSignal.id, {
-          payload: applyRedaction(
+        await tx.signals.replaceAudit(
+          existingSignal.id,
+          redactSignalAudit(
             config.redact,
-            existingSignal.payload,
+            existingSignal,
             resolvedSecretRefs,
           ),
-          consumedBy: { runId: run.runId, stepId },
+          [...resolvedSecretRefs],
+        );
+        await tx.signals.markConsumed(existingSignal.id, {
+          consumedBy: {
+            runId: persistenceAwareRun.runId,
+            stepId,
+          },
         });
         const repairedRun = await revokeSecretTaintedIdempotency(
           tx,
@@ -201,7 +216,7 @@ export async function enterWait(config: WaitMachineConfig, options: EnterWaitOpt
     // at all) — persist the outstanding wait, still inside the same
     // transaction as the check above.
     const trace: StepTrace = {
-      seq: run.trace.length,
+      seq: persistenceAwareRun.trace.length,
       stepId,
       authoredStepId: stepId,
       block: blockId,
@@ -219,10 +234,10 @@ export async function enterWait(config: WaitMachineConfig, options: EnterWaitOpt
           : {}),
     };
     const updatedRun: RunRecord = {
-      ...run,
+      ...persistenceAwareRun,
       status: "waiting",
-      waits: [...run.waits, wait],
-      trace: [...run.trace, trace],
+      waits: [...persistenceAwareRun.waits, wait],
+      trace: [...persistenceAwareRun.trace, trace],
       updatedAt: now.toISOString(),
     };
     const repairedRun = await revokeSecretTaintedIdempotency(
@@ -249,7 +264,7 @@ export async function enterWait(config: WaitMachineConfig, options: EnterWaitOpt
     } as WaitCondition;
     await tx.runs.put(redactedRun);
     await tx.waits.put(
-      run.runId,
+      persistenceAwareRun.runId,
       stepId,
       wait,
       now.toISOString(),
@@ -259,7 +274,11 @@ export async function enterWait(config: WaitMachineConfig, options: EnterWaitOpt
       },
     );
     if (JSON.stringify(auditWait) !== JSON.stringify(wait)) {
-      await tx.waits.redactAudit(run.runId, stepId, auditWait);
+      await tx.waits.redactAudit(
+        persistenceAwareRun.runId,
+        stepId,
+        auditWait,
+      );
     }
     return { run: redactedRun, suspended: true };
   });
@@ -439,12 +458,16 @@ async function claimAndCompleteWait(config: WaitMachineConfig, args: ClaimAndCom
     };
     const preparedRun = await prepareCompletedRun(updatedRun, stepId, tx);
     if (signalAudit !== undefined) {
-      await tx.signals.markConsumed(signalAudit.id, {
-        payload: applyRedaction(
+      await tx.signals.replaceAudit(
+        signalAudit.id,
+        redactSignalAudit(
           config.redact,
-          signalAudit.payload,
+          signalAudit,
           resolvedSecretRefs,
         ),
+        [...resolvedSecretRefs],
+      );
+      await tx.signals.markConsumed(signalAudit.id, {
         consumedBy: { runId, stepId },
       });
     }

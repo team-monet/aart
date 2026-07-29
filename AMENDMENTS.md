@@ -2091,6 +2091,15 @@ association is re-redacted and re-tainted in the same store transaction. The
 active run is part of that graph even though it is not yet in `RunStore`; its
 raw operational value receives the repaired taint metadata in memory while
 only the independently redacted audit value is persisted.
+The filesystem adapter serializes every top-level member operation and
+`transact()` call under one process-local, root-scoped mutex shared by every
+handle opened for that root. Security repair therefore cannot flush a stale
+whole-run image over a concurrently completed step. Because a step may prepare
+its next trace before acquiring that mutex, every engine run-write transaction
+also merges the latest persisted security provenance after it acquires the
+lock, preserving both the new progress and any repair that won first. The
+filesystem adapter remains the local-development store; multi-process server
+workers use the database adapter.
 Historical data/control analysis then follows descendants; if a repaired
 consumer cached a non-literal derivative, that key is revoked and its own
 consumers are repaired until the lineage reaches closure. Waiting runs remain
@@ -2131,6 +2140,10 @@ Signal audit records follow the same retrospective rule. Both the
 ordinary signal-resume claim and the separate early-arrival path replace the
 stored name, correlation id, payload, and fs filename with their redacted audit
 values when post-completion control first discovers a matching secret.
+Each consumption path reconstructs and writes all three audit fields with
+literal structural keys before clearing the sealed operational copy, so a
+crash after the claim cannot discard the only known-secret set while leaving
+plaintext signal metadata durable.
 Consumption also records the owning run/step as adapter-internal provenance. If
 an entirely later workflow step first discovers the secret, the global
 persisted-run reconstruction uses that link to re-redact the already-consumed

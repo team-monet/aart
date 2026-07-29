@@ -97,9 +97,17 @@ for an unconsumed signal. Such a signal keeps a sealed operational copy plus a
 one-way match fingerprint until consumption; `getOperationalSecretValues(id)`
 rehydrates the literals that caused its earlier audit rewrite before the
 engine completes an early-arrival wait. Each replacement rotates the signal's
-authenticated generation.
+authenticated generation. Resume paths call `replaceAudit` for name,
+correlation ID, and payload before `markConsumed` clears that protected copy.
 `listConsumedWithoutProvenance()` supplies the conservative upgrade path for
 already-consumed rows written before migration `0007`.
+
+The filesystem store serializes top-level operations and transactions under a
+process-local mutex shared by every handle to the same normalized root. Engine
+run writes merge the latest persisted taint metadata after entering that
+critical section, so retrospective repair and forward execution cannot
+overwrite one another. Database adapters remain the authority for
+multi-process server workers.
 
 **Wait-TIMEOUT-expiry sibling seam (architecture §4.4.1's "Expiry note") — a DIFFERENT terminal outcome from resume, S2's ticker should sweep this too, on the same interval:**
 ```ts

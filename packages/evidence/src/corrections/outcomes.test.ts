@@ -287,6 +287,8 @@ describe("outcome 1/6 — updateRunOutput (spec §23.4 'update current run outpu
       "controlSecretTainted",
       "authoredStepId",
       "iterationIndex",
+      "idempotencyLedgerKey",
+      "idempotencyLedgerFingerprint",
     ]) {
       await expect(
         updateRunOutput(

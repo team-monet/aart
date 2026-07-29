@@ -65,6 +65,11 @@ function loadKey(path: string): Promise<Buffer> {
   if (existing) return existing;
   const pending = readOrCreateKey(path);
   keyLoads.set(path, pending);
+  void pending.catch(() => {
+    if (keyLoads.get(path) === pending) {
+      keyLoads.delete(path);
+    }
+  });
   return pending;
 }
 

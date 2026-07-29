@@ -493,6 +493,122 @@ describe("fs adapter — documented non-atomic gap: the global signals audit cop
   });
 });
 
+describe("fs adapter — root-scoped operation serialization", () => {
+  it("serializes transactions across two store handles so a stale run cannot overwrite newer progress", async () => {
+    const run = continuationState("raw").run;
+    await store.runs.put(run);
+    const secondStore = createFsStore(root);
+    const events: string[] = [];
+    let releaseFirst!: () => void;
+    let markFirstEntered!: () => void;
+    const firstEntered = new Promise<void>((resolve) => {
+      markFirstEntered = resolve;
+    });
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+
+    const first = store.transact(async (tx) => {
+      events.push("first:start");
+      const current = await tx.runs.get(run.runId);
+      markFirstEntered();
+      await firstGate;
+      await tx.runs.put({
+        ...current!,
+        trace: [
+          {
+            seq: 0,
+            stepId: "completed",
+            block: "test.echo",
+            status: "completed",
+            inputs: {},
+            outputs: { value: "new-progress" },
+            startedAt: new Date().toISOString(),
+          },
+        ],
+      });
+      events.push("first:end");
+    });
+    await firstEntered;
+    const second = secondStore.transact(async (tx) => {
+      events.push("second:start");
+      const current = await tx.runs.get(run.runId);
+      expect(current?.trace).toHaveLength(1);
+      expect(current?.trace[0]?.outputs).toEqual({
+        value: "new-progress",
+      });
+      events.push("second:end");
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(events).toEqual(["first:start"]);
+
+    releaseFirst();
+    await Promise.all([first, second]);
+    expect(events).toEqual([
+      "first:start",
+      "first:end",
+      "second:start",
+      "second:end",
+    ]);
+  });
+
+  it("serializes an immediate signal transition with a transaction audit rewrite", async () => {
+    const signal = {
+      id: "serialized-signal",
+      name: "secret-name",
+      correlationId: "secret-correlation",
+      payload: { value: "secret-value" },
+      receivedAt: new Date().toISOString(),
+    };
+    await store.signals.append(signal);
+    const secondStore = createFsStore(root);
+    let releaseRepair!: () => void;
+    let markRepairEntered!: () => void;
+    const repairEntered = new Promise<void>((resolve) => {
+      markRepairEntered = resolve;
+    });
+    const repairGate = new Promise<void>((resolve) => {
+      releaseRepair = resolve;
+    });
+
+    const repair = store.transact(async (tx) => {
+      markRepairEntered();
+      await repairGate;
+      await tx.signals.replaceAudit(signal.id, {
+        name: "[REDACTED]",
+        correlationId: "[REDACTED]",
+        payload: { value: "[REDACTED]" },
+      });
+    });
+    await repairEntered;
+    let consumed = false;
+    const consume = secondStore.signals
+      .markConsumed(signal.id)
+      .then(() => {
+        consumed = true;
+      });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(consumed).toBe(false);
+
+    releaseRepair();
+    await Promise.all([repair, consume]);
+    await expect(
+      store.signals.findUnconsumedMatch(
+        signal.name,
+        signal.correlationId,
+      ),
+    ).resolves.toBeUndefined();
+    await expect(store.signals.list()).resolves.toEqual([
+      {
+        ...signal,
+        name: "[REDACTED]",
+        correlationId: "[REDACTED]",
+        payload: { value: "[REDACTED]" },
+      },
+    ]);
+  });
+});
+
 describe("fs adapter — signals directory layout", () => {
   it("writes a signal under signals/<correlationId>__<receivedAt>.json", async () => {
     const receivedAt = new Date().toISOString();
