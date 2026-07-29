@@ -12,6 +12,11 @@ import type {
   WaitOperationalRunState,
 } from "../../types.js";
 import { createFsStore } from "./index.js";
+import {
+  createStagingBuffer,
+  flushStagingBuffer,
+  JsonFileHandle,
+} from "./json-file.js";
 import * as paths from "./paths.js";
 
 let root: string;
@@ -562,6 +567,63 @@ describe("fs adapter — documented non-atomic gap: the global signals audit cop
 });
 
 describe("fs adapter — root-scoped operation serialization", () => {
+  it("recovers a crash after a ledger deletion but before its consumer repair flushes", async () => {
+    const ledgerPath = join(
+      paths.idempotencyDir(root),
+      "revoked-entry.json",
+    );
+    const consumerPath = join(
+      paths.runsDir(root),
+      "terminal-consumer.json",
+    );
+    await fs.mkdir(paths.idempotencyDir(root), {
+      recursive: true,
+    });
+    await fs.mkdir(paths.runsDir(root), { recursive: true });
+    await fs.writeFile(
+      ledgerPath,
+      JSON.stringify({ resolvedKey: "revoked" }),
+    );
+    await fs.writeFile(
+      consumerPath,
+      JSON.stringify({ repaired: false }),
+    );
+
+    const staging = createStagingBuffer();
+    await new JsonFileHandle(ledgerPath, staging).delete();
+    await new JsonFileHandle(consumerPath, staging).write({
+      repaired: true,
+    });
+    await expect(
+      flushStagingBuffer(staging, root, {
+        afterEntryApplied(index) {
+          if (index === 0) {
+            throw new Error("simulated process exit");
+          }
+        },
+      }),
+    ).rejects.toThrow(/simulated process exit/);
+
+    await expect(fs.stat(ledgerPath)).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+    await expect(
+      fs.readFile(consumerPath, "utf8").then(JSON.parse),
+    ).resolves.toEqual({ repaired: false });
+
+    const recoveredStore = createFsStore(root);
+    await recoveredStore.runs.list();
+    await expect(fs.stat(ledgerPath)).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+    await expect(
+      fs.readFile(consumerPath, "utf8").then(JSON.parse),
+    ).resolves.toEqual({ repaired: true });
+    await expect(
+      fs.readdir(join(root, ".transactions")),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it("serializes transactions across two store handles so a stale run cannot overwrite newer progress", async () => {
     const run = continuationState("raw").run;
     await store.runs.put(run);

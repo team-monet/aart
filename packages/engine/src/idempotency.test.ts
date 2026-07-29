@@ -1,7 +1,9 @@
 import type { AartStore } from "@aart/store";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  claimIdempotencyReplay,
   checkIdempotency,
+  idempotencyStorageKey,
   recordIdempotency,
   revokeSecretTaintedIdempotency,
 } from "./idempotency.js";
@@ -48,6 +50,100 @@ describe("checkIdempotency / recordIdempotency (spec §30.2, architecture §4.2/
     // No StepTrace was ever written for this "second attempt" — checking
     // idempotency doesn't require one.
     expect(await checkIdempotency(store, key)).toMatchObject({ alreadyCompleted: true });
+  });
+
+  it("registers a replay consumer before its trace exists so concurrent revocation protects the pending continuation", async () => {
+    const store = await setup();
+    const secret = "late-cache-secret";
+    const producer = fixtureRun({
+      runId: "claim-producer",
+      trace: [
+        {
+          seq: 0,
+          stepId: "produce",
+          block: "test.produce",
+          status: "completed",
+          inputs: {},
+          outputs: { value: secret },
+          startedAt: new Date().toISOString(),
+        },
+      ],
+    });
+    const consumer = fixtureRun({
+      runId: "claim-consumer",
+      status: "running",
+      trace: [],
+    });
+    await store.runs.put(producer);
+    await store.runs.put(consumer);
+    await store.runs.putOperationalState(consumer.runId, {
+      run: consumer,
+      resolvedSecretValues: [],
+    });
+    await recordIdempotency(
+      store,
+      "shared-key",
+      producer.runId,
+      "produce",
+      { value: secret },
+      new Date(),
+      0,
+    );
+    const resolvedSecretRefs = new Set<string>();
+
+    await expect(
+      claimIdempotencyReplay(
+        store,
+        "shared-key",
+        consumer,
+        "consume",
+        0,
+        resolvedSecretRefs,
+        () => true,
+      ),
+    ).resolves.toMatchObject({
+      alreadyCompleted: true,
+      recordedOutput: { value: secret },
+    });
+    await expect(
+      store.runs.getOperationalState(consumer.runId),
+    ).resolves.toMatchObject({
+      pendingIdempotencyReplays: [
+        {
+          ledgerKey: idempotencyStorageKey("shared-key"),
+          stepId: "consume",
+          traceSeq: 0,
+        },
+      ],
+    });
+
+    const redact = (
+      record: unknown,
+      refs: ReadonlySet<string>,
+    ): unknown => {
+      let json = JSON.stringify(record);
+      for (const value of refs) {
+        json = json.replaceAll(value, "[REDACTED]");
+      }
+      return JSON.parse(json);
+    };
+    await revokeSecretTaintedIdempotency(
+      store,
+      redact,
+      fixtureRun({ runId: "discoverer" }),
+      new Set([secret]),
+    );
+
+    await expect(
+      store.idempotencyLedger.get(
+        idempotencyStorageKey("shared-key"),
+      ),
+    ).resolves.toBeUndefined();
+    await expect(
+      store.runs.getOperationalState(consumer.runId),
+    ).resolves.toMatchObject({
+      resolvedSecretValues: [secret],
+    });
   });
 
   it("does not replay a legacy entry that collides with the current storage-key string", async () => {

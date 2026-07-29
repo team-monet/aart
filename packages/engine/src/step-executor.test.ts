@@ -638,7 +638,7 @@ describe("executeStep — idempotencyKey (spec §30.2)", () => {
         return { sentCount: executeCount };
       },
     };
-    const { config } = await setup({ blocks: { "test.counting": countingBlock } });
+    const { store, config } = await setup({ blocks: { "test.counting": countingBlock } });
     const run = fixtureRun({ runId: "run-idem-2" });
     const workflow = fixtureWorkflow({ execution: { type: "workflow", steps: [{ id: "send", uses: "test.counting", idempotencyKey: "{{ run.id }}:send" }] } });
 
@@ -654,6 +654,11 @@ describe("executeStep — idempotencyKey (spec §30.2)", () => {
     if (second.kind !== "continue") throw new Error("unreachable");
     expect(second.run.trace[0]?.outputs).toEqual({ sentCount: 1 }); // REPLAYED, not sentCount: 2
     expect(executeCount).toBe(1); // block.execute was called exactly once, ever
+    await expect(
+      store.runs.getOperationalState(run.runId),
+    ).resolves.not.toHaveProperty(
+      "pendingIdempotencyReplays",
+    );
   });
 
   it("a step with no idempotencyKey always re-executes (no protection — architecture's documented at-least-once boundary)", async () => {

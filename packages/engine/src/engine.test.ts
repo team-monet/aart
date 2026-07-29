@@ -1566,8 +1566,8 @@ describe("createEngine — resume wrappers continue execution past the resumed s
 
     expect(outcome.kind).toBe("resumed");
     await expect(store.approvals.get(task.id)).resolves.toMatchObject({
-      title: "Review [REDACTED]",
-      description: "Decision may contain [REDACTED]",
+      title: "[REDACTED]",
+      description: "[REDACTED]",
       reviewer: "[REDACTED]",
       decision: { note: "[REDACTED]" },
       authenticatedAs: "[REDACTED]",
@@ -1576,17 +1576,17 @@ describe("createEngine — resume wrappers continue execution past the resumed s
       store.corrections.list({ runId: run.runId }),
     ).resolves.toContainEqual(
       expect.objectContaining({
-        fieldPath: "outputs.[REDACTED]",
+        fieldPath: "[REDACTED]",
         observed: { note: "[REDACTED]" },
         corrected: { note: "[REDACTED]" },
-        reason: "remove [REDACTED]",
+        reason: "[REDACTED]",
         reviewer: "[REDACTED]",
       }),
     );
     await expect(store.events.list()).resolves.toContainEqual(
       expect.objectContaining({
         id: "late-approval-event",
-        summary: "[REDACTED] approved by [REDACTED]",
+        summary: "[REDACTED]",
         actor: "[REDACTED]",
       }),
     );
@@ -1595,8 +1595,8 @@ describe("createEngine — resume wrappers continue execution past the resumed s
     ).resolves.toMatchObject({
       name: "[REDACTED]",
       kind: "[REDACTED]",
-      mime: "text/[REDACTED]",
-      path: "[REDACTED]/report.txt",
+      mime: "[REDACTED]",
+      path: "[REDACTED]",
       bytes: 10,
     });
     await expect(

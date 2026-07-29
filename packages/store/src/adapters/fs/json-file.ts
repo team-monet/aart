@@ -14,8 +14,25 @@
 // entry is flushed as its own atomic write-temp-then-rename (or removed).
 // If the callback throws, the buffer is discarded — nothing was ever
 // written.
-import { promises as fs } from "node:fs";
-import { basename, dirname, join, sep } from "node:path";
+import {
+  existsSync,
+  mkdirSync,
+  promises as fs,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  rmdirSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
+import {
+  basename,
+  dirname,
+  join,
+  relative,
+  resolve,
+  sep,
+} from "node:path";
 
 export interface StagingBuffer {
   /** absolute file path -> pending JSON content (write) | null (delete) */
@@ -24,6 +41,58 @@ export interface StagingBuffer {
 
 export function createStagingBuffer(): StagingBuffer {
   return { pending: new Map() };
+}
+
+interface StagingJournalEntry {
+  relativePath: string;
+  contentBase64: string | null;
+}
+
+interface StagingJournal {
+  version: 1;
+  entries: StagingJournalEntry[];
+}
+
+export interface FlushStagingOptions {
+  /** Test-only crash hook; the durable journal intentionally remains. */
+  afterEntryApplied?: (index: number) => Promise<void> | void;
+}
+
+function journalDir(root: string): string {
+  return join(root, ".transactions");
+}
+
+function resolveJournalTarget(
+  root: string,
+  relativePath: string,
+): string {
+  const normalizedRoot = resolve(root);
+  const target = resolve(normalizedRoot, relativePath);
+  if (
+    target !== normalizedRoot &&
+    !target.startsWith(`${normalizedRoot}${sep}`)
+  ) {
+    throw new Error(
+      `Filesystem transaction journal path escapes store root: ${relativePath}`,
+    );
+  }
+  return target;
+}
+
+function toJournal(root: string, buffer: StagingBuffer): StagingJournal {
+  const normalizedRoot = resolve(root);
+  return {
+    version: 1,
+    entries: [...buffer.pending].map(([path, content]) => {
+      const relativePath = relative(normalizedRoot, resolve(path));
+      resolveJournalTarget(normalizedRoot, relativePath);
+      return {
+        relativePath,
+        contentBase64:
+          content === null ? null : content.toString("base64"),
+      };
+    }),
+  };
 }
 
 async function atomicWriteFile(path: string, content: Buffer): Promise<void> {
@@ -45,13 +114,121 @@ function isEnoent(err: unknown): boolean {
   return typeof err === "object" && err !== null && "code" in err && (err as { code?: string }).code === "ENOENT";
 }
 
-/** Flushes every staged write/delete to disk. Called by `transact()` only after its callback has resolved successfully. */
-export async function flushStagingBuffer(buffer: StagingBuffer): Promise<void> {
-  for (const [path, content] of buffer.pending) {
-    if (content === null) {
-      await removeFileIfExists(path);
-    } else {
-      await atomicWriteFile(path, content);
+async function applyJournalEntry(
+  root: string,
+  entry: StagingJournalEntry,
+): Promise<void> {
+  const path = resolveJournalTarget(root, entry.relativePath);
+  if (entry.contentBase64 === null) {
+    await removeFileIfExists(path);
+  } else {
+    await atomicWriteFile(
+      path,
+      Buffer.from(entry.contentBase64, "base64"),
+    );
+  }
+}
+
+function applyJournalEntrySync(
+  root: string,
+  entry: StagingJournalEntry,
+): void {
+  const path = resolveJournalTarget(root, entry.relativePath);
+  if (entry.contentBase64 === null) {
+    try {
+      unlinkSync(path);
+    } catch (err) {
+      if (!isEnoent(err)) throw err;
+    }
+    return;
+  }
+  mkdirSync(dirname(path), { recursive: true });
+  const tmp = join(
+    dirname(path),
+    `.tmp-${basename(path)}-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+  );
+  writeFileSync(tmp, Buffer.from(entry.contentBase64, "base64"));
+  renameSync(tmp, path);
+}
+
+/**
+ * Replays every durable transaction journal before the next top-level store
+ * operation. Applying entries is idempotent, so another crash during recovery
+ * leaves the journal in place for the next call or process start.
+ */
+export function recoverStagingJournals(root: string): void {
+  const dir = journalDir(root);
+  if (!existsSync(dir)) return;
+  for (const file of readdirSync(dir).filter((name) =>
+    name.endsWith(".json")
+  ).sort()) {
+    const path = join(dir, file);
+    let journal: StagingJournal;
+    try {
+      journal = JSON.parse(
+        readFileSync(path, "utf8"),
+      ) as StagingJournal;
+    } catch (err) {
+      if (isEnoent(err)) continue;
+      throw err;
+    }
+    if (journal.version !== 1 || !Array.isArray(journal.entries)) {
+      throw new Error(`Unsupported filesystem transaction journal: ${path}`);
+    }
+    for (const entry of journal.entries) {
+      applyJournalEntrySync(root, entry);
+    }
+    try {
+      unlinkSync(path);
+    } catch (err) {
+      if (!isEnoent(err)) throw err;
+    }
+  }
+  try {
+    rmdirSync(dir);
+  } catch (err) {
+    if (
+      !isEnoent(err) &&
+      (err as { code?: unknown }).code !== "ENOTEMPTY"
+    ) {
+      throw err;
+    }
+  }
+}
+
+/**
+ * Flushes every staged write/delete to disk. A durable redo journal lands
+ * first, so a process exit between per-file renames is completed on the next
+ * top-level store operation instead of exposing a permanently partial
+ * transaction.
+ */
+export async function flushStagingBuffer(
+  buffer: StagingBuffer,
+  root: string,
+  options: FlushStagingOptions = {},
+): Promise<void> {
+  if (buffer.pending.size === 0) return;
+  const journal = toJournal(root, buffer);
+  const dir = journalDir(root);
+  await fs.mkdir(dir, { recursive: true });
+  const journalPath = join(
+    dir,
+    `${Date.now()}-${process.pid}-${Math.random().toString(36).slice(2)}.json`,
+  );
+  await atomicWriteFile(
+    journalPath,
+    Buffer.from(JSON.stringify(journal), "utf8"),
+  );
+  for (const [index, entry] of journal.entries.entries()) {
+    await applyJournalEntry(root, entry);
+    await options.afterEntryApplied?.(index);
+  }
+  await removeFileIfExists(journalPath);
+  try {
+    await fs.rmdir(dir);
+  } catch (err) {
+    if (!isEnoent(err) && (err as { code?: unknown }).code !== "ENOTEMPTY") {
+      throw err;
     }
   }
 }

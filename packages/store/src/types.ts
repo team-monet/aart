@@ -208,6 +208,12 @@ export interface SignalStore {
 export interface WaitOperationalRunState {
   run: RunRecord;
   resolvedSecretValues: string[];
+  /**
+   * Cache replays claimed from the ledger but not yet represented by a
+   * durable StepTrace. Kept in sealed state so revocation can reach a
+   * consumer even when it races the replay's normal progress write.
+   */
+  pendingIdempotencyReplays?: IdempotencyReplayClaim[];
 }
 
 export type RunOperationalState = WaitOperationalRunState;
@@ -404,6 +410,12 @@ export interface IdempotencyLedgerEntry {
   createdAt: string;
   /** Absent on legacy entries written before provenance-aware replay. */
   schemaVersion?: number;
+}
+
+export interface IdempotencyReplayClaim {
+  ledgerKey: string;
+  stepId: string;
+  traceSeq: number;
 }
 
 export interface IdempotencyLedgerStore {

@@ -187,6 +187,70 @@ export function applyRedaction<T>(redact: RedactFn, record: T, resolvedSecretRef
 }
 
 /**
+ * Irreversible public persistence cannot assume that a future, longer secret
+ * will still be reconstructible after a shorter overlapping value is removed.
+ * Once any scalar leaf or object key matches, withhold that whole leaf/key
+ * instead of retaining adjacent text that a later discovery could reveal
+ * as the suffix of the longer secret.
+ */
+function conservativePublicRedact(base: RedactFn): RedactFn {
+  const walk = (
+    value: unknown,
+    resolvedSecretRefs: ReadonlySet<string>,
+  ): unknown => {
+    if (Array.isArray(value)) {
+      return value.map((item) => walk(item, resolvedSecretRefs));
+    }
+    if (
+      value !== null &&
+      typeof value === "object"
+    ) {
+      const output: Record<string, unknown> = {};
+      for (const [key, child] of Object.entries(
+        value as Record<string, unknown>,
+      )) {
+        const candidateKey = base(
+          key,
+          resolvedSecretRefs,
+        );
+        const rootKey =
+          candidateKey === key ? key : "[REDACTED]";
+        let safeKey = rootKey;
+        let collision = 1;
+        while (Object.hasOwn(output, safeKey)) {
+          safeKey = `${rootKey}#${collision}`;
+          collision += 1;
+        }
+        Object.defineProperty(output, safeKey, {
+          value: walk(child, resolvedSecretRefs),
+          enumerable: true,
+          configurable: true,
+          writable: true,
+        });
+      }
+      return output;
+    }
+    const redacted = base(value, resolvedSecretRefs);
+    return jsonValuesEqual(redacted, value)
+      ? value
+      : "[REDACTED]";
+  };
+  return (record, resolvedSecretRefs) =>
+    walk(record, resolvedSecretRefs);
+}
+
+export function applyConservativeRedaction<T>(
+  redact: RedactFn,
+  record: T,
+  resolvedSecretRefs: ReadonlySet<string>,
+): T {
+  return conservativePublicRedact(redact)(
+    record,
+    resolvedSecretRefs,
+  ) as T;
+}
+
+/**
  * Re-scans every text artifact for a run whenever the execution segment
  * learns another secret value. Artifact bytes are persisted before later
  * steps/control expressions run, so write-time redaction alone cannot cover
@@ -214,6 +278,7 @@ async function redactStoredArtifacts(
   resolvedSecretRefs: ReadonlySet<string>,
 ): Promise<Artifact[]> {
   if (resolvedSecretRefs.size === 0) return artifacts;
+  redact = conservativePublicRedact(redact);
 
   const refreshed: Artifact[] = [];
   for (const artifact of artifacts) {
@@ -264,6 +329,7 @@ function redactArtifactAudit(
   artifact: Pick<Artifact, "name" | "kind" | "mime" | "path">,
   resolvedSecretRefs: ReadonlySet<string>,
 ): Pick<Artifact, "name" | "kind" | "mime" | "path"> {
+  redact = conservativePublicRedact(redact);
   // Artifact field names are schema, not customer data. Rebuild each
   // literal key so a redactor that scans object keys cannot remove a
   // required field and make an adapter preserve stale plaintext.
@@ -296,6 +362,7 @@ export function redactApprovalAudit(
   task: ApprovalTask,
   resolvedSecretRefs: ReadonlySet<string>,
 ): ApprovalTask {
+  redact = conservativePublicRedact(redact);
   return {
     ...task,
     title: applyRedaction(
@@ -343,6 +410,7 @@ export function redactWaitAudit(
   wait: WaitCondition,
   resolvedSecretRefs: ReadonlySet<string>,
 ): WaitCondition {
+  redact = conservativePublicRedact(redact);
   const value = (input: string): string =>
     applyRedaction(redact, input, resolvedSecretRefs) as string;
   const timeout = (input: { timeout?: string }): { timeout?: string } =>
@@ -418,6 +486,7 @@ export function redactSignalAudit(
   signal: Pick<Signal, "name" | "correlationId" | "payload">,
   resolvedSecretRefs: ReadonlySet<string>,
 ): Pick<Signal, "name" | "correlationId" | "payload"> {
+  redact = conservativePublicRedact(redact);
   // Rebuild from literal field names. A whole-object redactor may scan keys
   // as well as values; casting that result would leave required signal
   // fields missing and could preserve the original value in adapter spreads.
@@ -459,6 +528,7 @@ export async function repairCustomerVisibleAudits(
   options: CustomerVisibleAuditRepairOptions = {},
 ): Promise<void> {
   if (resolvedSecretRefs.size === 0) return;
+  redact = conservativePublicRedact(redact);
   const runId = options.runId;
   const [
     runs,
@@ -525,6 +595,12 @@ export async function repairCustomerVisibleAudits(
             ...resolvedSecretRefs,
           ]),
         ],
+        ...(activeState?.pendingIdempotencyReplays !== undefined
+          ? {
+              pendingIdempotencyReplays:
+                activeState.pendingIdempotencyReplays,
+            }
+          : {}),
       });
     }
     if (run.status === "waiting") {
@@ -711,7 +787,7 @@ export async function repairGlobalAuditsForNewSecrets(
     repairCustomerVisibleAudits(
       transactionStore,
       redact,
-      newlyResolved,
+      resolvedSecretRefs,
     ),
   );
   for (const value of newlyResolved) {
@@ -759,7 +835,24 @@ function mergeTaintPaths(
  * concurrency matcher already supports. Terminal records no longer
  * participate in matching and remain fully redacted.
  */
+function redactAuditNumber(
+  redact: RedactFn,
+  value: number,
+  resolvedSecretRefs: ReadonlySet<string>,
+): number | undefined {
+  const redacted = applyRedaction(
+    redact,
+    value,
+    resolvedSecretRefs,
+  );
+  return typeof redacted === "number" &&
+    Object.is(redacted, value)
+    ? value
+    : undefined;
+}
+
 export function applyRunRedaction(redact: RedactFn, run: RunRecord, resolvedSecretRefs: ReadonlySet<string>): RunRecord {
+  redact = conservativePublicRedact(redact);
   const {
     trace: _trace,
     inputs: rawInputs,
@@ -910,6 +1003,138 @@ export function applyRunRedaction(redact: RedactFn, run: RunRecord, resolvedSecr
       resolvedSecretRefs,
       inputDiscoveredPaths.length > 0 && trace.outputs !== undefined,
     );
+    const durationMs =
+      trace.durationMs === undefined
+        ? undefined
+        : redactAuditNumber(
+            redact,
+            trace.durationMs,
+            resolvedSecretRefs,
+          );
+    const llmCall =
+      trace.llmCall === undefined
+        ? undefined
+        : (() => {
+            const tokensIn = redactAuditNumber(
+              redact,
+              trace.llmCall.tokensIn,
+              resolvedSecretRefs,
+            );
+            const tokensOut = redactAuditNumber(
+              redact,
+              trace.llmCall.tokensOut,
+              resolvedSecretRefs,
+            );
+            const latencyMs = redactAuditNumber(
+              redact,
+              trace.llmCall.latencyMs,
+              resolvedSecretRefs,
+            );
+            // Required numeric metrics cannot carry a string redaction
+            // marker without corrupting the schema. Withhold the optional
+            // llmCall audit as a unit if any required metric is secret.
+            if (
+              tokensIn === undefined ||
+              tokensOut === undefined ||
+              latencyMs === undefined
+            ) {
+              return undefined;
+            }
+            const costEstimate =
+              trace.llmCall.costEstimate === undefined
+                ? undefined
+                : redactAuditNumber(
+                    redact,
+                    trace.llmCall.costEstimate,
+                    resolvedSecretRefs,
+                  );
+            return {
+              provider: applyRedaction(
+                redact,
+                trace.llmCall.provider,
+                resolvedSecretRefs,
+              ),
+              model: applyRedaction(
+                redact,
+                trace.llmCall.model,
+                resolvedSecretRefs,
+              ),
+              promptRef: applyRedaction(
+                redact,
+                trace.llmCall.promptRef,
+                resolvedSecretRefs,
+              ),
+              promptVersion: applyRedaction(
+                redact,
+                trace.llmCall.promptVersion,
+                resolvedSecretRefs,
+              ),
+              ...(trace.llmCall.schemaRef !== undefined
+                ? {
+                    schemaRef: applyRedaction(
+                      redact,
+                      trace.llmCall.schemaRef,
+                      resolvedSecretRefs,
+                    ),
+                  }
+                : {}),
+              tokensIn,
+              tokensOut,
+              latencyMs,
+              ...(costEstimate !== undefined
+                ? { costEstimate }
+                : {}),
+              ...(trace.llmCall.scorerResult !== undefined
+                ? {
+                    scorerResult: applyRedaction(
+                      redact,
+                      trace.llmCall.scorerResult,
+                      resolvedSecretRefs,
+                    ),
+                  }
+                : {}),
+            };
+          })();
+    const externalCalls =
+      trace.externalCalls?.flatMap((call) => {
+        const durationMs = redactAuditNumber(
+          redact,
+          call.durationMs,
+          resolvedSecretRefs,
+        );
+        if (durationMs === undefined) return [];
+        const status =
+          call.status === undefined
+            ? undefined
+            : redactAuditNumber(
+                redact,
+                call.status,
+                resolvedSecretRefs,
+              );
+        return [{
+          system: applyRedaction(
+            redact,
+            call.system,
+            resolvedSecretRefs,
+          ),
+          domain: applyRedaction(
+            redact,
+            call.domain,
+            resolvedSecretRefs,
+          ),
+          ...(call.method !== undefined
+            ? {
+                method: applyRedaction(
+                  redact,
+                  call.method,
+                  resolvedSecretRefs,
+                ),
+              }
+            : {}),
+          ...(status !== undefined ? { status } : {}),
+          durationMs,
+        }];
+      });
     return {
       seq: trace.seq,
       stepId: trace.stepId,
@@ -918,8 +1143,8 @@ export function applyRunRedaction(redact: RedactFn, run: RunRecord, resolvedSecr
       inputs: redactedInputs,
       startedAt: trace.startedAt,
       ...(trace.endedAt !== undefined ? { endedAt: trace.endedAt } : {}),
-      ...(trace.durationMs !== undefined
-        ? { durationMs: trace.durationMs }
+      ...(durationMs !== undefined
+        ? { durationMs }
         : {}),
       ...(trace.postHocCorrected !== undefined
         ? { postHocCorrected: trace.postHocCorrected }
@@ -966,84 +1191,11 @@ export function applyRunRedaction(redact: RedactFn, run: RunRecord, resolvedSecr
             }),
           }
         : {}),
-      ...(trace.llmCall !== undefined
-        ? {
-            llmCall: {
-              provider: applyRedaction(
-                redact,
-                trace.llmCall.provider,
-                resolvedSecretRefs,
-              ),
-              model: applyRedaction(
-                redact,
-                trace.llmCall.model,
-                resolvedSecretRefs,
-              ),
-              promptRef: applyRedaction(
-                redact,
-                trace.llmCall.promptRef,
-                resolvedSecretRefs,
-              ),
-              promptVersion: applyRedaction(
-                redact,
-                trace.llmCall.promptVersion,
-                resolvedSecretRefs,
-              ),
-              ...(trace.llmCall.schemaRef !== undefined
-                ? {
-                    schemaRef: applyRedaction(
-                      redact,
-                      trace.llmCall.schemaRef,
-                      resolvedSecretRefs,
-                    ),
-                  }
-                : {}),
-              tokensIn: trace.llmCall.tokensIn,
-              tokensOut: trace.llmCall.tokensOut,
-              latencyMs: trace.llmCall.latencyMs,
-              ...(trace.llmCall.costEstimate !== undefined
-                ? { costEstimate: trace.llmCall.costEstimate }
-                : {}),
-              ...(trace.llmCall.scorerResult !== undefined
-                ? {
-                    scorerResult: applyRedaction(
-                      redact,
-                      trace.llmCall.scorerResult,
-                      resolvedSecretRefs,
-                    ),
-                  }
-                : {}),
-            },
-          }
+      ...(llmCall !== undefined
+        ? { llmCall }
         : {}),
-      ...(trace.externalCalls !== undefined
-        ? {
-            externalCalls: trace.externalCalls.map((call) => ({
-              system: applyRedaction(
-                redact,
-                call.system,
-                resolvedSecretRefs,
-              ),
-              domain: applyRedaction(
-                redact,
-                call.domain,
-                resolvedSecretRefs,
-              ),
-              ...(call.method !== undefined
-                ? {
-                    method: applyRedaction(
-                      redact,
-                      call.method,
-                      resolvedSecretRefs,
-                    ),
-                  }
-                : {}),
-              ...(call.status !== undefined
-                ? { status: call.status }
-                : {}),
-              durationMs: call.durationMs,
-            })),
-          }
+      ...(externalCalls !== undefined
+        ? { externalCalls }
         : {}),
       ...(trace.idempotencyLedgerKey !== undefined
         ? {

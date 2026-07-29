@@ -7,6 +7,8 @@
 import type {
   AartStore,
   IdempotencyLedgerEntry,
+  IdempotencyReplayClaim,
+  RunOperationalState,
 } from "@aart/store";
 import type {
   RedactFn,
@@ -49,6 +51,90 @@ export async function checkIdempotency(store: AartStore, resolvedKey: string): P
     return { alreadyCompleted: false };
   }
   return { alreadyCompleted: true, recordedOutput: entry.recordedOutput };
+}
+
+/**
+ * Atomically reads a reusable entry and registers the not-yet-persisted
+ * consumer in sealed run state. Secret repair therefore observes either
+ * this pending claim or the later durable trace association, never a gap
+ * between the two.
+ */
+export async function claimIdempotencyReplay(
+  store: AartStore,
+  resolvedKey: string,
+  run: RunRecord,
+  stepId: string,
+  traceSeq: number,
+  resolvedSecretRefs: Set<string>,
+  canReplay: (
+    protectedRun: RunRecord,
+    recordedOutput: unknown,
+  ) => boolean,
+): Promise<IdempotencyCheck> {
+  return store.transact(async (tx) => {
+    const storageKey = idempotencyStorageKey(resolvedKey);
+    const entry = await tx.idempotencyLedger.get(storageKey);
+    if (
+      !entry ||
+      entry.schemaVersion !== CURRENT_ENGINE_SCHEMA_VERSION
+    ) {
+      return { alreadyCompleted: false };
+    }
+    const activeState =
+      await tx.runs.getOperationalState(run.runId);
+    for (const value of activeState?.resolvedSecretValues ?? []) {
+      resolvedSecretRefs.add(value);
+    }
+    if (!canReplay(activeState?.run ?? run, entry.recordedOutput)) {
+      return { alreadyCompleted: false };
+    }
+    const claim: IdempotencyReplayClaim = {
+      ledgerKey: entry.resolvedKey,
+      stepId,
+      traceSeq,
+    };
+    const pending = [
+      ...(activeState?.pendingIdempotencyReplays ?? []),
+    ];
+    if (
+      !pending.some(
+        (candidate) =>
+          candidate.ledgerKey === claim.ledgerKey &&
+          candidate.stepId === claim.stepId &&
+          candidate.traceSeq === claim.traceSeq,
+      )
+    ) {
+      pending.push(claim);
+    }
+    await tx.runs.putOperationalState(run.runId, {
+      ...(activeState ?? {
+        run,
+        resolvedSecretValues: [...resolvedSecretRefs],
+      }),
+      pendingIdempotencyReplays: pending,
+    });
+    return {
+      alreadyCompleted: true,
+      recordedOutput: entry.recordedOutput,
+    };
+  });
+}
+
+export function retainUnsettledIdempotencyReplayClaims(
+  state: RunOperationalState | undefined,
+  run: RunRecord,
+): IdempotencyReplayClaim[] | undefined {
+  const pending = state?.pendingIdempotencyReplays?.filter(
+    (claim) =>
+      !run.trace.some(
+        (trace) =>
+          trace.seq === claim.traceSeq &&
+          trace.stepId === claim.stepId,
+      ),
+  );
+  return pending === undefined || pending.length === 0
+    ? undefined
+    : pending;
 }
 
 /** Records a step attempt's output under its resolved idempotency key — called ONLY after a successful (post-retry) execution, never for an attempt that exhausted its retries and ultimately failed (architecture §4.2: a genuinely-failed attempt gets no protection, so a later retry of the whole step/run tries again fresh, which is correct — the attempt truly never succeeded). */
@@ -156,6 +242,8 @@ async function redactAndPersistRun(
   resolvedSecretRefs: ReadonlySet<string>,
 ): Promise<RunRecord> {
   const effectiveSecretRefs = new Set(resolvedSecretRefs);
+  const activeState =
+    await store.runs.getOperationalState(run.runId);
   const operationalRun =
     run.status === "pending" || run.status === "running"
       ? await mergeActiveRunProtection(
@@ -201,6 +289,12 @@ async function redactAndPersistRun(
     await store.runs.putOperationalState(run.runId, {
       run: operationalRun,
       resolvedSecretValues: [...effectiveSecretRefs],
+      ...(activeState?.pendingIdempotencyReplays !== undefined
+        ? {
+            pendingIdempotencyReplays:
+              activeState.pendingIdempotencyReplays,
+          }
+        : {}),
     });
   } else {
     await store.runs.deleteOperationalState(run.runId);
@@ -349,6 +443,28 @@ export async function revokeSecretTaintedIdempotency(
     }
   }
   runsById.set(activeRun.runId, activeRun);
+  const pendingReplayClaimsByRunId = new Map<
+    string,
+    IdempotencyReplayClaim[]
+  >();
+  for (const [runId, candidateRun] of runsById) {
+    if (
+      candidateRun.status !== "pending" &&
+      candidateRun.status !== "running"
+    ) {
+      continue;
+    }
+    const state = await store.runs.getOperationalState(runId);
+    if (
+      state?.pendingIdempotencyReplays !== undefined &&
+      state.pendingIdempotencyReplays.length > 0
+    ) {
+      pendingReplayClaimsByRunId.set(
+        runId,
+        state.pendingIdempotencyReplays,
+      );
+    }
+  }
   const consumersByKey = new Map<string, Set<string>>();
   for (const [runId, candidateRun] of runsById) {
     for (const trace of candidateRun.trace) {
@@ -359,6 +475,15 @@ export async function revokeSecretTaintedIdempotency(
         new Set<string>();
       consumers.add(runId);
       consumersByKey.set(entry.resolvedKey, consumers);
+    }
+    for (const claim of
+      pendingReplayClaimsByRunId.get(runId) ?? []) {
+      if (!entriesByKey.has(claim.ledgerKey)) continue;
+      const consumers =
+        consumersByKey.get(claim.ledgerKey) ??
+        new Set<string>();
+      consumers.add(runId);
+      consumersByKey.set(claim.ledgerKey, consumers);
     }
   }
   const processedKeys = new Set<string>();
@@ -385,13 +510,18 @@ export async function revokeSecretTaintedIdempotency(
       if (!persistedRun) continue;
       const batchSet = new Set(batch);
       const consumedKeys = new Set(
-        persistedRun.trace.flatMap((trace) => {
-          const entry = entryForTrace(trace);
-          return entry !== undefined &&
-            batchSet.has(entry.resolvedKey)
-            ? [entry.resolvedKey]
-            : [];
-        }),
+        [
+          ...persistedRun.trace.flatMap((trace) => {
+            const entry = entryForTrace(trace);
+            return entry !== undefined &&
+              batchSet.has(entry.resolvedKey)
+              ? [entry.resolvedKey]
+              : [];
+          }),
+          ...(pendingReplayClaimsByRunId.get(runId) ?? [])
+            .filter((claim) => batchSet.has(claim.ledgerKey))
+            .map((claim) => claim.ledgerKey),
+        ],
       );
       if (consumedKeys.size === 0) continue;
 

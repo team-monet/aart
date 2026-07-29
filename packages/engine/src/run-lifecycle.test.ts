@@ -1996,9 +1996,7 @@ describe("executeRun — fresh execution", () => {
     expect(artifactId).toBeDefined();
     const bytes = await store.artifacts.getBytes(artifactId!);
     if (bytes === undefined) throw new Error("artifact bytes missing");
-    expect(new TextDecoder().decode(bytes)).toMatch(
-      /^\[REDACTED:secret-\d+\]$/,
-    );
+    expect(new TextDecoder().decode(bytes)).toBe("[REDACTED]");
     const metadata = await store.artifacts.getMetadata(artifactId!);
     expect(metadata?.bytes).toBe(bytes?.byteLength);
     expect(finished.artifacts).toContainEqual(metadata);
@@ -2051,7 +2049,7 @@ describe("executeRun — fresh execution", () => {
       id: "early-secret-signal",
       name: "ready",
       correlationId: "early",
-      payload: { value: "[REDACTED:secret-1]" },
+      payload: { value: "[REDACTED]" },
       receivedAt: expect.any(String),
     });
   });

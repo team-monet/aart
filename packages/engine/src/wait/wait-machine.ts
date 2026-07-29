@@ -145,6 +145,8 @@ export async function enterWait(config: WaitMachineConfig, options: EnterWaitOpt
   // `markConsumed` are "deliberately NOT staged" — see types.ts's
   // `SignalStore` doc comment), not to this check-then-act sequence itself.
   const result = await config.store.transact(async (tx) => {
+    const activeState =
+      await tx.runs.getOperationalState(run.runId);
     const activeAwareRun = await mergeActiveRunProtection(
       tx,
       run,
@@ -232,6 +234,7 @@ export async function enterWait(config: WaitMachineConfig, options: EnterWaitOpt
         await tx.runs.putOperationalState(
           repairedRun.runId,
           {
+            ...(activeState ?? {}),
             run: repairedRun,
             resolvedSecretValues: [...resolvedSecretRefs],
           },

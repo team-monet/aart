@@ -10,10 +10,16 @@ import { AartError, DEFAULT_EFFECTFUL_CAPABILITIES, isEffectfulCapability, Itera
 import { checkCapabilityDispatch, alwaysEmptyGrantedCapabilities } from "./capability.js";
 import { parseDurationMs } from "./duration.js";
 import { buildExprContext, resolveArrayExpression, resolveBooleanExpression, resolveStringExpression, resolveWithRecord, traceRepresentsAuthoredStep } from "./expr-context.js";
-import { checkIdempotency, idempotencyStorageKey, recordIdempotency, revokeSecretTaintedIdempotency } from "./idempotency.js";
+import {
+  claimIdempotencyReplay,
+  idempotencyStorageKey,
+  recordIdempotency,
+  retainUnsettledIdempotencyReplayClaims,
+  revokeSecretTaintedIdempotency,
+} from "./idempotency.js";
 import { idempotencyAssociationFingerprint } from "./idempotency-association.js";
 import { jsonCompatibilityProblem, jsonValuesEqual, validateWorkflowOutputs } from "./output-validation.js";
-import { applyRedaction, applyRunRedaction, changedJsonPointers, createTrackingSecretResolver, isTextMime, mergeActiveRunProtection, mergeOperationalRunTaint, mergePersistedRunTaint, redactStoredTextArtifacts, repairCustomerVisibleAudits, repairGlobalAuditsForNewSecrets, throwingSecretResolver } from "./redaction.js";
+import { applyConservativeRedaction, applyRedaction, applyRunRedaction, changedJsonPointers, createTrackingSecretResolver, isTextMime, mergeActiveRunProtection, mergeOperationalRunTaint, mergePersistedRunTaint, redactStoredTextArtifacts, repairCustomerVisibleAudits, repairGlobalAuditsForNewSecrets, throwingSecretResolver } from "./redaction.js";
 import { CURRENT_ENGINE_SCHEMA_VERSION } from "./schema-version.js";
 import {
   captureExecutionSnapshot,
@@ -210,10 +216,31 @@ function buildBlockContext(
       // writes an artifact within the same execute() call is covered, not
       // just secrets resolved before dispatch began.
       const bytes = isTextMime(input.mime)
-        ? new TextEncoder().encode(applyRedaction(config.redact, new TextDecoder().decode(input.bytes), resolvedSecretRefs))
+        ? new TextEncoder().encode(
+            applyConservativeRedaction(
+              config.redact,
+              new TextDecoder().decode(input.bytes),
+              resolvedSecretRefs,
+            ),
+          )
         : input.bytes;
+      const name = applyConservativeRedaction(
+        config.redact,
+        input.name,
+        resolvedSecretRefs,
+      );
+      const kind = applyConservativeRedaction(
+        config.redact,
+        input.kind,
+        resolvedSecretRefs,
+      );
+      const mime = applyConservativeRedaction(
+        config.redact,
+        input.mime,
+        resolvedSecretRefs,
+      );
       await config.store.artifacts.put(
-        { id, runId, stepId, name: input.name, kind: input.kind, mime: input.mime, path, bytes: bytes.byteLength, createdAt: (config.now?.() ?? new Date()).toISOString() },
+        { id, runId, stepId, name, kind, mime, path, bytes: bytes.byteLength, createdAt: (config.now?.() ?? new Date()).toISOString() },
         bytes,
       );
       return { id, path };
@@ -253,7 +280,55 @@ async function dispatchOnce(
     !dataSecretTaintedBeforeDispatch &&
     !controlSecretTaintedBeforeDispatch
   ) {
-    const check = await checkIdempotency(config.store, resolvedIdempotencyKey);
+    const check = await claimIdempotencyReplay(
+      config.store,
+      resolvedIdempotencyKey,
+      run,
+      stepIdForTrace,
+      seq,
+      resolvedSecretRefs,
+      (protectedRun, recordedOutput) => {
+        const protectedInputs = applyRedaction(
+          config.redact,
+          resolvedInputs,
+          resolvedSecretRefs,
+        );
+        const protectedOutput = applyRedaction(
+          config.redact,
+          recordedOutput,
+          resolvedSecretRefs,
+        );
+        const protectedKey = applyRedaction(
+          config.redact,
+          resolvedIdempotencyKey,
+          resolvedSecretRefs,
+        );
+        return (
+          !recomputeDataSecretTaint(
+            config,
+            step,
+            protectedRun,
+            resolvedSecretRefs,
+          ) &&
+          !runHasSecretControlledFlow(protectedRun) &&
+          !valueReferencesSecretTaintedTrace(
+            step.if,
+            protectedRun,
+          ) &&
+          !(
+            step.next !== undefined &&
+            valueReferencesSecretTaintedTrace(
+              step.until,
+              protectedRun,
+              step.id,
+            )
+          ) &&
+          jsonValuesEqual(resolvedInputs, protectedInputs) &&
+          jsonValuesEqual(recordedOutput, protectedOutput) &&
+          resolvedIdempotencyKey === protectedKey
+        );
+      },
+    );
     if (check.alreadyCompleted) {
       const endedAt = now().toISOString();
       const outputs = check.recordedOutput as Record<string, unknown>;
@@ -683,9 +758,19 @@ async function appendTracesAndPersist(
       resolvedSecretRefs,
     );
     await tx.runs.put(redacted);
+    const activeState =
+      await tx.runs.getOperationalState(repaired.runId);
+    const pendingIdempotencyReplays =
+      retainUnsettledIdempotencyReplayClaims(
+        activeState,
+        repaired,
+      );
     await tx.runs.putOperationalState(repaired.runId, {
       run: repaired,
       resolvedSecretValues: [...resolvedSecretRefs],
+      ...(pendingIdempotencyReplays !== undefined
+        ? { pendingIdempotencyReplays }
+        : {}),
     });
     return repaired;
   });
@@ -1413,9 +1498,19 @@ export async function refreshTaintAfterControlResolution(
       resolvedSecretRefs,
     );
     await tx.runs.put(refreshedRun);
+    const activeState =
+      await tx.runs.getOperationalState(repaired.runId);
+    const pendingIdempotencyReplays =
+      retainUnsettledIdempotencyReplayClaims(
+        activeState,
+        repaired,
+      );
     await tx.runs.putOperationalState(repaired.runId, {
       run: repaired,
       resolvedSecretValues: [...resolvedSecretRefs],
+      ...(pendingIdempotencyReplays !== undefined
+        ? { pendingIdempotencyReplays }
+        : {}),
     });
     return repaired;
   });

@@ -2072,6 +2072,12 @@ executing and repeats key/input/output plus data/control eligibility inside
 the same transaction as the ledger write. A global repair therefore either
 lands first and blocks admission, or lands second and sees/revokes the new
 entry; a stale worker cannot write a raw cache value after repair passed it.
+Replay uses the same no-gap rule: the ledger lookup and a sealed
+`pendingIdempotencyReplays` consumer claim commit together before a cached
+trace is returned. The normal progress transaction replaces that claim with
+the durable trace association. Revocation therefore observes either form,
+imports the newly known secret literals into a not-yet-persisted consumer,
+and cannot finish its scan in the window between lookup and trace write.
 If the matching secret is discovered
 only by a later step, every subsequent persistence boundary revisits both the
 current run's authored entries and the exact global entries replayed by its
@@ -2084,14 +2090,21 @@ global cache. Active `next`/`until` dependencies are classified before
 dispatch, so a secret-controlled loop condition cannot open a cache replay or
 write window before its post-step evaluation.
 The retrospective boundary is global, not source-run-only.
-Each newly resolved literal receives one separate value-only audit scan across
-retained run records, all signal audits, artifacts, approvals, waits,
-corrections, and activity events. That scan applies redaction without resolving
-or reconstructing any historical workflow, and its successful transaction is
-remembered only for the lifetime of the current execution segment. Thus an
-unrelated, non-cached historical record cannot retain a newly classified
-secret, while an ordinary multi-step secret-using workflow does not rescan all
-history at every persistence boundary.
+Each newly resolved literal triggers one audit scan across retained run
+records, all signal audits, artifacts, approvals, waits, corrections, and
+activity events, using the segment's complete currently known literal set.
+Public persistence and retrospective repair withhold an entire matching
+scalar leaf or object key rather than retaining adjacent text. This is the
+recoverable-source alternative for overlapping discoveries: if `abc` is
+learned before `abcdef`, the first rewrite cannot permanently expose `def`
+after the exact public source is gone. Late-repaired text artifacts use the
+same whole-content rule; active executable values remain exact only in their
+sealed continuation. The scan never resolves or reconstructs a historical
+workflow, and its successful transaction is remembered only for the lifetime
+of the current execution segment. Thus an unrelated, non-cached historical
+record cannot retain a newly classified secret, while an ordinary multi-step
+secret-using workflow does not rescan all history at every persistence
+boundary.
 `IdempotencyLedgerStore.list()` exposes the current ledger closure whenever a
 segment learns a secret. Before concluding that no key changed under literal
 redaction, the engine reconstructs the active run and the persisted producer
@@ -2114,8 +2127,15 @@ whole-run image over a concurrently completed step. Because a step may prepare
 its next trace before acquiring that mutex, every engine run-write transaction
 also merges the latest persisted security provenance after it acquires the
 lock, preserving both the new progress and any repair that won first. The
-filesystem adapter remains the local-development store; multi-process server
-workers use the database adapter.
+staged multi-file flush first writes a durable redo journal under
+`.transactions/`; every top-level operation idempotently completes outstanding
+journals before reading or writing the store and removes a journal only after
+all of its writes/deletes land.
+A process exit after a ledger deletion but before a repaired consumer run
+flushes therefore resumes the same revocation transaction on restart instead
+of permanently losing its lineage. The filesystem adapter remains the
+local-development store; multi-process server workers use the database
+adapter.
 An active concurrency key remains backward-readable while it is ordinary
 coordination data. If later secret resolution classifies that raw value as a
 secret, the public `RunRecord` atomically switches to the existing tagged
@@ -2232,7 +2252,13 @@ cannot change continuation semantics, and an echoed pre-restart secret is
 redacted on its first post-restart write. The public RunRecord is reconstructed
 from a structural allowlist; if a snapshot definition tree would be partially
 rewritten, its public `definitions` becomes `null` instead of an invalid
-workflow while the exact executable tree remains sealed.
+workflow while the exact executable tree remains sealed. Numeric observational
+metrics are not exempt from the value policy: an optional `durationMs` or
+status is omitted when it matches a numeric secret, an affected external-call
+row is withheld when its required duration cannot remain numeric, and the
+optional `llmCall` audit is withheld as a unit when `tokensIn`, `tokensOut`,
+or `latencyMs` would require a string marker; a secret-valued optional cost is
+omitted independently.
 `WaitStore.listOperational()` is the engine-only access path. A signal carrying
 the original correlation can therefore still resume the run without the
 public audit exposing the late-discovered value. SQLite migration

@@ -9,7 +9,12 @@ import { realpathSync } from "node:fs";
 import { dirname, basename, resolve } from "node:path";
 import { FsArtifactStore } from "./artifacts.js";
 import { FsEventLogStore } from "./events.js";
-import { createStagingBuffer, flushStagingBuffer, type StagingBuffer } from "./json-file.js";
+import {
+  createStagingBuffer,
+  flushStagingBuffer,
+  recoverStagingJournals,
+  type StagingBuffer,
+} from "./json-file.js";
 import * as paths from "./paths.js";
 import { FsRunStore } from "./runs.js";
 import {
@@ -88,13 +93,17 @@ function canonicalRootIdentity(root: string): string {
 function serializeMember<T extends object>(
   member: T,
   mutex: FsStoreMutex,
+  root: string,
 ): T {
   return new Proxy(member, {
     get(target, property, receiver) {
       const value = Reflect.get(target, property, receiver);
       if (typeof value !== "function") return value;
       return (...args: unknown[]) =>
-        mutex.run(() => Reflect.apply(value, target, args));
+        mutex.run(() => {
+          recoverStagingJournals(root);
+          return Reflect.apply(value, target, args);
+        });
     },
   });
 }
@@ -120,7 +129,7 @@ function buildStore(
   // so its members remain direct to avoid nested-lock deadlock.
   const serialized = <T extends object>(member: T): T =>
     staging === undefined
-      ? serializeMember(member, mutex)
+      ? serializeMember(member, mutex, root)
       : member;
   const store: AartStore = {
     workflows: serialized(
@@ -205,6 +214,7 @@ function buildStore(
         return fn(store);
       }
       return mutex.run(async () => {
+        recoverStagingJournals(root);
         const txBuffer = createStagingBuffer();
         const tx = buildStore(root, txBuffer, mutex);
         const result = await fn(tx);
@@ -212,7 +222,7 @@ function buildStore(
         // propagates out of `transact()` with the buffer simply discarded
         // (never referenced again, never flushed), which is the "roll back
         // together" half of the contract.
-        await flushStagingBuffer(txBuffer);
+        await flushStagingBuffer(txBuffer, root);
         return result;
       });
     },

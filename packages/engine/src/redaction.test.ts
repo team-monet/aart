@@ -163,10 +163,84 @@ describe("repairGlobalAuditsForNewSecrets", () => {
         name: "[REDACTED]",
         kind: artifact.kind,
         mime: artifact.mime,
-        path: "[REDACTED]/report.txt",
+        path: "[REDACTED]",
       });
       expect(() => RunRecordSchema.shape.artifacts.parse([audit])).not.toThrow();
       expect(JSON.stringify(audit)).not.toContain(':"name"');
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it("withholds whole late-repaired leaves so a longer overlapping secret cannot expose a suffix", async () => {
+    const { store, cleanup } = await createTestStore();
+    try {
+      const run = fixtureRun({
+        runId: "overlapping-terminal",
+        status: "completed",
+        trace: [
+          {
+            seq: 0,
+            stepId: "emit",
+            block: "test.emit",
+            status: "completed",
+            inputs: {},
+            outputs: { value: "abcdef" },
+            startedAt: "2026-07-29T00:00:00.000Z",
+          },
+        ],
+        outputs: { value: "abcdef" },
+        endedAt: "2026-07-29T00:00:00.000Z",
+      });
+      await store.runs.put(run);
+      await store.artifacts.put(
+        {
+          id: "overlapping-artifact",
+          runId: run.runId,
+          name: "report.txt",
+          kind: "report",
+          mime: "text/plain",
+          path: "report.txt",
+          bytes: 6,
+          createdAt: "2026-07-29T00:00:00.000Z",
+        },
+        new TextEncoder().encode("abcdef"),
+      );
+      const redact = (
+        record: unknown,
+        refs: ReadonlySet<string>,
+      ): unknown => {
+        let json = JSON.stringify(record);
+        for (const value of [...refs].sort(
+          (left, right) => right.length - left.length,
+        )) {
+          json = json.replaceAll(value, "[REDACTED]");
+        }
+        return JSON.parse(json);
+      };
+      const resolved = new Set(["abc"]);
+      await repairGlobalAuditsForNewSecrets(
+        store,
+        redact,
+        resolved,
+      );
+      resolved.add("abcdef");
+      await repairGlobalAuditsForNewSecrets(
+        store,
+        redact,
+        resolved,
+      );
+
+      const publicRun = await store.runs.get(run.runId);
+      expect(publicRun?.trace[0]?.outputs).toEqual({
+        value: "[REDACTED]",
+      });
+      const artifactBytes = await store.artifacts.getBytes(
+        "overlapping-artifact",
+      );
+      expect(
+        new TextDecoder().decode(artifactBytes),
+      ).toBe("[REDACTED]");
     } finally {
       await cleanup();
     }
@@ -352,6 +426,130 @@ describe("applyRunRedaction", () => {
     for (const ref of refs) json = json.replaceAll(ref, "[REDACTED]");
     return JSON.parse(json);
   };
+
+  it("withholds schema-constrained numeric call metrics instead of copying numeric secrets", () => {
+    const run = fixtureRun({
+      trace: [
+        {
+          seq: 0,
+          stepId: "llm",
+          block: "llm.call",
+          status: "completed",
+          inputs: {},
+          outputs: { ok: true },
+          startedAt: "2026-07-29T00:00:00.000Z",
+          durationMs: 42,
+          llmCall: {
+            provider: "provider",
+            model: "model",
+            promptRef: "prompt",
+            promptVersion: "1",
+            tokensIn: 42,
+            tokensOut: 42,
+            latencyMs: 42,
+            costEstimate: 42,
+          },
+          externalCalls: [
+            {
+              system: "api",
+              domain: "example.com",
+              status: 42,
+              durationMs: 42,
+            },
+          ],
+        },
+      ],
+    });
+
+    const numericRedact = (
+      record: unknown,
+      refs: ReadonlySet<string>,
+    ): unknown => {
+      if (
+        (typeof record === "number" ||
+          typeof record === "boolean" ||
+          typeof record === "string") &&
+        refs.has(String(record))
+      ) {
+        return "[REDACTED]";
+      }
+      if (Array.isArray(record)) {
+        return record.map((value) =>
+          numericRedact(value, refs)
+        );
+      }
+      if (record !== null && typeof record === "object") {
+        return Object.fromEntries(
+          Object.entries(record).map(([key, value]) => [
+            key,
+            numericRedact(value, refs),
+          ]),
+        );
+      }
+      return record;
+    };
+    const publicRun = applyRunRedaction(
+      numericRedact,
+      run,
+      new Set(["42"]),
+    );
+
+    expect(publicRun.trace[0]).not.toHaveProperty("durationMs");
+    expect(publicRun.trace[0]).not.toHaveProperty("llmCall");
+    expect(publicRun.trace[0]?.externalCalls).toEqual([]);
+    expect(JSON.stringify(publicRun)).not.toContain("42");
+    expect(() => RunRecordSchema.parse(publicRun)).not.toThrow();
+  });
+
+  it("omits a secret-valued optional LLM cost while retaining otherwise safe metrics", () => {
+    const run = fixtureRun({
+      trace: [
+        {
+          seq: 0,
+          stepId: "llm",
+          block: "llm.call",
+          status: "completed",
+          inputs: {},
+          outputs: { ok: true },
+          startedAt: "2026-07-29T00:00:00.000Z",
+          llmCall: {
+            provider: "provider",
+            model: "model",
+            promptRef: "prompt",
+            promptVersion: "1",
+            tokensIn: 10,
+            tokensOut: 20,
+            latencyMs: 30,
+            costEstimate: 42,
+          },
+        },
+      ],
+    });
+    const numericRedact = (
+      record: unknown,
+      refs: ReadonlySet<string>,
+    ): unknown =>
+      typeof record === "number" &&
+      refs.has(String(record))
+        ? "[REDACTED]"
+        : record;
+
+    const publicRun = applyRunRedaction(
+      numericRedact,
+      run,
+      new Set(["42"]),
+    );
+
+    expect(publicRun.trace[0]?.llmCall).toMatchObject({
+      tokensIn: 10,
+      tokensOut: 20,
+      latencyMs: 30,
+    });
+    expect(publicRun.trace[0]?.llmCall).not.toHaveProperty(
+      "costEstimate",
+    );
+    expect(JSON.stringify(publicRun)).not.toContain("42");
+  });
 
   it("fingerprints a non-terminal concurrency key once its raw value becomes secret", () => {
     const run = fixtureRun({
@@ -547,7 +745,7 @@ describe("applyRunRedaction", () => {
       endedAt: structuralValue,
       inputs: { value: "[REDACTED]" },
       outputs: { value: "[REDACTED]" },
-      error: "failed with [REDACTED]",
+      error: "[REDACTED]",
       secretTainted: true,
     });
     expect(redacted.trace[0]).not.toHaveProperty(

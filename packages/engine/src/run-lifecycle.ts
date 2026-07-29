@@ -578,6 +578,7 @@ export async function executeRun(config: EngineConfig, runId: string): Promise<R
     // null before any newly discovered secret can make their next public
     // progress write irreversible.
     await tx.runs.putOperationalState(runId, {
+      ...(operationalState ?? {}),
       run,
       resolvedSecretValues,
     });
