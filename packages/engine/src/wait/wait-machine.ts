@@ -50,6 +50,14 @@ export interface EnterWaitOptions {
   wait: WaitCondition;
   resolvedSecretRefs: ReadonlySet<string>;
   secretTainted?: boolean;
+  controlSecretTainted?: boolean;
+  /**
+   * Completes control-flow provenance against the in-memory early-arrival
+   * trace before the first durable write. This closes the window where an
+   * `until` expression could resolve a secret only after plaintext output
+   * had already been persisted.
+   */
+  prepareEarlyArrivalRun?: (run: RunRecord) => Promise<RunRecord>;
 }
 
 export interface EnterWaitResult {
@@ -68,7 +76,7 @@ export interface EnterWaitResult {
  * which skip the check entirely and always suspend).
  */
 export async function enterWait(config: WaitMachineConfig, options: EnterWaitOptions): Promise<EnterWaitResult> {
-  const { run, stepId, blockId, resolvedInputs, wait, resolvedSecretRefs, secretTainted } = options;
+  const { run, stepId, blockId, resolvedInputs, wait, resolvedSecretRefs, secretTainted, controlSecretTainted, prepareEarlyArrivalRun } = options;
   const now = config.now();
   const correlation = waitSignalCorrelation(wait);
 
@@ -103,6 +111,7 @@ export async function enterWait(config: WaitMachineConfig, options: EnterWaitOpt
         const trace: StepTrace = {
           seq: run.trace.length,
           stepId,
+          authoredStepId: stepId,
           block: blockId,
           status: "completed",
           inputs: resolvedInputs,
@@ -110,10 +119,21 @@ export async function enterWait(config: WaitMachineConfig, options: EnterWaitOpt
           startedAt: now.toISOString(),
           endedAt: now.toISOString(),
           durationMs: 0,
-          ...(secretTainted ? { secretTainted: true } : {}),
+          ...(secretTainted
+            ? { secretTainted: true, secretTaintedPaths: ["*"] }
+            : controlSecretTainted
+              ? {
+                  secretTainted: true,
+                  secretTaintedPaths: [],
+                  controlSecretTainted: true,
+                }
+              : {}),
         };
         const updatedRun: RunRecord = { ...run, trace: [...run.trace, trace], updatedAt: now.toISOString() };
-        const redacted = applyRunRedaction(config.redact, updatedRun, resolvedSecretRefs);
+        const preparedRun = prepareEarlyArrivalRun
+          ? await prepareEarlyArrivalRun(updatedRun)
+          : updatedRun;
+        const redacted = applyRunRedaction(config.redact, preparedRun, resolvedSecretRefs);
         await tx.runs.put(redacted);
         return { run: redacted, suspended: false };
       }
@@ -125,11 +145,20 @@ export async function enterWait(config: WaitMachineConfig, options: EnterWaitOpt
     const trace: StepTrace = {
       seq: run.trace.length,
       stepId,
+      authoredStepId: stepId,
       block: blockId,
       status: "waiting",
       inputs: resolvedInputs,
       startedAt: now.toISOString(),
-      ...(secretTainted ? { secretTainted: true } : {}),
+      ...(secretTainted
+        ? { secretTainted: true, secretTaintedPaths: ["*"] }
+        : controlSecretTainted
+          ? {
+              secretTainted: true,
+              secretTaintedPaths: [],
+              controlSecretTainted: true,
+            }
+          : {}),
     };
     const updatedRun: RunRecord = {
       ...run,

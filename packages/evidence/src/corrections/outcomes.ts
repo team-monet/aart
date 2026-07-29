@@ -37,12 +37,20 @@ function setByPath(target: Record<string, unknown>, path: string, value: unknown
  * (architecture §5.3 `step_traces.post_hoc_corrected`, F5 fix).
  */
 export async function updateRunOutput(store: AartStore, correction: Correction): Promise<RunRecord> {
-  if (
-    correction.fieldPath === "secretTainted" ||
-    correction.fieldPath.startsWith("secretTainted.")
-  ) {
+  const protectedTraceFields = [
+    "secretTainted",
+    "secretTaintedPaths",
+    "controlSecretTainted",
+    "authoredStepId",
+    "iterationIndex",
+  ];
+  if (protectedTraceFields.some(
+    (field) =>
+      correction.fieldPath === field ||
+      correction.fieldPath.startsWith(`${field}.`),
+  )) {
     throw new Error(
-      "updateRunOutput: secretTainted is protected engine security metadata and cannot be changed by a correction",
+      `updateRunOutput: "${correction.fieldPath}" is protected engine security metadata and cannot be changed by a correction`,
     );
   }
   const run = await store.runs.get(correction.runId);
@@ -58,13 +66,23 @@ export async function updateRunOutput(store: AartStore, correction: Correction):
   setByPath(updatedTrace as unknown as Record<string, unknown>, correction.fieldPath, correction.corrected);
 
   let trace = run.trace.map((t, i) => (i === traceIndex ? updatedTrace : t));
-  const forEachMatch = /^(.*)\[(\d+)\]$/.exec(correction.stepId);
+  const legacyForEachMatch =
+    original.authoredStepId === undefined
+      ? /^(.*)\[(\d+)\]$/.exec(correction.stepId)
+      : null;
+  const parentStepId =
+    original.iterationIndex !== undefined
+      ? original.authoredStepId
+      : legacyForEachMatch?.[1];
+  const itemIndex =
+    original.iterationIndex !== undefined
+      ? String(original.iterationIndex)
+      : legacyForEachMatch?.[2];
   if (
-    forEachMatch &&
+    parentStepId !== undefined &&
+    itemIndex !== undefined &&
     (correction.fieldPath === "outputs" || correction.fieldPath.startsWith("outputs."))
   ) {
-    const parentStepId = forEachMatch[1]!;
-    const itemIndex = forEachMatch[2]!;
     const aggregateIndex = trace.findLastIndex(
       (candidate, index) => index > traceIndex && candidate.stepId === parentStepId,
     );

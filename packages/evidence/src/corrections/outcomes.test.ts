@@ -281,12 +281,20 @@ describe("outcome 1/6 — updateRunOutput (spec §23.4 'update current run outpu
       }),
     );
 
-    await expect(
-      updateRunOutput(
-        store,
-        fixtureCorrection({ fieldPath: "secretTainted", corrected: false }),
-      ),
-    ).rejects.toThrow(/protected engine security metadata/);
+    for (const fieldPath of [
+      "secretTainted",
+      "secretTaintedPaths",
+      "controlSecretTainted",
+      "authoredStepId",
+      "iterationIndex",
+    ]) {
+      await expect(
+        updateRunOutput(
+          store,
+          fixtureCorrection({ fieldPath, corrected: false }),
+        ),
+      ).rejects.toThrow(/protected engine security metadata/);
+    }
     await expect(store.runs.get("run_1")).resolves.toMatchObject({
       trace: [{ secretTainted: true }],
     });

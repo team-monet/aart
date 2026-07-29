@@ -9,6 +9,51 @@ import type { RedactFn, RunRecord, StepTrace } from "@aart/types";
 import { SecretResolutionError } from "@aart/types";
 import { jsonValuesEqual } from "./output-validation.js";
 
+function escapeJsonPointerSegment(value: string): string {
+  return value.replaceAll("~", "~0").replaceAll("/", "~1");
+}
+
+export function changedJsonPointers(
+  before: unknown,
+  after: unknown,
+  path = "",
+): string[] {
+  if (jsonValuesEqual(before, after)) return [];
+  if (Array.isArray(before) && Array.isArray(after)) {
+    if (before.length !== after.length) return [path || "*"];
+    return before.flatMap((value, index) =>
+      changedJsonPointers(value, after[index], `${path}/${index}`),
+    );
+  }
+  if (
+    before !== null &&
+    after !== null &&
+    typeof before === "object" &&
+    typeof after === "object" &&
+    !Array.isArray(before) &&
+    !Array.isArray(after)
+  ) {
+    const beforeRecord = before as Record<string, unknown>;
+    const afterRecord = after as Record<string, unknown>;
+    const beforeKeys = Object.keys(beforeRecord);
+    const afterKeys = Object.keys(afterRecord);
+    if (
+      beforeKeys.length !== afterKeys.length ||
+      beforeKeys.some((key) => !Object.hasOwn(afterRecord, key))
+    ) {
+      return [path || "*"];
+    }
+    return beforeKeys.flatMap((key) =>
+      changedJsonPointers(
+        beforeRecord[key],
+        afterRecord[key],
+        `${path}/${escapeJsonPointerSegment(key)}`,
+      ),
+    );
+  }
+  return [path || "*"];
+}
+
 /**
  * Identity `RedactFn` — this session's own tests wire this by default
  * (architecture §7.9: "Engine unit tests may wire an identity `RedactFn`
@@ -135,40 +180,80 @@ export function applyRedaction<T>(redact: RedactFn, record: T, resolvedSecretRef
  * records no longer participate in matching and remain fully redacted.
  */
 export function applyRunRedaction(redact: RedactFn, run: RunRecord, resolvedSecretRefs: ReadonlySet<string>): RunRecord {
-  // `secretTainted` is security metadata, not authored/value data. Keep it
-  // outside value-based redaction entirely: a secret equal to "secret"
-  // could rewrite the key, while a boolean secret `true` could rewrite the
-  // value. Reattach only the trusted original booleans afterward.
-  const redactableTrace = run.trace.map((trace): StepTrace => {
-    const copy = { ...trace };
-    delete copy.secretTainted;
-    return copy;
-  });
   const { trace: _trace, ...runWithoutTrace } = run;
   const redactedPayload = applyRedaction(
     redact,
     runWithoutTrace,
     resolvedSecretRefs,
   );
-  const redactedTrace = applyRedaction(
-    redact,
-    redactableTrace,
-    resolvedSecretRefs,
-  );
-  const secretTaintByTrace = run.trace.map((trace, index) => {
-    if (trace.secretTainted === true) return true;
-    if (trace.outputs === undefined) return false;
-    return !jsonValuesEqual(trace.outputs, redactedTrace[index]?.outputs);
+  const redactedTrace = run.trace.map((trace): StepTrace => {
+    const redactedInputs = applyRedaction(
+      redact,
+      trace.inputs,
+      resolvedSecretRefs,
+    );
+    const redactedOutputs =
+      trace.outputs === undefined
+        ? undefined
+        : applyRedaction(redact, trace.outputs, resolvedSecretRefs);
+    const discoveredPaths =
+      trace.outputs === undefined || redactedOutputs === undefined
+        ? []
+        : changedJsonPointers(trace.outputs, redactedOutputs);
+    const existingPaths =
+      trace.secretTaintedPaths ??
+      (trace.secretTainted === true ? ["*"] : []);
+    const secretTaintedPaths = [
+      ...new Set([...existingPaths, ...discoveredPaths]),
+    ];
+    return {
+      ...trace,
+      inputs: redactedInputs,
+      ...(redactedOutputs !== undefined ? { outputs: redactedOutputs } : {}),
+      ...(trace.error !== undefined
+        ? {
+            error: applyRedaction(
+              redact,
+              trace.error,
+              resolvedSecretRefs,
+            ),
+          }
+        : {}),
+      ...(trace.artifacts !== undefined
+        ? {
+            artifacts: applyRedaction(
+              redact,
+              trace.artifacts,
+              resolvedSecretRefs,
+            ),
+          }
+        : {}),
+      ...(trace.llmCall !== undefined
+        ? {
+            llmCall: applyRedaction(
+              redact,
+              trace.llmCall,
+              resolvedSecretRefs,
+            ),
+          }
+        : {}),
+      ...(trace.externalCalls !== undefined
+        ? {
+            externalCalls: applyRedaction(
+              redact,
+              trace.externalCalls,
+              resolvedSecretRefs,
+            ),
+          }
+        : {}),
+      ...(secretTaintedPaths.length > 0
+        ? { secretTainted: true, secretTaintedPaths }
+        : {}),
+    };
   });
   const redacted: RunRecord = {
     ...redactedPayload,
-    trace: redactedTrace.map((trace, index) => {
-      const restored = { ...trace };
-      delete restored.secretTainted;
-      return secretTaintByTrace[index]
-        ? { ...restored, secretTainted: true }
-        : restored;
-    }),
+    trace: redactedTrace,
   };
   const concurrencyKey = run.params?.concurrencyKey;
   if (

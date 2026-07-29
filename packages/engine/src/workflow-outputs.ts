@@ -10,11 +10,41 @@ import {
   resolveExpression,
   type ResolveOptions,
 } from "@aart/expr";
-import type { RunRecord, Workflow } from "@aart/types";
+import type { RunRecord, StepTrace, Workflow } from "@aart/types";
 import { buildExprContext } from "./expr-context.js";
 
 function referencesSecret(expression: string): boolean {
   return findExpressionTokens(expression).some((token) => parseExpression(token[0]).root === "secrets");
+}
+
+function outputPointer(path: ReturnType<typeof parseExpression>["path"]): string {
+  return path
+    .slice(2)
+    .map((segment) =>
+      segment.kind === "property"
+        ? `/${segment.name.replaceAll("~", "~0").replaceAll("/", "~1")}`
+        : `/${segment.index}`,
+    )
+    .join("");
+}
+
+function pathsOverlap(left: string, right: string): boolean {
+  if (left === "*" || right === "") return true;
+  return (
+    left === right ||
+    left.startsWith(`${right}/`) ||
+    right.startsWith(`${left}/`)
+  );
+}
+
+function traceDataTaintsPointer(trace: StepTrace, pointer: string): boolean {
+  if (trace.secretTainted !== true) return false;
+  const paths =
+    trace.secretTaintedPaths ??
+    // Records created before path-level provenance conservatively taint all
+    // outputs. An explicit empty list denotes control-only provenance.
+    ["*"];
+  return paths.some((path) => pathsOverlap(path, pointer));
 }
 
 export function assertNoSecretTaintedOutputSources(
@@ -28,7 +58,15 @@ export function assertNoSecretTaintedOutputSources(
       if (parsed.root !== "steps") continue;
       const first = parsed.path[0];
       if (first === undefined) {
-        if (run.trace.some((trace) => trace.secretTainted === true)) {
+        const latestByStepId = new Map<string, StepTrace>();
+        for (const trace of run.trace) latestByStepId.set(trace.stepId, trace);
+        if (
+          [...latestByStepId.values()].some(
+            (trace) =>
+              trace.controlSecretTainted === true ||
+              traceDataTaintsPointer(trace, ""),
+          )
+        ) {
           throw new Error(
             `public outputMapping "${outputName}" depends on the full steps context containing secret-tainted traces; expose a non-secret derived value instead`,
           );
@@ -37,7 +75,20 @@ export function assertNoSecretTaintedOutputSources(
       }
       if (first.kind !== "property") continue;
       const source = run.trace.filter((trace) => trace.stepId === first.name).at(-1);
-      if (source?.secretTainted === true) {
+      if (source?.controlSecretTainted === true) {
+        throw new Error(
+          `public outputMapping "${outputName}" depends on secret-tainted step "${first.name}" because its execution path was secret-controlled; expose a result whose selection does not depend on secret data`,
+        );
+      }
+      const second = parsed.path[1];
+      if (source && second?.kind === "property" && second.name === "outputs") {
+        const pointer = outputPointer(parsed.path);
+        if (traceDataTaintsPointer(source, pointer)) {
+          throw new Error(
+            `public outputMapping "${outputName}" depends on secret-tainted step "${first.name}" output path "${pointer || "/"}"; expose a non-secret derived value instead`,
+          );
+        }
+      } else if (source && traceDataTaintsPointer(source, "")) {
         throw new Error(
           `public outputMapping "${outputName}" depends on secret-tainted step "${first.name}"; expose a non-secret derived value instead`,
         );

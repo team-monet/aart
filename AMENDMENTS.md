@@ -2026,21 +2026,32 @@ the isolated reuse-and-execute acceptance loop above.
 Step traces are redacted before they are persisted. A downstream step can
 therefore receive a redaction marker instead of the original value, and
 ordinary value comparison alone cannot later distinguish that marker from an
-authored string. `StepTrace.secretTainted` is a persistence-safe boolean that
-records this loss of semantic fidelity without storing a secret, a secret
-name, or a redacted path. A trace is marked when redaction changes its raw
-outputs, and the bit propagates conservatively when a later step references
-that trace in an execution expression. Bare `{{ steps }}` references depend
-on every visible tainted trace. Wait traces carry the same bit through entry,
+authored string. `StepTrace.secretTainted` remains the backward-compatible
+summary bit. `secretTaintedPaths` records output JSON pointers (or `"*"` when
+arbitrary output may be derived from secret data), while
+`controlSecretTainted` separately records that a branch, loop exit, or
+downstream occurrence was selected by secret data. None stores a secret or a
+secret name. Bare `{{ steps }}` references inspect the latest visible
+occurrence of each step. Wait traces carry the same provenance through entry,
 durable suspension, and completion.
 
-Public workflow outputs reject a mapping sourced from a secret-tainted step.
+Public workflow outputs reject control-tainted sources and data-tainted output
+paths, naming both the public field and source path in the error.
 This prevents an intermediate block from laundering a persisted redaction
-marker into a successful public result. A block may still publish a genuinely
-non-secret derived value: when its raw output survives redaction unchanged
-and it did not consume an already-tainted trace, no taint bit is added. The
-bit itself is removed before value-based redaction and restored afterward, so
-secrets equal to `"secret"` or `true` cannot rewrite its key or value.
+marker or a non-literal derivative into a successful public result. Block
+secret access defaults to data use and therefore taints arbitrary output;
+trusted connector blocks may explicitly mark authentication-only credential
+use, which leaves a public API response clean. Secret-derived outputs are not
+written to the idempotency cache.
+
+Normal dispatch now prepares the raw trace in memory, evaluates `until`
+against that provisional trace, computes data/control provenance, redacts,
+and only then performs the first durable write. Early-arrival waits use the
+same prepare-before-persist hook. `authoredStepId` and `iterationIndex`
+identify forEach traces without parsing a `[n]` suffix, so an authored id such
+as `gate[0]` is never mistaken for generated iteration identity. Provenance
+fields are structural engine metadata: value redaction and post-hoc
+corrections cannot rewrite them.
 
 Because this metadata changes the security interpretation of persisted
 RunRecords, the engine record schema version is bumped from 1 to 2. Version 2

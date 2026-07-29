@@ -478,6 +478,39 @@ describe("executeStep — idempotencyKey (spec §30.2)", () => {
     await executeStep(config, run, workflow, workflow.execution.steps[0]!, new Set(), undefined);
     await expect(store.idempotencyLedger.get("run-idem-3:s1")).resolves.toBeUndefined();
   });
+
+  it("does not cache output from an invocation that consumed secret data", async () => {
+    const { store, config } = await setup({
+      resolveSecret: () => "secret-value",
+    });
+    const run = fixtureRun({ runId: "run-idem-secret" });
+    const workflow = fixtureWorkflow({
+      execution: {
+        type: "workflow",
+        steps: [
+          {
+            id: "derive",
+            uses: "test.echo",
+            idempotencyKey: "{{ run.id }}:derive",
+            with: { source: "{{ secrets.API_KEY }}" },
+          },
+        ],
+      },
+    });
+
+    await executeStep(
+      config,
+      run,
+      workflow,
+      workflow.execution.steps[0]!,
+      new Set(),
+      undefined,
+    );
+
+    await expect(
+      store.idempotencyLedger.get("run-idem-secret:derive"),
+    ).resolves.toBeUndefined();
+  });
 });
 
 describe("executeStep — dry-run mode (S9 reconciliation ledger item 7, architecture §9.5 point 1 - RunRecord.params.dryRun)", () => {

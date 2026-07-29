@@ -55,6 +55,18 @@ export const StepTraceSchema = z.object({
   // never retained; the bit survives store reloads so downstream steps
   // cannot launder a redaction marker into a public workflow output.
   secretTainted: z.boolean().optional(),
+  // Output-level provenance. `*` means an arbitrary transformation may
+  // have used secret data; otherwise entries are JSON pointers relative
+  // to `outputs` whose values were changed by redaction.
+  secretTaintedPaths: z.array(z.string()).optional(),
+  // This occurrence, or the edge that selected it, depended on secret
+  // data. Kept separate from output-data taint so a clean final loop
+  // occurrence is not poisoned by an unrelated secret field.
+  controlSecretTainted: z.boolean().optional(),
+  // Stable authored identity. forEach child traces use a rendered stepId
+  // such as `map[0]`, but ownership never depends on parsing that string.
+  authoredStepId: z.string().optional(),
+  iterationIndex: z.number().int().nonnegative().optional(),
 });
 export type StepTrace = z.infer<typeof StepTraceSchema>;
 

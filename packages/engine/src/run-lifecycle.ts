@@ -14,6 +14,7 @@ import { assertSchemaVersionCompatible, CURRENT_ENGINE_SCHEMA_VERSION } from "./
 import { captureExecutionSnapshot, isSnapshotCaptured, resolveWorkflowForRun, uncapturedSnapshot } from "./snapshot.js";
 import { validateWorkflowOutputs, WorkflowOutputValidationError } from "./output-validation.js";
 import {
+  authoredStepIdForTrace,
   determineNextStepId,
   executeStep,
   refreshTaintAfterControlResolution,
@@ -261,14 +262,20 @@ async function resolveContinuation(
     return { run, nextStepId: workflow.execution.steps[0]?.id };
   }
   const lastTrace = run.trace[run.trace.length - 1]!;
-  const ownerStepId = lastTrace.stepId.replace(/\[\d+\]$/, "");
-  const isForEachSubEntry = lastTrace.stepId !== ownerStepId;
+  const ownerStepId = authoredStepIdForTrace(workflow, lastTrace);
+  const ownerStep = workflow.execution.steps.find(
+    (step) => step.id === ownerStepId,
+  );
+  const isForEachSubEntry =
+    ownerStep?.forEach !== undefined &&
+    (lastTrace.iterationIndex !== undefined ||
+      lastTrace.stepId !== ownerStepId);
 
   if (lastTrace.status === "failed" || isForEachSubEntry) {
     return { run, nextStepId: ownerStepId };
   }
 
-  const lastStep = workflow.execution.steps.find((s) => s.id === ownerStepId);
+  const lastStep = ownerStep;
   if (!lastStep) {
     throw new Error(`Cannot resolve continuation point for run "${run.runId}": step "${ownerStepId}" (from trailing trace entry "${lastTrace.stepId}") not found in workflow ${workflow.id}@${workflow.version}.`);
   }
@@ -300,10 +307,15 @@ async function resolveContinuation(
       `^${escapedOwnerStepId}\\[\\d+\\]$`,
     );
     for (let index = run.trace.length - 2; index >= 0; index -= 1) {
-      const candidateStepId = run.trace[index]!.stepId;
+      const candidate = run.trace[index]!;
+      const candidateStepId = candidate.stepId;
       if (
         declaredStepIds.has(candidateStepId) ||
-        !iterationTracePattern.test(candidateStepId)
+        !(
+          (candidate.authoredStepId === ownerStepId &&
+            candidate.iterationIndex !== undefined) ||
+          iterationTracePattern.test(candidateStepId)
+        )
       ) {
         break;
       }

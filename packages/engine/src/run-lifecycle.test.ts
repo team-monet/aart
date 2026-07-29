@@ -251,7 +251,6 @@ describe("executeRun — fresh execution", () => {
     });
     await store.workflows.put(workflow);
     const run = await triggerRun(config, { workflow, trigger: fixtureTrigger(), inputs: {} });
-
     const finished = await executeRun(config, run.runId);
 
     expect(finished.status).toBe("failed");
@@ -538,7 +537,6 @@ describe("executeRun — fresh execution", () => {
     });
     await store.workflows.put(workflow);
     const run = await triggerRun(config, { workflow, trigger: fixtureTrigger(), inputs: {} });
-
     const finished = await executeRun(config, run.runId);
 
     expect(finished.status).toBe("failed");
@@ -592,6 +590,96 @@ describe("executeRun — fresh execution", () => {
     expect(finished.status).toBe("failed");
     expect(finished.error).toMatch(/secret-tainted step "derive"/);
     expect(finished.trace[0]).toMatchObject({ secretTainted: true });
+  });
+
+  it("rejects a non-literal derivative when a block resolves the data secret internally", async () => {
+    const deriveLength: BlockImplementation = {
+      manifest: {
+        id: "test.internal-secret-length",
+        version: "1.0.0",
+        capabilities: [],
+        inputSchema: {},
+        outputSchema: {},
+        description: "Resolves secret data and returns only its length.",
+      },
+      execute: async (_inputs, ctx) => ({
+        length: (await ctx.resolveSecret("API_KEY")).length,
+      }),
+    };
+    const { store, config } = await setup({
+      blocks: { [deriveLength.manifest.id]: deriveLength },
+      redact: redactResolvedValues,
+      resolveSecret: () => "secret-value",
+    });
+    const workflow = fixtureWorkflow({
+      outputs: [{ name: "result", type: "integer", required: true }],
+      execution: {
+        type: "workflow",
+        steps: [{ id: "derive", uses: deriveLength.manifest.id }],
+        outputMapping: { result: "{{ steps.derive.outputs.length }}" },
+      },
+    });
+    await store.workflows.put(workflow);
+    const run = await triggerRun(config, {
+      workflow,
+      trigger: fixtureTrigger(),
+      inputs: {},
+    });
+
+    const finished = await executeRun(config, run.runId);
+
+    expect(finished.status).toBe("failed");
+    expect(finished.error).toMatch(
+      /secret-tainted step "derive" output path "\/length"/,
+    );
+    expect(finished.trace[0]).toMatchObject({
+      secretTainted: true,
+      secretTaintedPaths: ["*"],
+    });
+  });
+
+  it("allows a trusted block to use a credential without tainting its public response", async () => {
+    const authenticatedLookup: BlockImplementation = {
+      manifest: {
+        id: "test.credential-lookup",
+        version: "1.0.0",
+        capabilities: [],
+        inputSchema: {},
+        outputSchema: {},
+        description: "Uses a credential only at its authentication boundary.",
+      },
+      execute: async (_inputs, ctx) => {
+        await ctx.resolveSecret("API_KEY", { usage: "credential" });
+        return { accountName: "Acme" };
+      },
+    };
+    const { store, config } = await setup({
+      blocks: { [authenticatedLookup.manifest.id]: authenticatedLookup },
+      redact: redactResolvedValues,
+      resolveSecret: () => "secret-value",
+    });
+    const workflow = fixtureWorkflow({
+      outputs: [{ name: "accountName", type: "string", required: true }],
+      execution: {
+        type: "workflow",
+        steps: [{ id: "lookup", uses: authenticatedLookup.manifest.id }],
+        outputMapping: {
+          accountName: "{{ steps.lookup.outputs.accountName }}",
+        },
+      },
+    });
+    await store.workflows.put(workflow);
+    const run = await triggerRun(config, {
+      workflow,
+      trigger: fixtureTrigger(),
+      inputs: {},
+    });
+
+    const finished = await executeRun(config, run.runId);
+
+    expect(finished.status).toBe("completed");
+    expect(finished.outputs).toEqual({ accountName: "Acme" });
+    expect(finished.trace[0]?.secretTainted).toBeUndefined();
   });
 
   it("preserves secret taint across an intermediate persisted step", async () => {
@@ -729,7 +817,7 @@ describe("executeRun — fresh execution", () => {
     expect(finished.error).toMatch(/secret-tainted step "derive"/);
   });
 
-  it("uses only the latest guarded-loop occurrence when a later step reads the whole steps context", async () => {
+  it("does not treat a later clean-looking poll as safe when the block previously used a data secret", async () => {
     let attempts = 0;
     const pollingBlock: BlockImplementation = {
       manifest: {
@@ -780,14 +868,15 @@ describe("executeRun — fresh execution", () => {
 
     const finished = await executeRun(config, run.runId);
 
-    expect(finished.status).toBe("completed");
-    expect(finished.outputs).toEqual({ result: "clean-result" });
+    expect(finished.status).toBe("failed");
+    expect(finished.error).toMatch(/secret-tainted step "relay"/);
     expect(finished.trace.filter((trace) => trace.stepId === "poll")).toMatchObject([
       { secretTainted: true },
-      { outputs: { value: "clean-result" } },
+      { outputs: { value: "clean-result" }, controlSecretTainted: true },
     ]);
-    expect(finished.trace.filter((trace) => trace.stepId === "poll")[1]?.secretTainted).toBeUndefined();
-    expect(finished.trace.find((trace) => trace.stepId === "relay")?.secretTainted).toBeUndefined();
+    expect(finished.trace.find((trace) => trace.stepId === "relay")).toMatchObject({
+      controlSecretTainted: true,
+    });
   });
 
   it("refreshes trace taint when until is the first expression to resolve a secret", async () => {
@@ -825,6 +914,13 @@ describe("executeRun — fresh execution", () => {
     });
     await store.workflows.put(workflow);
     const run = await triggerRun(config, { workflow, trigger: fixtureTrigger(), inputs: {} });
+    const persistedPollValues: unknown[] = [];
+    const originalPutRun = store.runs.put.bind(store.runs);
+    store.runs.put = async (record) => {
+      const poll = record.trace.find((trace) => trace.stepId === "poll");
+      if (poll?.outputs) persistedPollValues.push(poll.outputs["value"]);
+      return originalPutRun(record);
+    };
 
     const finished = await executeRun(config, run.runId);
 
@@ -833,6 +929,8 @@ describe("executeRun — fresh execution", () => {
     expect(finished.trace.find((trace) => trace.stepId === "poll")).toMatchObject({
       secretTainted: true,
     });
+    expect(persistedPollValues).not.toContain(true);
+    expect(persistedPollValues[0]).toMatch(/REDACTED/);
   });
 
   it("taints an early-arrival wait after until first resolves a matching secret", async () => {
@@ -964,6 +1062,98 @@ describe("executeRun — fresh execution", () => {
     });
     expect(finished.trace.find((trace) => trace.stepId === "denied")).toMatchObject({
       secretTainted: true,
+    });
+  });
+
+  it("preserves an authored bracket-suffixed step id when propagating branch provenance", async () => {
+    const { store, config } = await setup({
+      redact: redactResolvedValues,
+      resolveSecret: () => false,
+    });
+    const workflow = fixtureWorkflow({
+      outputs: [{ name: "result", type: "string", required: true }],
+      execution: {
+        type: "workflow",
+        steps: [
+          {
+            id: "gate[0]",
+            uses: "test.echo",
+            if: "{{ secrets.FLAG }}",
+            then: "allowed",
+            else: "denied",
+          },
+          { id: "allowed", uses: "test.echo", with: { value: "allowed" } },
+          { id: "denied", uses: "test.echo", with: { value: "denied" } },
+        ],
+        outputMapping: {
+          result: "{{ steps.denied.outputs.echoed.value }}",
+        },
+      },
+    });
+    await store.workflows.put(workflow);
+    const run = await triggerRun(config, {
+      workflow,
+      trigger: fixtureTrigger(),
+      inputs: {},
+    });
+
+    const finished = await executeRun(config, run.runId);
+
+    expect(finished.status).toBe("failed");
+    expect(finished.trace.find((trace) => trace.stepId === "gate[0]")).toMatchObject({
+      authoredStepId: "gate[0]",
+      controlSecretTainted: true,
+    });
+    expect(finished.trace.find((trace) => trace.stepId === "denied")).toMatchObject({
+      controlSecretTainted: true,
+    });
+  });
+
+  it("propagates an indirect secret-controlled branch into its selected successor", async () => {
+    const { store, config } = await setup({
+      redact: redactResolvedValues,
+      resolveSecret: () => false,
+    });
+    const workflow = fixtureWorkflow({
+      outputs: [{ name: "result", type: "string", required: true }],
+      execution: {
+        type: "workflow",
+        steps: [
+          {
+            id: "source",
+            uses: "test.echo",
+            with: { flag: "{{ secrets.FLAG }}" },
+          },
+          {
+            id: "gate",
+            uses: "test.echo",
+            if: "{{ steps.source.outputs.echoed.flag }}",
+            then: "allowed",
+            else: "denied",
+          },
+          { id: "allowed", uses: "test.echo", with: { value: "allowed" } },
+          { id: "denied", uses: "test.echo", with: { value: "denied" } },
+        ],
+        outputMapping: {
+          result: "{{ steps.denied.outputs.echoed.value }}",
+        },
+      },
+    });
+    await store.workflows.put(workflow);
+    const run = await triggerRun(config, {
+      workflow,
+      trigger: fixtureTrigger(),
+      inputs: {},
+    });
+
+    const finished = await executeRun(config, run.runId);
+
+    expect(finished.status).toBe("failed");
+    expect(finished.trace.find((trace) => trace.stepId === "gate")).toMatchObject({
+      controlSecretTainted: true,
+    });
+    expect(finished.trace.find((trace) => trace.stepId === "denied")).toMatchObject({
+      controlSecretTainted: true,
     });
   });
 
