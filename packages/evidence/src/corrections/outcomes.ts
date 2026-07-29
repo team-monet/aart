@@ -14,6 +14,26 @@ import {
 import { generateImprovementBrief } from "../improvement-brief.js";
 import { correctionKey } from "./correction.js";
 
+const UNSAFE_CORRECTION_PATH_SEGMENTS = new Set([
+  "__proto__",
+  "constructor",
+  "prototype",
+]);
+
+function isWritableOutputPath(path: string): boolean {
+  if (path === "outputs") return true;
+  if (!path.startsWith("outputs.")) return false;
+  const segments = path.split(".").slice(1);
+  return (
+    segments.length > 0 &&
+    segments.every(
+      (segment) =>
+        segment.length > 0 &&
+        !UNSAFE_CORRECTION_PATH_SEGMENTS.has(segment),
+    )
+  );
+}
+
 /** Sets a dot-path (e.g. "outputs.nmi") on a plain object, creating intermediate objects as needed. */
 function setByPath(target: Record<string, unknown>, path: string, value: unknown): void {
   const segments = path.split(".");
@@ -48,7 +68,10 @@ function applyTraceCorrection(
   if (traceIndex === -1) throw new Error(`updateRunOutput: run "${correction.runId}" has no step "${correction.stepId}"`);
 
   const original = run.trace[traceIndex]!;
-  const updatedTrace: StepTrace = { ...original, postHocCorrected: true };
+  const updatedTrace: StepTrace = structuredClone({
+    ...original,
+    postHocCorrected: true,
+  });
   setByPath(updatedTrace as unknown as Record<string, unknown>, correction.fieldPath, correction.corrected);
 
   let trace = run.trace.map((t, i) => (i === traceIndex ? updatedTrace : t));
@@ -115,22 +138,19 @@ async function refreshCompletedCorrectionOutputs(
 }
 
 export async function updateRunOutput(store: AartStore, correction: Correction): Promise<RunRecord> {
-  const protectedTraceFields = [
-    "secretTainted",
-    "secretTaintedPaths",
-    "controlSecretTainted",
-    "authoredStepId",
-    "iterationIndex",
-    "idempotencyLedgerKey",
-    "idempotencyLedgerFingerprint",
-  ];
-  if (protectedTraceFields.some(
-    (field) =>
-      correction.fieldPath === field ||
-      correction.fieldPath.startsWith(`${field}.`),
-  )) {
+  if (!isWritableOutputPath(correction.fieldPath)) {
     throw new Error(
-      `updateRunOutput: "${correction.fieldPath}" is protected engine security metadata and cannot be changed by a correction`,
+      `updateRunOutput: "${correction.fieldPath}" is not a writable step output path; corrections cannot change trace identity, lifecycle, inputs, engine security metadata, or object prototypes`,
+    );
+  }
+  if (
+    correction.fieldPath === "outputs" &&
+    (correction.corrected === null ||
+      typeof correction.corrected !== "object" ||
+      Array.isArray(correction.corrected))
+  ) {
+    throw new Error(
+      'updateRunOutput: replacing "outputs" requires an object value',
     );
   }
 
@@ -176,8 +196,17 @@ export async function updateRunOutput(store: AartStore, correction: Correction):
           firstWait.runId,
           firstWait.stepId,
         );
+      const protectedRun = protectedState?.run ?? publicRun;
+      const protectedTarget = protectedRun.trace.findLast(
+        (trace) => trace.stepId === correction.stepId,
+      );
+      if (protectedTarget?.status !== "completed") {
+        throw new Error(
+          `updateRunOutput: waiting run "${correction.runId}" can correct only an already-completed trace; the unresolved wait result is owned by its eventual resume payload`,
+        );
+      }
       const updatedProtected = applyTraceCorrection(
-        protectedState?.run ?? publicRun,
+        protectedRun,
         correction,
         updatedAt,
       );

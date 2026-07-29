@@ -768,6 +768,102 @@ describe("executeStep — idempotencyKey (spec §30.2)", () => {
     ).resolves.toBeUndefined();
   });
 
+  it("rechecks protected secret refs atomically when another run discovers a secret during dispatch", async () => {
+    const secret = "secret-discovered-during-dispatch";
+    let markStarted: () => void = () => {};
+    let releaseDispatch: () => void = () => {};
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    const gate = new Promise<void>((resolve) => {
+      releaseDispatch = resolve;
+    });
+    const delayedBlock: BlockImplementation = {
+      manifest: {
+        id: "test.delayed-idempotency-output",
+        version: "1.0.0",
+        capabilities: [],
+        inputSchema: {},
+        outputSchema: {},
+        description:
+          "Returns only after another run can expand protected refs.",
+      },
+      execute: async () => {
+        markStarted();
+        await gate;
+        return { value: secret };
+      },
+    };
+    const redact = (
+      record: unknown,
+      refs: ReadonlySet<string>,
+    ): unknown =>
+      JSON.parse(
+        [...refs].reduce(
+          (json, value) =>
+            json.replaceAll(value, "[REDACTED]"),
+          JSON.stringify(record),
+        ),
+      );
+    const { store, config } = await setup({
+      blocks: { [delayedBlock.manifest.id]: delayedBlock },
+      redact,
+    });
+    const run = fixtureRun({
+      runId: "run-idem-concurrent-secret",
+      status: "running",
+    });
+    await store.runs.put(run);
+    await store.runs.putOperationalState(run.runId, {
+      run,
+      resolvedSecretValues: [],
+    });
+    const workflow = fixtureWorkflow({
+      execution: {
+        type: "workflow",
+        steps: [
+          {
+            id: "send",
+            uses: delayedBlock.manifest.id,
+            idempotencyKey: "stable-concurrent-key",
+          },
+        ],
+      },
+    });
+
+    const execution = executeStep(
+      config,
+      run,
+      workflow,
+      workflow.execution.steps[0]!,
+      new Set(),
+      undefined,
+    );
+    await started;
+    await repairGlobalAuditsForNewSecrets(
+      store,
+      redact,
+      new Set([secret]),
+    );
+    releaseDispatch();
+    const outcome = await execution;
+
+    expect(outcome.kind).toBe("continue");
+    await expect(
+      store.idempotencyLedger.get(
+        idempotencyStorageKey("stable-concurrent-key"),
+      ),
+    ).resolves.toBeUndefined();
+    expect(
+      JSON.stringify(await store.runs.get(run.runId)),
+    ).not.toContain(secret);
+    expect(
+      outcome.run.trace.find(
+        (trace) => trace.stepId === "send",
+      ),
+    ).toMatchObject({ secretTainted: true });
+  });
+
   it("does not replay an unversioned legacy ledger entry", async () => {
     let executeCount = 0;
     const block: BlockImplementation = {

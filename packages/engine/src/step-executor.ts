@@ -368,6 +368,7 @@ async function dispatchOnce(
   // would wrongly short-circuit a LATER, genuinely real invocation of this
   // same step into skipping the actual effectful action idempotencyKey
   // exists to gate in the first place.
+  let idempotencyRecorded = false;
   if (
     resolvedIdempotencyKey !== undefined &&
     !shouldFake &&
@@ -376,14 +377,71 @@ async function dispatchOnce(
     !controlSecretTaintedBeforeDispatch &&
     !outputsContainResolvedSecret
   ) {
-    await recordIdempotency(
-      config.store,
-      resolvedIdempotencyKey,
-      run.runId,
-      stepIdForTrace,
-      outputs,
-      now(),
-      seq,
+    idempotencyRecorded = await config.store.transact(
+      async (tx) => {
+        const protectedRun = await mergeActiveRunProtection(
+          tx,
+          run,
+          resolvedSecretRefs,
+        );
+        const protectedInputs = applyRedaction(
+          config.redact,
+          resolvedInputs,
+          resolvedSecretRefs,
+        );
+        const protectedOutputs = applyRedaction(
+          config.redact,
+          outputs,
+          resolvedSecretRefs,
+        );
+        const protectedIdempotencyKey = applyRedaction(
+          config.redact,
+          resolvedIdempotencyKey,
+          resolvedSecretRefs,
+        );
+        const protectedDataTaint =
+          recomputeDataSecretTaint(
+            config,
+            step,
+            protectedRun,
+            resolvedSecretRefs,
+          ) ||
+          !jsonValuesEqual(resolvedInputs, protectedInputs);
+        const protectedControlTaint =
+          runHasSecretControlledFlow(protectedRun) ||
+          valueReferencesSecretTaintedTrace(
+            step.if,
+            protectedRun,
+          ) ||
+          (step.next !== undefined &&
+            valueReferencesSecretTaintedTrace(
+              step.until,
+              protectedRun,
+              step.id,
+            ));
+        if (
+          protectedDataTaint ||
+          protectedControlTaint ||
+          protectedIdempotencyKey !==
+            resolvedIdempotencyKey ||
+          changedJsonPointers(
+            outputs,
+            protectedOutputs,
+          ).length > 0
+        ) {
+          return false;
+        }
+        await recordIdempotency(
+          tx,
+          resolvedIdempotencyKey,
+          run.runId,
+          stepIdForTrace,
+          outputs,
+          now(),
+          seq,
+        );
+        return true;
+      },
     );
   }
   return {
@@ -397,12 +455,7 @@ async function dispatchOnce(
     endedAt,
     durationMs,
     authoredStepId: step.id,
-    ...(resolvedIdempotencyKey !== undefined &&
-    !shouldFake &&
-    !dataSecretTaintedBeforeDispatch &&
-    !dataSecretAccessed &&
-    !controlSecretTaintedBeforeDispatch &&
-    !outputsContainResolvedSecret
+    ...(idempotencyRecorded
       ? {
           idempotencyLedgerKey,
           idempotencyLedgerFingerprint:

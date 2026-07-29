@@ -2066,7 +2066,13 @@ copying a trusted block id. Secret-derived outputs are not written to the
 idempotency cache. The cache decision also compares every
 successful output with its redacted form before the ledger write, covering an
 output that matches a secret resolved by an earlier step even when the current
-block did not itself consume secret data. If the matching secret is discovered
+block did not itself consume secret data. Immediately before admission, the
+engine rejoins any secret literals another run discovered while the block was
+executing and repeats key/input/output plus data/control eligibility inside
+the same transaction as the ledger write. A global repair therefore either
+lands first and blocks admission, or lands second and sees/revokes the new
+entry; a stale worker cannot write a raw cache value after repair passed it.
+If the matching secret is discovered
 only by a later step, every subsequent persistence boundary revisits both the
 current run's authored entries and the exact global entries replayed by its
 traces. Deletion and the redacted `RunRecord` write share one store
@@ -2189,11 +2195,16 @@ decision values are re-redacted for the affected run. Run-linked correction
 field paths, observed/corrected values, reason, and reviewer receive the same
 security rewrite; changing a secret-bearing correction key replaces the old
 row, with a non-secret ordinal suffix if two redacted paths collide.
-Applying a correction to a durably waiting run updates its sealed exact
+Corrections can change only `outputs` or a safe, non-empty descendant output
+path, never trace identity, status, timing, inputs, engine security metadata,
+or object prototypes; replacing `outputs` requires an object. Applying one to
+an already-completed trace in a durably waiting run updates its sealed exact
 continuation before the public audit, so downstream execution observes the
-accepted value after resume. Corrections against pending/running runs fail
-clearly instead of racing an in-flight effect and appearing accepted before
-being overwritten; terminal evidence remains directly correctable.
+accepted value after resume. The unresolved wait occurrence itself is not
+correctable because its eventual resume payload owns that result. Corrections
+against pending/running runs fail clearly instead of racing an in-flight
+effect and appearing accepted before being overwritten; terminal evidence
+remains directly correctable.
 Activity-event summary/actor fields are rewritten while their structural
 identity and ordering fields remain stable. An outstanding wait keeps a
 redacted user-visible condition while its signal correlation remains matchable

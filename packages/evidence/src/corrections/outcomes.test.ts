@@ -171,6 +171,116 @@ describe("outcome 1/6 — updateRunOutput (spec §23.4 'update current run outpu
     });
   });
 
+  it("rejects lifecycle and identity mutations instead of writing them into executable state", async () => {
+    const run = fixtureRunRecord({
+      runId: "run_1",
+      status: "waiting",
+      endedAt: undefined,
+      trace: [
+        {
+          seq: 0,
+          stepId: "extract",
+          block: "llm.extract",
+          status: "completed",
+          inputs: {},
+          outputs: { nmi: "wrong" },
+          startedAt: "t",
+        },
+      ],
+    });
+    await store.runs.put(run);
+    await store.waits.put(
+      run.runId,
+      "pause",
+      { type: "manual", schemaVersion: 1 },
+      "2026-01-01T00:00:00.000Z",
+      { run, resolvedSecretValues: [] },
+    );
+
+    for (const fieldPath of [
+      "status",
+      "stepId",
+      "seq",
+      "inputs.token",
+      "secretTainted",
+      "outputs.",
+      "outputs.__proto__.polluted",
+      "outputs.constructor.prototype.polluted",
+    ]) {
+      await expect(
+        updateRunOutput(
+          store,
+          fixtureCorrection({
+            fieldPath,
+            corrected: "mutated",
+          }),
+        ),
+      ).rejects.toThrow(/not a writable step output path/);
+    }
+    expect(
+      (Object.prototype as Record<string, unknown>)["polluted"],
+    ).toBeUndefined();
+
+    await expect(
+      updateRunOutput(
+        store,
+        fixtureCorrection({
+          fieldPath: "outputs",
+          corrected: "not-an-output-object",
+        }),
+      ),
+    ).rejects.toThrow(/requires an object value/);
+  });
+
+  it("rejects a correction to the unresolved wait occurrence whose resume payload owns the result", async () => {
+    const run = fixtureRunRecord({
+      runId: "run_1",
+      status: "waiting",
+      endedAt: undefined,
+      trace: [
+        {
+          seq: 0,
+          stepId: "pause",
+          block: "wait.manual",
+          status: "waiting",
+          inputs: {},
+          startedAt: "t",
+        },
+      ],
+    });
+    await store.runs.put(run);
+    await store.waits.put(
+      run.runId,
+      "pause",
+      { type: "manual", schemaVersion: 1 },
+      "2026-01-01T00:00:00.000Z",
+      { run, resolvedSecretValues: [] },
+    );
+
+    await expect(
+      updateRunOutput(
+        store,
+        fixtureCorrection({
+          stepId: "pause",
+          fieldPath: "outputs.answer",
+          corrected: "premature",
+        }),
+      ),
+    ).rejects.toThrow(/already-completed trace/);
+    await expect(
+      store.waits.getOperationalRunState("run_1", "pause"),
+    ).resolves.toMatchObject({
+      run: {
+        trace: [
+          expect.objectContaining({
+            stepId: "pause",
+            status: "waiting",
+          }),
+        ],
+      },
+    });
+  });
+
   it("preserves corrections on legacy completed runs without materialized public outputs", async () => {
     const run = fixtureRunRecord({
       runId: "run_1",
@@ -406,7 +516,7 @@ describe("outcome 1/6 — updateRunOutput (spec §23.4 'update current run outpu
           store,
           fixtureCorrection({ fieldPath, corrected: false }),
         ),
-      ).rejects.toThrow(/protected engine security metadata/);
+      ).rejects.toThrow(/not a writable step output path/);
     }
     await expect(store.runs.get("run_1")).resolves.toMatchObject({
       trace: [{ secretTainted: true }],
