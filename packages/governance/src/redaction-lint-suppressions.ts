@@ -60,9 +60,6 @@ export const REDACTION_LINT_SUPPRESSIONS: readonly RedactionLintSuppression[] = 
   // ---- packages/engine/src/redaction.ts ----
   { file: "packages/engine/src/redaction.ts", snippet: "await store.runs.put(repaired);", reason: "repairCustomerVisibleAudits computes `repaired` immediately above with applyRunRedaction(redact, run, resolvedSecretRefs). The separately sealed operational continuation is written through WaitStore, never this public RunStore write." },
 
-  // ---- packages/engine/src/run-lifecycle.ts ----
-  { file: "packages/engine/src/run-lifecycle.ts", snippet: "await tx.runs.put(", reason: "The only multiline match writes the immediate applyRunRedaction(config.redact, persistenceAwareSnapshot, resolvedSecretRefs) result. persistenceAwareSnapshot retains raw values only in memory for active execution and is never passed directly to RunStore." },
-
   // ---- packages/engine/src/wait/wait-machine.ts ----
   { file: "packages/engine/src/wait/wait-machine.ts", snippet: "await tx.approvals.put({ ...task, status: \"expired\", decidedAt: now.toISOString() });", reason: "failExpiredWait spreads an existing ApprovalTask (redacted at creation by step-executor.ts's executeWaitDispatch, A41 fix) with only a static status/decidedAt pair added -- introduces no new content." },
 

@@ -14,14 +14,15 @@ import {
   type PrepareRevokedIdempotencyConsumer,
 } from "../idempotency.js";
 import {
-  applyRedaction,
   applyRunRedaction,
   mergeOperationalRunTaint,
   mergePersistedRunTaint,
   redactSignalAudit,
+  redactWaitAudit,
   repairGlobalAuditsForNewSecrets,
 } from "../redaction.js";
 import { assertSchemaVersionCompatible } from "../schema-version.js";
+import { uncapturedSnapshot } from "../snapshot.js";
 import type { DueWait, ResumeMechanism, ResumeOutcome } from "../types.js";
 import { waitSignalCorrelation } from "./wait-blocks.js";
 
@@ -64,6 +65,13 @@ export interface EnterWaitOptions {
   secretTainted?: boolean;
   controlSecretTainted?: boolean;
   /**
+   * The caller captured this run's first snapshot specifically for this
+   * wait attempt. If an early signal means no suspension occurs, the
+   * snapshot remains uncaptured and completion (or a later real wait)
+   * becomes the durable capture boundary instead.
+   */
+  snapshotCapturedForWait?: boolean;
+  /**
    * Completes control-flow provenance against the in-memory early-arrival
    * trace before the first durable write. This closes the window where an
    * `until` expression could resolve a secret only after plaintext output
@@ -102,6 +110,7 @@ export async function enterWait(config: WaitMachineConfig, options: EnterWaitOpt
     resolvedSecretRefs: suppliedSecretRefs,
     secretTainted,
     controlSecretTainted,
+    snapshotCapturedForWait,
     prepareEarlyArrivalRun,
   } = options;
   const resolvedSecretRefs =
@@ -151,8 +160,14 @@ export async function enterWait(config: WaitMachineConfig, options: EnterWaitOpt
         // "about to wait" to "completed" in one hop (architecture §4.4 step
         // 3: "the wait resolves immediately... execution proceeds straight
         // to step 8").
+        const earlyArrivalBaseRun = snapshotCapturedForWait
+          ? {
+              ...persistenceAwareRun,
+              snapshot: uncapturedSnapshot(),
+            }
+          : persistenceAwareRun;
         const trace: StepTrace = {
-          seq: persistenceAwareRun.trace.length,
+          seq: earlyArrivalBaseRun.trace.length,
           stepId,
           authoredStepId: stepId,
           block: blockId,
@@ -173,8 +188,8 @@ export async function enterWait(config: WaitMachineConfig, options: EnterWaitOpt
               : {}),
         };
         const updatedRun: RunRecord = {
-          ...persistenceAwareRun,
-          trace: [...persistenceAwareRun.trace, trace],
+          ...earlyArrivalBaseRun,
+          trace: [...earlyArrivalBaseRun.trace, trace],
           updatedAt: now.toISOString(),
         };
         const preparedRun = prepareEarlyArrivalRun
@@ -191,7 +206,7 @@ export async function enterWait(config: WaitMachineConfig, options: EnterWaitOpt
         );
         await tx.signals.markConsumed(existingSignal.id, {
           consumedBy: {
-            runId: persistenceAwareRun.runId,
+            runId: earlyArrivalBaseRun.runId,
             stepId,
           },
         });
@@ -252,16 +267,11 @@ export async function enterWait(config: WaitMachineConfig, options: EnterWaitOpt
       repairedRun,
       resolvedSecretRefs,
     );
-    const redactedWait = applyRedaction(
+    const auditWait = redactWaitAudit(
       config.redact,
       wait,
       resolvedSecretRefs,
-    ) as WaitCondition;
-    const auditWait = {
-      ...redactedWait,
-      type: wait.type,
-      schemaVersion: wait.schemaVersion,
-    } as WaitCondition;
+    );
     await tx.runs.put(redactedRun);
     await tx.waits.put(
       persistenceAwareRun.runId,

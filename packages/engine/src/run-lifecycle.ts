@@ -24,7 +24,6 @@ import {
 } from "./step-executor.js";
 import { revokeSecretTaintedIdempotency } from "./idempotency.js";
 import type { EngineConfig, TriggerRunInput } from "./types.js";
-import { isWaitBlockId } from "./wait/wait-blocks.js";
 import { materializeWorkflowOutputs } from "./workflow-outputs.js";
 
 // ---------------------------------------------------------------------------
@@ -188,8 +187,8 @@ export async function finalizeTerminal(
   // ExecutionSnapshot capture (architecture §4.5) — "once per run, at the
   // earlier of (a) the run's first wait, or (b) run completion if it never
   // waits." A run that entered at least one wait already has one (captured
-  // in the step-loop below, right before dispatching a wait-type step); a
-  // run that never waited captures it here, at its first terminal status.
+  // by executeWaitDispatch as part of the durable suspension transition);
+  // a run that never waited captures it here, at its first terminal status.
   if (!isSnapshotCaptured(updated.snapshot)) {
     updated = { ...updated, snapshot: await captureExecutionSnapshot(workflow, config.blocks, now, config.computePackHashes) };
   }
@@ -454,23 +453,6 @@ export async function runStepsLoop(config: EngineConfig, initialRun: RunRecord, 
     const step = workflow.execution.steps.find((s) => s.id === currentStepId);
     if (!step) {
       throw new Error(`Step "${currentStepId}" referenced but not found in workflow ${workflow.id}@${workflow.version} (run "${run.runId}").`);
-    }
-
-    if (!isSnapshotCaptured(run.snapshot) && isWaitBlockId(step.uses)) {
-      const now = config.now?.() ?? new Date();
-      const withSnapshot: RunRecord = { ...run, snapshot: await captureExecutionSnapshot(workflow, config.blocks, now, config.computePackHashes) };
-      run = await config.store.transact(async (tx) => {
-        const persistenceAwareSnapshot =
-          await mergePersistedRunTaint(tx, withSnapshot);
-        await tx.runs.put(
-          applyRunRedaction(
-            config.redact,
-            persistenceAwareSnapshot,
-            resolvedSecretRefs,
-          ),
-        );
-        return persistenceAwareSnapshot;
-      });
     }
 
     let outcome: StepOutcome;

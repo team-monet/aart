@@ -87,6 +87,48 @@ describe("fs adapter — .aart/ layout (architecture §5.2)", () => {
     expect(JSON.parse(onDisk).record.runId).toBe("run_layout_1");
   });
 
+  it("shares one mutex across symlink aliases before the store directory exists", async () => {
+    const container = await fs.mkdtemp(
+      join(tmpdir(), "aart-store-fs-alias-"),
+    );
+    try {
+      const physicalParent = join(container, "physical");
+      const aliasParent = join(container, "alias");
+      await fs.mkdir(physicalParent);
+      await fs.symlink(physicalParent, aliasParent, "dir");
+      const firstStore = createFsStore(
+        join(physicalParent, ".aart"),
+      );
+      const aliasStore = createFsStore(join(aliasParent, ".aart"));
+      let releaseFirst!: () => void;
+      let markFirstEntered!: () => void;
+      const firstEntered = new Promise<void>((resolve) => {
+        markFirstEntered = resolve;
+      });
+      const firstGate = new Promise<void>((resolve) => {
+        releaseFirst = resolve;
+      });
+
+      const first = firstStore.transact(async () => {
+        markFirstEntered();
+        await firstGate;
+      });
+      await firstEntered;
+      let secondEntered = false;
+      const second = aliasStore.transact(async () => {
+        secondEntered = true;
+      });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(secondEntered).toBe(false);
+
+      releaseFirst();
+      await Promise.all([first, second]);
+      expect(secondEntered).toBe(true);
+    } finally {
+      await fs.rm(container, { recursive: true, force: true });
+    }
+  });
+
   it("keeps late-redacted wait operation values sealed on disk", async () => {
     const wait = {
       type: "external_job" as const,

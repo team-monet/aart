@@ -598,6 +598,42 @@ describe("executeRun — fresh execution", () => {
     expect(JSON.stringify(await store.runs.get(run.runId))).not.toContain("secret-value");
   });
 
+  it("allows a public step status mapping when only the step output data is secret-tainted", async () => {
+    const { store, config } = await setup({
+      redact: redactResolvedValues,
+      resolveSecret: () => "secret-value",
+    });
+    const workflow = fixtureWorkflow({
+      outputs: [{ name: "status", type: "string", required: true }],
+      execution: {
+        type: "workflow",
+        steps: [
+          {
+            id: "echo",
+            uses: "test.echo",
+            with: { secret: "{{ secrets.API_KEY }}" },
+          },
+        ],
+        outputMapping: { status: "{{ steps.echo.status }}" },
+      },
+    });
+    await store.workflows.put(workflow);
+    const run = await triggerRun(config, {
+      workflow,
+      trigger: fixtureTrigger(),
+      inputs: {},
+    });
+
+    const finished = await executeRun(config, run.runId);
+
+    expect(finished.status).toBe("completed");
+    expect(finished.outputs).toEqual({ status: "completed" });
+    expect(finished.trace[0]).toMatchObject({
+      status: "completed",
+      secretTainted: true,
+    });
+  });
+
   it("rejects a non-literal derivative of a directly referenced secret", async () => {
     const deriveLength: BlockImplementation = {
       manifest: {

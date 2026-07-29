@@ -15,7 +15,11 @@ import { idempotencyAssociationFingerprint } from "./idempotency-association.js"
 import { jsonCompatibilityProblem, jsonValuesEqual, validateWorkflowOutputs } from "./output-validation.js";
 import { applyRedaction, applyRunRedaction, changedJsonPointers, createTrackingSecretResolver, isTextMime, mergeOperationalRunTaint, mergePersistedRunTaint, redactStoredTextArtifacts, repairCustomerVisibleAudits, repairGlobalAuditsForNewSecrets, throwingSecretResolver } from "./redaction.js";
 import { CURRENT_ENGINE_SCHEMA_VERSION } from "./schema-version.js";
-import { resolveWorkflowForRun } from "./snapshot.js";
+import {
+  captureExecutionSnapshot,
+  isSnapshotCaptured,
+  resolveWorkflowForRun,
+} from "./snapshot.js";
 import type { EngineBlockExecutionContext, EngineConfig } from "./types.js";
 import { enterWait, type WaitMachineConfig } from "./wait/wait-machine.js";
 import { buildWaitConditionFromBlock, isWaitBlockId, type WaitBlockId } from "./wait/wait-blocks.js";
@@ -1726,6 +1730,20 @@ async function executeWaitDispatch(
       resolvedSecretRefs,
     ),
   };
+  const snapshotCapturedForWait = !isSnapshotCaptured(
+    historicallyTaintAwareRun.snapshot,
+  );
+  const waitReadyRun = snapshotCapturedForWait
+    ? {
+        ...historicallyTaintAwareRun,
+        snapshot: await captureExecutionSnapshot(
+          workflow,
+          config.blocks,
+          config.now?.() ?? new Date(),
+          config.computePackHashes,
+        ),
+      }
+    : historicallyTaintAwareRun;
 
   let wait: WaitCondition;
   if (step.uses === "human.approval") {
@@ -1762,7 +1780,7 @@ async function executeWaitDispatch(
   let preparedControlError: Error | undefined;
   let preparedOperationalRun: RunRecord | undefined;
   const result = await enterWait(waitMachineConfig, {
-    run: historicallyTaintAwareRun,
+    run: waitReadyRun,
     stepId: step.id,
     blockId: step.uses,
     resolvedInputs: resolvedWith,
@@ -1770,6 +1788,7 @@ async function executeWaitDispatch(
     resolvedSecretRefs,
     secretTainted: dataSecretTainted,
     controlSecretTainted,
+    snapshotCapturedForWait,
     prepareEarlyArrivalRun: async (
       provisionalRun,
       transactionStore: AartStore,

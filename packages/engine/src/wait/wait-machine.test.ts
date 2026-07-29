@@ -200,19 +200,32 @@ describe("enterWait — early-arrival resolution (architecture §4.4 step 3 / §
     const { store, config } = await setup();
     const run = fixtureRun({ status: "running" });
     await store.runs.put(run);
+    const waitReadyRun = fixtureRun({
+      ...run,
+      snapshot: {
+        definitions: { frozen: true },
+        resolvedVersions: {},
+        packHashes: {},
+        capturedAt: "2026-07-29T00:00:00.000Z",
+      },
+    });
 
     const signal = { id: uniqueId("sig"), name: "quote.received", correlationId: "corr1", payload: { price: 42 }, receivedAt: new Date().toISOString() };
     await store.signals.append(signal);
 
     const wait = { type: "signal" as const, name: "quote.received", correlationId: "corr1", schemaVersion: CURRENT_ENGINE_SCHEMA_VERSION };
-    const result = await enterWait(config, { run, stepId: "wait_step", blockId: "wait.for_signal", resolvedInputs: {}, wait, resolvedSecretRefs: new Set() });
+    const result = await enterWait(config, { run: waitReadyRun, stepId: "wait_step", blockId: "wait.for_signal", resolvedInputs: {}, wait, resolvedSecretRefs: new Set(), snapshotCapturedForWait: true });
 
     expect(result.suspended).toBe(false);
     expect(result.run.status).toBe("running"); // unchanged from before — never flipped to "waiting"
     expect(result.run.waits).toEqual([]); // never appended — "none of a/b/c is persisted as an outstanding wait"
+    expect(result.run.snapshot.capturedAt).toBe(""); // an early arrival never became a durable suspension boundary
 
     const waitRow = await store.waits.get(run.runId, "wait_step");
     expect(waitRow).toBeUndefined();
+    await expect(store.runs.get(run.runId)).resolves.toMatchObject({
+      snapshot: { capturedAt: "" },
+    });
 
     const trace = result.run.trace.find((t) => t.stepId === "wait_step");
     expect(trace).toMatchObject({ status: "completed", outputs: { price: 42 } });
@@ -265,6 +278,15 @@ describe("enterWait — early-arrival resolution (architecture §4.4 step 3 / §
     const { store, config } = await setup();
     const run = fixtureRun({ status: "running" });
     await store.runs.put(run);
+    const capturedRun = fixtureRun({
+      ...run,
+      snapshot: {
+        definitions: { note: "snapshot-secret" },
+        resolvedVersions: {},
+        packHashes: {},
+        capturedAt: "2026-07-29T00:00:00.000Z",
+      },
+    });
     // Deliberately NO matching signal exists — this exercises the
     // "no-match, persist the wait" branch, which is the one that used to
     // NOT be wrapped in transact() before this session's fix.
@@ -301,9 +323,13 @@ describe("enterWait — early-arrival resolution (architecture §4.4 step 3 / §
           return fn(wrappedTx);
         }),
     };
-    const crashingConfig: WaitMachineConfig = { ...config, store: crashingStore };
+    const crashingConfig: WaitMachineConfig = {
+      ...config,
+      store: crashingStore,
+      redact: redactLiteral("snapshot-secret"),
+    };
 
-    await expect(enterWait(crashingConfig, { run, stepId: "wait_step", blockId: "wait.for_signal", resolvedInputs: {}, wait, resolvedSecretRefs: new Set() })).rejects.toThrow(SimulatedCrash);
+    await expect(enterWait(crashingConfig, { run: capturedRun, stepId: "wait_step", blockId: "wait.for_signal", resolvedInputs: {}, wait, resolvedSecretRefs: new Set(["snapshot-secret"]) })).rejects.toThrow(SimulatedCrash);
     expect(waitPutCalls).toBe(1); // confirms the injected failure point was actually reached
 
     // Re-read through the REAL (unwrapped) store — the RunRecord.put that
@@ -312,6 +338,7 @@ describe("enterWait — early-arrival resolution (architecture §4.4 step 3 / §
     const reloaded = await store.runs.get(run.runId);
     expect(reloaded?.status).toBe("running"); // NOT "waiting" — the transaction rolled back
     expect(reloaded?.trace).toHaveLength(0); // no "waiting" StepTrace was persisted either
+    expect(reloaded?.snapshot.capturedAt).toBe("");
     await expect(store.waits.get(run.runId, "wait_step")).resolves.toBeUndefined();
   });
 });

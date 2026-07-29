@@ -213,16 +213,11 @@ async function redactStoredArtifacts(
 
   const refreshed: Artifact[] = [];
   for (const artifact of artifacts) {
-    const audit = applyRedaction(
+    const audit = redactArtifactAudit(
       redact,
-      {
-        name: artifact.name,
-        kind: artifact.kind,
-        mime: artifact.mime,
-        path: artifact.path,
-      },
+      artifact,
       resolvedSecretRefs,
-    ) as Pick<Artifact, "name" | "kind" | "mime" | "path">;
+    );
     let redactedBytes: Uint8Array | undefined;
     if (await store.artifacts.isTextEligible(artifact.id)) {
       const bytes = await store.artifacts.getBytes(artifact.id);
@@ -258,6 +253,38 @@ async function redactStoredArtifacts(
     refreshed.push(updated ?? artifact);
   }
   return refreshed;
+}
+
+function redactArtifactAudit(
+  redact: RedactFn,
+  artifact: Pick<Artifact, "name" | "kind" | "mime" | "path">,
+  resolvedSecretRefs: ReadonlySet<string>,
+): Pick<Artifact, "name" | "kind" | "mime" | "path"> {
+  // Artifact field names are schema, not customer data. Rebuild each
+  // literal key so a redactor that scans object keys cannot remove a
+  // required field and make an adapter preserve stale plaintext.
+  return {
+    name: applyRedaction(
+      redact,
+      artifact.name,
+      resolvedSecretRefs,
+    ) as string,
+    kind: applyRedaction(
+      redact,
+      artifact.kind,
+      resolvedSecretRefs,
+    ) as string,
+    mime: applyRedaction(
+      redact,
+      artifact.mime,
+      resolvedSecretRefs,
+    ) as string,
+    path: applyRedaction(
+      redact,
+      artifact.path,
+      resolvedSecretRefs,
+    ) as string,
+  };
 }
 
 export function redactApprovalAudit(
@@ -312,16 +339,74 @@ export function redactWaitAudit(
   wait: WaitCondition,
   resolvedSecretRefs: ReadonlySet<string>,
 ): WaitCondition {
-  const redacted = applyRedaction(
-    redact,
-    wait,
-    resolvedSecretRefs,
-  ) as WaitCondition;
-  return {
-    ...redacted,
-    type: wait.type,
-    schemaVersion: wait.schemaVersion,
-  } as WaitCondition;
+  const value = (input: string): string =>
+    applyRedaction(redact, input, resolvedSecretRefs) as string;
+  const timeout = (input: { timeout?: string }): { timeout?: string } =>
+    input.timeout === undefined
+      ? {}
+      : { timeout: value(input.timeout) };
+
+  // Every union member is rebuilt from literal schema keys. Redacting the
+  // object wholesale is unsafe when a secret literal equals "name",
+  // "correlationId", or another required key: key-scanning redactors can
+  // otherwise return a malformed public WaitCondition.
+  switch (wait.type) {
+    case "approval":
+      return {
+        type: wait.type,
+        taskId: value(wait.taskId),
+        ...timeout(wait),
+        schemaVersion: wait.schemaVersion,
+      };
+    case "signal":
+      return {
+        type: wait.type,
+        name: value(wait.name),
+        correlationId: value(wait.correlationId),
+        ...timeout(wait),
+        schemaVersion: wait.schemaVersion,
+      };
+    case "timer":
+      return {
+        type: wait.type,
+        resumeAt: value(wait.resumeAt),
+        schemaVersion: wait.schemaVersion,
+      };
+    case "webhook":
+      return {
+        type: wait.type,
+        event: value(wait.event),
+        correlationId: value(wait.correlationId),
+        ...timeout(wait),
+        schemaVersion: wait.schemaVersion,
+      };
+    case "external_job":
+      return {
+        type: wait.type,
+        provider: value(wait.provider),
+        jobId: value(wait.jobId),
+        ...timeout(wait),
+        schemaVersion: wait.schemaVersion,
+      };
+    case "queue":
+      return {
+        type: wait.type,
+        queue: value(wait.queue),
+        correlationId: value(wait.correlationId),
+        ...timeout(wait),
+        schemaVersion: wait.schemaVersion,
+      };
+    case "manual":
+      return {
+        type: wait.type,
+        ...timeout(wait),
+        schemaVersion: wait.schemaVersion,
+      };
+    default: {
+      const exhaustive: never = wait;
+      return exhaustive;
+    }
+  }
 }
 
 export function redactSignalAudit(
@@ -968,14 +1053,9 @@ export function applyRunRedaction(redact: RedactFn, run: RunRecord, resolvedSecr
     capturedAt: run.snapshot.capturedAt,
   };
   const artifacts = run.artifacts.map((artifact) => {
-    const audit = applyRedaction(
+    const audit = redactArtifactAudit(
       redact,
-      {
-        name: artifact.name,
-        kind: artifact.kind,
-        mime: artifact.mime,
-        path: artifact.path,
-      },
+      artifact,
       resolvedSecretRefs,
     );
     return {

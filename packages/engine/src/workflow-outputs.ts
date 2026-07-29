@@ -127,6 +127,17 @@ export function assertNoSecretTaintedOutputSources(
             `public outputMapping "${outputName}" depends on secret-tainted step "${first.name}" output path "${pointer || "/"}"; expose a non-secret derived value instead`,
           );
         }
+      } else if (
+        source &&
+        second?.kind === "property" &&
+        second.name === "status" &&
+        parsed.path.length === 2
+      ) {
+        // A step's status is execution metadata, not a read of its output
+        // data. Secret-controlled execution was rejected above, so
+        // path-level data taint alone must not make this public mapping
+        // fail.
+        continue;
       } else if (source && traceDataTaintsPointer(source, "")) {
         throw new Error(
           `public outputMapping "${outputName}" depends on secret-tainted step "${first.name}"; expose a non-secret derived value instead`,

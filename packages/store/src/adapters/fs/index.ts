@@ -5,7 +5,8 @@
 // signals audit copy — see types.ts's SignalStore doc comment and the note
 // on `withStaging` below).
 import type { AartStore } from "../../types.js";
-import { resolve } from "node:path";
+import { realpathSync } from "node:fs";
+import { dirname, basename, resolve } from "node:path";
 import { FsArtifactStore } from "./artifacts.js";
 import { FsEventLogStore } from "./events.js";
 import { createStagingBuffer, flushStagingBuffer, type StagingBuffer } from "./json-file.js";
@@ -58,6 +59,30 @@ function mutexForRoot(root: string): FsStoreMutex {
   const created = new FsStoreMutex();
   rootMutexes.set(root, created);
   return created;
+}
+
+function canonicalRootIdentity(root: string): string {
+  const missingSegments: string[] = [];
+  let candidate = resolve(root);
+
+  for (;;) {
+    try {
+      return resolve(
+        realpathSync.native(candidate),
+        ...missingSegments,
+      );
+    } catch (error) {
+      const code =
+        error !== null && typeof error === "object" && "code" in error
+          ? (error as { code?: unknown }).code
+          : undefined;
+      if (code !== "ENOENT" && code !== "ENOTDIR") throw error;
+      const parent = dirname(candidate);
+      if (parent === candidate) return resolve(root);
+      missingSegments.unshift(basename(candidate));
+      candidate = parent;
+    }
+  }
 }
 
 function serializeMember<T extends object>(
@@ -196,7 +221,7 @@ function buildStore(
 }
 
 export function createFsStore(root: string): AartStore {
-  const normalizedRoot = resolve(root);
+  const normalizedRoot = canonicalRootIdentity(root);
   return buildStore(
     normalizedRoot,
     undefined,

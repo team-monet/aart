@@ -1,10 +1,12 @@
 import {
   RunRecordSchema,
   SecretResolutionError,
+  WaitConditionSchema,
+  type WaitCondition,
   type StepTrace,
 } from "@aart/types";
 import { describe, expect, it } from "vitest";
-import { applyRedaction, applyRunRedaction, createTrackingSecretResolver, identityRedactFn, mergePersistedRunTaint, repairGlobalAuditsForNewSecrets, throwingSecretResolver } from "./redaction.js";
+import { applyRedaction, applyRunRedaction, createTrackingSecretResolver, identityRedactFn, mergePersistedRunTaint, redactWaitAudit, repairGlobalAuditsForNewSecrets, throwingSecretResolver } from "./redaction.js";
 import { createTestStore, fixtureRun } from "./test-utils/fixtures.js";
 
 describe("identityRedactFn", () => {
@@ -123,6 +125,99 @@ describe("repairGlobalAuditsForNewSecrets", () => {
       ).resolves.toEqual(signal);
     } finally {
       await cleanup();
+    }
+  });
+
+  it("reconstructs artifact audit fields when a secret equals a field name", async () => {
+    const { store, cleanup } = await createTestStore();
+    try {
+      const artifact = {
+        id: "key-scanned-artifact",
+        runId: "run-artifact",
+        name: "name",
+        kind: "report",
+        mime: "text/plain",
+        path: "name/report.txt",
+        bytes: 4,
+        createdAt: "2026-07-29T00:00:00.000Z",
+      };
+      await store.artifacts.put(
+        artifact,
+        new TextEncoder().encode("name"),
+      );
+      await repairGlobalAuditsForNewSecrets(
+        store,
+        (record, refs) => {
+          let json = JSON.stringify(record);
+          for (const value of refs) {
+            json = json.replaceAll(value, "[REDACTED]");
+          }
+          return JSON.parse(json);
+        },
+        new Set(["name"]),
+      );
+
+      const audit = await store.artifacts.getMetadata(artifact.id);
+      expect(audit).toMatchObject({
+        id: artifact.id,
+        name: "[REDACTED]",
+        kind: artifact.kind,
+        mime: artifact.mime,
+        path: "[REDACTED]/report.txt",
+      });
+      expect(() => RunRecordSchema.shape.artifacts.parse([audit])).not.toThrow();
+      expect(JSON.stringify(audit)).not.toContain(':"name"');
+    } finally {
+      await cleanup();
+    }
+  });
+});
+
+describe("redactWaitAudit", () => {
+  it("preserves every union member's structural fields under key-scanning redaction", () => {
+    const waits: WaitCondition[] = [
+      { type: "approval", taskId: "taskId", timeout: "timeout", schemaVersion: 2 },
+      { type: "signal", name: "name", correlationId: "correlationId", timeout: "timeout", schemaVersion: 2 },
+      { type: "timer", resumeAt: "resumeAt", schemaVersion: 2 },
+      { type: "webhook", event: "event", correlationId: "correlationId", timeout: "timeout", schemaVersion: 2 },
+      { type: "external_job", provider: "provider", jobId: "jobId", timeout: "timeout", schemaVersion: 2 },
+      { type: "queue", queue: "queue", correlationId: "correlationId", timeout: "timeout", schemaVersion: 2 },
+      { type: "manual", timeout: "timeout", schemaVersion: 2 },
+    ];
+    const structuralNames = new Set([
+      "taskId",
+      "name",
+      "correlationId",
+      "timeout",
+      "resumeAt",
+      "event",
+      "provider",
+      "jobId",
+      "queue",
+    ]);
+    const keyScanningRedactor = (
+      record: unknown,
+      refs: ReadonlySet<string>,
+    ): unknown => {
+      let json = JSON.stringify(record);
+      for (const value of refs) {
+        json = json.replaceAll(value, "[REDACTED]");
+      }
+      return JSON.parse(json);
+    };
+
+    for (const wait of waits) {
+      const audit = redactWaitAudit(
+        keyScanningRedactor,
+        wait,
+        structuralNames,
+      );
+      expect(() => WaitConditionSchema.parse(audit)).not.toThrow();
+      expect(Object.keys(audit)).not.toContain("[REDACTED]");
+      for (const [field, fieldValue] of Object.entries(audit)) {
+        if (field === "type" || field === "schemaVersion") continue;
+        expect(fieldValue).toBe("[REDACTED]");
+      }
     }
   });
 });
