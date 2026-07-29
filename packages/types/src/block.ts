@@ -43,9 +43,10 @@ export interface BlockExecutionContext {
   /**
    * Resolves a `secrets.<NAME>`-style symbolic reference. `data` is the
    * safe default: arbitrary outputs from that invocation are treated as
-   * secret-derived. Trusted connector/authentication blocks may opt into
+   * secret-derived. Connector/authentication blocks may request
    * `credential` when the value is used only at an authentication boundary
-   * and is never reflected into block output.
+   * and is never reflected into block output, but the engine independently
+   * decides whether that implementation is trusted for the exemption.
    */
   resolveSecret(
     ref: string,

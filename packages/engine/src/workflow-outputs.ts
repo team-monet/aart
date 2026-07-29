@@ -11,7 +11,10 @@ import {
   type ResolveOptions,
 } from "@aart/expr";
 import type { RunRecord, StepTrace, Workflow } from "@aart/types";
-import { buildExprContext } from "./expr-context.js";
+import {
+  buildExprContext,
+  traceRepresentsAuthoredStep,
+} from "./expr-context.js";
 
 function referencesSecret(expression: string): boolean {
   return findExpressionTokens(expression).some((token) => parseExpression(token[0]).root === "secrets");
@@ -82,7 +85,10 @@ export function assertNoSecretTaintedOutputSources(
       const first = parsed.path[0];
       if (first === undefined) {
         const latestByStepId = new Map<string, StepTrace>();
-        for (const trace of run.trace) latestByStepId.set(trace.stepId, trace);
+        for (const trace of run.trace) {
+          if (trace.iterationIndex !== undefined) continue;
+          latestByStepId.set(trace.authoredStepId ?? trace.stepId, trace);
+        }
         if (
           [...latestByStepId.values()].some(
             (trace) =>
@@ -97,7 +103,9 @@ export function assertNoSecretTaintedOutputSources(
         continue;
       }
       if (first.kind !== "property") continue;
-      const source = run.trace.filter((trace) => trace.stepId === first.name).at(-1);
+      const source = run.trace
+        .filter((trace) => traceRepresentsAuthoredStep(trace, first.name))
+        .at(-1);
       if (
         source === undefined &&
         run.trace.some((trace) => trace.controlSecretTainted === true)
@@ -177,7 +185,9 @@ function resolutionFailedForSkippedWorkflowStep(
   if (!findExpressionTokens(expression).some((token) => token[0] === error.expression)) return false;
   const stepId = isValidWorkflowStepSource(error.expression, declaredStepIds);
   if (stepId === undefined) return false;
-  const latest = run.trace.filter((trace) => trace.stepId === stepId).at(-1);
+  const latest = run.trace
+    .filter((trace) => traceRepresentsAuthoredStep(trace, stepId))
+    .at(-1);
   return latest === undefined || latest.status === "skipped";
 }
 

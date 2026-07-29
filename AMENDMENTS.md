@@ -2046,8 +2046,14 @@ This prevents an intermediate block from laundering a persisted redaction
 marker or a non-literal derivative into a successful public result. Block
 secret access defaults to data use and therefore taints arbitrary output;
 trusted connector blocks may explicitly mark authentication-only credential
-use, which leaves a public API response clean. Secret-derived outputs are not
-written to the idempotency cache. The cache decision also compares every
+use, which leaves a public API response clean. The request is not
+self-authorizing: `EngineConfig.canUseCredentialSecrets` independently trusts
+the exact implementation, and an absent/negative decision treats the request
+as ordinary data use. The real catalog trusts the built-in implementation
+objects captured at engine construction and excludes active, historical, and
+dynamically loaded Pack implementations; a Pack cannot gain the exemption by
+copying a trusted block id. Secret-derived outputs are not written to the
+idempotency cache. The cache decision also compares every
 successful output with its redacted form before the ledger write, covering an
 output that matches a secret resolved by an earlier step even when the current
 block did not itself consume secret data. If the matching secret is discovered
@@ -2085,6 +2091,14 @@ dispatch, early-arrival signals, atomic wait claims, and worker reclaim:
 operators see that the effect already happened and do not retry it as though
 the dispatch had failed. Control reconstruction failure never replaces the
 completed trace with a synthetic failed step.
+Text artifacts obey the same retrospective discovery rule as traces and cache
+entries. Every boundary that can enlarge the resolved-secret set—normal
+dispatch, wait entry/early arrival, atomic resume, reclaim, and terminal
+finalization—re-scans the run's stored text artifacts, overwrites changed
+bytes through `ArtifactStore`, refreshes byte-count metadata, and carries the
+refreshed metadata into the `RunRecord`. Binary artifacts retain the existing
+pre-capture masking/explicit-read boundary because arbitrary encoded bytes
+cannot be safely search-and-replaced.
 The individually exported low-level resume mechanisms require this preparation
 callback and reject a missing callback before touching the transaction; callers
 that do not own the full preparation pipeline use `createEngine`'s bound resume
@@ -2124,6 +2138,11 @@ persisted run can still resume and expressions can still address prior steps;
 only data-bearing trace fields are value-redacted. A coincidental equality
 between a runtime secret and an authored identifier does not make that
 identifier a derivative of the secret.
+Expression contexts expose authored traces only. Synthetic forEach child
+occurrences (`iterationIndex` present) cannot satisfy or shadow an authored
+step source; the aggregate parent is the public expression source. Bracketed
+occurrence text is also not an alternate identifier syntax in the closed
+expression grammar.
 
 Because this metadata changes the security interpretation of persisted
 RunRecords, the engine record schema version is bumped from 1 to 2. Version 2

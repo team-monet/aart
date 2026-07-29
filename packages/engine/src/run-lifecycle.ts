@@ -9,7 +9,7 @@ import type { RunRecord, StepTrace, Workflow, WorkflowStep } from "@aart/types";
 import { ConcurrencyRejectedError } from "@aart/types";
 import { buildExprContext, resolveBooleanExpression } from "./expr-context.js";
 import { decideConcurrency, fingerprintConcurrencyKey, releaseQueuedRuns, resolveConcurrencyKey } from "./concurrency.js";
-import { applyRedaction, applyRunRedaction, createTrackingSecretResolver, throwingSecretResolver } from "./redaction.js";
+import { applyRedaction, applyRunRedaction, createTrackingSecretResolver, redactStoredTextArtifacts, throwingSecretResolver } from "./redaction.js";
 import { assertSchemaVersionCompatible, CURRENT_ENGINE_SCHEMA_VERSION } from "./schema-version.js";
 import { captureExecutionSnapshot, isSnapshotCaptured, resolveWorkflowForRun, uncapturedSnapshot } from "./snapshot.js";
 import { validateWorkflowOutputs, WorkflowOutputValidationError } from "./output-validation.js";
@@ -192,6 +192,15 @@ export async function finalizeTerminal(
   if (!isSnapshotCaptured(updated.snapshot)) {
     updated = { ...updated, snapshot: await captureExecutionSnapshot(workflow, config.blocks, now, config.computePackHashes) };
   }
+  updated = {
+    ...updated,
+    artifacts: await redactStoredTextArtifacts(
+      config.store,
+      config.redact,
+      updated.runId,
+      resolvedSecretRefs,
+    ),
+  };
   updated = { ...updated, status: terminalStatus, outputs, error: terminalError, endedAt: now.toISOString(), updatedAt: now.toISOString() };
   const redacted = applyRunRedaction(config.redact, updated, resolvedSecretRefs);
   await config.store.transact(async (tx) => {

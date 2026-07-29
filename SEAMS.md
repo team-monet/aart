@@ -104,8 +104,9 @@ interface EngineConfig {
   getGrantedCapabilities?: GetGrantedCapabilities      // (workflow, environment) => string[] | Promise<string[]> — NOT a frozen type, this package's own DI seam pairing with capabilityCheck; S4 supplies the real policy computation here. Defaults to alwaysEmptyGrantedCapabilities.
   resolveSecret?: SecretResolver                       // @aart/expr's injected secret-resolver shape — S4/whoever owns the secret adapter supplies the real one; defaults to a resolver that throws SecretResolutionError if actually invoked
   blocks: BlockRegistry                                // Record<string, BlockImplementation> — S3/S7's real catalog in production
+  canUseCredentialSecrets?: ({run, block}) => boolean  // engine-owned authentication-only trust decision; absent/false means a block's credential request is conservatively treated as data use
   forEachArrayLimit?: number                           // default 10,000
-  schemaVersion?: number                                // defaults to CURRENT_ENGINE_SCHEMA_VERSION (currently 1)
+  schemaVersion?: number                                // defaults to CURRENT_ENGINE_SCHEMA_VERSION (currently 2)
   now?: () => Date
   computeRetryDelayMs?: (attempt: number, backoff: string | undefined) => number
 }

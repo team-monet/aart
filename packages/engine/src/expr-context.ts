@@ -3,14 +3,28 @@
 // the one place `RunRecord` -> `ExprContext` translation happens, so every
 // step-executor call site resolves `{{ }}` values identically.
 import { type ExprContext, type ResolveOptions, resolveExpression } from "@aart/expr";
-import type { RunRecord } from "@aart/types";
+import type { RunRecord, StepTrace } from "@aart/types";
+
+/**
+ * A workflow expression addresses authored steps, never the synthetic child
+ * occurrence produced for an individual forEach item. The aggregate trace
+ * has no iterationIndex and is the authored step's public expression source.
+ */
+export function traceRepresentsAuthoredStep(
+  trace: StepTrace,
+  stepId: string,
+): boolean {
+  if (trace.iterationIndex !== undefined) return false;
+  return (trace.authoredStepId ?? trace.stepId) === stepId;
+}
 
 /**
  * Builds the `{{ }}` resolution context for a run at its CURRENT state
  * (architecture §3.2's root table): `inputs.*` (the validated input record,
  * immutable for the run), `steps.<id>.outputs.<field>` (every completed
- * step's output, keyed by `StepTrace.stepId` — including forEach's
- * aggregate parent entries, see `step-executor.ts`), `trigger.*` (the
+ * step's output, keyed by authored step identity — including forEach's
+ * aggregate parent entry but excluding its synthetic child occurrences,
+ * see `step-executor.ts`), `trigger.*` (the
  * `Trigger` that started/resumed this run), `run.*` (id/workflowId/version,
  * available from run start). `secrets.*` is deliberately absent from this
  * plain object — @aart/expr treats it as an opaque root resolved via the
@@ -20,7 +34,12 @@ import type { RunRecord } from "@aart/types";
 export function buildExprContext(run: RunRecord): ExprContext {
   const steps: Record<string, { outputs: Record<string, unknown> | undefined; status: string }> = {};
   for (const trace of run.trace) {
-    steps[trace.stepId] = { outputs: trace.outputs, status: trace.status };
+    if (trace.iterationIndex !== undefined) continue;
+    const authoredStepId = trace.authoredStepId ?? trace.stepId;
+    steps[authoredStepId] = {
+      outputs: trace.outputs,
+      status: trace.status,
+    };
   }
   return {
     inputs: run.inputs,

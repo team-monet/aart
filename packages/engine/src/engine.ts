@@ -3,7 +3,7 @@
 // is what a composition root (`@aart/server`/`@aart/cli`/`@aart/mcp`, or
 // this package's own tests) actually instantiates.
 import type { RunRecord, Signal, Workflow } from "@aart/types";
-import { createTrackingSecretResolver, throwingSecretResolver } from "./redaction.js";
+import { createTrackingSecretResolver, redactStoredTextArtifacts, throwingSecretResolver } from "./redaction.js";
 import { buildExprContext, resolveBooleanExpression } from "./expr-context.js";
 import { cancelRun, executeRun, finalizeTerminal, runStepsLoop, triggerRun } from "./run-lifecycle.js";
 import { resolveWorkflowForRun } from "./snapshot.js";
@@ -108,7 +108,7 @@ async function prepareResumedRun(
   } else {
     prepared.nextStepId = controlResolution.nextStepId;
   }
-  return prepareTaintAfterControlResolution(
+  const preparedRun = prepareTaintAfterControlResolution(
     config,
     workflow,
     step,
@@ -116,6 +116,15 @@ async function prepareResumedRun(
     1,
     resolvedSecretRefs,
   );
+  return {
+    ...preparedRun,
+    artifacts: await redactStoredTextArtifacts(
+      config.store,
+      config.redact,
+      run.runId,
+      resolvedSecretRefs,
+    ),
+  };
 }
 
 async function resumeWithPreparation(

@@ -107,6 +107,16 @@ export interface EngineConfig {
   /** Optional per-run resolver used to dispatch a Pack implementation pinned by the run snapshot instead of the process-global active version. */
   resolveBlockForRun?: (run: RunRecord, blockId: string) => BlockImplementation | undefined;
   /**
+   * Engine-owned trust decision for authentication-only secret use. A block
+   * cannot make itself trusted by passing `{ usage: "credential" }`; when
+   * this callback is absent or returns false, the request is conservatively
+   * treated as ordinary data use and the block's outputs are secret-tainted.
+   */
+  canUseCredentialSecrets?: (input: {
+    run: RunRecord;
+    block: BlockImplementation;
+  }) => boolean;
+  /**
    * Engine/deployment-level config, NOT a per-workflow declaration (architecture
    * §4.2) — this is what keeps a workflow author from raising their own bound.
    * Default: 10,000. Reuses `IterationLimitExceededError` (architecture §4.2/§8),

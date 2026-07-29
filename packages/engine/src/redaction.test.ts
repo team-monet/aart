@@ -1,4 +1,4 @@
-import { SecretResolutionError } from "@aart/types";
+import { SecretResolutionError, type StepTrace } from "@aart/types";
 import { describe, expect, it } from "vitest";
 import { applyRedaction, applyRunRedaction, createTrackingSecretResolver, identityRedactFn, throwingSecretResolver } from "./redaction.js";
 import { fixtureRun } from "./test-utils/fixtures.js";
@@ -228,6 +228,52 @@ describe("applyRunRedaction", () => {
 
     expect(redacted.trace).toHaveLength(1);
     expect(redacted).not.toHaveProperty("[REDACTED]");
+  });
+
+  it("preserves authored execution identity while redacting data-bearing trace fields", () => {
+    const structuralValue = "coincidental-secret";
+    const run = fixtureRun({
+      trace: [
+        {
+          seq: 0,
+          stepId: structuralValue,
+          authoredStepId: structuralValue,
+          block: structuralValue,
+          status: "failed",
+          inputs: { value: structuralValue },
+          outputs: { value: structuralValue },
+          error: `failed with ${structuralValue}`,
+          startedAt: structuralValue,
+          endedAt: structuralValue,
+          durationMs: 0,
+        },
+      ],
+    });
+    (
+      run.trace[0] as StepTrace & {
+        futureDataBearingField: string;
+      }
+    ).futureDataBearingField = structuralValue;
+    const redacted = applyRunRedaction(
+      redactResolved,
+      run,
+      new Set([structuralValue]),
+    );
+
+    expect(redacted.trace[0]).toMatchObject({
+      stepId: structuralValue,
+      authoredStepId: structuralValue,
+      block: structuralValue,
+      startedAt: structuralValue,
+      endedAt: structuralValue,
+      inputs: { value: "[REDACTED]" },
+      outputs: { value: "[REDACTED]" },
+      error: "failed with [REDACTED]",
+      secretTainted: true,
+    });
+    expect(redacted.trace[0]).not.toHaveProperty(
+      "futureDataBearingField",
+    );
   });
 
   it("collapses persisted root pointers when a later secret matches a path segment", () => {

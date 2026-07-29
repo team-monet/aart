@@ -110,6 +110,82 @@ describe("createEngine — resume wrappers continue execution past the resumed s
     ).resolves.toBeUndefined();
   });
 
+  it("re-redacts an earlier text artifact when wait resume first discovers its secret", async () => {
+    const { store, cleanup } = await createTestStore();
+    cleanups.push(cleanup);
+    const redact = (
+      record: unknown,
+      resolvedSecretRefs: ReadonlySet<string>,
+    ): unknown => {
+      let json = JSON.stringify(record);
+      for (const secret of resolvedSecretRefs) {
+        json = json.replaceAll(secret, "[REDACTED]");
+      }
+      return JSON.parse(json);
+    };
+    const engine = createEngine({
+      store,
+      redact,
+      resolveSecret: () => "late-secret",
+      capabilityCheck: alwaysAllowCapabilityCheck,
+      blocks: createBlockRegistry([echoBlock]),
+      computeRetryDelayMs: () => 0,
+    });
+    const workflow = fixtureWorkflow({
+      execution: {
+        type: "workflow",
+        steps: [
+          {
+            id: "pause",
+            uses: "wait.manual",
+            next: "pause",
+            until: "{{ secrets.STOP }}",
+            maxIterations: 1,
+          },
+        ],
+      },
+    });
+    await store.workflows.put(workflow);
+    const run = await engine.triggerRun({
+      workflow,
+      trigger: fixtureTrigger(),
+      inputs: {},
+    });
+    await engine.executeRun(run.runId);
+    const rawBytes = new TextEncoder().encode("late-secret");
+    await store.artifacts.put(
+      {
+        id: "artifact-before-resume",
+        runId: run.runId,
+        stepId: "earlier",
+        name: "earlier.txt",
+        kind: "report",
+        mime: "text/plain",
+        path: `artifacts/${run.runId}/artifact-before-resume`,
+        bytes: rawBytes.byteLength,
+        createdAt: new Date().toISOString(),
+      },
+      rawBytes,
+    );
+
+    const outcome = await engine.resumeManual(run.runId, "pause", {
+      received: true,
+    });
+
+    expect(outcome.kind).toBe("resumed");
+    if (outcome.kind !== "resumed") throw new Error("unreachable");
+    const protectedBytes = await store.artifacts.getBytes(
+      "artifact-before-resume",
+    );
+    if (protectedBytes === undefined) {
+      throw new Error("artifact bytes missing");
+    }
+    expect(new TextDecoder().decode(protectedBytes)).toBe("[REDACTED]");
+    expect(outcome.run.artifacts).toContainEqual(
+      await store.artifacts.getMetadata("artifact-before-resume"),
+    );
+  });
+
   it("carries secret taint through a persisted wait and rejects its public output after resume", async () => {
     const { store, cleanup } = await createTestStore();
     cleanups.push(cleanup);

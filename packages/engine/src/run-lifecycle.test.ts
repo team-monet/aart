@@ -709,6 +709,8 @@ describe("executeRun — fresh execution", () => {
       blocks: { [authenticatedLookup.manifest.id]: authenticatedLookup },
       redact: redactResolvedValues,
       resolveSecret: () => "secret-value",
+      canUseCredentialSecrets: ({ block }) =>
+        block === authenticatedLookup,
     });
     const workflow = fixtureWorkflow({
       outputs: [{ name: "accountName", type: "string", required: true }],
@@ -732,6 +734,66 @@ describe("executeRun — fresh execution", () => {
     expect(finished.status).toBe("completed");
     expect(finished.outputs).toEqual({ accountName: "Acme" });
     expect(finished.trace[0]?.secretTainted).toBeUndefined();
+  });
+
+  it("does not let an untrusted block self-classify derived secret data as credential-only", async () => {
+    const untrustedLookup: BlockImplementation = {
+      manifest: {
+        id: "pack.untrusted-credential",
+        version: "1.0.0",
+        capabilities: [],
+        inputSchema: {},
+        outputSchema: {},
+        description: "Attempts to downgrade secret-derived output.",
+      },
+      execute: async (_inputs, ctx) => {
+        const secret = await ctx.resolveSecret("API_KEY", {
+          usage: "credential",
+        });
+        return { secretLength: secret.length };
+      },
+    };
+    const { store, config } = await setup({
+      blocks: { [untrustedLookup.manifest.id]: untrustedLookup },
+      redact: redactResolvedValues,
+      resolveSecret: () => "secret-value",
+    });
+    const workflow = fixtureWorkflow({
+      outputs: [{ name: "secretLength", type: "number", required: true }],
+      execution: {
+        type: "workflow",
+        steps: [
+          {
+            id: "lookup",
+            uses: untrustedLookup.manifest.id,
+            idempotencyKey: "untrusted-credential",
+          },
+        ],
+        outputMapping: {
+          secretLength: "{{ steps.lookup.outputs.secretLength }}",
+        },
+      },
+    });
+    await store.workflows.put(workflow);
+    const run = await triggerRun(config, {
+      workflow,
+      trigger: fixtureTrigger(),
+      inputs: {},
+    });
+
+    const finished = await executeRun(config, run.runId);
+
+    expect(finished.status).toBe("failed");
+    expect(finished.error).toMatch(/secret-tainted step "lookup"/);
+    expect(finished.trace[0]).toMatchObject({
+      secretTainted: true,
+      secretTaintedPaths: ["*"],
+    });
+    await expect(
+      store.idempotencyLedger.get(
+        idempotencyStorageKey("untrusted-credential"),
+      ),
+    ).resolves.toBeUndefined();
   });
 
   it("propagates a secret-consuming forEach child's provenance to the aggregate output", async () => {
@@ -1719,6 +1781,72 @@ describe("executeRun — fresh execution", () => {
     ).resolves.toMatchObject({
       recordedOutput: { receipt: "effect-1" },
     });
+  });
+
+  it("re-redacts a text artifact when post-dispatch control first discovers its secret", async () => {
+    let artifactId: string | undefined;
+    const artifactBlock: BlockImplementation = {
+      manifest: {
+        id: "test.artifact-before-secret-discovery",
+        version: "1.0.0",
+        capabilities: [],
+        inputSchema: {},
+        outputSchema: {},
+        description: "Writes text before a later control expression resolves.",
+      },
+      execute: async (inputs, ctx) => {
+        const value = (inputs as { value: string }).value;
+        artifactId = (
+          await ctx.writeArtifact({
+            name: "result.txt",
+            kind: "report",
+            mime: "text/plain",
+            bytes: new TextEncoder().encode(value),
+          })
+        ).id;
+        return { written: true };
+      },
+    };
+    const { store, config } = await setup({
+      blocks: { [artifactBlock.manifest.id]: artifactBlock },
+      redact: redactResolvedValues,
+      resolveSecret: () => "late-secret",
+    });
+    const workflow = fixtureWorkflow({
+      inputs: [{ name: "value", type: "string", required: true }],
+      execution: {
+        type: "workflow",
+        steps: [
+          {
+            id: "write",
+            uses: artifactBlock.manifest.id,
+            with: { value: "{{ inputs.value }}" },
+            next: "write",
+            until: "{{ secrets.STOP }}",
+            maxIterations: 1,
+          },
+        ],
+      },
+    });
+    await store.workflows.put(workflow);
+    const run = await triggerRun(config, {
+      workflow,
+      trigger: fixtureTrigger(),
+      inputs: { value: "late-secret" },
+    });
+
+    const finished = await executeRun(config, run.runId);
+
+    expect(finished.status).toBe("completed");
+    expect(artifactId).toBeDefined();
+    const bytes = await store.artifacts.getBytes(artifactId!);
+    if (bytes === undefined) throw new Error("artifact bytes missing");
+    expect(new TextDecoder().decode(bytes)).toMatch(
+      /^\[REDACTED:secret-\d+\]$/,
+    );
+    const metadata = await store.artifacts.getMetadata(artifactId!);
+    expect(metadata?.bytes).toBe(bytes?.byteLength);
+    expect(finished.artifacts).toContainEqual(metadata);
   });
 
   it("taints an early-arrival wait after until first resolves a matching secret", async () => {

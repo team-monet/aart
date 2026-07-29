@@ -8,10 +8,10 @@ import type { ApprovalTask, LlmCallMetadata, RetryPolicy, RunRecord, StepTrace, 
 import { AartError, DEFAULT_EFFECTFUL_CAPABILITIES, isEffectfulCapability, IterationLimitExceededError, TimeoutError } from "@aart/types";
 import { checkCapabilityDispatch, alwaysEmptyGrantedCapabilities } from "./capability.js";
 import { parseDurationMs } from "./duration.js";
-import { buildExprContext, resolveArrayExpression, resolveBooleanExpression, resolveStringExpression, resolveWithRecord } from "./expr-context.js";
+import { buildExprContext, resolveArrayExpression, resolveBooleanExpression, resolveStringExpression, resolveWithRecord, traceRepresentsAuthoredStep } from "./expr-context.js";
 import { checkIdempotency, idempotencyStorageKey, recordIdempotency, revokeSecretTaintedIdempotency } from "./idempotency.js";
 import { jsonCompatibilityProblem, jsonValuesEqual } from "./output-validation.js";
-import { applyRedaction, applyRunRedaction, changedJsonPointers, createTrackingSecretResolver, isTextMime, throwingSecretResolver } from "./redaction.js";
+import { applyRedaction, applyRunRedaction, changedJsonPointers, createTrackingSecretResolver, isTextMime, redactStoredTextArtifacts, throwingSecretResolver } from "./redaction.js";
 import { CURRENT_ENGINE_SCHEMA_VERSION } from "./schema-version.js";
 import type { EngineBlockExecutionContext, EngineConfig } from "./types.js";
 import { enterWait, type WaitMachineConfig } from "./wait/wait-machine.js";
@@ -177,12 +177,18 @@ function buildBlockContext(
   resolvedSecretRefs: ReadonlySet<string>,
   onRecordLlmCall: (metadata: LlmCallMetadata) => void,
   onSecretAccess: (usage: "data" | "credential") => void,
+  credentialSecretsAllowed: boolean,
 ): EngineBlockExecutionContext {
   return {
     runId,
     stepId,
     resolveSecret: async (ref: string, options) => {
-      onSecretAccess(options?.usage ?? "data");
+      const requestedUsage = options?.usage ?? "data";
+      onSecretAccess(
+        requestedUsage === "credential" && credentialSecretsAllowed
+          ? "credential"
+          : "data",
+      );
       const value = await secretResolver(ref);
       return typeof value === "string" ? value : String(value);
     },
@@ -262,7 +268,7 @@ async function dispatchOnce(
     capturedLlmCall = metadata;
   }, (usage) => {
     if (usage === "data") dataSecretAccessed = true;
-  });
+  }, config.canUseCredentialSecrets?.({ run, block: impl }) === true);
   const timeoutMs = step.timeout ? parseDurationMs(step.timeout) : undefined;
   const computeDelay = config.computeRetryDelayMs ?? defaultComputeRetryDelayMs;
 
@@ -519,8 +525,17 @@ async function appendTracesAndPersist(
   step: WorkflowStep,
   newTraces: StepTrace[],
   resolvedSecretRefs: ReadonlySet<string>,
+  secretCountBeforeStep: number,
 ): Promise<RunRecord> {
-  const artifacts = await config.store.artifacts.listByRun(run.runId);
+  const artifacts =
+    resolvedSecretRefs.size > secretCountBeforeStep
+      ? await redactStoredTextArtifacts(
+          config.store,
+          config.redact,
+          run.runId,
+          resolvedSecretRefs,
+        )
+      : await config.store.artifacts.listByRun(run.runId);
   const updated: RunRecord = { ...run, trace: [...run.trace, ...newTraces], artifacts, updatedAt: (config.now?.() ?? new Date()).toISOString() };
   const prepared = prepareTaintAfterControlResolution(
     config,
@@ -636,7 +651,10 @@ function valueReferencesSecretTaintedTrace(
       if (parsed.root !== "steps") continue;
       if (first === undefined) {
         const latestByStepId = new Map<string, StepTrace>();
-        for (const trace of run.trace) latestByStepId.set(trace.stepId, trace);
+        for (const trace of run.trace) {
+          if (trace.iterationIndex !== undefined) continue;
+          latestByStepId.set(trace.authoredStepId ?? trace.stepId, trace);
+        }
         if (
           [...latestByStepId.values()].some(
             (trace) =>
@@ -651,7 +669,9 @@ function valueReferencesSecretTaintedTrace(
       }
       if (first.kind !== "property") continue;
       if (first.name === shadowedStepId) continue;
-      const source = run.trace.filter((trace) => trace.stepId === first.name).at(-1);
+      const source = run.trace
+        .filter((trace) => traceRepresentsAuthoredStep(trace, first.name))
+        .at(-1);
       if (source?.controlSecretTainted === true) return true;
       if (source?.secretTainted !== true) continue;
       const pointer = pointerForOutputPath(parsed.path);
@@ -970,7 +990,7 @@ export async function refreshTaintAfterControlResolution(
   resolvedSecretRefs: ReadonlySet<string>,
   secretCountBeforeResolution: number,
 ): Promise<RunRecord> {
-  const preparedRun = prepareTaintAfterControlResolution(
+  let preparedRun = prepareTaintAfterControlResolution(
     config,
     workflow,
     step,
@@ -978,6 +998,15 @@ export async function refreshTaintAfterControlResolution(
     currentTraceCount,
     resolvedSecretRefs,
   );
+  preparedRun = {
+    ...preparedRun,
+    artifacts: await redactStoredTextArtifacts(
+      config.store,
+      config.redact,
+      run.runId,
+      resolvedSecretRefs,
+    ),
+  };
   const taintChanged = preparedRun.trace.some(
     (trace, index) =>
       trace.secretTainted !== run.trace[index]?.secretTainted ||
@@ -990,8 +1019,12 @@ export async function refreshTaintAfterControlResolution(
       JSON.stringify(run.secretTaintedInputPaths) ||
     JSON.stringify(preparedRun.secretTaintedTriggerPaths) !==
       JSON.stringify(run.secretTaintedTriggerPaths);
+  const artifactsChanged =
+    JSON.stringify(preparedRun.artifacts) !==
+    JSON.stringify(run.artifacts);
   if (
     !taintChanged &&
+    !artifactsChanged &&
     resolvedSecretRefs.size === secretCountBeforeResolution
   ) {
     return run;
@@ -1102,6 +1135,7 @@ export async function executeStep(
   resolvedSecretRefs: Set<string>,
   environment: string | undefined,
 ): Promise<StepOutcome> {
+  const secretCountBeforeStep = resolvedSecretRefs.size;
   const secretResolver = createTrackingSecretResolver(config.resolveSecret ?? throwingSecretResolver, resolvedSecretRefs);
   const resolveOptions: ResolveOptions = { secretResolver };
   const exprContextBeforeDispatch = buildExprContext(run);
@@ -1169,6 +1203,7 @@ export async function executeStep(
           controlSecretTaint,
         ),
         resolvedSecretRefs,
+        secretCountBeforeStep,
       );
       const nextStepId = step.next ?? step.else ?? nextStepIdInArrayOrder(workflow, step.id);
       return { kind: "continue", run: updatedRun, nextStepId };
@@ -1299,6 +1334,7 @@ export async function executeStep(
       step,
       taintAnnotatedTraces,
       resolvedSecretRefs,
+      secretCountBeforeStep,
     );
     const failure = taintAnnotatedTraces[taintAnnotatedTraces.length - 1]!;
     return { kind: "failed", run: updatedRun, error: new Error(failure.error ?? `Step "${step.id}" failed.`) };
@@ -1338,6 +1374,7 @@ export async function executeStep(
     step,
     finalTraces,
     resolvedSecretRefs,
+    secretCountBeforeStep,
   );
   if (controlResolution.kind === "failed") {
     return {
@@ -1373,7 +1410,7 @@ async function executeWaitDispatch(
 ): Promise<StepOutcome> {
   const schemaVersion = config.schemaVersion ?? CURRENT_ENGINE_SCHEMA_VERSION;
   const waitMachineConfig: WaitMachineConfig = { store: config.store, redact: config.redact, now: config.now ?? (() => new Date()) };
-  const historicallyTaintAwareRun = prepareTaintAfterControlResolution(
+  const preparedHistoricalRun = prepareTaintAfterControlResolution(
     config,
     workflow,
     step,
@@ -1381,6 +1418,15 @@ async function executeWaitDispatch(
     0,
     resolvedSecretRefs,
   );
+  const historicallyTaintAwareRun = {
+    ...preparedHistoricalRun,
+    artifacts: await redactStoredTextArtifacts(
+      config.store,
+      config.redact,
+      run.runId,
+      resolvedSecretRefs,
+    ),
+  };
 
   let wait: WaitCondition;
   if (step.uses === "human.approval") {
@@ -1438,7 +1484,7 @@ async function executeWaitDispatch(
       } else {
         preparedNextStepId = controlResolution.nextStepId;
       }
-      return prepareTaintAfterControlResolution(
+      const preparedRun = prepareTaintAfterControlResolution(
         config,
         workflow,
         step,
@@ -1446,6 +1492,15 @@ async function executeWaitDispatch(
         1,
         resolvedSecretRefs,
       );
+      return {
+        ...preparedRun,
+        artifacts: await redactStoredTextArtifacts(
+          config.store,
+          config.redact,
+          provisionalRun.runId,
+          resolvedSecretRefs,
+        ),
+      };
     },
   });
 

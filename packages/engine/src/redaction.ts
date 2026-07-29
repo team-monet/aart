@@ -5,7 +5,8 @@
 // is the one place that threading happens; every persist call site in this
 // package goes through `applyRedaction`, never `config.redact` directly.
 import type { SecretResolver } from "@aart/expr";
-import type { RedactFn, RunRecord, StepTrace } from "@aart/types";
+import type { AartStore } from "@aart/store";
+import type { Artifact, RedactFn, RunRecord, StepTrace } from "@aart/types";
 import { SecretResolutionError } from "@aart/types";
 import { jsonValuesEqual } from "./output-validation.js";
 
@@ -172,6 +173,53 @@ export function applyRedaction<T>(redact: RedactFn, record: T, resolvedSecretRef
   return redact(record, resolvedSecretRefs) as T;
 }
 
+/**
+ * Re-scans every text artifact for a run whenever the execution segment
+ * learns another secret value. Artifact bytes are persisted before later
+ * steps/control expressions run, so write-time redaction alone cannot cover
+ * a value that only becomes known to be secret afterward.
+ */
+export async function redactStoredTextArtifacts(
+  store: Pick<AartStore, "artifacts">,
+  redact: RedactFn,
+  runId: string,
+  resolvedSecretRefs: ReadonlySet<string>,
+): Promise<Artifact[]> {
+  const artifacts = await store.artifacts.listByRun(runId);
+  if (resolvedSecretRefs.size === 0) return artifacts;
+
+  const refreshed: Artifact[] = [];
+  for (const artifact of artifacts) {
+    if (!isTextMime(artifact.mime)) {
+      refreshed.push(artifact);
+      continue;
+    }
+    const bytes = await store.artifacts.getBytes(artifact.id);
+    if (bytes === undefined) {
+      refreshed.push(artifact);
+      continue;
+    }
+    const rawText = new TextDecoder().decode(bytes);
+    const redactedText = applyRedaction(
+      redact,
+      rawText,
+      resolvedSecretRefs,
+    );
+    if (redactedText === rawText) {
+      refreshed.push(artifact);
+      continue;
+    }
+    const redactedBytes = new TextEncoder().encode(redactedText);
+    const updatedArtifact = {
+      ...artifact,
+      bytes: redactedBytes.byteLength,
+    };
+    await store.artifacts.put(updatedArtifact, redactedBytes);
+    refreshed.push(updatedArtifact);
+  }
+  return refreshed;
+}
+
 function mergeTaintPaths(
   redact: RedactFn,
   existing: string[],
@@ -237,6 +285,11 @@ export function applyRunRedaction(redact: RedactFn, run: RunRecord, resolvedSecr
     resolvedSecretRefs,
   );
   const redactedTrace = run.trace.map((trace): StepTrace => {
+    // Reconstruct from an explicit structural allowlist rather than
+    // spreading the trace. Authored/runtime identity remains stable for
+    // resume and expression addressing; every payload/observational field
+    // is copied only after independent redaction, which also preserves the
+    // StepTrace schema's field names when a secret happens to equal one.
     const redactedInputs = applyRedaction(
       redact,
       trace.inputs,
@@ -249,7 +302,11 @@ export function applyRunRedaction(redact: RedactFn, run: RunRecord, resolvedSecr
     const redactedOutputs =
       trace.outputs === undefined
         ? undefined
-        : applyRedaction(redact, trace.outputs, resolvedSecretRefs);
+        : applyRedaction(
+            redact,
+            trace.outputs,
+            resolvedSecretRefs,
+          );
     const discoveredPaths =
       trace.outputs === undefined || redactedOutputs === undefined
         ? []
@@ -265,8 +322,25 @@ export function applyRunRedaction(redact: RedactFn, run: RunRecord, resolvedSecr
       inputDiscoveredPaths.length > 0 && trace.outputs !== undefined,
     );
     return {
-      ...trace,
+      seq: trace.seq,
+      stepId: trace.stepId,
+      block: trace.block,
+      status: trace.status,
       inputs: redactedInputs,
+      startedAt: trace.startedAt,
+      ...(trace.endedAt !== undefined ? { endedAt: trace.endedAt } : {}),
+      ...(trace.durationMs !== undefined
+        ? { durationMs: trace.durationMs }
+        : {}),
+      ...(trace.postHocCorrected !== undefined
+        ? { postHocCorrected: trace.postHocCorrected }
+        : {}),
+      ...(trace.authoredStepId !== undefined
+        ? { authoredStepId: trace.authoredStepId }
+        : {}),
+      ...(trace.iterationIndex !== undefined
+        ? { iterationIndex: trace.iterationIndex }
+        : {}),
       ...(redactedOutputs !== undefined ? { outputs: redactedOutputs } : {}),
       ...(trace.error !== undefined
         ? {
@@ -313,8 +387,13 @@ export function applyRunRedaction(redact: RedactFn, run: RunRecord, resolvedSecr
             ),
           }
         : {}),
-      ...(secretTaintedPaths.length > 0
+      ...(secretTaintedPaths.length > 0 ||
+      trace.secretTainted === true ||
+      trace.controlSecretTainted === true
         ? { secretTainted: true, secretTaintedPaths }
+        : {}),
+      ...(trace.controlSecretTainted === true
+        ? { controlSecretTainted: true }
         : {}),
     };
   });
