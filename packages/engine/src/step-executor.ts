@@ -990,8 +990,9 @@ export async function executeStep(
     config,
   );
   controlSecretTaint ||=
-    valueReferencesSecret(step.until) ||
-    valueReferencesSecretTaintedTrace(step.until, provisionalRun);
+    step.next !== undefined &&
+    (valueReferencesSecret(step.until) ||
+      valueReferencesSecretTaintedTrace(step.until, provisionalRun));
   const finalTraces = annotateSecretTaint(
     config,
     taintAnnotatedTraces,
@@ -1080,8 +1081,9 @@ async function executeWaitDispatch(
         config,
       );
       const untilSecretControlled =
-        valueReferencesSecret(step.until) ||
-        valueReferencesSecretTaintedTrace(step.until, provisionalRun);
+        step.next !== undefined &&
+        (valueReferencesSecret(step.until) ||
+          valueReferencesSecretTaintedTrace(step.until, provisionalRun));
       if (!controlSecretTainted && !untilSecretControlled) {
         return provisionalRun;
       }
