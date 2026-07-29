@@ -246,7 +246,11 @@ export class SqliteArtifactStore implements ArtifactStore {
     }
   }
 
-  async put(artifact: Artifact, bytes: Uint8Array): Promise<void> {
+  async put(
+    artifact: Artifact,
+    bytes: Uint8Array,
+    options?: { redactionTextEligible?: boolean },
+  ): Promise<void> {
     await this.recoverPending();
     const blobFilePath = this.blobFilePath(artifact.runId, artifact.id);
     await fs.mkdir(dirname(blobFilePath), { recursive: true });
@@ -271,7 +275,10 @@ export class SqliteArtifactStore implements ArtifactStore {
           artifact.path,
           artifact.bytes,
           artifact.createdAt,
-          isTextMime(artifact.mime) ? 1 : 0,
+          (options?.redactionTextEligible ??
+            isTextMime(artifact.mime))
+            ? 1
+            : 0,
         ],
       ),
     );

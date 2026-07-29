@@ -242,6 +242,7 @@ function buildBlockContext(
       await config.store.artifacts.put(
         { id, runId, stepId, name, kind, mime, path, bytes: bytes.byteLength, createdAt: (config.now?.() ?? new Date()).toISOString() },
         bytes,
+        { redactionTextEligible: isTextMime(input.mime) },
       );
       return { id, path };
     },
@@ -1378,7 +1379,7 @@ export async function prepareRevokedIdempotencyConsumer(
       const outputs = await materializeWorkflowOutputs(workflow, prepared, {
         secretResolver: throwingSecretResolver,
       });
-      const observableOutputs = applyRedaction(
+      const observableOutputs = applyConservativeRedaction(
         config.redact,
         outputs,
         resolvedSecretRefs,

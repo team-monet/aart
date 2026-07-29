@@ -240,6 +240,7 @@ async function redactAndPersistRun(
   redact: RedactFn,
   run: RunRecord,
   resolvedSecretRefs: ReadonlySet<string>,
+  pendingIdempotencyReplays?: IdempotencyReplayClaim[],
 ): Promise<RunRecord> {
   const effectiveSecretRefs = new Set(resolvedSecretRefs);
   const activeState =
@@ -278,6 +279,10 @@ async function redactAndPersistRun(
             ...effectiveSecretRefs,
           ]),
         ],
+        ...(pendingIdempotencyReplays !== undefined &&
+        pendingIdempotencyReplays.length > 0
+          ? { pendingIdempotencyReplays }
+          : {}),
       });
     }
   }
@@ -289,7 +294,11 @@ async function redactAndPersistRun(
     await store.runs.putOperationalState(run.runId, {
       run: operationalRun,
       resolvedSecretValues: [...effectiveSecretRefs],
-      ...(activeState?.pendingIdempotencyReplays !== undefined
+      ...(pendingIdempotencyReplays !== undefined
+        ? pendingIdempotencyReplays.length > 0
+          ? { pendingIdempotencyReplays }
+          : {}
+        : activeState?.pendingIdempotencyReplays !== undefined
         ? {
             pendingIdempotencyReplays:
               activeState.pendingIdempotencyReplays,
@@ -528,6 +537,19 @@ export async function revokeSecretTaintedIdempotency(
       const taintedConsumedKeys = new Set(
         [...consumedKeys].filter((key) => outputTaintedKeys.has(key)),
       );
+      const pendingReplayClaims = (
+        pendingReplayClaimsByRunId.get(runId) ?? []
+      ).map((claim) =>
+        taintedConsumedKeys.has(claim.ledgerKey)
+          ? { ...claim, outputSecretTainted: true }
+          : claim,
+      );
+      if (pendingReplayClaims.length > 0) {
+        pendingReplayClaimsByRunId.set(
+          runId,
+          pendingReplayClaims,
+        );
+      }
       const directlyMarked = markDirectLedgerConsumers(
         persistedRun,
         [...taintedConsumedKeys].flatMap((key) => {
@@ -558,9 +580,27 @@ export async function revokeSecretTaintedIdempotency(
               redact,
               prepared,
               resolvedSecretRefs,
+              pendingReplayClaims,
             );
       if (runId === activeRun.runId) {
         activeRun = repaired;
+        if (pendingReplayClaims.length > 0) {
+          const activeState =
+            await store.runs.getOperationalState(runId);
+          await store.runs.putOperationalState(runId, {
+            ...(activeState ?? {
+              run: repaired,
+              resolvedSecretValues: [],
+            }),
+            resolvedSecretValues: [
+              ...new Set([
+                ...(activeState?.resolvedSecretValues ?? []),
+                ...resolvedSecretRefs,
+              ]),
+            ],
+            pendingIdempotencyReplays: pendingReplayClaims,
+          });
+        }
       }
       runsById.set(runId, repaired);
 

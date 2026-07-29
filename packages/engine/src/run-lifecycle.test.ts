@@ -3,12 +3,17 @@ import { ConcurrencyRejectedError } from "@aart/types";
 import type { BlockImplementation, Field } from "@aart/types";
 import { afterEach, describe, expect, it } from "vitest";
 import { idempotencyStorageKey, recordIdempotency } from "./idempotency.js";
-import { cancelRun, executeRun, triggerRun } from "./run-lifecycle.js";
+import {
+  cancelRun,
+  executeRun,
+  finalizeTerminal,
+  triggerRun,
+} from "./run-lifecycle.js";
 import {
   applyRunRedaction,
   repairGlobalAuditsForNewSecrets,
 } from "./redaction.js";
-import { createTestStore, echoBlock, failingBlock, fixtureTrigger, testEngineConfig, fixtureWorkflow } from "./test-utils/fixtures.js";
+import { createTestStore, echoBlock, failingBlock, fixtureRun, fixtureTrigger, testEngineConfig, fixtureWorkflow } from "./test-utils/fixtures.js";
 import type { EngineConfig } from "./types.js";
 
 const cleanups: Array<() => Promise<void>> = [];
@@ -277,6 +282,57 @@ describe("executeRun — fresh execution", () => {
     expect(finished.status).toBe("completed");
     expect(finished.outputs).toEqual({ result: { value: "reusable" } });
     await expect(store.runs.get(run.runId)).resolves.toMatchObject({ outputs: { result: { value: "reusable" } } });
+  });
+
+  it("fails instead of publishing a conservatively redacted output that violates its declared contract", async () => {
+    const { config } = await setup({
+      redact: redactResolvedValues,
+    });
+    const workflow = fixtureWorkflow({
+      outputs: [
+        {
+          name: "result",
+          type: "string",
+          required: true,
+          pattern: "^prefix-",
+        },
+      ],
+      execution: {
+        type: "workflow",
+        steps: [{ id: "produce", uses: "test.echo" }],
+        outputMapping: {
+          result: "{{ steps.produce.outputs.value }}",
+        },
+      },
+    });
+    const run = fixtureRun({
+      workflowId: workflow.id,
+      workflowVersion: workflow.version,
+      status: "running",
+      trace: [
+        {
+          seq: 0,
+          stepId: "produce",
+          block: "test.echo",
+          status: "completed",
+          inputs: {},
+          outputs: { value: "prefix-secret-suffix" },
+          startedAt: "2026-07-29T00:00:00.000Z",
+        },
+      ],
+    });
+
+    const finished = await finalizeTerminal(
+      config,
+      run,
+      workflow,
+      "completed",
+      new Set(["secret"]),
+    );
+
+    expect(finished.status).toBe("failed");
+    expect(finished.outputs).toBeUndefined();
+    expect(finished.error).toMatch(/pattern/);
   });
 
   it("preserves backward-compatible custom output types as opaque Pack-defined contracts", async () => {
@@ -2000,6 +2056,76 @@ describe("executeRun — fresh execution", () => {
     const metadata = await store.artifacts.getMetadata(artifactId!);
     expect(metadata?.bytes).toBe(bytes?.byteLength);
     expect(finished.artifacts).toContainEqual(metadata);
+  });
+
+  it("keeps original text eligibility when a known secret redacts the public MIME before a later secret is discovered", async () => {
+    let artifactId: string | undefined;
+    const artifactBlock: BlockImplementation = {
+      manifest: {
+        id: "test.redacted-text-mime",
+        version: "1.0.0",
+        capabilities: [],
+        inputSchema: {},
+        outputSchema: {},
+        description:
+          "Redacts MIME first, then discovers a second secret in text bytes.",
+      },
+      execute: async (_inputs, ctx) => {
+        const mimePrefix = await ctx.resolveSecret("MIME_PREFIX");
+        artifactId = (
+          await ctx.writeArtifact({
+            name: "result.txt",
+            kind: "report",
+            mime: `${mimePrefix}/plain`,
+            bytes: new TextEncoder().encode("future-secret"),
+          })
+        ).id;
+        await ctx.resolveSecret("LATE_VALUE");
+        return { written: true };
+      },
+    };
+    const { store, config } = await setup({
+      blocks: { [artifactBlock.manifest.id]: artifactBlock },
+      redact: redactResolvedValues,
+      resolveSecret: (ref) =>
+        ref === "MIME_PREFIX" ? "text" : "future-secret",
+    });
+    const workflow = fixtureWorkflow({
+      execution: {
+        type: "workflow",
+        steps: [
+          {
+            id: "write",
+            uses: artifactBlock.manifest.id,
+          },
+        ],
+      },
+    });
+    await store.workflows.put(workflow);
+    const run = await triggerRun(config, {
+      workflow,
+      trigger: fixtureTrigger(),
+      inputs: {},
+    });
+
+    const finished = await executeRun(config, run.runId);
+
+    expect(finished.status).toBe("completed");
+    expect(artifactId).toBeDefined();
+    await expect(
+      store.artifacts.isTextEligible(artifactId!),
+    ).resolves.toBe(true);
+    const bytes = await store.artifacts.getBytes(artifactId!);
+    expect(
+      bytes === undefined
+        ? undefined
+        : new TextDecoder().decode(bytes),
+    ).toBe("[REDACTED]");
+    await expect(
+      store.artifacts.getMetadata(artifactId!),
+    ).resolves.toMatchObject({
+      mime: "[REDACTED]",
+    });
   });
 
   it("taints an early-arrival wait after until first resolves a matching secret", async () => {

@@ -140,7 +140,11 @@ export class FsArtifactStore implements ArtifactStore {
     }
   }
 
-  async put(artifact: Artifact, bytes: Uint8Array): Promise<void> {
+  async put(
+    artifact: Artifact,
+    bytes: Uint8Array,
+    options?: { redactionTextEligible?: boolean },
+  ): Promise<void> {
     await this.recoverPendingRedactions();
     await fs.mkdir(this.runDir(artifact.runId), { recursive: true });
     const existing =
@@ -154,6 +158,7 @@ export class FsArtifactStore implements ArtifactStore {
       ...artifact,
       redactionTextEligible:
         existing?.redactionTextEligible ??
+        options?.redactionTextEligible ??
         isTextMime(artifact.mime),
     });
   }

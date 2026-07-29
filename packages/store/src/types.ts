@@ -219,7 +219,17 @@ export interface WaitOperationalRunState {
 export type RunOperationalState = WaitOperationalRunState;
 
 export interface ArtifactStore {
-  put(artifact: Artifact, bytes: Uint8Array): Promise<void>;
+  put(
+    artifact: Artifact,
+    bytes: Uint8Array,
+    options?: {
+      /**
+       * Classification captured from the original MIME before its public
+       * audit value is redacted. Once stored, adapters keep the first value.
+       */
+      redactionTextEligible?: boolean;
+    },
+  ): Promise<void>;
   getMetadata(artifactId: string): Promise<Artifact | undefined>;
   getBytes(artifactId: string): Promise<Uint8Array | undefined>;
   /** All customer-visible artifact audit rows. */
@@ -416,6 +426,12 @@ export interface IdempotencyReplayClaim {
   ledgerKey: string;
   stepId: string;
   traceSeq: number;
+  /**
+   * The claimed output was revoked through provenance, even if no currently
+   * known literal occurs in the output. Retained until the matching trace is
+   * durable so restart/reclaim cannot launder a derivative through replay.
+   */
+  outputSecretTainted?: boolean;
 }
 
 export interface IdempotencyLedgerStore {

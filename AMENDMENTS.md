@@ -2258,7 +2258,11 @@ status is omitted when it matches a numeric secret, an affected external-call
 row is withheld when its required duration cannot remain numeric, and the
 optional `llmCall` audit is withheld as a unit when `tokensIn`, `tokensOut`,
 or `latencyMs` would require a string marker; a secret-valued optional cost is
-omitted independently.
+omitted independently. Artifact byte counts follow the same rule: because
+the count is required and numeric, an affected artifact audit row is withheld
+from both the run and trace views as a unit. Artifact audit objects are rebuilt
+from literal schema keys so a secret matching `name`, `kind`, `mime`, or
+`path` cannot invalidate the public `RunRecord`.
 `WaitStore.listOperational()` is the engine-only access path. A signal carrying
 the original correlation can therefore still resume the run without the
 public audit exposing the late-discovered value. SQLite migration
@@ -2279,7 +2283,8 @@ dispatch, wait entry/early arrival, atomic resume, reclaim, and terminal
 finalization—re-scans the run's stored text artifacts, overwrites changed
 bytes, redacts name/kind/MIME/path metadata, refreshes byte-count metadata, and
 carries the refreshed metadata into the `RunRecord`. Text eligibility is fixed
-when the artifact is first stored and survives MIME audit redaction, so a
+from the original MIME before its public audit value is redacted, then survives
+every later MIME audit rewrite, so a
 second, later secret discovery still scans the bytes. Binary artifacts retain
 the existing pre-capture masking/explicit-read boundary because arbitrary
 encoded bytes cannot be safely search-and-replaced.
@@ -2328,6 +2333,20 @@ taints its selected continuation before terminal output materialization.
 Historical `with`, `idempotencyKey`, and `forEach` expressions receive the same
 replay analysis, including a completed forEach aggregate whose source only
 becomes known as secret later.
+Cache replay admission records a sealed pending consumer claim before returning
+the cached output. If revocation reaches that claim before its trace is
+durable, the claim also records whether the producer output was provenance-
+tainted; the next progress/reclaim merge transfers that wildcard taint to the
+matching occurrence before clearing the claim. Deleting the ledger entry
+therefore cannot erase non-literal derivative provenance in the claim-to-trace
+gap.
+
+Workflow outputs are validated against the exact conservative representation
+that the public `RunRecord` will store, both at ordinary terminal completion
+and during retrospective cache repair. A partially redacted scalar can no
+longer pass a pattern/enum contract and then be replaced by a whole-leaf
+`[REDACTED]` value that violates that same contract; the run fails instead of
+publishing an invalid completed result.
 
 Trace identity and execution metadata (`stepId`, `block`, timestamps, status,
 and the explicit authored/iteration identity) are intentionally structural,

@@ -5,9 +5,11 @@ import {
   checkIdempotency,
   idempotencyStorageKey,
   recordIdempotency,
+  retainUnsettledIdempotencyReplayClaims,
   revokeSecretTaintedIdempotency,
 } from "./idempotency.js";
 import { idempotencyAssociationFingerprint } from "./idempotency-association.js";
+import { mergeActiveRunProtection } from "./redaction.js";
 import {
   createTestStore,
   fixtureRun,
@@ -144,6 +146,112 @@ describe("checkIdempotency / recordIdempotency (spec §30.2, architecture §4.2/
     ).resolves.toMatchObject({
       resolvedSecretValues: [secret],
     });
+  });
+
+  it("carries non-literal revoked-output taint from a pending claim into its later replay trace", async () => {
+    const store = await setup();
+    const ledgerKey = idempotencyStorageKey("derived-key");
+    const producer = fixtureRun({
+      runId: "derived-producer",
+      trace: [
+        {
+          seq: 0,
+          stepId: "derive",
+          block: "test.derive",
+          status: "completed",
+          inputs: { source: "[REDACTED]" },
+          outputs: { length: 17 },
+          idempotencyLedgerKey: ledgerKey,
+          idempotencyLedgerFingerprint:
+            idempotencyAssociationFingerprint(ledgerKey),
+          secretTainted: true,
+          secretTaintedPaths: ["*"],
+          startedAt: "2026-07-29T00:00:00.000Z",
+        },
+      ],
+    });
+    const consumer = fixtureRun({
+      runId: "derived-consumer",
+      status: "running",
+      trace: [],
+    });
+    await store.runs.put(producer);
+    await store.runs.put(consumer);
+    await store.runs.putOperationalState(consumer.runId, {
+      run: consumer,
+      resolvedSecretValues: [],
+    });
+    await store.idempotencyLedger.put({
+      resolvedKey: ledgerKey,
+      runId: producer.runId,
+      stepId: "derive",
+      traceSeq: 0,
+      recordedOutput: { length: 17 },
+      createdAt: "2026-07-29T00:00:00.000Z",
+      schemaVersion: 2,
+    });
+    await claimIdempotencyReplay(
+      store,
+      "derived-key",
+      consumer,
+      "reuse",
+      0,
+      new Set(),
+      () => true,
+    );
+
+    await revokeSecretTaintedIdempotency(
+      store,
+      (record) => record,
+      fixtureRun({ runId: "discoverer" }),
+      new Set(["unrelated-literal"]),
+    );
+
+    const claimedState =
+      await store.runs.getOperationalState(consumer.runId);
+    expect(
+      claimedState?.pendingIdempotencyReplays,
+    ).toEqual([
+      {
+        ledgerKey,
+        stepId: "reuse",
+        traceSeq: 0,
+        outputSecretTainted: true,
+      },
+    ]);
+
+    const replayTraceRun = {
+      ...consumer,
+      trace: [
+        {
+          seq: 0,
+          stepId: "reuse",
+          block: "test.reuse",
+          status: "completed" as const,
+          inputs: {},
+          outputs: { length: 17 },
+          idempotencyLedgerFingerprint:
+            idempotencyAssociationFingerprint(ledgerKey),
+          startedAt: "2026-07-29T00:00:00.000Z",
+        },
+      ],
+    };
+    const protectedRun = await mergeActiveRunProtection(
+      store,
+      replayTraceRun,
+      new Set(),
+    );
+
+    expect(protectedRun.trace[0]).toMatchObject({
+      secretTainted: true,
+      secretTaintedPaths: ["*"],
+    });
+    expect(
+      retainUnsettledIdempotencyReplayClaims(
+        claimedState,
+        protectedRun,
+      ),
+    ).toBeUndefined();
   });
 
   it("does not replay a legacy entry that collides with the current storage-key string", async () => {

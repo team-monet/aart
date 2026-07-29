@@ -643,6 +643,29 @@ export function runAartStoreConformanceSuite(label: string, options: Conformance
           store.artifacts.getBytes(artifact.id),
         ).resolves.toEqual(new TextEncoder().encode("[REDACTED]"));
       });
+
+      it("retains text eligibility captured before the public MIME is redacted", async () => {
+        const runId = uniqueId("run");
+        const artifact: Artifact = {
+          id: uniqueId("art"),
+          runId,
+          name: "result.txt",
+          kind: "report",
+          mime: "[REDACTED]",
+          path: `artifacts/${runId}/result.txt`,
+          bytes: 12,
+          createdAt: new Date().toISOString(),
+        };
+        await store.artifacts.put(
+          artifact,
+          new TextEncoder().encode("future-value"),
+          { redactionTextEligible: true },
+        );
+
+        await expect(
+          store.artifacts.isTextEligible(artifact.id),
+        ).resolves.toBe(true);
+      });
     });
 
     describe("approvals", () => {

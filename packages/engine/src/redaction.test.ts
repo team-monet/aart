@@ -501,6 +501,97 @@ describe("applyRunRedaction", () => {
     expect(() => RunRecordSchema.parse(publicRun)).not.toThrow();
   });
 
+  it("withholds artifact audit rows whose required byte count is a numeric secret", () => {
+    const artifact = {
+      id: "numeric-artifact",
+      runId: "numeric-run",
+      stepId: "write",
+      name: "result.txt",
+      kind: "report",
+      mime: "text/plain",
+      path: "artifacts/numeric-run/numeric-artifact",
+      bytes: 42,
+      createdAt: "2026-07-29T00:00:00.000Z",
+    };
+    const run = fixtureRun({
+      runId: artifact.runId,
+      artifacts: [artifact],
+      trace: [
+        {
+          seq: 0,
+          stepId: "write",
+          block: "test.write",
+          status: "completed",
+          inputs: {},
+          artifacts: [artifact],
+          startedAt: "2026-07-29T00:00:00.000Z",
+        },
+      ],
+    });
+    const numericRedact = (
+      record: unknown,
+      refs: ReadonlySet<string>,
+    ): unknown =>
+      typeof record === "number" && refs.has(String(record))
+        ? "[REDACTED]"
+        : record;
+
+    const publicRun = applyRunRedaction(
+      numericRedact,
+      run,
+      new Set(["42"]),
+    );
+
+    expect(publicRun.artifacts).toEqual([]);
+    expect(publicRun.trace[0]?.artifacts).toEqual([]);
+    expect(JSON.stringify(publicRun)).not.toContain("42");
+    expect(() => RunRecordSchema.parse(publicRun)).not.toThrow();
+  });
+
+  it("preserves literal trace-artifact schema keys when a secret matches a field name", () => {
+    const artifact = {
+      id: "key-artifact",
+      runId: "key-run",
+      stepId: "write",
+      name: "name",
+      kind: "report",
+      mime: "text/plain",
+      path: "name/result.txt",
+      bytes: 4,
+      createdAt: "2026-07-29T00:00:00.000Z",
+    };
+    const run = fixtureRun({
+      runId: artifact.runId,
+      trace: [
+        {
+          seq: 0,
+          stepId: "write",
+          block: "test.write",
+          status: "completed",
+          inputs: {},
+          artifacts: [artifact],
+          startedAt: "2026-07-29T00:00:00.000Z",
+        },
+      ],
+    });
+
+    const publicRun = applyRunRedaction(
+      redactResolved,
+      run,
+      new Set(["name"]),
+    );
+
+    expect(publicRun.trace[0]?.artifacts?.[0]).toMatchObject({
+      name: "[REDACTED]",
+      path: "[REDACTED]",
+    });
+    expect(publicRun.trace[0]?.artifacts?.[0]).toHaveProperty(
+      "mime",
+      "text/plain",
+    );
+    expect(() => RunRecordSchema.parse(publicRun)).not.toThrow();
+  });
+
   it("omits a secret-valued optional LLM cost while retaining otherwise safe metrics", () => {
     const run = fixtureRun({
       trace: [

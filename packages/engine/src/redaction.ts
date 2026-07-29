@@ -357,6 +357,37 @@ function redactArtifactAudit(
   };
 }
 
+function redactRunArtifactAudit(
+  redact: RedactFn,
+  artifact: Artifact,
+  resolvedSecretRefs: ReadonlySet<string>,
+): Artifact | undefined {
+  const bytes = redactAuditNumber(
+    redact,
+    artifact.bytes,
+    resolvedSecretRefs,
+  );
+  // ArtifactSchema requires a numeric byte count. If publishing that
+  // observation would reveal a numeric secret, withhold this optional audit
+  // row as a unit instead of corrupting the public RunRecord contract.
+  if (bytes === undefined) return undefined;
+  const audit = redactArtifactAudit(
+    redact,
+    artifact,
+    resolvedSecretRefs,
+  );
+  return {
+    id: artifact.id,
+    runId: artifact.runId,
+    ...(artifact.stepId !== undefined
+      ? { stepId: artifact.stepId }
+      : {}),
+    ...audit,
+    bytes,
+    createdAt: artifact.createdAt,
+  };
+}
+
 export function redactApprovalAudit(
   redact: RedactFn,
   task: ApprovalTask,
@@ -1167,27 +1198,13 @@ export function applyRunRedaction(redact: RedactFn, run: RunRecord, resolvedSecr
         : {}),
       ...(trace.artifacts !== undefined
         ? {
-            artifacts: trace.artifacts.map((artifact) => {
-              const audit = applyRedaction(
+            artifacts: trace.artifacts.flatMap((artifact) => {
+              const audit = redactRunArtifactAudit(
                 redact,
-                {
-                  name: artifact.name,
-                  kind: artifact.kind,
-                  mime: artifact.mime,
-                  path: artifact.path,
-                },
+                artifact,
                 resolvedSecretRefs,
               );
-              return {
-                id: artifact.id,
-                runId: artifact.runId,
-                ...(artifact.stepId !== undefined
-                  ? { stepId: artifact.stepId }
-                  : {}),
-                ...audit,
-                bytes: artifact.bytes,
-                createdAt: artifact.createdAt,
-              };
+              return audit === undefined ? [] : [audit];
             }),
           }
         : {}),
@@ -1254,22 +1271,13 @@ export function applyRunRedaction(redact: RedactFn, run: RunRecord, resolvedSecr
     ),
     capturedAt: run.snapshot.capturedAt,
   };
-  const artifacts = run.artifacts.map((artifact) => {
-    const audit = redactArtifactAudit(
+  const artifacts = run.artifacts.flatMap((artifact) => {
+    const audit = redactRunArtifactAudit(
       redact,
       artifact,
       resolvedSecretRefs,
     );
-    return {
-      id: artifact.id,
-      runId: artifact.runId,
-      ...(artifact.stepId !== undefined
-        ? { stepId: artifact.stepId }
-        : {}),
-      ...audit,
-      bytes: artifact.bytes,
-      createdAt: artifact.createdAt,
-    };
+    return audit === undefined ? [] : [audit];
   });
   const flag =
     run.flag === undefined || run.flag === null
@@ -1418,7 +1426,33 @@ export async function mergeActiveRunProtection(
   for (const value of activeState.resolvedSecretValues) {
     resolvedSecretRefs.add(value);
   }
-  return mergeOperationalRunTaint(run, activeState.run);
+  const protectedRun = mergeOperationalRunTaint(
+    run,
+    activeState.run,
+  );
+  const taintedPendingClaims =
+    activeState.pendingIdempotencyReplays?.filter(
+      (claim) => claim.outputSecretTainted === true,
+    ) ?? [];
+  if (taintedPendingClaims.length === 0) {
+    return protectedRun;
+  }
+  return {
+    ...protectedRun,
+    trace: protectedRun.trace.map((trace) =>
+      taintedPendingClaims.some(
+        (claim) =>
+          claim.traceSeq === trace.seq &&
+          claim.stepId === trace.stepId,
+      )
+        ? {
+            ...trace,
+            secretTainted: true,
+            secretTaintedPaths: ["*"],
+          }
+        : trace,
+    ),
+  };
 }
 
 /**

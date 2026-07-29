@@ -9,7 +9,7 @@ import type { RunRecord, StepTrace, Workflow, WorkflowStep } from "@aart/types";
 import { ConcurrencyRejectedError } from "@aart/types";
 import { buildExprContext, resolveBooleanExpression } from "./expr-context.js";
 import { decideConcurrency, fingerprintConcurrencyKey, releaseQueuedRuns, resolveConcurrencyKey } from "./concurrency.js";
-import { applyRedaction, applyRunRedaction, createTrackingSecretResolver, mergeActiveRunProtection, mergeOperationalRunTaint, mergePersistedRunTaint, redactStoredTextArtifacts, repairGlobalAuditsForNewSecrets, throwingSecretResolver } from "./redaction.js";
+import { applyConservativeRedaction, applyRunRedaction, createTrackingSecretResolver, mergeActiveRunProtection, mergeOperationalRunTaint, mergePersistedRunTaint, redactStoredTextArtifacts, repairGlobalAuditsForNewSecrets, throwingSecretResolver } from "./redaction.js";
 import { assertSchemaVersionCompatible, CURRENT_ENGINE_SCHEMA_VERSION } from "./schema-version.js";
 import { captureExecutionSnapshot, isSnapshotCaptured, resolveWorkflowForRun, uncapturedSnapshot } from "./snapshot.js";
 import { validateWorkflowOutputs, WorkflowOutputValidationError } from "./output-validation.js";
@@ -178,7 +178,11 @@ export async function finalizeTerminal(
       // redaction boundary. A raw number that becomes a string marker, or an
       // enum/pattern value changed by redaction, is not a valid completed
       // public result.
-      const observableOutputs = applyRedaction(config.redact, outputs, resolvedSecretRefs);
+      const observableOutputs = applyConservativeRedaction(
+        config.redact,
+        outputs,
+        resolvedSecretRefs,
+      );
       validateWorkflowOutputs(workflow, observableOutputs);
     } catch (err) {
       // A declared result that cannot be produced is a failed workflow, even
