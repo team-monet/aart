@@ -3,8 +3,13 @@
 // run *can* have had multiple waits over its lifetime... so the composite
 // key is necessary." File name: `<runId>__<stepId>.json`.
 import { createHash } from "node:crypto";
+import { join } from "node:path";
 import type { WaitCondition } from "@aart/types";
 import type { WaitStore } from "../../types.js";
+import {
+  openWaitOperation,
+  sealWaitOperation,
+} from "../wait-operation-seal.js";
 import { KeyedJsonCollection, type StagingBuffer } from "./json-file.js";
 
 interface StoredWait {
@@ -14,6 +19,8 @@ interface StoredWait {
   wait: WaitCondition;
   /** One-way exact-match key; never exposes the original correlation. */
   signalMatchFingerprint?: string;
+  /** AES-GCM sealed operational copy; never returned by audit listing. */
+  operationalWait?: string;
   createdAt: string;
 }
 
@@ -58,14 +65,16 @@ function fingerprintForWait(wait: WaitCondition): string | undefined {
 
 export class FsWaitStore implements WaitStore {
   private readonly collection: KeyedJsonCollection<StoredWait>;
+  private readonly operationKeyPath: string;
 
   constructor(dir: string, staging?: StagingBuffer) {
     this.collection = new KeyedJsonCollection<StoredWait>(dir, staging);
+    this.operationKeyPath = join(dir, ".operational-key");
   }
 
   async get(runId: string, stepId: string): Promise<WaitCondition | undefined> {
     const stored = await this.collection.get(waitKey(runId, stepId));
-    return stored?.wait;
+    return stored ? this.operationalWait(stored) : undefined;
   }
 
   async put(runId: string, stepId: string, wait: WaitCondition, createdAt: string): Promise<void> {
@@ -74,6 +83,12 @@ export class FsWaitStore implements WaitStore {
       stepId,
       wait,
       signalMatchFingerprint: fingerprintForWait(wait),
+      operationalWait: await sealWaitOperation(
+        this.operationKeyPath,
+        runId,
+        stepId,
+        wait,
+      ),
       createdAt,
     });
   }
@@ -89,6 +104,14 @@ export class FsWaitStore implements WaitStore {
     await this.collection.put(key, {
       ...stored,
       wait,
+      operationalWait:
+        stored.operationalWait ??
+        (await sealWaitOperation(
+          this.operationKeyPath,
+          runId,
+          stepId,
+          stored.wait,
+        )),
       signalMatchFingerprint:
         stored.signalMatchFingerprint ?? fingerprintForWait(stored.wait),
     });
@@ -98,14 +121,44 @@ export class FsWaitStore implements WaitStore {
     await this.collection.delete(waitKey(runId, stepId));
   }
 
-  async list(): Promise<Array<{ runId: string; stepId: string; wait: WaitCondition; createdAt: string }>> {
-    return (await this.collection.list()).map(
+  async list(filter?: { runId?: string }): Promise<Array<{ runId: string; stepId: string; wait: WaitCondition; createdAt: string }>> {
+    return (await this.collection.list())
+      .filter((entry) =>
+        filter?.runId === undefined
+          ? true
+          : entry.runId === filter.runId,
+      )
+      .map(
       ({ runId, stepId, wait, createdAt }) => ({
         runId,
         stepId,
         wait,
         createdAt,
       }),
+    );
+  }
+
+  async listOperational(filter?: {
+    runId?: string;
+    type?: WaitCondition["type"];
+  }): Promise<Array<{ runId: string; stepId: string; wait: WaitCondition; createdAt: string }>> {
+    const stored = (await this.collection.list()).filter((entry) =>
+      filter?.runId === undefined
+        ? true
+        : entry.runId === filter.runId,
+    );
+    const rows = await Promise.all(
+      stored.map(async (entry) => ({
+        runId: entry.runId,
+        stepId: entry.stepId,
+        wait: await this.operationalWait(entry),
+        createdAt: entry.createdAt,
+      })),
+    );
+    return rows.filter((entry) =>
+      filter?.type === undefined
+        ? true
+        : entry.wait.type === filter.type,
     );
   }
 
@@ -124,15 +177,44 @@ export class FsWaitStore implements WaitStore {
   }
 
   async listDue(now: string): Promise<Array<{ runId: string; stepId: string; wait: WaitCondition }>> {
-    const all = await this.collection.list();
     // Only `timer` waits are determinable as "due" purely from
     // WaitCondition's own frozen shape (resumeAt <= now). Poll-mode
     // external_job waits (architecture §4.4.1) additionally require the
     // originating trigger/poll config to know their condition/interval —
     // that cross-reference is Wave-1 scope (S2's scheduler ticker), not
     // buildable from the store layer alone.
-    return all
-      .filter((entry) => entry.wait.type === "timer" && entry.wait.resumeAt <= now)
-      .map(({ runId, stepId, wait }) => ({ runId, stepId, wait }));
+    const stored = (await this.collection.list()).filter(
+      (entry) => entry.wait.type === "timer",
+    );
+    const due: Array<{
+      runId: string;
+      stepId: string;
+      wait: WaitCondition;
+    }> = [];
+    for (const entry of stored) {
+      const operational = await this.operationalWait(entry);
+      if (
+        operational.type === "timer" &&
+        operational.resumeAt <= now
+      ) {
+        due.push({
+          runId: entry.runId,
+          stepId: entry.stepId,
+          wait: entry.wait,
+        });
+      }
+    }
+    return due;
+  }
+
+  private async operationalWait(stored: StoredWait): Promise<WaitCondition> {
+    return stored.operationalWait === undefined
+      ? stored.wait
+      : openWaitOperation(
+          this.operationKeyPath,
+          stored.runId,
+          stored.stepId,
+          stored.operationalWait,
+        );
   }
 }

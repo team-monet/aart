@@ -234,6 +234,49 @@ export function runAartStoreConformanceSuite(label: string, options: Conformance
         ).resolves.toEqual([{ runId, stepId: "wait_step" }]);
       });
 
+      it("keeps redacted audit values separate from sealed operational scheduling values", async () => {
+        const runId = uniqueId("run");
+        const resumeAt = new Date(Date.now() - 60_000).toISOString();
+        const wait: WaitCondition = {
+          type: "timer",
+          resumeAt,
+          schemaVersion: 1,
+        };
+        await store.waits.put(
+          runId,
+          "timer_step",
+          wait,
+          new Date().toISOString(),
+        );
+        await store.waits.redactAudit(runId, "timer_step", {
+          ...wait,
+          resumeAt: "[REDACTED]",
+        });
+        await expect(
+          store.waits.list({ runId }),
+        ).resolves.toEqual([
+          expect.objectContaining({
+            wait: { ...wait, resumeAt: "[REDACTED]" },
+          }),
+        ]);
+        await expect(
+          store.waits.listOperational({ runId, type: "timer" }),
+        ).resolves.toEqual([
+          expect.objectContaining({ wait }),
+        ]);
+        await expect(
+          store.waits.listDue(new Date().toISOString()),
+        ).resolves.toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              runId,
+              stepId: "timer_step",
+              wait: { ...wait, resumeAt: "[REDACTED]" },
+            }),
+          ]),
+        );
+      });
+
       it("delete removes a wait", async () => {
         const runId = uniqueId("run");
         await store.waits.put(runId, "wait_step", fixtureWait(), new Date().toISOString());
@@ -319,6 +362,41 @@ export function runAartStoreConformanceSuite(label: string, options: Conformance
           expect.arrayContaining([signal]),
         );
       });
+
+      it("replaces every consumed-signal audit field while preserving identity and consumption", async () => {
+        const signal: Signal = {
+          id: uniqueId("sig"),
+          name: "late-secret",
+          correlationId: "late-secret",
+          payload: { value: "late-secret" },
+          receivedAt: new Date().toISOString(),
+        };
+        await store.signals.append(signal);
+        await store.signals.markConsumed(signal.id, {
+          consumedBy: { runId: uniqueId("run"), stepId: "pause" },
+        });
+        await store.signals.replaceConsumedAudit(signal.id, {
+          name: "[REDACTED]",
+          correlationId: "[REDACTED]",
+          payload: { value: "[REDACTED]" },
+        });
+        await expect(store.signals.list()).resolves.toEqual(
+          expect.arrayContaining([
+            {
+              ...signal,
+              name: "[REDACTED]",
+              correlationId: "[REDACTED]",
+              payload: { value: "[REDACTED]" },
+            },
+          ]),
+        );
+        await expect(
+          store.signals.findUnconsumedMatch(
+            "[REDACTED]",
+            "[REDACTED]",
+          ),
+        ).resolves.toBeUndefined();
+      });
     });
 
     describe("artifacts", () => {
@@ -358,6 +436,52 @@ export function runAartStoreConformanceSuite(label: string, options: Conformance
         const list = await store.artifacts.listByRun(runId);
         expect(list).toHaveLength(1);
         expect(list[0]?.runId).toBe(runId);
+      });
+
+      it("replaces artifact audit metadata and text bytes without changing structural ownership", async () => {
+        const runId = uniqueId("run");
+        const artifact: Artifact = {
+          id: uniqueId("art"),
+          runId,
+          stepId: "capture",
+          name: "late-secret",
+          kind: "late-secret",
+          mime: "text/late-secret",
+          path: "late-secret/report.txt",
+          bytes: 11,
+          createdAt: new Date().toISOString(),
+        };
+        await store.artifacts.put(
+          artifact,
+          new TextEncoder().encode("late-secret"),
+        );
+        await expect(
+          store.artifacts.isTextEligible(artifact.id),
+        ).resolves.toBe(true);
+        const updated = await store.artifacts.replaceAudit(
+          artifact.id,
+          {
+            name: "[REDACTED]",
+            kind: "[REDACTED]",
+            mime: "[REDACTED]",
+            path: "[REDACTED]",
+          },
+          new TextEncoder().encode("[REDACTED]"),
+        );
+        expect(updated).toEqual({
+          ...artifact,
+          name: "[REDACTED]",
+          kind: "[REDACTED]",
+          mime: "[REDACTED]",
+          path: "[REDACTED]",
+          bytes: new TextEncoder().encode("[REDACTED]").byteLength,
+        });
+        await expect(
+          store.artifacts.isTextEligible(artifact.id),
+        ).resolves.toBe(true);
+        await expect(
+          store.artifacts.getBytes(artifact.id),
+        ).resolves.toEqual(new TextEncoder().encode("[REDACTED]"));
       });
     });
 
@@ -416,6 +540,79 @@ export function runAartStoreConformanceSuite(label: string, options: Conformance
         };
         await store.corrections.put(correction);
         await expect(store.corrections.list({ runId: correction.runId })).resolves.toEqual([correction]);
+      });
+
+      it("replaceAudit moves a correction whose redacted fieldPath changes its store key", async () => {
+        const correction: Correction = {
+          runId: uniqueId("run"),
+          stepId: "extract",
+          fieldPath: "outputs.late-secret",
+          observed: "late-secret",
+          corrected: "late-secret",
+          reason: "late-secret",
+          reviewer: "late-secret",
+          createdAt: new Date().toISOString(),
+        };
+        await store.corrections.put(correction);
+        await store.corrections.replaceAudit(correction, {
+          fieldPath: "outputs.[REDACTED]",
+          observed: "[REDACTED]",
+          corrected: "[REDACTED]",
+          reason: "[REDACTED]",
+          reviewer: "[REDACTED]",
+        });
+        await expect(
+          store.corrections.list({ runId: correction.runId }),
+        ).resolves.toEqual([
+          {
+            ...correction,
+            fieldPath: "outputs.[REDACTED]",
+            observed: "[REDACTED]",
+            corrected: "[REDACTED]",
+            reason: "[REDACTED]",
+            reviewer: "[REDACTED]",
+          },
+        ]);
+      });
+
+      it("replaceAudit preserves colliding redacted corrections without deriving a suffix from the secret path", async () => {
+        const runId = uniqueId("run");
+        const first: Correction = {
+          runId,
+          stepId: "extract",
+          fieldPath: "outputs.first-secret",
+          observed: "first-secret",
+          corrected: "a",
+          reason: "repair",
+          reviewer: "reviewer",
+          createdAt: "2026-01-01T00:00:00.000Z",
+        };
+        const second: Correction = {
+          ...first,
+          fieldPath: "outputs.second-secret",
+          observed: "second-secret",
+          corrected: "b",
+          createdAt: "2026-01-01T00:00:01.000Z",
+        };
+        await store.corrections.put(first);
+        await store.corrections.put(second);
+        for (const correction of [first, second]) {
+          await store.corrections.replaceAudit(correction, {
+            fieldPath: "outputs.[REDACTED]",
+            observed: "[REDACTED]",
+            corrected: correction.corrected,
+            reason: correction.reason,
+            reviewer: correction.reviewer,
+          });
+        }
+        const repaired = await store.corrections.list({ runId });
+        expect(repaired).toHaveLength(2);
+        expect(repaired.map((entry) => entry.fieldPath).sort()).toEqual([
+          "outputs.[REDACTED]",
+          "outputs.[REDACTED]#2",
+        ]);
+        expect(JSON.stringify(repaired)).not.toContain("first-secret");
+        expect(JSON.stringify(repaired)).not.toContain("second-secret");
       });
     });
 

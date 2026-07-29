@@ -548,14 +548,19 @@ async function appendTracesAndPersist(
     newTraces.length,
     resolvedSecretRefs,
   );
-  const redacted = applyRunRedaction(config.redact, prepared, resolvedSecretRefs);
-  await config.store.transact(async (tx) => {
-    await revokeSecretTaintedIdempotency(
+  return config.store.transact(async (tx) => {
+    const repaired = await revokeSecretTaintedIdempotency(
       tx,
       config.redact,
       prepared,
       resolvedSecretRefs,
-      (store, consumerRun, outputTaintedLedgerKeys, secretRefs) =>
+      (
+        store,
+        consumerRun,
+        outputTaintedLedgerKeys,
+        secretRefs,
+        repairOptions,
+      ) =>
         prepareRevokedIdempotencyConsumer(
           config,
           store,
@@ -563,11 +568,17 @@ async function appendTracesAndPersist(
           outputTaintedLedgerKeys,
           secretRefs,
           consumerRun.runId === prepared.runId ? workflow : undefined,
+          repairOptions?.includeUnattributedSignalAudits,
         ),
     );
+    const redacted = applyRunRedaction(
+      config.redact,
+      repaired,
+      resolvedSecretRefs,
+    );
     await tx.runs.put(redacted);
+    return redacted;
   });
-  return redacted;
 }
 
 export function authoredStepIdForTrace(
@@ -1095,6 +1106,15 @@ function redactApprovalAudit(
           ),
         }
       : {}),
+    ...(task.authenticatedAs !== undefined
+      ? {
+          authenticatedAs: applyRedaction(
+            redact,
+            task.authenticatedAs,
+            resolvedSecretRefs,
+          ) as string,
+        }
+      : {}),
   };
 }
 
@@ -1123,14 +1143,25 @@ async function repairRunDurableAudits(
   store: AartStore,
   runId: string,
   resolvedSecretRefs: ReadonlySet<string>,
+  includeUnattributedSignalAudits: boolean,
 ): Promise<void> {
-  const [approvals, waits, consumedSignals, corrections, events] =
+  const [
+    approvals,
+    waits,
+    consumedSignals,
+    legacyConsumedSignals,
+    corrections,
+    events,
+  ] =
     await Promise.all([
       store.approvals.list({ runId }),
-      store.waits.list(),
+      store.waits.list({ runId }),
       store.signals.listConsumedByRun(runId),
+      includeUnattributedSignalAudits
+        ? store.signals.listConsumedWithoutProvenance()
+        : Promise.resolve([]),
       store.corrections.list({ runId }),
-      store.events.list(),
+      store.events.list({ runId }),
     ]);
   for (const task of approvals) {
     const redacted = redactApprovalAudit(
@@ -1142,7 +1173,6 @@ async function repairRunDurableAudits(
     await store.approvals.put(redacted);
   }
   for (const entry of waits) {
-    if (entry.runId !== runId) continue;
     const redacted = redactWaitAudit(
       config,
       entry.wait,
@@ -1156,19 +1186,42 @@ async function repairRunDurableAudits(
       );
     }
   }
-  for (const signal of consumedSignals) {
-    const payload = applyRedaction(
+  const signalsById = new Map(
+    [...consumedSignals, ...legacyConsumedSignals].map((signal) => [
+      signal.id,
+      signal,
+    ]),
+  );
+  for (const signal of signalsById.values()) {
+    const audit = applyRedaction(
       config.redact,
-      signal.payload,
+      {
+        name: signal.name,
+        correlationId: signal.correlationId,
+        payload: signal.payload,
+      },
       resolvedSecretRefs,
-    );
-    if (JSON.stringify(payload) !== JSON.stringify(signal.payload)) {
-      await store.signals.markConsumed(signal.id, { payload });
-    }
+    ) as Pick<
+      typeof signal,
+      "name" | "correlationId" | "payload"
+    >;
+    if (
+      JSON.stringify(audit) ===
+      JSON.stringify({
+        name: signal.name,
+        correlationId: signal.correlationId,
+        payload: signal.payload,
+      })
+    ) continue;
+    await store.signals.replaceConsumedAudit(signal.id, audit);
   }
   for (const correction of corrections) {
     const redacted = {
-      ...correction,
+      fieldPath: applyRedaction(
+        config.redact,
+        correction.fieldPath,
+        resolvedSecretRefs,
+      ) as string,
       observed: applyRedaction(
         config.redact,
         correction.observed,
@@ -1190,11 +1243,19 @@ async function repairRunDurableAudits(
         resolvedSecretRefs,
       ) as string,
     };
-    if (JSON.stringify(redacted) === JSON.stringify(correction)) continue;
-    await store.corrections.put(redacted);
+    if (
+      JSON.stringify(redacted) ===
+      JSON.stringify({
+        fieldPath: correction.fieldPath,
+        observed: correction.observed,
+        corrected: correction.corrected,
+        reason: correction.reason,
+        reviewer: correction.reviewer,
+      })
+    ) continue;
+    await store.corrections.replaceAudit(correction, redacted);
   }
   for (const event of events) {
-    if (event.runId !== runId) continue;
     const redacted = {
       ...event,
       summary: applyRedaction(
@@ -1238,12 +1299,14 @@ export async function prepareRevokedIdempotencyConsumer(
   outputTaintedLedgerKeys: ReadonlySet<string>,
   resolvedSecretRefs: ReadonlySet<string>,
   currentWorkflow?: Workflow,
+  includeUnattributedSignalAudits = false,
 ): Promise<RunRecord> {
   await repairRunDurableAudits(
     config,
     store,
     run.runId,
     resolvedSecretRefs,
+    includeUnattributedSignalAudits,
   );
   let workflow: Workflow;
   if (currentWorkflow) {
@@ -1378,18 +1441,19 @@ export async function refreshTaintAfterControlResolution(
     return run;
   }
 
-  const refreshedRun = applyRunRedaction(
-    config.redact,
-    preparedRun,
-    resolvedSecretRefs,
-  );
-  await config.store.transact(async (tx) => {
-    await revokeSecretTaintedIdempotency(
+  return config.store.transact(async (tx) => {
+    const repaired = await revokeSecretTaintedIdempotency(
       tx,
       config.redact,
       preparedRun,
       resolvedSecretRefs,
-      (store, consumerRun, outputTaintedLedgerKeys, secretRefs) =>
+      (
+        store,
+        consumerRun,
+        outputTaintedLedgerKeys,
+        secretRefs,
+        repairOptions,
+      ) =>
         prepareRevokedIdempotencyConsumer(
           config,
           store,
@@ -1397,11 +1461,17 @@ export async function refreshTaintAfterControlResolution(
           outputTaintedLedgerKeys,
           secretRefs,
           consumerRun.runId === preparedRun.runId ? workflow : undefined,
+          repairOptions?.includeUnattributedSignalAudits,
         ),
     );
+    const refreshedRun = applyRunRedaction(
+      config.redact,
+      repaired,
+      resolvedSecretRefs,
+    );
     await tx.runs.put(refreshedRun);
+    return refreshedRun;
   });
-  return refreshedRun;
 }
 
 /**
@@ -1775,6 +1845,7 @@ async function executeWaitDispatch(
       consumerRun,
       outputTaintedLedgerKeys,
       secretRefs,
+      repairOptions,
     ) =>
       prepareRevokedIdempotencyConsumer(
         config,
@@ -1783,6 +1854,7 @@ async function executeWaitDispatch(
         outputTaintedLedgerKeys,
         secretRefs,
         consumerRun.runId === run.runId ? workflow : undefined,
+        repairOptions?.includeUnattributedSignalAudits,
       ),
   };
   const preparedHistoricalRun = prepareTaintAfterControlResolution(

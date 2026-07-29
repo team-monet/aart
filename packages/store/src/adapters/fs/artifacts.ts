@@ -16,6 +16,21 @@ import type { Artifact } from "@aart/types";
 import type { ArtifactStore } from "../../types.js";
 import { JsonFileHandle } from "./json-file.js";
 
+interface StoredArtifact extends Artifact {
+  redactionTextEligible?: boolean;
+}
+
+function isTextMime(mime: string): boolean {
+  const normalized = mime.toLowerCase();
+  return (
+    normalized.startsWith("text/") ||
+    normalized.includes("json") ||
+    normalized.includes("xml") ||
+    normalized.includes("javascript") ||
+    normalized.includes("yaml")
+  );
+}
+
 export class FsArtifactStore implements ArtifactStore {
   constructor(private readonly dir: string) {}
 
@@ -31,13 +46,26 @@ export class FsArtifactStore implements ArtifactStore {
 
   async put(artifact: Artifact, bytes: Uint8Array): Promise<void> {
     await fs.mkdir(this.runDir(artifact.runId), { recursive: true });
+    const existing =
+      await new JsonFileHandle<StoredArtifact>(
+        this.metaPath(artifact.runId, artifact.id),
+      ).read();
     await fs.writeFile(this.blobPath(artifact.runId, artifact.id), bytes);
-    await new JsonFileHandle<Artifact>(this.metaPath(artifact.runId, artifact.id)).write(artifact);
+    await new JsonFileHandle<StoredArtifact>(
+      this.metaPath(artifact.runId, artifact.id),
+    ).write({
+      ...artifact,
+      redactionTextEligible:
+        existing?.redactionTextEligible ??
+        isTextMime(artifact.mime),
+    });
   }
 
   async getMetadata(artifactId: string): Promise<Artifact | undefined> {
     const found = await this.findByArtifactId(artifactId);
-    return found?.metadata;
+    return found
+      ? this.publicArtifact(found.metadata)
+      : undefined;
   }
 
   async getBytes(artifactId: string): Promise<Uint8Array | undefined> {
@@ -63,11 +91,55 @@ export class FsArtifactStore implements ArtifactStore {
     } catch {
       return [];
     }
-    const values = await Promise.all(files.map((f) => new JsonFileHandle<Artifact>(join(this.runDir(runId), f)).read()));
-    return values.filter((v): v is Artifact => v !== undefined);
+    const values = await Promise.all(
+      files.map((file) =>
+        new JsonFileHandle<StoredArtifact>(
+          join(this.runDir(runId), file),
+        ).read(),
+      ),
+    );
+    return values.flatMap((value) =>
+      value === undefined ? [] : [this.publicArtifact(value)],
+    );
   }
 
-  private async findByArtifactId(artifactId: string): Promise<{ metadata: Artifact } | undefined> {
+  async isTextEligible(artifactId: string): Promise<boolean> {
+    const found = await this.findByArtifactId(artifactId);
+    if (!found) return false;
+    return (
+      found.metadata.redactionTextEligible ??
+      isTextMime(found.metadata.mime)
+    );
+  }
+
+  async replaceAudit(
+    artifactId: string,
+    audit: Pick<Artifact, "name" | "kind" | "mime" | "path">,
+    bytes?: Uint8Array,
+  ): Promise<Artifact | undefined> {
+    const found = await this.findByArtifactId(artifactId);
+    if (!found) return undefined;
+    if (bytes !== undefined) {
+      await fs.writeFile(
+        this.blobPath(found.metadata.runId, artifactId),
+        bytes,
+      );
+    }
+    const updated: StoredArtifact = {
+      ...found.metadata,
+      ...audit,
+      bytes: bytes?.byteLength ?? found.metadata.bytes,
+      redactionTextEligible:
+        found.metadata.redactionTextEligible ??
+        isTextMime(found.metadata.mime),
+    };
+    await new JsonFileHandle<StoredArtifact>(
+      this.metaPath(found.metadata.runId, artifactId),
+    ).write(updated);
+    return this.publicArtifact(updated);
+  }
+
+  private async findByArtifactId(artifactId: string): Promise<{ metadata: StoredArtifact } | undefined> {
     let runDirs: string[];
     try {
       runDirs = await fs.readdir(this.dir);
@@ -75,9 +147,17 @@ export class FsArtifactStore implements ArtifactStore {
       return undefined;
     }
     for (const runId of runDirs) {
-      const metadata = await new JsonFileHandle<Artifact>(this.metaPath(runId, artifactId)).read();
+      const metadata = await new JsonFileHandle<StoredArtifact>(this.metaPath(runId, artifactId)).read();
       if (metadata) return { metadata };
     }
     return undefined;
+  }
+
+  private publicArtifact(stored: StoredArtifact): Artifact {
+    const {
+      redactionTextEligible: _redactionTextEligible,
+      ...artifact
+    } = stored;
+    return artifact;
   }
 }

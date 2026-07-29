@@ -159,6 +159,66 @@ export class SqliteCorrectionStore implements CorrectionStore {
     );
   }
 
+  async replaceAudit(
+    original: Pick<Correction, "runId" | "stepId" | "fieldPath">,
+    audit: Pick<
+      Correction,
+      "fieldPath" | "observed" | "corrected" | "reason" | "reviewer"
+    >,
+  ): Promise<void> {
+    await this.exec((db) => {
+      const row = dbGet<CorrectionRow>(
+        db,
+        `SELECT * FROM corrections
+         WHERE run_id = ? AND step_id = ? AND field_path = ?`,
+        [original.runId, original.stepId, original.fieldPath],
+      );
+      if (!row) return;
+      const isOccupied = (fieldPath: string): boolean =>
+        dbGet<{ found: number }>(
+          db,
+          `SELECT 1 AS found FROM corrections
+           WHERE run_id = ? AND step_id = ? AND field_path = ?
+             AND field_path <> ?
+           LIMIT 1`,
+          [
+            original.runId,
+            original.stepId,
+            fieldPath,
+            original.fieldPath,
+          ],
+        ) !== undefined;
+      let collisionIndex = 1;
+      let replacementFieldPath = audit.fieldPath;
+      while (isOccupied(replacementFieldPath)) {
+        collisionIndex += 1;
+        replacementFieldPath = `${audit.fieldPath}#${collisionIndex}`;
+      }
+      dbRun(
+        db,
+        `DELETE FROM corrections
+         WHERE run_id = ? AND step_id = ? AND field_path = ?`,
+        [original.runId, original.stepId, original.fieldPath],
+      );
+      dbRun(
+        db,
+        `INSERT INTO corrections
+          (run_id, step_id, field_path, observed_json, corrected_json, reason, reviewer, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          row.run_id,
+          row.step_id,
+          replacementFieldPath,
+          JSON.stringify(audit.observed),
+          JSON.stringify(audit.corrected),
+          audit.reason,
+          audit.reviewer,
+          row.created_at,
+        ],
+      );
+    });
+  }
+
   async list(filter?: { runId?: string; stepId?: string }): Promise<Correction[]> {
     const clauses: string[] = [];
     const params: string[] = [];

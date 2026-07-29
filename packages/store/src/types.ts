@@ -89,7 +89,16 @@ export interface WaitStore {
   redactAudit(runId: string, stepId: string, wait: WaitCondition): Promise<void>;
   delete(runId: string, stepId: string): Promise<void>;
   /** User-visible, persistence-safe audit rows. */
-  list(): Promise<Array<{ runId: string; stepId: string; wait: WaitCondition; createdAt: string }>>;
+  list(filter?: { runId?: string }): Promise<Array<{ runId: string; stepId: string; wait: WaitCondition; createdAt: string }>>;
+  /**
+   * Engine-only operational rows. Values are sealed at rest separately
+   * from the public audit copy and materialized only for scheduling,
+   * expiry, polling, or an atomic claim.
+   */
+  listOperational(filter?: {
+    runId?: string;
+    type?: WaitCondition["type"];
+  }): Promise<Array<{ runId: string; stepId: string; wait: WaitCondition; createdAt: string }>>;
   /**
    * Matches a resolving signal through an adapter-internal one-way
    * fingerprint, so a redacted correlation value need not remain in the
@@ -135,6 +144,16 @@ export interface SignalStore {
   ): Promise<void>;
   /** Consumed audit copies associated with a run, for late-secret repair. */
   listConsumedByRun(runId: string): Promise<Signal[]>;
+  /** Pre-provenance consumed rows from stores created before migration 0007. */
+  listConsumedWithoutProvenance(): Promise<Signal[]>;
+  /**
+   * Security-only audit rewrite. Consumption state, provenance, identity,
+   * and receipt time remain immutable.
+   */
+  replaceConsumedAudit(
+    signalId: string,
+    audit: Pick<Signal, "name" | "correlationId" | "payload">,
+  ): Promise<void>;
   list(): Promise<Signal[]>;
 }
 
@@ -143,6 +162,18 @@ export interface ArtifactStore {
   getMetadata(artifactId: string): Promise<Artifact | undefined>;
   getBytes(artifactId: string): Promise<Uint8Array | undefined>;
   listByRun(runId: string): Promise<Artifact[]>;
+  /** Stable classification retained before audit MIME values are redacted. */
+  isTextEligible(artifactId: string): Promise<boolean>;
+  /**
+   * Rewrites only customer-visible metadata and, optionally, content bytes.
+   * Artifact identity/ownership/timestamps and the text classification stay
+   * fixed.
+   */
+  replaceAudit(
+    artifactId: string,
+    audit: Pick<Artifact, "name" | "kind" | "mime" | "path">,
+    bytes?: Uint8Array,
+  ): Promise<Artifact | undefined>;
 }
 
 export interface ApprovalStore {
@@ -153,6 +184,17 @@ export interface ApprovalStore {
 
 export interface CorrectionStore {
   put(correction: Correction): Promise<void>;
+  /**
+   * Replaces a correction audit even when redaction changes its fieldPath
+   * key. The old keyed row/file is removed in the same adapter operation.
+   */
+  replaceAudit(
+    original: Pick<Correction, "runId" | "stepId" | "fieldPath">,
+    audit: Pick<
+      Correction,
+      "fieldPath" | "observed" | "corrected" | "reason" | "reviewer"
+    >,
+  ): Promise<void>;
   list(filter?: { runId?: string; stepId?: string }): Promise<Correction[]>;
 }
 
@@ -249,7 +291,11 @@ export interface EventLogStore {
     audit: { summary: string; actor?: string },
   ): Promise<void>;
   /** Newest-first (descending `occurredAt`). `since` and `limit` are independent, freely-combinable optional filters. */
-  list(filter?: { since?: string; limit?: number }): Promise<EventLogEntry[]>;
+  list(filter?: {
+    since?: string;
+    limit?: number;
+    runId?: string;
+  }): Promise<EventLogEntry[]>;
 }
 
 // ---------------------------------------------------------------------------

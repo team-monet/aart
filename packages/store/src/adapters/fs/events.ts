@@ -63,10 +63,17 @@ export class FsEventLogStore implements EventLogStore {
     return values.filter((v): v is EventLogEntry => v !== undefined);
   }
 
-  async list(filter?: { since?: string; limit?: number }): Promise<EventLogEntry[]> {
+  async list(filter?: {
+    since?: string;
+    limit?: number;
+    runId?: string;
+  }): Promise<EventLogEntry[]> {
     const all = await this.listStored();
     const filtered = all
       .filter((e) => (filter?.since ? e.occurredAt >= filter.since : true))
+      .filter((e) =>
+        filter?.runId === undefined ? true : e.runId === filter.runId,
+      )
       // Newest-first by occurredAt; ties (e.g. a burst of same-ms events,
       // aart_approve's own 3-event emission) broken DESC by `id` (D2b/V1 fix
       // pass, AMENDMENTS.md A63 FIX 4) — without this, ties fell back to

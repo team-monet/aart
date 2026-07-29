@@ -51,25 +51,35 @@ function resumeApproval(config: WaitMachineConfig, runId: string, stepId: string
 `WaitMachineConfig.prepareRevokedIdempotencyConsumer` is the sibling trusted
 callback used when that preparation invalidates a global cache entry already
 replayed by another persisted run. The bound `Engine` supplies it and repairs
-the full transitive consumer lineage inside the active transaction. Producer
-runs are reconstructed before the ledger is declared clean, and the callback
-also repairs run-associated artifacts, approval audits, consumed-signal audits,
-outstanding-wait audit copies, correction values, and activity-event
-summary/actor fields. A
+the full transitive consumer lineage inside the active transaction. The active
+run and ledger-named producer runs are reconstructed before the ledger is
+declared clean; only after an affected key is found does the engine index
+retained consumers and follow its reachable graph. The callback returns the
+repaired active run so a same-execution cache consumer cannot later overwrite
+it with stale in-memory state. It also repairs run-associated artifact bytes
+and metadata, approval audits (including authenticated identity), consumed
+signal names/correlations/payloads, outstanding-wait audit copies, correction
+field paths and values, and activity-event summary/actor fields. A
 standalone caller omitting it can delete the cache entry and directly redact
 literal consumer data, but cannot reconstruct downstream workflow provenance;
 this is another reason standalone resume functions are test/split-process
 mechanisms rather than the production composition surface.
 
 `WaitStore.list()` returns the redacted audit condition.
+`WaitStore.listOperational()` is the engine-only view that opens the complete
+AES-256-GCM-sealed condition used for timer/timeout scheduling and external-job
+polling; the adapter-local key is persisted mode `0600` so restart does not
+break outstanding waits. SQLite does not retain a raw `resume_at` shadow.
 `WaitStore.findSignalMatches(name, correlationId)` is the engine-only exact
 match seam backed by a one-way adapter fingerprint, and
 `WaitStore.redactAudit(runId, stepId, wait)` replaces only the audit copy
-without changing that fingerprint. `SignalStore.markConsumed(...,
+without changing either the fingerprint or sealed operation. `SignalStore.markConsumed(...,
 { consumedBy: { runId, stepId } })` records internal repair provenance;
 `listConsumedByRun(runId)` retrieves only those already-consumed audit copies
-so a later secret discovery never consumes or rewrites an unrelated
-early-arrival signal.
+so a later secret discovery never consumes an unrelated early-arrival signal.
+`replaceConsumedAudit(...)` rewrites all public fields (and the fs filename);
+`listConsumedWithoutProvenance()` supplies the conservative upgrade path for
+already-consumed rows written before migration `0007`.
 
 **Wait-TIMEOUT-expiry sibling seam (architecture §4.4.1's "Expiry note") — a DIFFERENT terminal outcome from resume, S2's ticker should sweep this too, on the same interval:**
 ```ts

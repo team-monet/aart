@@ -505,7 +505,7 @@ describe("0007_secret_audit_provenance", () => {
     handle.db
       .prepare(
         `INSERT INTO signals (signal_id, name, correlation_id, payload_json, received_at, consumed_at)
-         VALUES (?, ?, ?, ?, ?, NULL)`,
+         VALUES (?, ?, ?, ?, ?, ?)`,
       )
       .run(
         "signal-audit",
@@ -513,6 +513,7 @@ describe("0007_secret_audit_provenance", () => {
         "late-secret-correlation",
         JSON.stringify({ value: "secret" }),
         "2026-01-01T00:00:00.000Z",
+        "2026-01-01T00:01:00.000Z",
       );
 
     const all = new MigrationRunner(
@@ -520,7 +521,7 @@ describe("0007_secret_audit_provenance", () => {
       new SqliteMigrationWatermarkStore(handle.db),
       handle.store,
     );
-    await expect(all.up()).resolves.toBe(7);
+    await expect(all.up()).resolves.toBe(8);
     await handle.store.waits.redactAudit("run-audit", "pause", {
       ...wait,
       correlationId: "[REDACTED]",
@@ -544,7 +545,16 @@ describe("0007_secret_audit_provenance", () => {
     expect(JSON.stringify(storedWait)).not.toContain(
       "late-secret-correlation",
     );
+    expect(storedWait).toMatchObject({ resume_at: null });
+    await expect(
+      handle.store.waits.get("run-audit", "pause"),
+    ).resolves.toEqual(wait);
 
+    await expect(
+      handle.store.signals.listConsumedWithoutProvenance(),
+    ).resolves.toEqual([
+      expect.objectContaining({ id: "signal-audit" }),
+    ]);
     await handle.store.signals.markConsumed("signal-audit", {
       consumedBy: { runId: "run-audit", stepId: "pause" },
     });
@@ -569,5 +579,91 @@ describe("0007_secret_audit_provenance", () => {
         )
         .get("signal-audit"),
     ).toEqual({ consumed_at: originalConsumedAt });
+  });
+});
+
+describe("0008_sealed_operational_state", () => {
+  it("upgrades legacy waits on first audit repair and preserves artifact text eligibility", async () => {
+    dir = await fs.mkdtemp(join(tmpdir(), "aart-sqlite-migration-test-"));
+    const dbPath = join(dir, "aart.db");
+    handle = await openSqliteStore(dbPath, { runMigrations: false });
+    const through0007 = new MigrationRunner(
+      ALL_SQLITE_MIGRATIONS(handle.db).slice(0, 7),
+      new SqliteMigrationWatermarkStore(handle.db),
+      handle.store,
+    );
+    await expect(through0007.up()).resolves.toBe(7);
+    const wait = {
+      type: "timer" as const,
+      resumeAt: "2027-01-01T00:00:00.000Z",
+      schemaVersion: 1,
+    };
+    handle.db
+      .prepare(
+        `INSERT INTO waits
+          (run_id, step_id, wait_condition_json, signal_match_fingerprint, wait_type, resume_at, created_at)
+         VALUES (?, ?, ?, NULL, ?, ?, ?)`,
+      )
+      .run(
+        "run-sealed-upgrade",
+        "pause",
+        JSON.stringify(wait),
+        "timer",
+        wait.resumeAt,
+        "2026-01-01T00:00:00.000Z",
+      );
+    handle.db
+      .prepare(
+        `INSERT INTO artifacts
+          (artifact_id, run_id, step_id, name, kind, mime, path_or_uri, bytes, created_at)
+         VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        "artifact-upgrade",
+        "run-sealed-upgrade",
+        "report",
+        "report",
+        "text/plain",
+        "report.txt",
+        0,
+        "2026-01-01T00:00:00.000Z",
+      );
+    const all = new MigrationRunner(
+      ALL_SQLITE_MIGRATIONS(handle.db),
+      new SqliteMigrationWatermarkStore(handle.db),
+      handle.store,
+    );
+    await expect(all.up()).resolves.toBe(8);
+    await handle.store.waits.redactAudit(
+      "run-sealed-upgrade",
+      "pause",
+      { ...wait, resumeAt: "[REDACTED]" },
+    );
+    await expect(
+      handle.store.waits.get("run-sealed-upgrade", "pause"),
+    ).resolves.toEqual(wait);
+    const storedWait = handle.db
+      .prepare(
+        "SELECT * FROM waits WHERE run_id = ? AND step_id = ?",
+      )
+      .get("run-sealed-upgrade", "pause");
+    expect(JSON.stringify(storedWait)).not.toContain(wait.resumeAt);
+    await expect(
+      handle.store.artifacts.isTextEligible("artifact-upgrade"),
+    ).resolves.toBe(true);
+    await handle.store.artifacts.replaceAudit("artifact-upgrade", {
+      name: "[REDACTED]",
+      kind: "[REDACTED]",
+      mime: "[REDACTED]",
+      path: "[REDACTED]",
+    });
+    await expect(
+      handle.store.artifacts.isTextEligible("artifact-upgrade"),
+    ).resolves.toBe(true);
+    handle.close();
+    handle = await openSqliteStore(dbPath);
+    await expect(
+      handle.store.waits.get("run-sealed-upgrade", "pause"),
+    ).resolves.toEqual(wait);
   });
 });

@@ -99,6 +99,36 @@ export class SqliteSignalStore implements SignalStore {
     return rows.map(rowToSignal);
   }
 
+  async listConsumedWithoutProvenance(): Promise<Signal[]> {
+    const rows = await this.exec((db) =>
+      dbAll<SignalRow>(
+        db,
+        "SELECT * FROM signals WHERE consumed_at IS NOT NULL AND consumed_by_run_id IS NULL",
+      ),
+    );
+    return rows.map(rowToSignal);
+  }
+
+  async replaceConsumedAudit(
+    signalId: string,
+    audit: Pick<Signal, "name" | "correlationId" | "payload">,
+  ): Promise<void> {
+    await this.exec((db) =>
+      dbRun(
+        db,
+        `UPDATE signals
+         SET name = ?, correlation_id = ?, payload_json = ?
+         WHERE signal_id = ? AND consumed_at IS NOT NULL`,
+        [
+          audit.name,
+          audit.correlationId,
+          JSON.stringify(audit.payload) ?? "null",
+          signalId,
+        ],
+      ),
+    );
+  }
+
   async list(): Promise<Signal[]> {
     const rows = await this.exec((db) => dbAll<SignalRow>(db, "SELECT * FROM signals"));
     return rows.map(rowToSignal);

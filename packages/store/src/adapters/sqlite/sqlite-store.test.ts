@@ -38,9 +38,9 @@ describe("SQLite adapter — connection setup (architecture §5.1)", () => {
     expect(row.journal_mode).toBe("wal");
   });
 
-  it("auto-runs migrations by default, advancing the watermark to the latest ordinal (7, including 0007_secret_audit_provenance)", async () => {
+  it("auto-runs migrations by default, advancing the watermark to the latest ordinal (8, including 0008_sealed_operational_state)", async () => {
     const watermark = new SqliteMigrationWatermarkStore(handle.db);
-    await expect(watermark.read()).resolves.toBe(7);
+    await expect(watermark.read()).resolves.toBe(8);
   });
 
   it("runMigrations: false skips DDL — store calls fail against the not-yet-created schema", async () => {
@@ -65,13 +65,14 @@ describe("SQLite adapter — connection setup (architecture §5.1)", () => {
       // registered (0001_init,
       // 0002_deployment_promoted, 0003_approval_task_authenticated_as,
       // 0004_events_table, 0005_idempotency_schema_version,
-      // 0006_run_root_taint_paths + 0007_secret_audit_provenance) — up() from
-      // watermark 0 applies all seven in one
+      // 0006_run_root_taint_paths + 0007_secret_audit_provenance +
+      // 0008_sealed_operational_state) — up() from
+      // watermark 0 applies all eight in one
       // call, landing on the latest ordinal.
-      await expect(runner.up()).resolves.toBe(7);
+      await expect(runner.up()).resolves.toBe(8);
       await expect(handle3.store.workflows.listWorkflowIds()).resolves.toEqual([]);
       // Idempotent re-run.
-      await expect(runner.up()).resolves.toBe(7);
+      await expect(runner.up()).resolves.toBe(8);
     } finally {
       handle3.close();
       await fs.rm(dir3, { recursive: true, force: true });

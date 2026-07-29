@@ -364,6 +364,68 @@ export function createSqliteAddSecretAuditProvenanceMigration(
   };
 }
 
+/**
+ * Separates customer-visible audit values from the operational state needed
+ * to resume waits, and retains a non-sensitive text/binary classification
+ * before artifact MIME metadata can be redacted.
+ *
+ * Existing waits remain readable through the audit column until their next
+ * put/security rewrite, which seals the operational copy before replacing
+ * any audit value. Existing artifacts are backfilled from their current MIME
+ * while that original classification is still available.
+ */
+export function createSqliteAddSealedOperationalStateMigration(
+  db: DatabaseSync,
+): Migration {
+  const addColumn = (table: string, definition: string): void => {
+    try {
+      db.exec(`ALTER TABLE ${table} ADD COLUMN ${definition}`);
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        error.message.includes("duplicate column name")
+      ) {
+        return;
+      }
+      throw error;
+    }
+  };
+
+  return {
+    id: "0008_sealed_operational_state",
+    async up(): Promise<void> {
+      addColumn("waits", "operational_wait_ciphertext TEXT");
+      addColumn("artifacts", "redaction_text_eligible INTEGER");
+      db.exec(
+        "CREATE INDEX IF NOT EXISTS idx_events_run_id ON events(run_id)",
+      );
+      db.exec(
+        `UPDATE artifacts
+         SET redaction_text_eligible =
+           CASE
+             WHEN lower(mime) LIKE 'text/%'
+               OR lower(mime) LIKE '%json%'
+               OR lower(mime) LIKE '%xml%'
+               OR lower(mime) LIKE '%javascript%'
+               OR lower(mime) LIKE '%yaml%'
+             THEN 1
+             ELSE 0
+           END
+         WHERE redaction_text_eligible IS NULL`,
+      );
+    },
+    async down(): Promise<void> {
+      db.exec("DROP INDEX IF EXISTS idx_events_run_id");
+      db.exec(
+        "ALTER TABLE artifacts DROP COLUMN redaction_text_eligible",
+      );
+      db.exec(
+        "ALTER TABLE waits DROP COLUMN operational_wait_ciphertext",
+      );
+    },
+  };
+}
+
 export const ALL_SQLITE_MIGRATIONS = (db: DatabaseSync): Migration[] => [
   createSqliteInitMigration(db),
   createSqliteAddDeploymentPromotedMigration(db),
@@ -372,4 +434,5 @@ export const ALL_SQLITE_MIGRATIONS = (db: DatabaseSync): Migration[] => [
   createSqliteAddIdempotencySchemaVersionMigration(db),
   createSqliteAddRunRootTaintPathsMigration(db),
   createSqliteAddSecretAuditProvenanceMigration(db),
+  createSqliteAddSealedOperationalStateMigration(db),
 ];

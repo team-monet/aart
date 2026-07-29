@@ -73,6 +73,46 @@ export class FsCorrectionStore implements CorrectionStore {
   put(correction: Correction) {
     return this.collection.put(`${correction.runId}__${correction.stepId}__${fieldPathHash(correction.fieldPath)}`, correction);
   }
+  async replaceAudit(
+    original: Pick<Correction, "runId" | "stepId" | "fieldPath">,
+    audit: Pick<
+      Correction,
+      "fieldPath" | "observed" | "corrected" | "reason" | "reviewer"
+    >,
+  ): Promise<void> {
+    const originalKey = `${original.runId}__${original.stepId}__${fieldPathHash(original.fieldPath)}`;
+    const stored = await this.collection.get(originalKey);
+    if (!stored) return;
+    let updated: Correction = {
+      ...stored,
+      ...audit,
+      runId: stored.runId,
+      stepId: stored.stepId,
+      createdAt: stored.createdAt,
+    };
+    const redactedFieldPath = updated.fieldPath;
+    let collisionIndex = 1;
+    let updatedKey = `${updated.runId}__${updated.stepId}__${fieldPathHash(updated.fieldPath)}`;
+    while (
+      updatedKey !== originalKey &&
+      (await this.collection.get(updatedKey)) !== undefined
+    ) {
+      collisionIndex += 1;
+      updated = {
+        ...updated,
+        fieldPath: `${redactedFieldPath}#${collisionIndex}`,
+      };
+      updatedKey = `${updated.runId}__${updated.stepId}__${fieldPathHash(updated.fieldPath)}`;
+    }
+    // Rewrite the original keyed record with safe content first. If the
+    // subsequent key move is interrupted, the old hash may remain but its
+    // JSON no longer contains the secret field path or audit values.
+    await this.collection.put(originalKey, updated);
+    if (updatedKey !== originalKey) {
+      await this.collection.put(updatedKey, updated);
+      await this.collection.delete(originalKey);
+    }
+  }
   async list(filter?: { runId?: string; stepId?: string }): Promise<Correction[]> {
     const all = await this.collection.list();
     return all

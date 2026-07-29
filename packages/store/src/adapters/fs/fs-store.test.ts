@@ -46,6 +46,95 @@ describe("fs adapter — .aart/ layout (architecture §5.2)", () => {
     expect(JSON.parse(onDisk).record.runId).toBe("run_layout_1");
   });
 
+  it("keeps late-redacted wait operation values sealed on disk", async () => {
+    const wait = {
+      type: "external_job" as const,
+      provider: "late-secret",
+      jobId: "late-secret",
+      timeout: "late-secret",
+      schemaVersion: 1,
+    };
+    await store.waits.put(
+      "run_wait_sealed",
+      "wait_job",
+      wait,
+      new Date().toISOString(),
+    );
+    await store.waits.redactAudit(
+      "run_wait_sealed",
+      "wait_job",
+      {
+        ...wait,
+        provider: "[REDACTED]",
+        jobId: "[REDACTED]",
+        timeout: "[REDACTED]",
+      },
+    );
+    const persisted = await fs.readFile(
+      join(
+        paths.waitsDir(root),
+        "run_wait_sealed__wait_job.json",
+      ),
+      "utf8",
+    );
+    expect(persisted).not.toContain("late-secret");
+    await expect(
+      store.waits.listOperational({ runId: "run_wait_sealed" }),
+    ).resolves.toEqual([
+      expect.objectContaining({ wait }),
+    ]);
+    const restartedStore = createFsStore(root);
+    await expect(
+      restartedStore.waits.listOperational({
+        runId: "run_wait_sealed",
+      }),
+    ).resolves.toEqual([
+      expect.objectContaining({ wait }),
+    ]);
+    const keyStat = await fs.stat(
+      join(paths.waitsDir(root), ".operational-key"),
+    );
+    expect(keyStat.mode & 0o777).toBe(0o600);
+  });
+
+  it("binds sealed wait operation state to its run and step identity", async () => {
+    const first = {
+      type: "timer" as const,
+      resumeAt: "2026-01-01T00:00:00.000Z",
+      schemaVersion: 1,
+    };
+    const second = {
+      ...first,
+      resumeAt: "2026-01-02T00:00:00.000Z",
+    };
+    await store.waits.put("run_a", "wait_a", first, first.resumeAt);
+    await store.waits.put("run_b", "wait_b", second, second.resumeAt);
+    const firstPath = join(
+      paths.waitsDir(root),
+      "run_a__wait_a.json",
+    );
+    const secondPath = join(
+      paths.waitsDir(root),
+      "run_b__wait_b.json",
+    );
+    const firstStored = JSON.parse(
+      await fs.readFile(firstPath, "utf8"),
+    ) as Record<string, unknown>;
+    const secondStored = JSON.parse(
+      await fs.readFile(secondPath, "utf8"),
+    ) as Record<string, unknown>;
+    firstStored["operationalWait"] =
+      secondStored["operationalWait"];
+    await fs.writeFile(
+      firstPath,
+      JSON.stringify(firstStored),
+      "utf8",
+    );
+    await expect(
+      createFsStore(root).waits.get("run_a", "wait_a"),
+    ).rejects.toThrow();
+  });
+
   it("writes a workflow under registry/workflows/<workflowId>/<version>.json", async () => {
     await store.workflows.put({
       id: "wf_layout",
@@ -99,5 +188,32 @@ describe("fs adapter — signals directory layout", () => {
     await store.signals.append({ id: "sig_layout", name: "n", correlationId: "corr_layout", payload: {}, receivedAt });
     const entries = await fs.readdir(paths.signalsDir(root));
     expect(entries.some((f) => f.startsWith("corr_layout__"))).toBe(true);
+  });
+
+  it("renames a consumed signal when late redaction changes its correlation audit", async () => {
+    const signal = {
+      id: "sig_late_redaction",
+      name: "late-secret",
+      correlationId: "late-secret",
+      payload: { value: "late-secret" },
+      receivedAt: new Date().toISOString(),
+    };
+    await store.signals.append(signal);
+    await store.signals.markConsumed(signal.id);
+    await store.signals.replaceConsumedAudit(signal.id, {
+      name: "[REDACTED]",
+      correlationId: "[REDACTED]",
+      payload: { value: "[REDACTED]" },
+    });
+    const entries = await fs.readdir(paths.signalsDir(root));
+    expect(entries.some((file) => file.includes("late-secret"))).toBe(
+      false,
+    );
+    const persisted = await Promise.all(
+      entries.map((file) =>
+        fs.readFile(join(paths.signalsDir(root), file), "utf8"),
+      ),
+    );
+    expect(persisted.join("\n")).not.toContain("late-secret");
   });
 });

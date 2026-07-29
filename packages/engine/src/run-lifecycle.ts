@@ -203,14 +203,19 @@ export async function finalizeTerminal(
     ),
   };
   updated = { ...updated, status: terminalStatus, outputs, error: terminalError, endedAt: now.toISOString(), updatedAt: now.toISOString() };
-  const redacted = applyRunRedaction(config.redact, updated, resolvedSecretRefs);
-  await config.store.transact(async (tx) => {
-    await revokeSecretTaintedIdempotency(
+  const redacted = await config.store.transact(async (tx) => {
+    const repaired = await revokeSecretTaintedIdempotency(
       tx,
       config.redact,
       updated,
       resolvedSecretRefs,
-      (store, consumerRun, outputTaintedLedgerKeys, secretRefs) =>
+      (
+        store,
+        consumerRun,
+        outputTaintedLedgerKeys,
+        secretRefs,
+        repairOptions,
+      ) =>
         prepareRevokedIdempotencyConsumer(
           config,
           store,
@@ -218,9 +223,16 @@ export async function finalizeTerminal(
           outputTaintedLedgerKeys,
           secretRefs,
           consumerRun.runId === updated.runId ? workflow : undefined,
+          repairOptions?.includeUnattributedSignalAudits,
         ),
     );
-    await tx.runs.put(redacted);
+    const persistenceSafeRun = applyRunRedaction(
+      config.redact,
+      repaired,
+      resolvedSecretRefs,
+    );
+    await tx.runs.put(persistenceSafeRun);
+    return persistenceSafeRun;
   });
 
   if (typeof concurrencyKey === "string") {

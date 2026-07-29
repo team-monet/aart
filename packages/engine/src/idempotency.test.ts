@@ -1,7 +1,15 @@
 import type { AartStore } from "@aart/store";
 import { afterEach, describe, expect, it } from "vitest";
-import { checkIdempotency, recordIdempotency } from "./idempotency.js";
-import { createTestStore, uniqueId } from "./test-utils/fixtures.js";
+import {
+  checkIdempotency,
+  recordIdempotency,
+  revokeSecretTaintedIdempotency,
+} from "./idempotency.js";
+import {
+  createTestStore,
+  fixtureRun,
+  uniqueId,
+} from "./test-utils/fixtures.js";
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {
@@ -54,5 +62,68 @@ describe("checkIdempotency / recordIdempotency (spec §30.2, architecture §4.2/
     await expect(checkIdempotency(store, "charge-123")).resolves.toEqual({
       alreadyCompleted: false,
     });
+  });
+
+  it("reconstructs only the active run and ledger graph, not unrelated retained history", async () => {
+    const store = await setup();
+    const ledgerKey = "v2:producer-key";
+    const producer = fixtureRun({
+      runId: "producer-run",
+      trace: [
+        {
+          seq: 0,
+          stepId: "derive",
+          block: "test.derive",
+          status: "completed",
+          inputs: { source: "late-secret" },
+          outputs: { length: 11 },
+          idempotencyLedgerKey: ledgerKey,
+          startedAt: new Date().toISOString(),
+          endedAt: new Date().toISOString(),
+          durationMs: 0,
+        },
+      ],
+    });
+    await store.runs.put(producer);
+    for (let index = 0; index < 12; index += 1) {
+      await store.runs.put(
+        fixtureRun({ runId: `unrelated-${index}` }),
+      );
+    }
+    await store.idempotencyLedger.put({
+      resolvedKey: ledgerKey,
+      runId: producer.runId,
+      stepId: "derive",
+      recordedOutput: { length: 11 },
+      createdAt: new Date().toISOString(),
+      schemaVersion: 2,
+    });
+    const preparedRunIds: string[] = [];
+    await revokeSecretTaintedIdempotency(
+      store,
+      (record) => record,
+      fixtureRun({ runId: "active-run" }),
+      new Set(["late-secret"]),
+      async (_store, candidate) => {
+        preparedRunIds.push(candidate.runId);
+        return candidate.runId === producer.runId
+          ? {
+              ...candidate,
+              trace: candidate.trace.map((trace) => ({
+                ...trace,
+                secretTainted: true,
+                secretTaintedPaths: ["*"],
+              })),
+            }
+          : candidate;
+      },
+    );
+    expect(preparedRunIds).toContain("active-run");
+    expect(preparedRunIds).toContain("producer-run");
+    expect(
+      preparedRunIds.some((runId) =>
+        runId.startsWith("unrelated-"),
+      ),
+    ).toBe(false);
   });
 });

@@ -190,32 +190,49 @@ export async function redactStoredTextArtifacts(
 
   const refreshed: Artifact[] = [];
   for (const artifact of artifacts) {
-    if (!isTextMime(artifact.mime)) {
-      refreshed.push(artifact);
-      continue;
-    }
-    const bytes = await store.artifacts.getBytes(artifact.id);
-    if (bytes === undefined) {
-      refreshed.push(artifact);
-      continue;
-    }
-    const rawText = new TextDecoder().decode(bytes);
-    const redactedText = applyRedaction(
+    const audit = applyRedaction(
       redact,
-      rawText,
+      {
+        name: artifact.name,
+        kind: artifact.kind,
+        mime: artifact.mime,
+        path: artifact.path,
+      },
       resolvedSecretRefs,
-    );
-    if (redactedText === rawText) {
+    ) as Pick<Artifact, "name" | "kind" | "mime" | "path">;
+    let redactedBytes: Uint8Array | undefined;
+    if (await store.artifacts.isTextEligible(artifact.id)) {
+      const bytes = await store.artifacts.getBytes(artifact.id);
+      if (bytes !== undefined) {
+        const rawText = new TextDecoder().decode(bytes);
+        const redactedText = applyRedaction(
+          redact,
+          rawText,
+          resolvedSecretRefs,
+        );
+        if (redactedText !== rawText) {
+          redactedBytes = new TextEncoder().encode(redactedText);
+        }
+      }
+    }
+    const auditChanged =
+      JSON.stringify(audit) !==
+      JSON.stringify({
+        name: artifact.name,
+        kind: artifact.kind,
+        mime: artifact.mime,
+        path: artifact.path,
+      });
+    if (!auditChanged && redactedBytes === undefined) {
       refreshed.push(artifact);
       continue;
     }
-    const redactedBytes = new TextEncoder().encode(redactedText);
-    const updatedArtifact = {
-      ...artifact,
-      bytes: redactedBytes.byteLength,
-    };
-    await store.artifacts.put(updatedArtifact, redactedBytes);
-    refreshed.push(updatedArtifact);
+    const updated = await store.artifacts.replaceAudit(
+      artifact.id,
+      audit,
+      redactedBytes,
+    );
+    refreshed.push(updated ?? artifact);
   }
   return refreshed;
 }

@@ -80,12 +80,20 @@ export class SqliteEventLogStore implements EventLogStore {
     );
   }
 
-  async list(filter?: { since?: string; limit?: number }): Promise<EventLogEntry[]> {
+  async list(filter?: {
+    since?: string;
+    limit?: number;
+    runId?: string;
+  }): Promise<EventLogEntry[]> {
     const clauses: string[] = [];
     const params: SqlParam[] = [];
     if (filter?.since) {
       clauses.push("occurred_at >= ?");
       params.push(filter.since);
+    }
+    if (filter?.runId) {
+      clauses.push("run_id = ?");
+      params.push(filter.runId);
     }
     const where = clauses.length ? ` WHERE ${clauses.join(" AND ")}` : "";
     let limitClause = "";

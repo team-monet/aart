@@ -1,12 +1,16 @@
 // WaitStore — architecture §5.3 `waits` table, keyed by (run_id, step_id)
-// per architecture §5.6. `wait_type`/`resume_at` are extracted columns
-// purely so `listDue` can filter in SQL rather than loading every
-// outstanding wait into JS on every scheduler-ticker interval (architecture
-// §4.4.3 — S2 runs this on a 5s-10s tick; a table-scan-and-JSON-parse-
-// everything approach would scale badly as outstanding waits accumulate).
+// per architecture §5.6. Public audit JSON is kept separate from the complete
+// AES-GCM-sealed operational condition. Scheduling and polling open only that
+// sealed copy; `resume_at` is deliberately NULL after audit repair so a
+// late-discovered secret cannot survive in a query-optimization shadow.
 import { createHash } from "node:crypto";
+import { join } from "node:path";
 import type { WaitCondition } from "@aart/types";
 import type { WaitStore } from "../../../types.js";
+import {
+  openWaitOperation,
+  sealWaitOperation,
+} from "../../wait-operation-seal.js";
 import { dbAll, dbGet, dbRun, fromJson, toJson, type SqlExec } from "../db.js";
 
 interface WaitRow {
@@ -14,11 +18,8 @@ interface WaitRow {
   step_id: string;
   wait_condition_json: string;
   signal_match_fingerprint: string | null;
+  operational_wait_ciphertext: string | null;
   created_at: string;
-}
-
-function resumeAtFor(wait: WaitCondition): string | null {
-  return wait.type === "timer" ? wait.resumeAt : null;
 }
 
 function signalCorrelation(
@@ -57,34 +58,51 @@ function fingerprintForWait(wait: WaitCondition): string | null {
 }
 
 export class SqliteWaitStore implements WaitStore {
-  constructor(private readonly exec: SqlExec) {}
+  private readonly operationKeyPath: string;
+
+  constructor(
+    private readonly exec: SqlExec,
+    operationalStateDir: string,
+  ) {
+    this.operationKeyPath = join(
+      operationalStateDir,
+      ".wait-operational-key",
+    );
+  }
 
   async get(runId: string, stepId: string): Promise<WaitCondition | undefined> {
     const row = await this.exec((db) =>
       dbGet<WaitRow>(db, "SELECT * FROM waits WHERE run_id = ? AND step_id = ?", [runId, stepId]),
     );
-    return row ? fromJson<WaitCondition>(row.wait_condition_json) : undefined;
+    return row ? this.operationalWait(row) : undefined;
   }
 
   async put(runId: string, stepId: string, wait: WaitCondition, createdAt: string): Promise<void> {
+    const operationalWait = await sealWaitOperation(
+      this.operationKeyPath,
+      runId,
+      stepId,
+      wait,
+    );
     await this.exec((db) =>
       dbRun(
         db,
-        `INSERT INTO waits (run_id, step_id, wait_condition_json, signal_match_fingerprint, wait_type, resume_at, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO waits (run_id, step_id, wait_condition_json, signal_match_fingerprint, operational_wait_ciphertext, wait_type, resume_at, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, NULL, ?)
          ON CONFLICT(run_id, step_id) DO UPDATE SET
            wait_condition_json = excluded.wait_condition_json,
            signal_match_fingerprint = excluded.signal_match_fingerprint,
+           operational_wait_ciphertext = excluded.operational_wait_ciphertext,
            wait_type = excluded.wait_type,
-           resume_at = excluded.resume_at,
+           resume_at = NULL,
            created_at = excluded.created_at`,
         [
           runId,
           stepId,
           toJson(wait)!,
           fingerprintForWait(wait),
+          operationalWait,
           wait.type,
-          resumeAtFor(wait),
           createdAt,
         ],
       ),
@@ -96,23 +114,34 @@ export class SqliteWaitStore implements WaitStore {
     stepId: string,
     wait: WaitCondition,
   ): Promise<void> {
-    await this.exec((db) => {
-      const stored = dbGet<WaitRow>(
+    const stored = await this.exec((db) =>
+      dbGet<WaitRow>(
         db,
         "SELECT * FROM waits WHERE run_id = ? AND step_id = ?",
         [runId, stepId],
-      );
-      if (!stored) return;
-      const priorWait = fromJson<WaitCondition>(
-        stored.wait_condition_json,
-      )!;
+      ),
+    );
+    if (!stored) return;
+    const priorWait = fromJson<WaitCondition>(
+      stored.wait_condition_json,
+    )!;
+    const operationalWait =
+      stored.operational_wait_ciphertext ??
+      (await sealWaitOperation(
+        this.operationKeyPath,
+        runId,
+        stepId,
+        priorWait,
+      ));
+    await this.exec((db) => {
       dbRun(
         db,
-        "UPDATE waits SET wait_condition_json = ?, signal_match_fingerprint = ? WHERE run_id = ? AND step_id = ?",
+        "UPDATE waits SET wait_condition_json = ?, signal_match_fingerprint = ?, operational_wait_ciphertext = ?, resume_at = NULL WHERE run_id = ? AND step_id = ?",
         [
           toJson(wait)!,
           stored.signal_match_fingerprint ??
             fingerprintForWait(priorWait),
+          operationalWait,
           runId,
           stepId,
         ],
@@ -124,9 +153,50 @@ export class SqliteWaitStore implements WaitStore {
     await this.exec((db) => dbRun(db, "DELETE FROM waits WHERE run_id = ? AND step_id = ?", [runId, stepId]));
   }
 
-  async list(): Promise<Array<{ runId: string; stepId: string; wait: WaitCondition; createdAt: string }>> {
-    const rows = await this.exec((db) => dbAll<WaitRow>(db, "SELECT * FROM waits"));
+  async list(filter?: { runId?: string }): Promise<Array<{ runId: string; stepId: string; wait: WaitCondition; createdAt: string }>> {
+    const rows = await this.exec((db) =>
+      filter?.runId === undefined
+        ? dbAll<WaitRow>(db, "SELECT * FROM waits")
+        : dbAll<WaitRow>(
+            db,
+            "SELECT * FROM waits WHERE run_id = ?",
+            [filter.runId],
+          ),
+    );
     return rows.map((r) => ({ runId: r.run_id, stepId: r.step_id, wait: fromJson<WaitCondition>(r.wait_condition_json)!, createdAt: r.created_at }));
+  }
+
+  async listOperational(filter?: {
+    runId?: string;
+    type?: WaitCondition["type"];
+  }): Promise<Array<{ runId: string; stepId: string; wait: WaitCondition; createdAt: string }>> {
+    const clauses: string[] = [];
+    const params: string[] = [];
+    if (filter?.runId !== undefined) {
+      clauses.push("run_id = ?");
+      params.push(filter.runId);
+    }
+    if (filter?.type !== undefined) {
+      clauses.push("wait_type = ?");
+      params.push(filter.type);
+    }
+    const where =
+      clauses.length === 0 ? "" : ` WHERE ${clauses.join(" AND ")}`;
+    const rows = await this.exec((db) =>
+      dbAll<WaitRow>(
+        db,
+        `SELECT * FROM waits${where}`,
+        params,
+      ),
+    );
+    return Promise.all(
+      rows.map(async (row) => ({
+        runId: row.run_id,
+        stepId: row.step_id,
+        wait: await this.operationalWait(row),
+        createdAt: row.created_at,
+      })),
+    );
   }
 
   async findSignalMatches(
@@ -161,12 +231,42 @@ export class SqliteWaitStore implements WaitStore {
     // S2's scheduler ticker (packages/server) cross-references that
     // separately, not buildable from the store layer alone.
     const rows = await this.exec((db) =>
-      dbAll<WaitRow>(db, "SELECT * FROM waits WHERE wait_type = 'timer' AND resume_at <= ?", [now]),
+      dbAll<WaitRow>(
+        db,
+        "SELECT * FROM waits WHERE wait_type = 'timer'",
+      ),
     );
-    return rows.map((row) => ({
-      runId: row.run_id,
-      stepId: row.step_id,
-      wait: fromJson<WaitCondition>(row.wait_condition_json)!,
-    }));
+    const due: Array<{
+      runId: string;
+      stepId: string;
+      wait: WaitCondition;
+    }> = [];
+    for (const row of rows) {
+      const operational = await this.operationalWait(row);
+      if (
+        operational.type === "timer" &&
+        operational.resumeAt <= now
+      ) {
+        due.push({
+          runId: row.run_id,
+          stepId: row.step_id,
+          wait: fromJson<WaitCondition>(
+            row.wait_condition_json,
+          )!,
+        });
+      }
+    }
+    return due;
+  }
+
+  private async operationalWait(row: WaitRow): Promise<WaitCondition> {
+    return row.operational_wait_ciphertext === null
+      ? fromJson<WaitCondition>(row.wait_condition_json)!
+      : openWaitOperation(
+          this.operationKeyPath,
+          row.run_id,
+          row.step_id,
+          row.operational_wait_ciphertext,
+        );
   }
 }

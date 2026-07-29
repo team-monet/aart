@@ -729,6 +729,111 @@ describe("createEngine — resume wrappers continue execution past the resumed s
     });
   });
 
+  it("returns repaired taint to the active cache consumer before its authoritative write", async () => {
+    const { store, cleanup } = await createSqliteTestStore();
+    cleanups.push(cleanup);
+    const redact = (
+      record: unknown,
+      resolvedSecretRefs: ReadonlySet<string>,
+    ): unknown => {
+      let json = JSON.stringify(record);
+      for (const secret of resolvedSecretRefs) {
+        json = json.replaceAll(secret, "[REDACTED]");
+      }
+      return JSON.parse(json);
+    };
+    let executions = 0;
+    const derivativeBlock: BlockImplementation = {
+      manifest: {
+        id: "test.active-cache-derivative",
+        version: "1.0.0",
+        capabilities: [],
+        inputSchema: {},
+        outputSchema: {},
+        description: "Returns a non-literal derivative.",
+      },
+      execute: async (inputs) => {
+        executions += 1;
+        return {
+          length: String(
+            (inputs as Record<string, unknown>)["source"],
+          ).length,
+        };
+      },
+    };
+    const engine = createEngine({
+      store,
+      redact,
+      resolveSecret: () => "late-secret",
+      capabilityCheck: alwaysAllowCapabilityCheck,
+      blocks: createBlockRegistry([echoBlock, derivativeBlock]),
+      computeRetryDelayMs: () => 0,
+    });
+    const producerWorkflow = fixtureWorkflow({
+      id: "wf-active-consumer-producer",
+      inputs: [{ name: "raw", type: "string", required: true }],
+      execution: {
+        type: "workflow",
+        steps: [
+          {
+            id: "derive",
+            uses: derivativeBlock.manifest.id,
+            with: { source: "{{ inputs.raw }}" },
+            idempotencyKey: "active-consumer-shared",
+          },
+        ],
+      },
+    });
+    const activeConsumerWorkflow = fixtureWorkflow({
+      id: "wf-active-consumer",
+      outputs: [{ name: "result", type: "integer", required: true }],
+      execution: {
+        type: "workflow",
+        steps: [
+          {
+            id: "replay",
+            uses: derivativeBlock.manifest.id,
+            idempotencyKey: "active-consumer-shared",
+          },
+          {
+            id: "discover",
+            uses: "test.echo",
+            with: { value: "{{ secrets.API_KEY }}" },
+          },
+        ],
+        outputMapping: {
+          result: "{{ steps.replay.outputs.length }}",
+        },
+      },
+    });
+    await Promise.all([
+      store.workflows.put(producerWorkflow),
+      store.workflows.put(activeConsumerWorkflow),
+    ]);
+    const producer = await engine.triggerRun({
+      workflow: producerWorkflow,
+      trigger: fixtureTrigger(),
+      inputs: { raw: "late-secret" },
+    });
+    await engine.executeRun(producer.runId);
+    const activeConsumer = await engine.triggerRun({
+      workflow: activeConsumerWorkflow,
+      trigger: fixtureTrigger(),
+      inputs: {},
+    });
+    const finished = await engine.executeRun(activeConsumer.runId);
+
+    expect(executions).toBe(1);
+    expect(finished.status).toBe("failed");
+    expect(finished.outputs).toBeUndefined();
+    expect(
+      finished.trace.find((trace) => trace.stepId === "replay"),
+    ).toMatchObject({
+      secretTainted: true,
+      secretTaintedPaths: ["*"],
+    });
+  });
+
   it("propagates repaired cache taint from forEach children into the persisted aggregate", async () => {
     const { store, cleanup } = await createSqliteTestStore();
     cleanups.push(cleanup);
@@ -1151,8 +1256,8 @@ describe("createEngine — resume wrappers continue execution past the resumed s
             id: "pause",
             uses: "wait.for_signal",
             with: {
-              name: "ready",
-              correlationId: "late-signal",
+              name: "late-secret",
+              correlationId: "late-secret",
             },
           },
           {
@@ -1172,8 +1277,8 @@ describe("createEngine — resume wrappers continue execution past the resumed s
     await engine.executeRun(run.runId);
     const signal = {
       id: "late-signal-audit",
-      name: "ready",
-      correlationId: "late-signal",
+      name: "late-secret",
+      correlationId: "late-secret",
       payload: { value: "late-secret" },
       receivedAt: new Date().toISOString(),
     };
@@ -1184,12 +1289,75 @@ describe("createEngine — resume wrappers continue execution past the resumed s
     expect(outcome.kind).toBe("resumed");
     await expect(store.signals.list()).resolves.toContainEqual({
       ...signal,
+      name: "[REDACTED]",
+      correlationId: "[REDACTED]",
       payload: { value: "[REDACTED]" },
     });
     await expect(
       store.signals.listConsumedByRun(run.runId),
     ).resolves.toContainEqual({
       ...signal,
+      name: "[REDACTED]",
+      correlationId: "[REDACTED]",
+      payload: { value: "[REDACTED]" },
+    });
+  });
+
+  it("conservatively repairs a pre-provenance consumed signal after upgrade", async () => {
+    const { store, cleanup } = await createSqliteTestStore();
+    cleanups.push(cleanup);
+    const redact = (
+      record: unknown,
+      resolvedSecretRefs: ReadonlySet<string>,
+    ): unknown => {
+      let json = JSON.stringify(record);
+      for (const secret of resolvedSecretRefs) {
+        json = json.replaceAll(secret, "[REDACTED]");
+      }
+      return JSON.parse(json);
+    };
+    const engine = createEngine({
+      store,
+      redact,
+      resolveSecret: () => "late-secret",
+      capabilityCheck: alwaysAllowCapabilityCheck,
+      blocks: createBlockRegistry([echoBlock]),
+      computeRetryDelayMs: () => 0,
+    });
+    const legacySignal = {
+      id: "legacy-consumed-signal",
+      name: "late-secret",
+      correlationId: "late-secret",
+      payload: { value: "late-secret" },
+      receivedAt: new Date().toISOString(),
+    };
+    await store.signals.append(legacySignal);
+    await store.signals.markConsumed(legacySignal.id);
+    const workflow = fixtureWorkflow({
+      id: "wf-repair-legacy-signal",
+      execution: {
+        type: "workflow",
+        steps: [
+          {
+            id: "discover",
+            uses: "test.echo",
+            with: { secret: "{{ secrets.API_KEY }}" },
+          },
+        ],
+      },
+    });
+    await store.workflows.put(workflow);
+    const run = await engine.triggerRun({
+      workflow,
+      trigger: fixtureTrigger(),
+      inputs: {},
+    });
+    await engine.executeRun(run.runId);
+
+    await expect(store.signals.list()).resolves.toContainEqual({
+      ...legacySignal,
+      name: "[REDACTED]",
+      correlationId: "[REDACTED]",
       payload: { value: "[REDACTED]" },
     });
   });
@@ -1286,13 +1454,14 @@ describe("createEngine — resume wrappers continue execution past the resumed s
       status: "approved" as const,
       reviewer: "late-secret",
       decision: { note: "late-secret" },
+      authenticatedAs: "late-secret",
       decidedAt: new Date().toISOString(),
     };
     await store.approvals.put(decided);
     await store.corrections.put({
       runId: run.runId,
       stepId: "review",
-      fieldPath: "outputs.note",
+      fieldPath: "outputs.late-secret",
       observed: { note: "late-secret" },
       corrected: { note: "late-secret" },
       reason: "remove late-secret",
@@ -1307,6 +1476,20 @@ describe("createEngine — resume wrappers continue execution past the resumed s
       runId: run.runId,
       actor: "late-secret",
     });
+    await store.artifacts.put(
+      {
+        id: "late-approval-artifact",
+        runId: run.runId,
+        stepId: "review",
+        name: "late-secret",
+        kind: "late-secret",
+        mime: "text/late-secret",
+        path: "late-secret/report.txt",
+        bytes: 11,
+        createdAt: new Date().toISOString(),
+      },
+      new TextEncoder().encode("late-secret"),
+    );
 
     const outcome = await engine.resumeApproval(
       run.runId,
@@ -1320,11 +1503,13 @@ describe("createEngine — resume wrappers continue execution past the resumed s
       description: "Decision may contain [REDACTED]",
       reviewer: "[REDACTED]",
       decision: { note: "[REDACTED]" },
+      authenticatedAs: "[REDACTED]",
     });
     await expect(
       store.corrections.list({ runId: run.runId }),
     ).resolves.toContainEqual(
       expect.objectContaining({
+        fieldPath: "outputs.[REDACTED]",
         observed: { note: "[REDACTED]" },
         corrected: { note: "[REDACTED]" },
         reason: "remove [REDACTED]",
@@ -1338,6 +1523,18 @@ describe("createEngine — resume wrappers continue execution past the resumed s
         actor: "[REDACTED]",
       }),
     );
+    await expect(
+      store.artifacts.getMetadata("late-approval-artifact"),
+    ).resolves.toMatchObject({
+      name: "[REDACTED]",
+      kind: "[REDACTED]",
+      mime: "text/[REDACTED]",
+      path: "[REDACTED]/report.txt",
+      bytes: 10,
+    });
+    await expect(
+      store.artifacts.getBytes("late-approval-artifact"),
+    ).resolves.toEqual(new TextEncoder().encode("[REDACTED]"));
   });
 
   it("resumeExternalJobResult continues execution to completion", async () => {

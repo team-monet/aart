@@ -283,6 +283,7 @@ describe("enterWait — early-arrival resolution (architecture §4.4 step 3 / §
               redactAudit: tx.waits.redactAudit.bind(tx.waits),
               delete: tx.waits.delete.bind(tx.waits),
               list: tx.waits.list.bind(tx.waits),
+              listOperational: tx.waits.listOperational.bind(tx.waits),
               findSignalMatches: tx.waits.findSignalMatches.bind(tx.waits),
               listDue: tx.waits.listDue.bind(tx.waits),
               put: () => {
@@ -603,6 +604,43 @@ describe("listExternalJobWaits — S2's poll-mechanism sweep query", () => {
     expect(jobs).toHaveLength(1);
     expect(jobs[0]).toMatchObject({ stepId: "job_wait" });
   });
+
+  it("polls with sealed provider/job values after their audit copy is redacted", async () => {
+    const { store } = await setup();
+    const wait = {
+      type: "external_job" as const,
+      provider: "late-secret",
+      jobId: "late-secret",
+      schemaVersion: CURRENT_ENGINE_SCHEMA_VERSION,
+    };
+    await store.waits.put(
+      "run-sealed-job",
+      "job_wait",
+      wait,
+      new Date().toISOString(),
+    );
+    await store.waits.redactAudit(
+      "run-sealed-job",
+      "job_wait",
+      {
+        ...wait,
+        provider: "[REDACTED]",
+        jobId: "[REDACTED]",
+      },
+    );
+    await expect(listExternalJobWaits(store)).resolves.toEqual([
+      expect.objectContaining({ wait }),
+    ]);
+    await expect(store.waits.list()).resolves.toEqual([
+      expect.objectContaining({
+        wait: {
+          ...wait,
+          provider: "[REDACTED]",
+          jobId: "[REDACTED]",
+        },
+      }),
+    ]);
+  });
 });
 
 describe("getExpiredWaits / failExpiredWait — wait TIMEOUT expiry (architecture §4.4.1's Expiry note)", () => {
@@ -627,6 +665,42 @@ describe("getExpiredWaits / failExpiredWait — wait TIMEOUT expiry (architectur
 
     const expired = await getExpiredWaits(store, new Date());
     expect(expired.map((e) => e.stepId)).not.toContain("wait_step");
+  });
+
+  it("uses sealed operational timeout values after the public audit is redacted", async () => {
+    const { store } = await setup();
+    const wait = {
+      type: "signal" as const,
+      name: "late-secret",
+      correlationId: "late-secret",
+      timeout: "1s",
+      schemaVersion: CURRENT_ENGINE_SCHEMA_VERSION,
+    };
+    await store.waits.put(
+      "run-sealed-timeout",
+      "pause",
+      wait,
+      new Date(Date.now() - 10_000).toISOString(),
+    );
+    await store.waits.redactAudit(
+      "run-sealed-timeout",
+      "pause",
+      {
+        ...wait,
+        name: "[REDACTED]",
+        correlationId: "[REDACTED]",
+        timeout: "[REDACTED]",
+      },
+    );
+    await expect(
+      getExpiredWaits(store, new Date()),
+    ).resolves.toEqual([
+      expect.objectContaining({
+        runId: "run-sealed-timeout",
+        stepId: "pause",
+        wait,
+      }),
+    ]);
   });
 
   it("getExpiredWaits excludes a wait with no timeout field at all (e.g. manual, or signal without one declared)", async () => {

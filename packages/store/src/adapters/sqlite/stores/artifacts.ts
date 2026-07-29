@@ -33,6 +33,18 @@ interface ArtifactRow {
   path_or_uri: string;
   bytes: number;
   created_at: string;
+  redaction_text_eligible: number | null;
+}
+
+function isTextMime(mime: string): boolean {
+  const normalized = mime.toLowerCase();
+  return (
+    normalized.startsWith("text/") ||
+    normalized.includes("json") ||
+    normalized.includes("xml") ||
+    normalized.includes("javascript") ||
+    normalized.includes("yaml")
+  );
 }
 
 function rowToArtifact(row: ArtifactRow): Artifact {
@@ -67,13 +79,25 @@ export class SqliteArtifactStore implements ArtifactStore {
     await this.exec((db) =>
       dbRun(
         db,
-        `INSERT INTO artifacts (artifact_id, run_id, step_id, name, kind, mime, path_or_uri, bytes, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO artifacts (artifact_id, run_id, step_id, name, kind, mime, path_or_uri, bytes, created_at, redaction_text_eligible)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(artifact_id) DO UPDATE SET
            run_id = excluded.run_id, step_id = excluded.step_id, name = excluded.name,
            kind = excluded.kind, mime = excluded.mime, path_or_uri = excluded.path_or_uri,
-           bytes = excluded.bytes, created_at = excluded.created_at`,
-        [artifact.id, artifact.runId, artifact.stepId ?? null, artifact.name, artifact.kind, artifact.mime, artifact.path, artifact.bytes, artifact.createdAt],
+           bytes = excluded.bytes, created_at = excluded.created_at,
+           redaction_text_eligible = COALESCE(artifacts.redaction_text_eligible, excluded.redaction_text_eligible)`,
+        [
+          artifact.id,
+          artifact.runId,
+          artifact.stepId ?? null,
+          artifact.name,
+          artifact.kind,
+          artifact.mime,
+          artifact.path,
+          artifact.bytes,
+          artifact.createdAt,
+          isTextMime(artifact.mime) ? 1 : 0,
+        ],
       ),
     );
   }
@@ -101,5 +125,70 @@ export class SqliteArtifactStore implements ArtifactStore {
   async listByRun(runId: string): Promise<Artifact[]> {
     const rows = await this.exec((db) => dbAll<ArtifactRow>(db, "SELECT * FROM artifacts WHERE run_id = ?", [runId]));
     return rows.map(rowToArtifact);
+  }
+
+  async isTextEligible(artifactId: string): Promise<boolean> {
+    const row = await this.exec((db) =>
+      dbGet<ArtifactRow>(
+        db,
+        "SELECT * FROM artifacts WHERE artifact_id = ?",
+        [artifactId],
+      ),
+    );
+    if (!row) return false;
+    return row.redaction_text_eligible === null
+      ? isTextMime(row.mime)
+      : row.redaction_text_eligible === 1;
+  }
+
+  async replaceAudit(
+    artifactId: string,
+    audit: Pick<Artifact, "name" | "kind" | "mime" | "path">,
+    bytes?: Uint8Array,
+  ): Promise<Artifact | undefined> {
+    const row = await this.exec((db) =>
+      dbGet<ArtifactRow>(
+        db,
+        "SELECT * FROM artifacts WHERE artifact_id = ?",
+        [artifactId],
+      ),
+    );
+    if (!row) return undefined;
+    if (bytes !== undefined) {
+      const blobFilePath = this.blobFilePath(row.run_id, artifactId);
+      await fs.mkdir(dirname(blobFilePath), { recursive: true });
+      await fs.writeFile(blobFilePath, bytes);
+    }
+    const byteCount = bytes?.byteLength ?? row.bytes;
+    const textEligible =
+      row.redaction_text_eligible ??
+      (isTextMime(row.mime) ? 1 : 0);
+    await this.exec((db) =>
+      dbRun(
+        db,
+        `UPDATE artifacts
+         SET name = ?, kind = ?, mime = ?, path_or_uri = ?, bytes = ?,
+             redaction_text_eligible = ?
+         WHERE artifact_id = ?`,
+        [
+          audit.name,
+          audit.kind,
+          audit.mime,
+          audit.path,
+          byteCount,
+          textEligible,
+          artifactId,
+        ],
+      ),
+    );
+    return rowToArtifact({
+      ...row,
+      name: audit.name,
+      kind: audit.kind,
+      mime: audit.mime,
+      path_or_uri: audit.path,
+      bytes: byteCount,
+      redaction_text_eligible: textEligible,
+    });
   }
 }

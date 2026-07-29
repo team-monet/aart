@@ -127,7 +127,7 @@ function buildStore(exec: SqlExec, blobsDir: string, transact: AartStore["transa
   return {
     workflows: new SqliteWorkflowStore(exec),
     runs: new SqliteRunStore(exec),
-    waits: new SqliteWaitStore(exec),
+    waits: new SqliteWaitStore(exec, blobsDir),
     signals: new SqliteSignalStore(exec),
     artifacts: new SqliteArtifactStore(exec, blobsDir),
     approvals: new SqliteApprovalStore(exec),
@@ -238,6 +238,7 @@ export {
   createSqliteAddEventsTableMigration,
   createSqliteAddIdempotencySchemaVersionMigration,
   createSqliteAddSecretAuditProvenanceMigration,
+  createSqliteAddSealedOperationalStateMigration,
   ALL_SQLITE_MIGRATIONS,
 } from "./migrations.js";
 export { SqliteMigrationWatermarkStore } from "./watermark.js";

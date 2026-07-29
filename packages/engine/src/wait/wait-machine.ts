@@ -150,14 +150,18 @@ export async function enterWait(config: WaitMachineConfig, options: EnterWaitOpt
           ),
           consumedBy: { runId: run.runId, stepId },
         });
-        await revokeSecretTaintedIdempotency(
+        const repairedRun = await revokeSecretTaintedIdempotency(
           tx,
           config.redact,
           preparedRun,
           resolvedSecretRefs,
           config.prepareRevokedIdempotencyConsumer,
         );
-        const redacted = applyRunRedaction(config.redact, preparedRun, resolvedSecretRefs);
+        const redacted = applyRunRedaction(
+          config.redact,
+          repairedRun,
+          resolvedSecretRefs,
+        );
         await tx.runs.put(redacted);
         return { run: redacted, suspended: false };
       }
@@ -191,17 +195,38 @@ export async function enterWait(config: WaitMachineConfig, options: EnterWaitOpt
       trace: [...run.trace, trace],
       updatedAt: now.toISOString(),
     };
-    await revokeSecretTaintedIdempotency(
+    const repairedRun = await revokeSecretTaintedIdempotency(
       tx,
       config.redact,
       updatedRun,
       resolvedSecretRefs,
       config.prepareRevokedIdempotencyConsumer,
     );
-    const redactedRun = applyRunRedaction(config.redact, updatedRun, resolvedSecretRefs);
-    const redactedWait = applyRedaction(config.redact, wait, resolvedSecretRefs);
+    const redactedRun = applyRunRedaction(
+      config.redact,
+      repairedRun,
+      resolvedSecretRefs,
+    );
+    const redactedWait = applyRedaction(
+      config.redact,
+      wait,
+      resolvedSecretRefs,
+    ) as WaitCondition;
+    const auditWait = {
+      ...redactedWait,
+      type: wait.type,
+      schemaVersion: wait.schemaVersion,
+    } as WaitCondition;
     await tx.runs.put(redactedRun);
-    await tx.waits.put(run.runId, stepId, redactedWait, now.toISOString());
+    await tx.waits.put(
+      run.runId,
+      stepId,
+      wait,
+      now.toISOString(),
+    );
+    if (JSON.stringify(auditWait) !== JSON.stringify(wait)) {
+      await tx.waits.redactAudit(run.runId, stepId, auditWait);
+    }
     return { run: redactedRun, suspended: true };
   });
 }
@@ -352,14 +377,18 @@ async function claimAndCompleteWait(config: WaitMachineConfig, args: ClaimAndCom
         consumedBy: { runId, stepId },
       });
     }
-    await revokeSecretTaintedIdempotency(
+    const repairedRun = await revokeSecretTaintedIdempotency(
       tx,
       config.redact,
       preparedRun,
       resolvedSecretRefs,
       config.prepareRevokedIdempotencyConsumer,
     );
-    const redacted = applyRunRedaction(config.redact, preparedRun, resolvedSecretRefs);
+    const redacted = applyRunRedaction(
+      config.redact,
+      repairedRun,
+      resolvedSecretRefs,
+    );
     await tx.runs.put(redacted);
     return { kind: "resumed", run: redacted, mechanism };
   });
@@ -381,7 +410,7 @@ async function claimAndCompleteWait(config: WaitMachineConfig, args: ClaimAndCom
 
 /** Every outstanding wait carrying a `timeout` field whose deadline (relative to the `WaitStore` row's own `createdAt`) has elapsed. `[DECISION]` NOT part of `getDueWaits` (below) — `WaitStore.listDue` (S0-frozen, architecture §4.4.3) is specifically "every timer-type wait whose `resumeAt` has passed"; `timeout` is a DIFFERENT, relative-duration field present on 6 of the 7 `WaitCondition` members (all but `timer`, which has no `timeout` field — a timer's own `resumeAt` due-ness, via `getDueWaits`, is the only time-based resolution it has) and checking it requires comparing against `createdAt` + a parsed duration, not a stored absolute deadline. S2's ticker should sweep this ALONGSIDE `getDueWaits`/`listExternalJobWaits` on the same interval. */
 export async function getExpiredWaits(store: AartStore, now: Date): Promise<Array<{ runId: string; stepId: string; wait: WaitCondition }>> {
-  const all = await store.waits.list();
+  const all = await store.waits.listOperational();
   return all
     .filter((entry) => {
       const timeout = "timeout" in entry.wait ? entry.wait.timeout : undefined;
@@ -451,14 +480,18 @@ export async function failExpiredWait(config: WaitMachineConfig, runId: string, 
     newTrace[traceIndex] = failedTrace;
 
     const updatedRun: RunRecord = { ...run, status: "running", trace: newTrace, updatedAt: now.toISOString() };
-    await revokeSecretTaintedIdempotency(
+    const repairedRun = await revokeSecretTaintedIdempotency(
       tx,
       config.redact,
       updatedRun,
       resolvedSecretRefs,
       config.prepareRevokedIdempotencyConsumer,
     );
-    const redacted = applyRunRedaction(config.redact, updatedRun, resolvedSecretRefs);
+    const redacted = applyRunRedaction(
+      config.redact,
+      repairedRun,
+      resolvedSecretRefs,
+    );
     await tx.runs.put(redacted);
     return { kind: "resumed", run: redacted, mechanism };
   });
@@ -599,6 +632,8 @@ export async function getDueWaits(store: AartStore, now: Date): Promise<DueWait[
 
 /** Every currently-outstanding `external_job` wait — for S2's poll mechanism to sweep on its own interval (no fixed deadline to filter by, unlike `timer` — see `DueWait`'s doc comment in types.ts) and, for each, poll the named provider's job-status endpoint, calling `resumeExternalJobResult` once a poll reports completion. */
 export async function listExternalJobWaits(store: AartStore): Promise<Array<{ runId: string; stepId: string; wait: Extract<WaitCondition, { type: "external_job" }> }>> {
-  const all = await store.waits.list();
+  const all = await store.waits.listOperational({
+    type: "external_job",
+  });
   return all.filter((entry): entry is typeof entry & { wait: Extract<WaitCondition, { type: "external_job" }> } => entry.wait.type === "external_job");
 }
