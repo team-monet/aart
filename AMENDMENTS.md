@@ -2571,7 +2571,7 @@ grows, its intended fix remains executable, and every eval or historical
 decision derived from it transitions with the same policy.
 
 **Verification.** `check:tsconfig-refs`, full build, production and test
-typechecks, and `lint:redaction` are clean (**294 reviewed suppressions**).
+typechecks, and `lint:redaction` are clean (**296 reviewed suppressions**).
 The full workspace suite passes **247 files / 3,044 tests**, including both
 adapter conformance suites, legacy correction-target upgrade, exact-key
 resolution after redaction, correction-derived eval/orphan repair, waiting

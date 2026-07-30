@@ -34,6 +34,9 @@ export const REDACTION_LINT_SUPPRESSIONS: readonly RedactionLintSuppression[] = 
   // ---- packages/cli/src/commands/deployment.ts ----
   { file: "packages/cli/src/commands/deployment.ts", snippet: "await cli.aart.store.deployments.put(updated);", reason: "triggerAddCommand writes Deployment.triggerConfig from CLI flags (mode/webhook-path/webhook-hmac-secret-ref/cron/...) -- webhook-hmac-secret-ref is a symbolic REF/name (S2 SEAMS.md TriggerBinding shape), never a resolved secret value; same class as deployment/trigger configuration elsewhere, outside resolvedSecretRefs' scope." },
 
+  // ---- packages/cli/src/test-utils.ts ----
+  { file: "packages/cli/src/test-utils.ts", snippet: "await testCli.cli.aart.store.runs.put(run);", reason: "Test-only helper (verified: this file is imported exclusively by cli.test.ts) -- persists a fully hardcoded completed RunRecord with an empty output object so correction command tests can prove the production policy rejects invented run/step targets. It executes no block, expression, or secret resolver and cannot contain a resolved runtime secret." },
+
   // ---- packages/cli/src/stubs/server.ts ----
   { file: "packages/cli/src/stubs/server.ts", snippet: "await store.runs.put(updated);", reason: "clearRunFlag spreads an existing RunRecord (already redacted at creation by whichever engine wrote it) with only a static { clearedBy, clearedAt } flag object added -- no new arbitrary content enters the record." },
 
@@ -371,6 +374,7 @@ export const REDACTION_LINT_SUPPRESSIONS: readonly RedactionLintSuppression[] = 
   // ---- packages/mcp/src/test-utils.ts ----
   { file: "packages/mcp/src/test-utils.ts", snippet: "return fs.mkdtemp(join(tmpdir(), prefix));", reason: "Test-only helper (verified: imported exclusively by *.test.ts files across this package, zero non-test importers) -- creates a real OS temp directory path, no application data at all." },
   { file: "packages/mcp/src/test-utils.ts", snippet: "return { ctx, root, cleanup: () => cleanupTempRoot(root) };", reason: "Test-only helper (same verification as above) -- returns a test fixture bundle (an AartContext handle, a tmp path, a cleanup closure), not persisted/emitted application data." },
+  { file: "packages/mcp/src/test-utils.ts", snippet: "await ctx.store.runs.put(run);", reason: "Test-only helper (same verified test-only import boundary) -- persists a fully hardcoded completed RunRecord with empty outputs so MCP correction tests exercise the real run/step existence guard. No block, expression, or secret resolver runs, so no resolved runtime secret can enter this fixture." },
   { file: "packages/mcp/src/test-utils.ts", snippet: "return `id: ${id}", reason: "Test-only helper, 3 sites (sampleWorkflowYaml/approvalWaitWorkflowYaml/failingWorkflowYaml) -- each returns a hardcoded YAML fixture template string used only by this package's own tests; verified zero non-test importers of this file." },
 
   // ---- packages/mcp/src/tools/definitions.ts ----
