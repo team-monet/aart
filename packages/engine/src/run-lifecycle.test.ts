@@ -2186,6 +2186,89 @@ describe("executeRun — fresh execution", () => {
     ).resolves.toEqual(new Uint8Array([1, 2, 3, 4]));
   });
 
+  it("rejoins a secret another run added to sealed state before the initial artifact write", async () => {
+    let activeRunId: string | undefined;
+    let artifactId: string | undefined;
+    let visibleDuringExecution = true;
+    let storeForBlock: AartStore | undefined;
+    const artifactBlock: BlockImplementation = {
+      manifest: {
+        id: "test.concurrent-secret-artifact",
+        version: "1.0.0",
+        capabilities: [],
+        inputSchema: {},
+        outputSchema: {},
+        description:
+          "Simulates global repair committing while dispatch is active.",
+      },
+      execute: async (_inputs, ctx) => {
+        const state =
+          await storeForBlock!.runs.getOperationalState(
+            activeRunId!,
+          );
+        if (state === undefined) {
+          throw new Error("active protection missing");
+        }
+        await storeForBlock!.runs.putOperationalState(
+          activeRunId!,
+          {
+            ...state,
+            resolvedSecretValues: [
+              ...state.resolvedSecretValues,
+              "4",
+            ],
+          },
+        );
+        artifactId = (
+          await ctx.writeArtifact({
+            name: "opaque.bin",
+            kind: "file",
+            mime: "application/octet-stream",
+            bytes: new Uint8Array([1, 2, 3, 4]),
+          })
+        ).id;
+        visibleDuringExecution =
+          (await storeForBlock!.artifacts.getMetadata(
+            artifactId,
+          )) !== undefined;
+        return { written: true };
+      },
+    };
+    const { store, config } = await setup({
+      blocks: {
+        [artifactBlock.manifest.id]: artifactBlock,
+      },
+      redact: redactResolvedValues,
+    });
+    storeForBlock = store;
+    const workflow = fixtureWorkflow({
+      execution: {
+        type: "workflow",
+        steps: [
+          {
+            id: "write",
+            uses: artifactBlock.manifest.id,
+          },
+        ],
+      },
+    });
+    await store.workflows.put(workflow);
+    const run = await triggerRun(config, {
+      workflow,
+      trigger: fixtureTrigger(),
+      inputs: {},
+    });
+    activeRunId = run.runId;
+
+    const finished = await executeRun(config, run.runId);
+
+    expect(finished.status).toBe("completed");
+    expect(visibleDuringExecution).toBe(false);
+    await expect(
+      store.artifacts.getMetadata(artifactId!),
+    ).resolves.toBeUndefined();
+  });
+
   it("keeps original text eligibility when a known secret redacts the public MIME before a later secret is discovered", async () => {
     let artifactId: string | undefined;
     const artifactBlock: BlockImplementation = {
@@ -3008,6 +3091,54 @@ describe("cancelRun (architecture §4.1, spec F16)", () => {
     expect(cancelled.trace.find((t) => t.stepId === "s1")?.status).toBe("completed"); // already-reached step untouched
     expect(cancelled.trace.find((t) => t.stepId === "s2")?.status).toBe("skipped");
     expect(cancelled.trace.find((t) => t.stepId === "s3")?.status).toBe("skipped");
+  });
+
+  it("keeps an exact authored bracket-suffixed step reached during cancellation", async () => {
+    const { store, config } = await setup();
+    const workflow = fixtureWorkflow({
+      execution: {
+        type: "workflow",
+        steps: [
+          { id: "gate[0]", uses: "test.echo" },
+          { id: "after", uses: "test.echo" },
+        ],
+      },
+    });
+    await store.workflows.put(workflow);
+    const run = await triggerRun(config, {
+      workflow,
+      trigger: fixtureTrigger(),
+      inputs: {},
+    });
+    await store.runs.put({
+      ...run,
+      status: "running",
+      trace: [
+        {
+          seq: 0,
+          stepId: "gate[0]",
+          block: "test.echo",
+          status: "completed",
+          inputs: {},
+          outputs: {},
+          startedAt: "t",
+          endedAt: "t",
+        },
+      ],
+    });
+
+    const cancelled = await cancelRun(config, run.runId);
+
+    expect(
+      cancelled.trace.filter(
+        (trace) => trace.stepId === "gate[0]",
+      ),
+    ).toHaveLength(1);
+    expect(
+      cancelled.trace.find(
+        (trace) => trace.stepId === "after",
+      )?.status,
+    ).toBe("skipped");
   });
 
   it("calls onRunTerminal with the runId once cancelled (S9 reconciliation ledger item 10 - cancelRun is a SEPARATE terminal-transition path from finalizeTerminal, needs the same hook)", async () => {

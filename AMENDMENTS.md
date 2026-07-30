@@ -2460,3 +2460,63 @@ conformance suites, SQLite migration/restart and two-process migration-race
 coverage, terminal/wait correction rejection, sealed historical snapshot
 resolution, initial artifact withholding, and read-your-writes/rollback for
 artifact, signal, and event state.
+
+### A77 — Rejoin protection at the last responsible boundary; one correction policy and a reader-safe blob lifecycle
+
+A76 established pre-write visibility and atomic repair, but six concurrency and
+upgrade findings showed that a caller can still hold a stale view of protection
+or storage state between an earlier read and the operation that makes data
+public. They are one boundary rule, not six special cases:
+
+1. **Rejoin sealed protection in the transaction that publishes.** An initial
+   artifact write reloads the run's latest sealed secret set inside the same
+   store transaction as `ArtifactStore.put`. Cancellation likewise reloads
+   the public run, durable wait/active protection, progress, and outstanding
+   waits inside one transaction before constructing the terminal audit and
+   sealed archive. Whichever side commits first is safe: an earlier global
+   repair sees and repairs the new public record, or the later publisher sees
+   the enlarged protected set before writing.
+2. **Validate the correction audit itself, before persistence.** The canonical
+   `recordCorrection` path recursively checks `fieldPath`, `observed`,
+   `corrected`, `reason`, `reviewer`, and object keys against the latest sealed
+   secret set inside the correction transaction. Server, MCP, and the
+   dashboard's default embedded path all use that implementation; only the
+   explicit known-secret policy error becomes an HTTP 400, while genuine
+   storage failures still surface as server failures. This supersedes A41's
+   earlier residual-limitation statement for values already known to the
+   target run; arbitrary external text that no run has classified remains
+   outside value-based detection.
+3. **Preserve one exact historical authority for legacy terminals.** The first
+   correction to a completed, failed, or cancelled legacy row that predates
+   sealed terminal archives bootstraps the archive from that row and applies
+   the correction to both exact history and public audit. The dashboard's
+   compatibility outcome delegates to this same evidence implementation
+   instead of maintaining a second, weaker mutation path.
+4. **Finish storage intent only after the durable boundary.** Recovery of a
+   legacy SQLite artifact journal removes the journal only after SQLite
+   `COMMIT`, so a crash before commit preserves replay intent. Immutable blob
+   generations that were ever selected by committed metadata are retained:
+   another process may already have selected an older generation and still be
+   about to open it. Recovery therefore never reclaims a transaction-journal
+   generation: once a later pointer has superseded it, recovery cannot prove
+   whether it was never committed or was previously public. Only a synchronous
+   write failure that knows its new file never became observable deletes that
+   file; offline/exclusive garbage collection is a separate maintenance
+   concern. A deterministic two-handle test advances the pointer between a
+   reader's metadata selection and file open and proves both the selected old
+   bytes and the new authoritative bytes remain readable.
+
+The customer-visible contract is now independent of timing and client surface:
+once AART has classified a value, an in-flight artifact, cancellation, or
+correction cannot republish it; correcting an older terminal does not discard
+the exact history needed for future reasoning; and concurrent SQLite readers
+do not observe a present artifact as missing during a rewrite.
+
+**Verification.** `check:tsconfig-refs`, full build, production and test
+typechecks, and `lint:redaction` are clean (**295 reviewed suppressions**).
+The full workspace suite passes **247 files / 3,035 tests**, including
+cross-run initial-artifact rejoin, pre-persist correction rejection across
+every public field, HTTP rejection with no audit row, dashboard canonical
+outcome routing, legacy terminal archive bootstrap, atomic cancellation with
+exact bracketed authored-step identity, delayed-journal generation retention,
+and the two-handle immutable-generation reader race.

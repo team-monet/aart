@@ -384,6 +384,90 @@ describe("SQLite adapter — artifact redaction recovery", () => {
       store.artifacts.getBytes(artifact.id),
     ).resolves.toEqual(safeBytes);
   });
+
+  it("retains a superseded committed generation when delayed journals are reconciled", async () => {
+    const dbPath = join(dir, "aart.db");
+    const blobsDir = `${dbPath}.blobs`;
+    const newestBytes =
+      new TextEncoder().encode("[REDACTED-v2]");
+    await store.artifacts.put(
+      artifact,
+      new TextEncoder().encode("late-secret"),
+    );
+    const transactionArtifacts = new SqliteArtifactStore(
+      createDirectExec(handle.db),
+      blobsDir,
+      true,
+    );
+
+    handle.db.exec("BEGIN IMMEDIATE");
+    await transactionArtifacts.replaceAudit(
+      artifact.id,
+      safeAudit,
+      safeBytes,
+    );
+    handle.db.exec("COMMIT");
+    handle.db.exec("BEGIN IMMEDIATE");
+    await transactionArtifacts.replaceAudit(
+      artifact.id,
+      safeAudit,
+      newestBytes,
+    );
+    handle.db.exec("COMMIT");
+
+    await expect(
+      store.artifacts.getBytes(artifact.id),
+    ).resolves.toEqual(newestBytes);
+    const generations = (
+      await fs.readdir(join(blobsDir, artifact.runId))
+    ).filter((name) => name.includes(".generation-"));
+    expect(generations).toHaveLength(3);
+    const remainingJournals = (
+      await fs.readdir(
+        join(blobsDir, ".artifact-redaction-journal"),
+      )
+    ).filter((name) => name.endsWith(".json"));
+    expect(remainingJournals).toEqual([]);
+  });
+
+  it("keeps a selected immutable blob generation readable while another process advances the pointer", async () => {
+    const dbPath = join(dir, "aart.db");
+    const blobsDir = `${dbPath}.blobs`;
+    const originalBytes =
+      new TextEncoder().encode("late-secret");
+    const replacementBytes =
+      new TextEncoder().encode("[REDACTED]");
+    await store.artifacts.put(artifact, originalBytes);
+    const secondHandle = await openSqliteStore(dbPath);
+    let replaced = false;
+    const racingReader = new SqliteArtifactStore(
+      createDirectExec(handle.db),
+      blobsDir,
+      true,
+      async () => {
+        if (replaced) return;
+        replaced = true;
+        await secondHandle.store.artifacts.replaceAudit(
+          artifact.id,
+          safeAudit,
+          replacementBytes,
+        );
+      },
+    );
+    try {
+      await expect(
+        racingReader.getBytes(artifact.id),
+      ).resolves.toEqual(originalBytes);
+      expect(replaced).toBe(true);
+      await expect(
+        secondHandle.store.artifacts.getBytes(
+          artifact.id,
+        ),
+      ).resolves.toEqual(replacementBytes);
+    } finally {
+      secondHandle.close();
+    }
+  });
 });
 
 describe("SQLite adapter — transact() serialization on one connection (db.ts AsyncMutex)", () => {

@@ -4,6 +4,7 @@ import { promises as fs } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { fixtureRunRecord } from "../test-support/fixtures.js";
 import { correctionKey, recordCorrection, type RecordCorrectionInput } from "./correction.js";
 
 let root: string;
@@ -52,6 +53,44 @@ describe("recordCorrection", () => {
       corrected: "6401234568",
       reason: "OCR misread final digit",
     });
+  });
+
+  it("rejects every public correction field against the sealed known-secret set before persisting", async () => {
+    const secret = "known-correction-secret";
+    const run = fixtureRunRecord({ runId: "run_secret" });
+    await store.runs.put(run);
+    await store.runs.putOperationalState(run.runId, {
+      run,
+      resolvedSecretValues: [secret],
+    });
+    const base: RecordCorrectionInput = {
+      runId: run.runId,
+      stepId: "extract",
+      fieldPath: "outputs.value",
+      observed: "old",
+      corrected: "new",
+      reason: "human correction",
+      reviewer: "alice",
+    };
+    const sensitiveInputs: RecordCorrectionInput[] = [
+      { ...base, fieldPath: `outputs.${secret}` },
+      {
+        ...base,
+        observed: { [secret]: "value" },
+      },
+      { ...base, corrected: `prefix-${secret}` },
+      { ...base, reason: `reason ${secret}` },
+      { ...base, reviewer: secret },
+    ];
+
+    for (const input of sensitiveInputs) {
+      await expect(
+        recordCorrection(store, input),
+      ).rejects.toThrow(/secret already known/);
+    }
+    await expect(
+      store.corrections.list({ runId: run.runId }),
+    ).resolves.toEqual([]);
   });
 });
 

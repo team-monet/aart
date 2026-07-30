@@ -189,7 +189,7 @@ function buildBlockContext(
   runId: string,
   stepId: string,
   secretResolver: ReturnType<typeof createTrackingSecretResolver>,
-  resolvedSecretRefs: ReadonlySet<string>,
+  resolvedSecretRefs: Set<string>,
   onRecordLlmCall: (metadata: LlmCallMetadata) => void,
   onSecretAccess: (usage: "data" | "credential") => void,
   credentialSecretsAllowed: boolean,
@@ -216,46 +216,60 @@ function buildBlockContext(
       // other persist call site — a block that resolves a secret and THEN
       // writes an artifact within the same execute() call is covered, not
       // just secrets resolved before dispatch began.
-      const bytes = isTextMime(input.mime)
-        ? new TextEncoder().encode(
-            applyConservativeRedaction(
-              config.redact,
-              new TextDecoder().decode(input.bytes),
-              resolvedSecretRefs,
-            ),
-          )
-        : input.bytes;
-      const name = applyConservativeRedaction(
-        config.redact,
-        input.name,
-        resolvedSecretRefs,
-      );
-      const kind = applyConservativeRedaction(
-        config.redact,
-        input.kind,
-        resolvedSecretRefs,
-      );
-      const mime = applyConservativeRedaction(
-        config.redact,
-        input.mime,
-        resolvedSecretRefs,
-      );
-      const publicByteCount = applyConservativeRedaction(
-        config.redact,
-        bytes.byteLength,
-        resolvedSecretRefs,
-      );
-      const auditVisible =
-        typeof publicByteCount === "number" &&
-        Object.is(publicByteCount, bytes.byteLength);
-      await config.store.artifacts.put(
-        { id, runId, stepId, name, kind, mime, path, bytes: bytes.byteLength, createdAt: (config.now?.() ?? new Date()).toISOString() },
-        bytes,
-        {
-          redactionTextEligible: isTextMime(input.mime),
-          ...(auditVisible ? {} : { auditVisible: false }),
-        },
-      );
+      await config.store.transact(async (tx) => {
+        // A different run can classify a value while this block is still
+        // executing. Rejoin the latest sealed set under the same store lock
+        // as the initial artifact write: repair either commits first and is
+        // applied here, or this write commits first and the repair sees it.
+        const protectedState =
+          await tx.runs.getOperationalState(runId);
+        for (const value of
+          protectedState?.resolvedSecretValues ?? []) {
+          resolvedSecretRefs.add(value);
+        }
+        const bytes = isTextMime(input.mime)
+          ? new TextEncoder().encode(
+              applyConservativeRedaction(
+                config.redact,
+                new TextDecoder().decode(input.bytes),
+                resolvedSecretRefs,
+              ),
+            )
+          : input.bytes;
+        const name = applyConservativeRedaction(
+          config.redact,
+          input.name,
+          resolvedSecretRefs,
+        );
+        const kind = applyConservativeRedaction(
+          config.redact,
+          input.kind,
+          resolvedSecretRefs,
+        );
+        const mime = applyConservativeRedaction(
+          config.redact,
+          input.mime,
+          resolvedSecretRefs,
+        );
+        const publicByteCount = applyConservativeRedaction(
+          config.redact,
+          bytes.byteLength,
+          resolvedSecretRefs,
+        );
+        const auditVisible =
+          typeof publicByteCount === "number" &&
+          Object.is(publicByteCount, bytes.byteLength);
+        await tx.artifacts.put(
+          { id, runId, stepId, name, kind, mime, path, bytes: bytes.byteLength, createdAt: (config.now?.() ?? new Date()).toISOString() },
+          bytes,
+          {
+            redactionTextEligible: isTextMime(input.mime),
+            ...(auditVisible
+              ? {}
+              : { auditVisible: false }),
+          },
+        );
+      });
       return { id, path };
     },
     recordLlmCall: onRecordLlmCall,

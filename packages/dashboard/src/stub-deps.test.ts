@@ -400,13 +400,63 @@ describe("correction outcomes (S6 seam E4)", () => {
   it("updateRunOutput patches RunRecord.outputs for an outputs.<key> fieldPath", async () => {
     const { store, deps, cleanup } = await createTestFixture();
     try {
-      const run = makeRun({ runId: "run-out", outputs: { total: 1, other: "x" } });
+      const workflow = makeWorkflow({
+        id: "wf-correction-output",
+        outputs: [
+          {
+            name: "total",
+            type: "number",
+            required: true,
+          },
+          {
+            name: "other",
+            type: "string",
+            required: true,
+          },
+        ],
+        execution: {
+          type: "workflow",
+          steps: [{ id: "step1", uses: "http.get" }],
+          outputMapping: {
+            total: "{{ steps.step1.outputs.total }}",
+            other: "{{ steps.step1.outputs.other }}",
+          },
+        },
+      });
+      const run = makeRun({
+        runId: "run-out",
+        workflowId: workflow.id,
+        workflowVersion: workflow.version,
+        outputs: { total: 1, other: "x" },
+        trace: [
+          {
+            seq: 0,
+            stepId: "step1",
+            block: "http.get",
+            status: "completed",
+            inputs: {},
+            outputs: { total: 1, other: "x" },
+            startedAt: "2026-07-10T00:00:00.000Z",
+          },
+        ],
+        snapshot: {
+          definitions: workflow,
+          resolvedVersions: {},
+          packHashes: {},
+          capturedAt: "2026-07-10T00:00:00.000Z",
+        },
+      });
       await store.runs.put(run);
       const correction = makeCorrection({ runId: "run-out", fieldPath: "outputs.total", corrected: 42 });
 
       const updated = await deps.updateRunOutput(store, correction);
 
       expect(updated.outputs).toEqual({ total: 42, other: "x" });
+      await expect(
+        store.runs.getOperationalState(run.runId),
+      ).resolves.toMatchObject({
+        run: { outputs: { total: 42, other: "x" } },
+      });
     } finally {
       await cleanup();
     }
@@ -420,7 +470,7 @@ describe("correction outcomes (S6 seam E4)", () => {
         trace: [{ seq: 0, stepId: "step1", block: "http.get", status: "completed", inputs: {}, outputs: { count: 1 }, startedAt: "2026-07-10T00:00:00.000Z" }],
       });
       await store.runs.put(run);
-      const correction = makeCorrection({ runId: "run-step", stepId: "step1", fieldPath: "count", corrected: 99 });
+      const correction = makeCorrection({ runId: "run-step", stepId: "step1", fieldPath: "outputs.count", corrected: 99 });
 
       const updated = await deps.updateRunOutput(store, correction);
 

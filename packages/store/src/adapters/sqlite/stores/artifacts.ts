@@ -67,7 +67,12 @@ interface ArtifactRedactionJournal {
    * unreferenced generation.
    */
   generationManaged?: boolean;
-  /** Prior immutable/canonical blob filename, removed only after commit. */
+  /**
+   * Prior immutable/canonical blob filename from the first-generation
+   * journal format. Retained for backwards-compatible journal parsing;
+   * committed generations are intentionally not reclaimed while another
+   * process may still have selected them.
+   */
   previousBlobName?: string;
   previousBlobRunId?: string;
 }
@@ -221,6 +226,7 @@ export async function recoverSqliteArtifactRedactions(
     try {
       const pendingJournals =
         await readRedactionJournals(blobsDir);
+      const completedJournalPaths: string[] = [];
       for (const { path, journal } of pendingJournals) {
         if (journal.version !== 1) {
           throw new Error(
@@ -231,57 +237,14 @@ export async function recoverSqliteArtifactRedactions(
           journal.generationManaged === true &&
           journal.stagedBlobName !== undefined
         ) {
-          const committed = dbGet<ArtifactRow>(
-            db,
-            "SELECT * FROM artifacts WHERE artifact_id = ?",
-            [journal.artifactId],
-          );
-          const committedBlobName =
-            committed === undefined
-              ? undefined
-              : committed.blob_generation ??
-                `${committed.artifact_id}.blob`;
-          const generationPath = artifactBlobPath(
-            blobsDir,
-            journal.runId,
-            journal.artifactId,
-            journal.stagedBlobName,
-          );
-          const pointsTo = (
-            runId: string,
-            blobName: string,
-          ): boolean =>
-            committed?.run_id === runId &&
-            committedBlobName === blobName;
-          if (
-            !pointsTo(
-              journal.runId,
-              journal.stagedBlobName,
-            )
-          ) {
-            await removeFileIfPresent(generationPath);
-          }
-          if (journal.previousBlobName !== undefined) {
-            const previousRunId =
-              journal.previousBlobRunId ??
-              journal.runId;
-            if (
-              !pointsTo(
-                previousRunId,
-                journal.previousBlobName,
-              )
-            ) {
-              await removeFileIfPresent(
-                artifactBlobPath(
-                  blobsDir,
-                  previousRunId,
-                  journal.artifactId,
-                  journal.previousBlobName,
-                ),
-              );
-            }
-          }
-          await removeFileIfPresent(path);
+          // Never reclaim an immutable generation from recovery. A journal
+          // can outlive its own COMMIT and the pointer can then advance again
+          // before this pass runs, so "not current" cannot distinguish an
+          // uncommitted file from a previously committed file a concurrent
+          // reader has already selected. Only the synchronous SQL-failure
+          // paths below delete a just-created generation they know was never
+          // published.
+          completedJournalPaths.push(path);
           continue;
         }
         if (journal.stagedBlobName !== undefined) {
@@ -322,9 +285,12 @@ export async function recoverSqliteArtifactRedactions(
             journal.runId,
           ],
         );
-        await removeFileIfPresent(path);
+        completedJournalPaths.push(path);
       }
       db.exec("COMMIT");
+      for (const path of completedJournalPaths) {
+        await removeFileIfPresent(path);
+      }
     } catch (error) {
       try {
         db.exec("ROLLBACK");
@@ -341,6 +307,8 @@ export class SqliteArtifactStore implements ArtifactStore {
     private readonly exec: SqlExec,
     private readonly blobsDir: string,
     private readonly transactionScoped = false,
+    /** Test/diagnostic coordination hook for the SELECT-to-file-open seam. */
+    private readonly beforeBlobRead?: () => Promise<void>,
   ) {}
 
   /** Resolves a legacy canonical or immutable generation path. */
@@ -393,11 +361,6 @@ export class SqliteArtifactStore implements ArtifactStore {
       options?.auditVisible === false
         ? 0
         : 1;
-    const previousBlobName =
-      existing === undefined
-        ? undefined
-        : existing.blob_generation ??
-          `${existing.artifact_id}.blob`;
     const blobGeneration =
       `.${artifact.id}.generation-${randomUUID()}.blob`;
     const blobFilePath = this.blobFilePath(
@@ -422,12 +385,6 @@ export class SqliteArtifactStore implements ArtifactStore {
         auditVisible,
         stagedBlobName: blobGeneration,
         generationManaged: true,
-        ...(previousBlobName === undefined
-          ? {}
-          : {
-              previousBlobName,
-              previousBlobRunId: existing!.run_id,
-            }),
       });
     }
     await fs.writeFile(blobFilePath, bytes);
@@ -469,20 +426,6 @@ export class SqliteArtifactStore implements ArtifactStore {
         await removeFileIfPresent(blobFilePath);
       }
       throw error;
-    }
-    if (
-      !this.transactionScoped &&
-      previousBlobName !== undefined &&
-      (existing!.run_id !== artifact.runId ||
-        previousBlobName !== blobGeneration)
-    ) {
-      await removeFileIfPresent(
-        this.blobFilePath(
-          existing!.run_id,
-          artifact.id,
-          previousBlobName,
-        ),
-      );
     }
   }
 
@@ -529,7 +472,11 @@ export class SqliteArtifactStore implements ArtifactStore {
   private async readBytes(
     row: ArtifactRow,
   ): Promise<Uint8Array | undefined> {
+    // Metadata and immutable bytes live in different systems. Committed
+    // generations are retained, so a reader may safely open the generation
+    // it selected even after another process advances the SQLite pointer.
     try {
+      await this.beforeBlobRead?.();
       const buffer = await fs.readFile(
         this.blobFilePath(
           row.run_id,
@@ -541,7 +488,11 @@ export class SqliteArtifactStore implements ArtifactStore {
       // artifacts.ts for why (a Buffer's extra own properties would break
       // the conformance suite's toEqual deep-equality check against a
       // plain Uint8Array).
-      return new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength);
+      return new Uint8Array(
+        buffer.buffer,
+        buffer.byteOffset,
+        buffer.byteLength,
+      );
     } catch {
       return undefined;
     }
@@ -628,9 +579,6 @@ export class SqliteArtifactStore implements ArtifactStore {
       options?.auditVisible === false
         ? 0
         : 1;
-    const previousBlobName =
-      row.blob_generation ??
-      `${row.artifact_id}.blob`;
     let blobGeneration = row.blob_generation;
     let generatedBlobPath: string | undefined;
     if (bytes !== undefined) {
@@ -657,8 +605,6 @@ export class SqliteArtifactStore implements ArtifactStore {
             auditVisible,
             stagedBlobName: blobGeneration,
             generationManaged: true,
-            previousBlobName,
-            previousBlobRunId: row.run_id,
           },
         );
       }
@@ -698,19 +644,6 @@ export class SqliteArtifactStore implements ArtifactStore {
         await removeFileIfPresent(generatedBlobPath);
       }
       throw error;
-    }
-    if (
-      !this.transactionScoped &&
-      generatedBlobPath !== undefined &&
-      previousBlobName !== blobGeneration
-    ) {
-      await removeFileIfPresent(
-        this.blobFilePath(
-          row.run_id,
-          artifactId,
-          previousBlobName,
-        ),
-      );
     }
     return rowToArtifact({
       ...row,

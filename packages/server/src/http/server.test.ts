@@ -565,6 +565,75 @@ describe("dashboard write actions (AMENDMENTS.md A47) — every dashboard write 
     expect(missingRes.status).toBe(404);
   });
 
+  it("POST /corrections rejects known secrets before creating a public correction row", async () => {
+    fx = await createTestFixture();
+    const secret = "sealed-correction-secret";
+    const now = fx.clock.nowIso();
+    const run = {
+      runId: "run_secret_correction",
+      workflowId: "wf_corr",
+      workflowVersion: "1.0.0",
+      status: "completed" as const,
+      approved: true,
+      approvalMode: "dev" as const,
+      trigger: {
+        type: "manual" as const,
+        id: "t1",
+        source: "cli" as const,
+        payload: null,
+        receivedAt: now,
+      },
+      inputs: {},
+      trace: [],
+      waits: [],
+      artifacts: [],
+      snapshot: {
+        definitions: {},
+        resolvedVersions: {},
+        packHashes: {},
+        capturedAt: now,
+      },
+      startedAt: now,
+      endedAt: now,
+      updatedAt: now,
+      schemaVersion: 2,
+    };
+    await fx.store.runs.put(run);
+    await fx.store.runs.putOperationalState(run.runId, {
+      run,
+      resolvedSecretValues: [secret],
+    });
+    handle = await startServer({
+      store: fx.store,
+      engine: fx.engine,
+      clock: fx.clock,
+      port: 0,
+      runTicker: false,
+    });
+
+    const response = await fetch(
+      `http://localhost:${handle.port}/corrections`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          runId: run.runId,
+          stepId: "step1",
+          fieldPath: "outputs.total",
+          observed: 1,
+          corrected: 2,
+          reason: `do not publish ${secret}`,
+          reviewer: "alice",
+        }),
+      },
+    );
+
+    expect(response.status).toBe(400);
+    await expect(
+      fx.store.corrections.list({ runId: run.runId }),
+    ).resolves.toEqual([]);
+  });
+
   it("POST /evals/suites creates a suite; POST /evals/runs scores it with @aart/evidence's real scorer registry and persists the EvalRun", async () => {
     fx = await createTestFixture();
     await fx.store.workflows.put(fixtureWorkflow("1.0.0", { id: "wf_eval" }));

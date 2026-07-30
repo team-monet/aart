@@ -12,7 +12,10 @@ import {
   validateWorkflowOutputs,
 } from "@aart/engine/workflow-output-contract";
 import { generateImprovementBrief } from "../improvement-brief.js";
-import { correctionKey } from "./correction.js";
+import {
+  containsKnownSecret,
+  correctionKey,
+} from "./correction.js";
 
 const UNSAFE_CORRECTION_PATH_SEGMENTS = new Set([
   "__proto__",
@@ -47,39 +50,6 @@ function setByPath(target: Record<string, unknown>, path: string, value: unknown
     cursor = cursor[key] as Record<string, unknown>;
   }
   cursor[segments[segments.length - 1]!] = value;
-}
-
-function containsKnownSecret(
-  value: unknown,
-  resolvedSecretValues: readonly string[],
-): boolean {
-  const secrets = resolvedSecretValues.filter(
-    (secret) => secret.length > 0,
-  );
-  if (secrets.length === 0) return false;
-  if (typeof value === "string") {
-    return secrets.some((secret) => value.includes(secret));
-  }
-  if (
-    typeof value === "number" ||
-    typeof value === "boolean" ||
-    typeof value === "bigint"
-  ) {
-    return secrets.includes(String(value));
-  }
-  if (Array.isArray(value)) {
-    return value.some((item) =>
-      containsKnownSecret(item, secrets),
-    );
-  }
-  if (value !== null && typeof value === "object") {
-    return Object.entries(value).some(
-      ([key, child]) =>
-        containsKnownSecret(key, secrets) ||
-        containsKnownSecret(child, secrets),
-    );
-  }
-  return false;
 }
 
 /**
@@ -227,10 +197,20 @@ export async function updateRunOutput(store: AartStore, correction: Correction):
         : await tx.runs.getOperationalState(
             correction.runId,
           );
+    const effectiveProtectedState =
+      protectedState ??
+      (publicRun.status === "completed" ||
+      publicRun.status === "failed" ||
+      publicRun.status === "cancelled"
+        ? {
+            run: publicRun,
+            resolvedSecretValues: [],
+          }
+        : undefined);
     if (
       containsKnownSecret(
         correction.corrected,
-        protectedState?.resolvedSecretValues ?? [],
+        effectiveProtectedState?.resolvedSecretValues ?? [],
       )
     ) {
       throw new Error(
@@ -251,11 +231,11 @@ export async function updateRunOutput(store: AartStore, correction: Correction):
 
     let updatedProtected: RunRecord | undefined;
     if (
-      protectedState !== undefined ||
+      effectiveProtectedState !== undefined ||
       publicRun.status === "waiting"
     ) {
       const protectedRun =
-        protectedState?.run ?? publicRun;
+        effectiveProtectedState?.run ?? publicRun;
       const protectedTarget = protectedRun.trace.findLast(
         (trace) => trace.stepId === correction.stepId,
       );
@@ -288,12 +268,12 @@ export async function updateRunOutput(store: AartStore, correction: Correction):
         {
           run: updatedProtected ?? updatedPublic,
           resolvedSecretValues:
-            protectedState?.resolvedSecretValues ?? [],
-          ...(protectedState?.pendingIdempotencyReplays !==
+            effectiveProtectedState?.resolvedSecretValues ?? [],
+          ...(effectiveProtectedState?.pendingIdempotencyReplays !==
           undefined
             ? {
                 pendingIdempotencyReplays:
-                  protectedState.pendingIdempotencyReplays,
+                  effectiveProtectedState.pendingIdempotencyReplays,
               }
             : {}),
         },
@@ -302,14 +282,14 @@ export async function updateRunOutput(store: AartStore, correction: Correction):
       const {
         pendingIdempotencyReplays: _settledClaims,
         ...archiveBase
-      } = protectedState ?? {};
+      } = effectiveProtectedState ?? {};
       await tx.runs.putOperationalState(
         correction.runId,
         {
           ...archiveBase,
           run: updatedProtected,
           resolvedSecretValues:
-            protectedState?.resolvedSecretValues ?? [],
+            effectiveProtectedState?.resolvedSecretValues ?? [],
         },
       );
     }

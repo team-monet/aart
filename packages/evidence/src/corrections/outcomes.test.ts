@@ -84,6 +84,57 @@ describe("outcome 1/6 — updateRunOutput (spec §23.4 'update current run outpu
     });
   });
 
+  it("creates a sealed historical archive when a legacy terminal receives its first correction", async () => {
+    const workflow = fixtureWorkflow({
+      id: "legacy-terminal-workflow",
+      version: "1.0.0",
+    });
+    const run = fixtureRunRecord({
+      runId: "run_1",
+      workflowId: workflow.id,
+      workflowVersion: workflow.version,
+      trace: [
+        {
+          seq: 0,
+          stepId: "extract",
+          block: "llm.extract",
+          status: "completed",
+          inputs: {},
+          outputs: { nmi: "6401234567" },
+          startedAt: "t",
+        },
+      ],
+      snapshot: {
+        definitions: workflow,
+        resolvedVersions: {},
+        packHashes: {},
+        capturedAt: "2026-01-01T00:00:00.000Z",
+      },
+    });
+    await store.runs.put(run);
+    await expect(
+      store.runs.getOperationalState(run.runId),
+    ).resolves.toBeUndefined();
+
+    await updateRunOutput(store, fixtureCorrection());
+
+    await expect(
+      store.runs.getOperationalState(run.runId),
+    ).resolves.toEqual({
+      run: expect.objectContaining({
+        status: "completed",
+        snapshot: run.snapshot,
+        trace: [
+          expect.objectContaining({
+            outputs: { nmi: "6401234568" },
+            postHocCorrected: true,
+          }),
+        ],
+      }),
+      resolvedSecretValues: [],
+    });
+  });
+
   it("updates the sealed continuation when correcting a durably waiting run", async () => {
     const exactRun = fixtureRunRecord({
       runId: "run_1",

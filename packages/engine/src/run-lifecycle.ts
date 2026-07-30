@@ -665,72 +665,113 @@ export async function executeRun(config: EngineConfig, runId: string): Promise<R
  * and by `triggerRun`'s `cancel_existing` concurrency policy.
  */
 export async function cancelRun(config: EngineConfig, runId: string): Promise<RunRecord> {
-  const publicRun = await config.store.runs.get(runId);
-  if (!publicRun) {
-    throw new Error(`cancelRun: no RunRecord found for runId "${runId}".`);
-  }
-  const outstandingWaits = await config.store.waits.list({
-    runId,
-  });
-  if (
-    publicRun.status === "completed" ||
-    publicRun.status === "failed" ||
-    publicRun.status === "cancelled"
-  ) {
-    if (outstandingWaits.length > 0) {
-      await config.store.transact(async (tx) => {
-        for (const wait of outstandingWaits) {
-          await tx.waits.delete(wait.runId, wait.stepId);
-        }
-      });
+  const result = await config.store.transact(async (tx) => {
+    const publicRun = await tx.runs.get(runId);
+    if (!publicRun) {
+      throw new Error(
+        `cancelRun: no RunRecord found for runId "${runId}".`,
+      );
     }
-    return publicRun;
-  }
-
-  const operationalState =
-    outstandingWaits[0] === undefined
-      ? await config.store.runs.getOperationalState(runId)
-      : await config.store.waits.getOperationalRunState(
-          outstandingWaits[0].runId,
-          outstandingWaits[0].stepId,
+    const outstandingWaits = await tx.waits.list({ runId });
+    if (
+      publicRun.status === "completed" ||
+      publicRun.status === "failed" ||
+      publicRun.status === "cancelled"
+    ) {
+      for (const wait of outstandingWaits) {
+        await tx.waits.delete(wait.runId, wait.stepId);
+      }
+      return {
+        transitioned: false as const,
+        run: publicRun,
+      };
+    }
+    const currentWait = outstandingWaits[0];
+    const protection =
+      currentWait === undefined
+        ? await tx.runs.getOperationalState(runId)
+        : await tx.waits.getOperationalRunState(
+            currentWait.runId,
+            currentWait.stepId,
+          );
+    const protectedBase =
+      protection === undefined
+        ? publicRun
+        : protection.run.trace.length >=
+            publicRun.trace.length
+          ? protection.run
+          : publicRun;
+    const run = {
+      ...mergeOperationalRunTaint(
+        protectedBase,
+        publicRun,
+      ),
+      status: publicRun.status,
+      updatedAt: publicRun.updatedAt,
+    };
+    const workflow = await resolveWorkflowForRun(tx, run);
+    const authoredWorkflowStepIds = new Set(
+      workflow.execution.steps.map((step) => step.id),
+    );
+    const reachedStepIds = new Set(
+      run.trace
+        .map((trace) => {
+          if (trace.authoredStepId !== undefined) {
+            return trace.authoredStepId;
+          }
+          // Prefer exact authored identity, so an authored id such as
+          // `gate[0]` is never mistaken for a generated occurrence. The
+          // suffix fallback only preserves pre-provenance forEach traces
+          // when the exact text is not itself an authored workflow step.
+          if (authoredWorkflowStepIds.has(trace.stepId)) {
+            return trace.stepId;
+          }
+          const legacyIteration =
+            /^(.*)\[\d+\]$/.exec(trace.stepId);
+          return legacyIteration !== null &&
+            authoredWorkflowStepIds.has(legacyIteration[1]!)
+            ? legacyIteration[1]
+            : undefined;
+        })
+        .filter((stepId): stepId is string =>
+          stepId !== undefined
+        ),
+    );
+    const nowDate = config.now?.() ?? new Date();
+    const now = nowDate.toISOString();
+    const skippedTraces: StepTrace[] =
+      workflow.execution.steps
+        .filter((step) => !reachedStepIds.has(step.id))
+        .map(
+          (step, index): StepTrace => ({
+            seq: run.trace.length + index,
+            stepId: step.id,
+            block: step.uses,
+            status: "skipped",
+            inputs: {},
+            startedAt: now,
+            endedAt: now,
+            durationMs: 0,
+          }),
         );
-  const protectedBase =
-    operationalState === undefined
-      ? publicRun
-      : operationalState.run.trace.length >=
-          publicRun.trace.length
-        ? operationalState.run
-        : publicRun;
-  const run = {
-    ...mergeOperationalRunTaint(
-      protectedBase,
-      publicRun,
-    ),
-    status: publicRun.status,
-    updatedAt: publicRun.updatedAt,
-  };
-  const workflow = await resolveWorkflowForRun(config.store, run);
-  const reachedStepIds = new Set(run.trace.map((t) => t.stepId.replace(/\[\d+\]$/, "")));
-  const now = (config.now?.() ?? new Date()).toISOString();
-  const skippedTraces: StepTrace[] = workflow.execution.steps
-    .filter((s) => !reachedStepIds.has(s.id))
-    .map((s, i): StepTrace => ({ seq: run.trace.length + i, stepId: s.id, block: s.uses, status: "skipped", inputs: {}, startedAt: now, endedAt: now, durationMs: 0 }));
-
-  const resolvedSecretRefs = new Set(
-    operationalState?.resolvedSecretValues ?? [],
-  );
-  const nowDate = config.now?.() ?? new Date();
-  const concurrencyKey = run.params?.concurrencyKey;
-  const concurrencyKeyFormat = run.params?.concurrencyKeyFormat;
-  const updated: RunRecord = {
-    ...run,
-    status: "cancelled",
-    trace: [...run.trace, ...skippedTraces],
-    endedAt: now,
-    updatedAt: now,
-    snapshot: isSnapshotCaptured(run.snapshot) ? run.snapshot : await captureExecutionSnapshot(workflow, config.blocks, nowDate, config.computePackHashes),
-  };
-  const redacted = await config.store.transact(async (tx) => {
+    const resolvedSecretRefs = new Set(
+      protection?.resolvedSecretValues ?? [],
+    );
+    const updated: RunRecord = {
+      ...run,
+      status: "cancelled",
+      trace: [...run.trace, ...skippedTraces],
+      endedAt: now,
+      updatedAt: now,
+      snapshot: isSnapshotCaptured(run.snapshot)
+        ? run.snapshot
+        : await captureExecutionSnapshot(
+            workflow,
+            config.blocks,
+            nowDate,
+            config.computePackHashes,
+          ),
+    };
     const persistenceAwareUpdated =
       await mergePersistedRunTaint(tx, updated);
     const persistenceSafeRun = applyRunRedaction(
@@ -739,31 +780,39 @@ export async function cancelRun(config: EngineConfig, runId: string): Promise<Ru
       resolvedSecretRefs,
     );
     await tx.runs.put(persistenceSafeRun);
-    const protectedState =
-      await tx.runs.getOperationalState(runId);
     const {
       pendingIdempotencyReplays: _pendingClaims,
       ...archiveBase
-    } = protectedState ?? {};
+    } = protection ?? {};
     await tx.runs.putOperationalState(runId, {
       ...archiveBase,
       run: persistenceAwareUpdated,
-      resolvedSecretValues: [
-        ...new Set([
-          ...(protectedState?.resolvedSecretValues ?? []),
-          ...resolvedSecretRefs,
-        ]),
-      ],
+      resolvedSecretValues: [...resolvedSecretRefs],
     });
     for (const wait of outstandingWaits) {
       await tx.waits.delete(wait.runId, wait.stepId);
     }
-    return persistenceSafeRun;
+    return {
+      transitioned: true as const,
+      run: persistenceSafeRun,
+      concurrencyKey: run.params?.concurrencyKey,
+      concurrencyKeyFormat:
+        run.params?.concurrencyKeyFormat,
+    };
   });
 
-  if (typeof concurrencyKey === "string") {
-    await releaseQueuedRuns(config.store, redacted.workflowId, concurrencyKey, concurrencyKeyFormat);
+  if (!result.transitioned) return result.run;
+  if (typeof result.concurrencyKey === "string") {
+    await releaseQueuedRuns(
+      config.store,
+      result.run.workflowId,
+      result.concurrencyKey,
+      result.concurrencyKeyFormat,
+    );
   }
-  await notifyRunTerminal(config.onRunTerminal, redacted.runId);
-  return redacted;
+  await notifyRunTerminal(
+    config.onRunTerminal,
+    result.run.runId,
+  );
+  return result.run;
 }
