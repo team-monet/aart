@@ -13,6 +13,7 @@
 // "written against the AartStore interface... so the same Migration/
 // MigrationRunner shapes are reusable by the SQLite/Postgres adapters Wave
 // 1 builds").
+import { createHash } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import type { Migration } from "../../migrations/types.js";
 import { runMigrationDdl } from "./db.js";
@@ -220,9 +221,430 @@ export function createSqliteAddEventsTableMigration(db: DatabaseSync): Migration
   };
 }
 
+export function createSqliteAddIdempotencySchemaVersionMigration(db: DatabaseSync): Migration {
+  return {
+    id: "0005_idempotency_schema_version",
+    async up(): Promise<void> {
+      try {
+        db.exec(`ALTER TABLE idempotency_ledger ADD COLUMN schema_version INTEGER`);
+      } catch (err) {
+        if (
+          err instanceof Error &&
+          err.message.includes("duplicate column name")
+        ) {
+          // A prior interrupted/retried migration may already have added
+          // the column. Continue so the companion lookup index is repaired.
+        } else {
+          throw err;
+        }
+      }
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_idempotency_ledger_run_id ON idempotency_ledger(run_id)`);
+    },
+    async down(): Promise<void> {
+      db.exec(`DROP INDEX IF EXISTS idx_idempotency_ledger_run_id`);
+      db.exec(`ALTER TABLE idempotency_ledger DROP COLUMN schema_version`);
+    },
+  };
+}
+
+export function createSqliteAddRunRootTaintPathsMigration(db: DatabaseSync): Migration {
+  const addColumn = (name: string): void => {
+    try {
+      db.exec(`ALTER TABLE runs ADD COLUMN ${name} TEXT`);
+    } catch (err) {
+      if (
+        !(
+          err instanceof Error &&
+          err.message.includes("duplicate column name")
+        )
+      ) {
+        throw err;
+      }
+    }
+  };
+  return {
+    id: "0006_run_root_taint_paths",
+    async up(): Promise<void> {
+      addColumn("secret_tainted_input_paths_json");
+      addColumn("secret_tainted_trigger_paths_json");
+    },
+    async down(): Promise<void> {
+      db.exec(`ALTER TABLE runs DROP COLUMN secret_tainted_trigger_paths_json`);
+      db.exec(`ALTER TABLE runs DROP COLUMN secret_tainted_input_paths_json`);
+    },
+  };
+}
+
+/**
+ * Separates redacted audit values from the operational values required to
+ * resume an outstanding wait, and records which run consumed a signal so a
+ * later secret discovery can repair that audit copy without scanning or
+ * consuming unrelated signals.
+ */
+export function createSqliteAddSecretAuditProvenanceMigration(
+  db: DatabaseSync,
+): Migration {
+  const addColumn = (table: string, definition: string): void => {
+    try {
+      db.exec(`ALTER TABLE ${table} ADD COLUMN ${definition}`);
+    } catch (err) {
+      if (
+        !(
+          err instanceof Error &&
+          err.message.includes("duplicate column name")
+        )
+      ) {
+        throw err;
+      }
+    }
+  };
+  return {
+    id: "0007_secret_audit_provenance",
+    async up(): Promise<void> {
+      addColumn("waits", "signal_match_fingerprint TEXT");
+      const waitRows = db
+        .prepare(
+          "SELECT run_id, step_id, wait_condition_json FROM waits WHERE signal_match_fingerprint IS NULL",
+        )
+        .all() as Array<{
+        run_id: string;
+        step_id: string;
+        wait_condition_json: string;
+      }>;
+      const updateWait = db.prepare(
+        "UPDATE waits SET signal_match_fingerprint = ? WHERE run_id = ? AND step_id = ?",
+      );
+      for (const row of waitRows) {
+        const wait = JSON.parse(row.wait_condition_json) as Record<
+          string,
+          unknown
+        >;
+        let name: string | undefined;
+        let correlationId: string | undefined;
+        switch (wait["type"]) {
+          case "signal":
+            name = wait["name"] as string | undefined;
+            correlationId = wait["correlationId"] as string | undefined;
+            break;
+          case "webhook":
+            name = wait["event"] as string | undefined;
+            correlationId = wait["correlationId"] as string | undefined;
+            break;
+          case "queue":
+            name = wait["queue"] as string | undefined;
+            correlationId = wait["correlationId"] as string | undefined;
+            break;
+          case "external_job":
+            name = wait["provider"] as string | undefined;
+            correlationId = wait["jobId"] as string | undefined;
+            break;
+        }
+        if (name !== undefined && correlationId !== undefined) {
+          updateWait.run(
+            createHash("sha256")
+              .update(JSON.stringify([name, correlationId]))
+              .digest("hex"),
+            row.run_id,
+            row.step_id,
+          );
+        }
+      }
+      addColumn("signals", "consumed_by_run_id TEXT");
+      addColumn("signals", "consumed_by_step_id TEXT");
+      db.exec(
+        "CREATE INDEX IF NOT EXISTS idx_signals_consumed_by_run ON signals(consumed_by_run_id)",
+      );
+    },
+    async down(): Promise<void> {
+      db.exec("DROP INDEX IF EXISTS idx_signals_consumed_by_run");
+      db.exec("ALTER TABLE signals DROP COLUMN consumed_by_step_id");
+      db.exec("ALTER TABLE signals DROP COLUMN consumed_by_run_id");
+      db.exec("ALTER TABLE waits DROP COLUMN signal_match_fingerprint");
+    },
+  };
+}
+
+/**
+ * Separates customer-visible audit values from the operational state needed
+ * to resume waits, and retains a non-sensitive text/binary classification
+ * before artifact MIME metadata can be redacted.
+ *
+ * Existing waits remain readable through the audit column until their next
+ * put/security rewrite, which seals the operational copy before replacing
+ * any audit value. Existing artifacts are backfilled from their current MIME
+ * while that original classification is still available.
+ */
+export function createSqliteAddSealedOperationalStateMigration(
+  db: DatabaseSync,
+): Migration {
+  const addColumn = (table: string, definition: string): void => {
+    try {
+      db.exec(`ALTER TABLE ${table} ADD COLUMN ${definition}`);
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        error.message.includes("duplicate column name")
+      ) {
+        return;
+      }
+      throw error;
+    }
+  };
+
+  return {
+    id: "0008_sealed_operational_state",
+    async up(): Promise<void> {
+      addColumn("waits", "operational_wait_ciphertext TEXT");
+      addColumn("artifacts", "redaction_text_eligible INTEGER");
+      db.exec(
+        "CREATE INDEX IF NOT EXISTS idx_events_run_id ON events(run_id)",
+      );
+      db.exec(
+        `UPDATE artifacts
+         SET redaction_text_eligible =
+           CASE
+             WHEN lower(mime) LIKE 'text/%'
+               OR lower(mime) LIKE '%json%'
+               OR lower(mime) LIKE '%xml%'
+               OR lower(mime) LIKE '%javascript%'
+               OR lower(mime) LIKE '%yaml%'
+             THEN 1
+             ELSE 0
+           END
+         WHERE redaction_text_eligible IS NULL`,
+      );
+    },
+    async down(): Promise<void> {
+      db.exec("DROP INDEX IF EXISTS idx_events_run_id");
+      db.exec(
+        "ALTER TABLE artifacts DROP COLUMN redaction_text_eligible",
+      );
+      db.exec(
+        "ALTER TABLE waits DROP COLUMN operational_wait_ciphertext",
+      );
+    },
+  };
+}
+
+/**
+ * Gives every wait entry a fresh authenticated generation. Existing v1
+ * ciphertext remains readable and is lazily rotated to generation-bound
+ * v2 on the first operational access.
+ */
+export function createSqliteAddWaitOperationGenerationMigration(
+  db: DatabaseSync,
+): Migration {
+  return {
+    id: "0009_wait_operation_generation",
+    async up(): Promise<void> {
+      try {
+        db.exec(
+          "ALTER TABLE waits ADD COLUMN operational_generation TEXT",
+        );
+      } catch (error) {
+        if (
+          error instanceof Error &&
+          error.message.includes("duplicate column name")
+        ) {
+          return;
+        }
+        throw error;
+      }
+    },
+    async down(): Promise<void> {
+      db.exec(
+        "ALTER TABLE waits DROP COLUMN operational_generation",
+      );
+    },
+  };
+}
+
+/**
+ * Separates still-actionable signal values plus pending/active/suspended run
+ * continuation state from their customer-visible audit copies. Existing
+ * signal rows are lazily sealed before the first audit rewrite, while new
+ * operational state is sealed at its lifecycle transition.
+ */
+export function createSqliteAddProtectedContinuationStateMigration(
+  db: DatabaseSync,
+): Migration {
+  const addColumn = (table: string, definition: string): void => {
+    try {
+      db.exec(`ALTER TABLE ${table} ADD COLUMN ${definition}`);
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        error.message.includes("duplicate column name")
+      ) {
+        return;
+      }
+      throw error;
+    }
+  };
+  return {
+    id: "0010_protected_continuation_state",
+    async up(): Promise<void> {
+      addColumn("signals", "signal_match_fingerprint TEXT");
+      addColumn("signals", "operational_signal_ciphertext TEXT");
+      addColumn("signals", "operational_generation TEXT");
+      addColumn(
+        "waits",
+        "operational_run_state_ciphertext TEXT",
+      );
+      addColumn("runs", "operational_generation TEXT");
+      addColumn(
+        "runs",
+        "operational_run_state_ciphertext TEXT",
+      );
+      addColumn("idempotency_ledger", "trace_seq INTEGER");
+      db.exec(
+        "CREATE INDEX IF NOT EXISTS idx_signals_match_fingerprint ON signals(signal_match_fingerprint)",
+      );
+    },
+    async down(): Promise<void> {
+      db.exec(
+        "DROP INDEX IF EXISTS idx_signals_match_fingerprint",
+      );
+      db.exec(
+        "ALTER TABLE waits DROP COLUMN operational_run_state_ciphertext",
+      );
+      db.exec(
+        "ALTER TABLE runs DROP COLUMN operational_run_state_ciphertext",
+      );
+      db.exec(
+        "ALTER TABLE runs DROP COLUMN operational_generation",
+      );
+      db.exec(
+        "ALTER TABLE idempotency_ledger DROP COLUMN trace_seq",
+      );
+      db.exec(
+        "ALTER TABLE signals DROP COLUMN operational_generation",
+      );
+      db.exec(
+        "ALTER TABLE signals DROP COLUMN operational_signal_ciphertext",
+      );
+      db.exec(
+        "ALTER TABLE signals DROP COLUMN signal_match_fingerprint",
+      );
+    },
+  };
+}
+
+/**
+ * Separates an artifact's engine-retained repair source from its public
+ * audit visibility. Existing artifacts remain visible; redaction may only
+ * move the flag from 1 to 0.
+ */
+export function createSqliteAddArtifactAuditVisibilityMigration(
+  db: DatabaseSync,
+): Migration {
+  return {
+    id: "0011_artifact_audit_visibility",
+    async up(): Promise<void> {
+      try {
+        db.exec(
+          "ALTER TABLE artifacts ADD COLUMN redaction_audit_visible INTEGER NOT NULL DEFAULT 1",
+        );
+      } catch (error) {
+        if (
+          error instanceof Error &&
+          error.message.includes("duplicate column name")
+        ) {
+          return;
+        }
+        throw error;
+      }
+    },
+    async down(): Promise<void> {
+      db.exec(
+        "ALTER TABLE artifacts DROP COLUMN redaction_audit_visible",
+      );
+    },
+  };
+}
+
+/**
+ * Makes the SQLite metadata row the atomic pointer to immutable artifact
+ * bytes. A transaction writes a fresh generation file, then commits this
+ * pointer with the audit metadata; rollback leaves the prior pointer intact.
+ * Legacy rows keep NULL and continue reading `<artifactId>.blob`.
+ */
+export function createSqliteAddArtifactBlobGenerationMigration(
+  db: DatabaseSync,
+): Migration {
+  return {
+    id: "0012_artifact_blob_generation",
+    async up(): Promise<void> {
+      try {
+        db.exec(
+          "ALTER TABLE artifacts ADD COLUMN blob_generation TEXT",
+        );
+      } catch (error) {
+        if (
+          error instanceof Error &&
+          error.message.includes("duplicate column name")
+        ) {
+          return;
+        }
+        throw error;
+      }
+    },
+    async down(): Promise<void> {
+      db.exec(
+        "ALTER TABLE artifacts DROP COLUMN blob_generation",
+      );
+    },
+  };
+}
+
+/** Seals the exact correction target separately from its redacted audit. */
+export function createSqliteAddCorrectionOperationalTargetMigration(
+  db: DatabaseSync,
+): Migration {
+  const addColumn = (definition: string): void => {
+    try {
+      db.exec(
+        `ALTER TABLE corrections ADD COLUMN ${definition}`,
+      );
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        error.message.includes("duplicate column name")
+      ) {
+        return;
+      }
+      throw error;
+    }
+  };
+  return {
+    id: "0013_correction_operational_target",
+    async up(): Promise<void> {
+      addColumn("operational_generation TEXT");
+      addColumn("operational_target_ciphertext TEXT");
+    },
+    async down(): Promise<void> {
+      db.exec(
+        "ALTER TABLE corrections DROP COLUMN operational_target_ciphertext",
+      );
+      db.exec(
+        "ALTER TABLE corrections DROP COLUMN operational_generation",
+      );
+    },
+  };
+}
+
 export const ALL_SQLITE_MIGRATIONS = (db: DatabaseSync): Migration[] => [
   createSqliteInitMigration(db),
   createSqliteAddDeploymentPromotedMigration(db),
   createSqliteAddApprovalTaskAuthenticatedAsMigration(db),
   createSqliteAddEventsTableMigration(db),
+  createSqliteAddIdempotencySchemaVersionMigration(db),
+  createSqliteAddRunRootTaintPathsMigration(db),
+  createSqliteAddSecretAuditProvenanceMigration(db),
+  createSqliteAddSealedOperationalStateMigration(db),
+  createSqliteAddWaitOperationGenerationMigration(db),
+  createSqliteAddProtectedContinuationStateMigration(db),
+  createSqliteAddArtifactAuditVisibilityMigration(db),
+  createSqliteAddArtifactBlobGenerationMigration(db),
+  createSqliteAddCorrectionOperationalTargetMigration(db),
 ];

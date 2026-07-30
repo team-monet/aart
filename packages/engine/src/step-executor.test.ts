@@ -2,7 +2,12 @@ import { CapabilityDeniedError, IterationLimitExceededError } from "@aart/types"
 import type { BlockImplementation } from "@aart/types";
 import type { AartStore } from "@aart/store";
 import { afterEach, describe, expect, it } from "vitest";
-import { executeStep } from "./step-executor.js";
+import {
+  executeStep,
+  prepareRevokedIdempotencyConsumer,
+} from "./step-executor.js";
+import { idempotencyStorageKey } from "./idempotency.js";
+import { repairGlobalAuditsForNewSecrets } from "./redaction.js";
 import {
   capabilityBlock,
   createTestStore,
@@ -23,6 +28,89 @@ afterEach(async () => {
   await Promise.all(cleanups.splice(0).map((fn) => fn()));
 });
 
+describe("prepareRevokedIdempotencyConsumer — protected history", () => {
+  it("loads an exact waiting snapshot from WaitStore after active run protection has transferred", async () => {
+    const { store, config } = await setup();
+    const workflow = fixtureWorkflow({
+      id: "waiting-cache-history",
+      version: "1.0.0",
+      execution: {
+        type: "workflow",
+        steps: [
+          { id: "produce", uses: "test.echo" },
+          { id: "pause", uses: "wait.manual" },
+        ],
+      },
+    });
+    const exactRun = fixtureRun({
+      runId: "waiting-cache-run",
+      workflowId: workflow.id,
+      workflowVersion: workflow.version,
+      status: "waiting",
+      trace: [
+        {
+          seq: 0,
+          stepId: "produce",
+          block: "test.echo",
+          status: "completed",
+          inputs: {},
+          outputs: { value: "cached" },
+          startedAt: "t",
+        },
+        {
+          seq: 1,
+          stepId: "pause",
+          block: "wait.manual",
+          status: "waiting",
+          inputs: {},
+          startedAt: "t",
+        },
+      ],
+      waits: [{ type: "manual", schemaVersion: 2 }],
+      snapshot: {
+        definitions: workflow,
+        resolvedVersions: {},
+        packHashes: {},
+        capturedAt: "2026-07-30T00:00:00.000Z",
+      },
+    });
+    const publicRun = {
+      ...exactRun,
+      snapshot: {
+        ...exactRun.snapshot,
+        definitions: null,
+      },
+    };
+    await store.runs.put(publicRun);
+    await store.waits.put(
+      exactRun.runId,
+      "pause",
+      exactRun.waits[0]!,
+      "2026-07-30T00:00:00.000Z",
+      {
+        run: exactRun,
+        resolvedSecretValues: [],
+      },
+    );
+    await expect(
+      store.runs.getOperationalState(exactRun.runId),
+    ).resolves.toBeUndefined();
+
+    await expect(
+      prepareRevokedIdempotencyConsumer(
+        config,
+        store,
+        publicRun,
+        new Set(),
+        new Set(),
+      ),
+    ).resolves.toMatchObject({
+      runId: exactRun.runId,
+      status: "waiting",
+    });
+  });
+});
+
 async function setup(configOverrides: Partial<EngineConfig> = {}): Promise<{ store: AartStore; config: EngineConfig }> {
   const { store, cleanup } = await createTestStore();
   cleanups.push(cleanup);
@@ -39,6 +127,146 @@ describe("executeStep — resolve with: + basic dispatch", () => {
     if (outcome.kind !== "continue") throw new Error("unreachable");
     const trace = outcome.run.trace[0];
     expect(trace).toMatchObject({ status: "completed", inputs: { target: "http://x" }, outputs: { echoed: { target: "http://x" } } });
+  });
+
+  it("establishes protected progress for a migrated running run whose active state is absent", async () => {
+    const secret = "migrated-running-secret";
+    const redact = (
+      record: unknown,
+      refs: ReadonlySet<string>,
+    ): unknown =>
+      JSON.parse(
+        [...refs].reduce(
+          (json, value) =>
+            json.replaceAll(value, "[REDACTED]"),
+          JSON.stringify(record),
+        ),
+      );
+    const { store, config } = await setup({
+      redact,
+      resolveSecret: () => secret,
+    });
+    const run = fixtureRun({ status: "running" });
+    await store.runs.put(run);
+    await expect(
+      store.runs.getOperationalState(run.runId),
+    ).resolves.toBeUndefined();
+    const workflow = fixtureWorkflow({
+      execution: {
+        type: "workflow",
+        steps: [
+          {
+            id: "s1",
+            uses: "test.echo",
+            with: { token: "{{ secrets.API_KEY }}" },
+          },
+        ],
+      },
+    });
+
+    const outcome = await executeStep(
+      config,
+      run,
+      workflow,
+      workflow.execution.steps[0]!,
+      new Set(),
+      undefined,
+    );
+
+    expect(outcome.kind).toBe("continue");
+    expect(
+      JSON.stringify(await store.runs.get(run.runId)),
+    ).not.toContain(secret);
+    await expect(
+      store.runs.getOperationalState(run.runId),
+    ).resolves.toMatchObject({
+      run: {
+        status: "running",
+        trace: [
+          expect.objectContaining({
+            outputs: { echoed: { token: secret } },
+          }),
+        ],
+      },
+      resolvedSecretValues: [secret],
+    });
+  });
+
+  it("imports secret refs discovered by another run before writing later progress", async () => {
+    const secret = "cross-run-late-secret";
+    const redact = (
+      record: unknown,
+      refs: ReadonlySet<string>,
+    ): unknown =>
+      JSON.parse(
+        [...refs].reduce(
+          (json, value) =>
+            json.replaceAll(value, "[REDACTED]"),
+          JSON.stringify(record),
+        ),
+      );
+    const { store, config } = await setup({ redact });
+    const run = fixtureRun({
+      status: "running",
+      trace: [
+        {
+          seq: 0,
+          stepId: "source",
+          block: "test.echo",
+          status: "completed",
+          inputs: {},
+          outputs: { value: secret },
+          startedAt: "t",
+        },
+      ],
+    });
+    await store.runs.put(run);
+    await store.runs.putOperationalState(run.runId, {
+      run,
+      resolvedSecretValues: [],
+    });
+    await repairGlobalAuditsForNewSecrets(
+      store,
+      redact,
+      new Set([secret]),
+    );
+    const workflow = fixtureWorkflow({
+      execution: {
+        type: "workflow",
+        steps: [
+          { id: "source", uses: "test.echo" },
+          { id: "next", uses: "test.echo" },
+        ],
+      },
+    });
+
+    const outcome = await executeStep(
+      config,
+      run,
+      workflow,
+      workflow.execution.steps[1]!,
+      new Set(),
+      undefined,
+    );
+
+    expect(outcome.kind).toBe("continue");
+    expect(
+      JSON.stringify(await store.runs.get(run.runId)),
+    ).not.toContain(secret);
+    await expect(
+      store.runs.getOperationalState(run.runId),
+    ).resolves.toMatchObject({
+      resolvedSecretValues: [secret],
+      run: {
+        trace: [
+          expect.objectContaining({
+            outputs: { value: secret },
+            secretTainted: true,
+          }),
+          expect.objectContaining({ stepId: "next" }),
+        ],
+      },
+    });
   });
 
   it("determines nextStepId as the next sequential step when no if/next present", async () => {
@@ -162,6 +390,66 @@ describe("executeStep — guarded back-edges: maxIterations (spec §18.2)", () =
 });
 
 describe("executeStep — guarded back-edges: until (spec §18.2, architecture §4.2)", () => {
+  it("bypasses replay/admission and revokes an unprovable prior cache entry before a secret-dependent until is evaluated", async () => {
+    let executeCount = 0;
+    const block: BlockImplementation = {
+      manifest: {
+        id: "test.until-secret-cache",
+        version: "1.0.0",
+        capabilities: [],
+        inputSchema: {},
+        outputSchema: {},
+        description: "fixture",
+      },
+      execute: async () => ({ value: ++executeCount }),
+    };
+    const { store, config } = await setup({
+      blocks: { [block.manifest.id]: block },
+      resolveSecret: () => true,
+    });
+    await store.idempotencyLedger.put({
+      resolvedKey: idempotencyStorageKey("shared-until"),
+      runId: "other-run",
+      stepId: "poll",
+      recordedOutput: { value: "cached" },
+      createdAt: new Date().toISOString(),
+      schemaVersion: 2,
+    });
+    const workflow = fixtureWorkflow({
+      execution: {
+        type: "workflow",
+        steps: [
+          {
+            id: "poll",
+            uses: block.manifest.id,
+            idempotencyKey: "shared-until",
+            next: "poll",
+            until: "{{ secrets.STOP }}",
+            maxIterations: 2,
+          },
+          { id: "done", uses: "test.echo" },
+        ],
+      },
+    });
+
+    const outcome = await executeStep(
+      config,
+      fixtureRun(),
+      workflow,
+      workflow.execution.steps[0]!,
+      new Set(),
+      undefined,
+    );
+
+    expect(executeCount).toBe(1);
+    expect(outcome.kind).toBe("continue");
+    if (outcome.kind !== "continue") throw new Error("unreachable");
+    expect(outcome.run.trace[0]?.outputs).toEqual({ value: 1 });
+    await expect(
+      store.idempotencyLedger.get(idempotencyStorageKey("shared-until")),
+    ).resolves.toBeUndefined();
+  });
+
   it("until false: the back-edge (next) IS taken", async () => {
     const { config } = await setup();
     const workflow = fixtureWorkflow({
@@ -424,7 +712,7 @@ describe("executeStep — idempotencyKey (spec §30.2)", () => {
     const outcome = await executeStep(config, run, workflow, workflow.execution.steps[0]!, new Set(), undefined);
     if (outcome.kind !== "continue") throw new Error("unreachable");
     expect(outcome.run.trace[0]?.outputs).toEqual({ echoed: { to: "a@b.com" } });
-    await expect(store.idempotencyLedger.get("run-idem-1:send")).resolves.toBeDefined();
+    await expect(store.idempotencyLedger.get(idempotencyStorageKey("run-idem-1:send"))).resolves.toBeDefined();
   });
 
   it("a second execution with the SAME resolved key replays the recorded output instead of re-executing the block", async () => {
@@ -436,7 +724,7 @@ describe("executeStep — idempotencyKey (spec §30.2)", () => {
         return { sentCount: executeCount };
       },
     };
-    const { config } = await setup({ blocks: { "test.counting": countingBlock } });
+    const { store, config } = await setup({ blocks: { "test.counting": countingBlock } });
     const run = fixtureRun({ runId: "run-idem-2" });
     const workflow = fixtureWorkflow({ execution: { type: "workflow", steps: [{ id: "send", uses: "test.counting", idempotencyKey: "{{ run.id }}:send" }] } });
 
@@ -452,6 +740,11 @@ describe("executeStep — idempotencyKey (spec §30.2)", () => {
     if (second.kind !== "continue") throw new Error("unreachable");
     expect(second.run.trace[0]?.outputs).toEqual({ sentCount: 1 }); // REPLAYED, not sentCount: 2
     expect(executeCount).toBe(1); // block.execute was called exactly once, ever
+    await expect(
+      store.runs.getOperationalState(run.runId),
+    ).resolves.not.toHaveProperty(
+      "pendingIdempotencyReplays",
+    );
   });
 
   it("a step with no idempotencyKey always re-executes (no protection — architecture's documented at-least-once boundary)", async () => {
@@ -476,7 +769,240 @@ describe("executeStep — idempotencyKey (spec §30.2)", () => {
     const run = fixtureRun({ runId: "run-idem-3" });
     const workflow = fixtureWorkflow({ execution: { type: "workflow", steps: [{ id: "s1", uses: "test.fail-idem", idempotencyKey: "{{ run.id }}:s1" }] } });
     await executeStep(config, run, workflow, workflow.execution.steps[0]!, new Set(), undefined);
-    await expect(store.idempotencyLedger.get("run-idem-3:s1")).resolves.toBeUndefined();
+    await expect(store.idempotencyLedger.get(idempotencyStorageKey("run-idem-3:s1"))).resolves.toBeUndefined();
+  });
+
+  it("does not cache output from an invocation that consumed secret data", async () => {
+    const { store, config } = await setup({
+      resolveSecret: () => "secret-value",
+    });
+    const run = fixtureRun({ runId: "run-idem-secret" });
+    const workflow = fixtureWorkflow({
+      execution: {
+        type: "workflow",
+        steps: [
+          {
+            id: "derive",
+            uses: "test.echo",
+            idempotencyKey: "{{ run.id }}:derive",
+            with: { source: "{{ secrets.API_KEY }}" },
+          },
+        ],
+      },
+    });
+
+    await executeStep(
+      config,
+      run,
+      workflow,
+      workflow.execution.steps[0]!,
+      new Set(),
+      undefined,
+    );
+
+    await expect(
+      store.idempotencyLedger.get(idempotencyStorageKey("run-idem-secret:derive")),
+    ).resolves.toBeUndefined();
+  });
+
+  it("does not cache output that matches a secret resolved earlier in the execution segment", async () => {
+    const secret = "secret-from-earlier-step";
+    const returningBlock: BlockImplementation = {
+      manifest: {
+        id: "test.return-existing-secret",
+        version: "1.0.0",
+        capabilities: [],
+        inputSchema: {},
+        outputSchema: {},
+        description: "fixture",
+      },
+      execute: async () => ({ value: secret }),
+    };
+    const { store, config } = await setup({
+      blocks: { [returningBlock.manifest.id]: returningBlock },
+      redact: (record, resolvedSecretRefs) =>
+        [...resolvedSecretRefs].reduce(
+          (redacted, value) =>
+            JSON.parse(
+              JSON.stringify(redacted).replaceAll(value, "[REDACTED]"),
+            ),
+          record,
+        ),
+    });
+    const run = fixtureRun({ runId: "run-idem-existing-secret" });
+    const workflow = fixtureWorkflow({
+      execution: {
+        type: "workflow",
+        steps: [
+          {
+            id: "echo-secret",
+            uses: returningBlock.manifest.id,
+            idempotencyKey: "stable-existing-secret-key",
+          },
+        ],
+      },
+    });
+
+    await executeStep(
+      config,
+      run,
+      workflow,
+      workflow.execution.steps[0]!,
+      new Set([secret]),
+      undefined,
+    );
+
+    await expect(
+      store.idempotencyLedger.get(
+        idempotencyStorageKey("stable-existing-secret-key"),
+      ),
+    ).resolves.toBeUndefined();
+  });
+
+  it("rechecks protected secret refs atomically when another run discovers a secret during dispatch", async () => {
+    const secret = "secret-discovered-during-dispatch";
+    let markStarted: () => void = () => {};
+    let releaseDispatch: () => void = () => {};
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    const gate = new Promise<void>((resolve) => {
+      releaseDispatch = resolve;
+    });
+    const delayedBlock: BlockImplementation = {
+      manifest: {
+        id: "test.delayed-idempotency-output",
+        version: "1.0.0",
+        capabilities: [],
+        inputSchema: {},
+        outputSchema: {},
+        description:
+          "Returns only after another run can expand protected refs.",
+      },
+      execute: async () => {
+        markStarted();
+        await gate;
+        return { value: secret };
+      },
+    };
+    const redact = (
+      record: unknown,
+      refs: ReadonlySet<string>,
+    ): unknown =>
+      JSON.parse(
+        [...refs].reduce(
+          (json, value) =>
+            json.replaceAll(value, "[REDACTED]"),
+          JSON.stringify(record),
+        ),
+      );
+    const { store, config } = await setup({
+      blocks: { [delayedBlock.manifest.id]: delayedBlock },
+      redact,
+    });
+    const run = fixtureRun({
+      runId: "run-idem-concurrent-secret",
+      status: "running",
+    });
+    await store.runs.put(run);
+    await store.runs.putOperationalState(run.runId, {
+      run,
+      resolvedSecretValues: [],
+    });
+    const workflow = fixtureWorkflow({
+      execution: {
+        type: "workflow",
+        steps: [
+          {
+            id: "send",
+            uses: delayedBlock.manifest.id,
+            idempotencyKey: "stable-concurrent-key",
+          },
+        ],
+      },
+    });
+
+    const execution = executeStep(
+      config,
+      run,
+      workflow,
+      workflow.execution.steps[0]!,
+      new Set(),
+      undefined,
+    );
+    await started;
+    await repairGlobalAuditsForNewSecrets(
+      store,
+      redact,
+      new Set([secret]),
+    );
+    releaseDispatch();
+    const outcome = await execution;
+
+    expect(outcome.kind).toBe("continue");
+    await expect(
+      store.idempotencyLedger.get(
+        idempotencyStorageKey("stable-concurrent-key"),
+      ),
+    ).resolves.toBeUndefined();
+    expect(
+      JSON.stringify(await store.runs.get(run.runId)),
+    ).not.toContain(secret);
+    expect(
+      outcome.run.trace.find(
+        (trace) => trace.stepId === "send",
+      ),
+    ).toMatchObject({ secretTainted: true });
+  });
+
+  it("does not replay an unversioned legacy ledger entry", async () => {
+    let executeCount = 0;
+    const block: BlockImplementation = {
+      manifest: {
+        id: "test.versioned-idempotency",
+        version: "1.0.0",
+        capabilities: [],
+        inputSchema: {},
+        outputSchema: {},
+        description: "fixture",
+      },
+      execute: async () => ({ value: ++executeCount }),
+    };
+    const { store, config } = await setup({
+      blocks: { [block.manifest.id]: block },
+    });
+    await store.idempotencyLedger.put({
+      resolvedKey: "stable-key",
+      runId: "legacy-run",
+      stepId: "work",
+      recordedOutput: { value: "legacy-secret" },
+      createdAt: new Date().toISOString(),
+    });
+    const workflow = fixtureWorkflow({
+      execution: {
+        type: "workflow",
+        steps: [
+          {
+            id: "work",
+            uses: block.manifest.id,
+            idempotencyKey: "stable-key",
+          },
+        ],
+      },
+    });
+
+    const outcome = await executeStep(
+      config,
+      fixtureRun(),
+      workflow,
+      workflow.execution.steps[0]!,
+      new Set(),
+      undefined,
+    );
+
+    if (outcome.kind !== "continue") throw new Error("unreachable");
+    expect(outcome.run.trace[0]?.outputs).toEqual({ value: 1 });
+    expect(executeCount).toBe(1);
   });
 });
 
@@ -565,7 +1091,7 @@ describe("executeStep — dry-run mode (S9 reconciliation ledger item 7, archite
     if (dryOutcome.kind !== "continue") throw new Error("unreachable");
     expect(dryOutcome.run.trace[0]?.outputs).toMatchObject({ dryRun: true });
     expect(realCallCount).toBe(0);
-    await expect(store.idempotencyLedger.get("run-dryrun-idem:send")).resolves.toBeUndefined();
+    await expect(store.idempotencyLedger.get(idempotencyStorageKey("run-dryrun-idem:send"))).resolves.toBeUndefined();
 
     // Second: a REAL dispatch of the SAME resolved idempotencyKey — must
     // actually call the real handler (not short-circuited by the dry run's

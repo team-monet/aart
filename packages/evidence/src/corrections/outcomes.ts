@@ -4,6 +4,7 @@
 // recording a correction), because the spec lists them as things a
 // correction *can* do, not things it *always* does." Recording a Correction
 // (correction.ts) never triggers any of these automatically.
+import { randomUUID } from "node:crypto";
 import type { AartStore } from "@aart/store";
 import type { Correction, EvalExample, ImprovementBrief, RunRecord, StepTrace, Workflow } from "@aart/types";
 import {
@@ -12,7 +13,11 @@ import {
   validateWorkflowOutputs,
 } from "@aart/engine/workflow-output-contract";
 import { generateImprovementBrief } from "../improvement-brief.js";
-import { correctionKey } from "./correction.js";
+import {
+  containsKnownSecret,
+  correctionKey,
+  isWritableCorrectionOutputPath,
+} from "./correction.js";
 
 /** Sets a dot-path (e.g. "outputs.nmi") on a plain object, creating intermediate objects as needed. */
 function setByPath(target: Record<string, unknown>, path: string, value: unknown): void {
@@ -36,9 +41,11 @@ function setByPath(target: Record<string, unknown>, path: string, value: unknown
  * §23.3's own example) and flags that trace `postHocCorrected: true`
  * (architecture §5.3 `step_traces.post_hoc_corrected`, F5 fix).
  */
-export async function updateRunOutput(store: AartStore, correction: Correction): Promise<RunRecord> {
-  const run = await store.runs.get(correction.runId);
-  if (!run) throw new Error(`updateRunOutput: no such run "${correction.runId}"`);
+function applyTraceCorrection(
+  run: RunRecord,
+  correction: Correction,
+  updatedAt: string,
+): RunRecord {
   // A step may have more than one trace after a loop/back-edge or reclaim.
   // Expression projection uses the latest matching trace, so corrections
   // without an explicit sequence target that same observable occurrence.
@@ -46,17 +53,30 @@ export async function updateRunOutput(store: AartStore, correction: Correction):
   if (traceIndex === -1) throw new Error(`updateRunOutput: run "${correction.runId}" has no step "${correction.stepId}"`);
 
   const original = run.trace[traceIndex]!;
-  const updatedTrace: StepTrace = { ...original, postHocCorrected: true };
+  const updatedTrace: StepTrace = structuredClone({
+    ...original,
+    postHocCorrected: true,
+  });
   setByPath(updatedTrace as unknown as Record<string, unknown>, correction.fieldPath, correction.corrected);
 
   let trace = run.trace.map((t, i) => (i === traceIndex ? updatedTrace : t));
-  const forEachMatch = /^(.*)\[(\d+)\]$/.exec(correction.stepId);
+  const legacyForEachMatch =
+    original.authoredStepId === undefined
+      ? /^(.*)\[(\d+)\]$/.exec(correction.stepId)
+      : null;
+  const parentStepId =
+    original.iterationIndex !== undefined
+      ? original.authoredStepId
+      : legacyForEachMatch?.[1];
+  const itemIndex =
+    original.iterationIndex !== undefined
+      ? String(original.iterationIndex)
+      : legacyForEachMatch?.[2];
   if (
-    forEachMatch &&
+    parentStepId !== undefined &&
+    itemIndex !== undefined &&
     (correction.fieldPath === "outputs" || correction.fieldPath.startsWith("outputs."))
   ) {
-    const parentStepId = forEachMatch[1]!;
-    const itemIndex = forEachMatch[2]!;
     const aggregateIndex = trace.findLastIndex(
       (candidate, index) => index > traceIndex && candidate.stepId === parentStepId,
     );
@@ -75,30 +95,202 @@ export async function updateRunOutput(store: AartStore, correction: Correction):
       trace = trace.map((candidate, index) => (index === aggregateIndex ? aggregate : candidate));
     }
   }
-  let outputs = run.outputs;
+  return {
+    ...run,
+    trace,
+    updatedAt,
+  };
+}
+
+async function refreshCompletedCorrectionOutputs(
+  store: AartStore,
+  run: RunRecord,
+): Promise<RunRecord> {
   // Failed/cancelled runs are intentionally partial evidence: correcting a
   // trace must remain possible even when required output sources never ran.
   // Modern completed runs with a public projection promise a fully
   // materialized contract. Legacy completed records may predate that field
   // and carry no parseable workflow definition in their old snapshots; in
   // that case the trace correction remains valid without inventing outputs.
-  if (run.status === "completed" && run.outputs !== undefined) {
-    const workflow = await resolveWorkflowForRun(store, run);
-    const correctedProjection = { ...run, trace };
-    if (workflow.execution.outputMapping) {
-      outputs = await materializeWorkflowOutputs(workflow, correctedProjection);
-      validateWorkflowOutputs(workflow, outputs);
-    }
+  if (run.status !== "completed" || run.outputs === undefined) {
+    return run;
   }
+  const workflow = await resolveWorkflowForRun(store, run);
+  if (!workflow.execution.outputMapping) return run;
+  const outputs = await materializeWorkflowOutputs(workflow, run);
+  validateWorkflowOutputs(workflow, outputs);
+  return { ...run, outputs };
+}
 
-  const updatedRun: RunRecord = {
-    ...run,
-    trace,
-    outputs,
-    updatedAt: new Date().toISOString(),
-  };
-  await store.runs.put(updatedRun);
-  return updatedRun;
+export async function updateRunOutput(store: AartStore, correction: Correction): Promise<RunRecord> {
+  return store.transact(async (tx) => {
+    const operationalTarget =
+      await tx.corrections.getOperationalTarget(
+        correction,
+      );
+    const targetedCorrection: Correction = {
+      ...correction,
+      ...(operationalTarget ?? {}),
+    };
+    if (
+      !isWritableCorrectionOutputPath(
+        targetedCorrection.fieldPath,
+      )
+    ) {
+      throw new Error(
+        `updateRunOutput: correction target is not a writable step output path; corrections cannot change trace identity, lifecycle, inputs, engine security metadata, or object prototypes`,
+      );
+    }
+    if (
+      targetedCorrection.fieldPath === "outputs" &&
+      (targetedCorrection.corrected === null ||
+        typeof targetedCorrection.corrected !== "object" ||
+        Array.isArray(targetedCorrection.corrected))
+    ) {
+      throw new Error(
+        'updateRunOutput: replacing "outputs" requires an object value',
+      );
+    }
+    const publicRun = await tx.runs.get(correction.runId);
+    if (!publicRun) {
+      throw new Error(
+        `updateRunOutput: no such run "${correction.runId}"`,
+      );
+    }
+    if (
+      publicRun.status === "pending" ||
+      publicRun.status === "running"
+    ) {
+      throw new Error(
+        `updateRunOutput: run "${correction.runId}" is actively executing; corrections are accepted only at a durable wait or terminal boundary`,
+      );
+    }
+
+    const waits =
+      publicRun.status === "waiting"
+        ? await tx.waits.list({
+            runId: correction.runId,
+          })
+        : [];
+    const firstWait = waits[0];
+    if (
+      publicRun.status === "waiting" &&
+      firstWait === undefined
+    ) {
+      throw new Error(
+        `updateRunOutput: waiting run "${correction.runId}" has no durable wait boundary`,
+      );
+    }
+    const protectedState =
+      publicRun.status === "waiting"
+        ? await tx.waits.getOperationalRunState(
+            firstWait!.runId,
+            firstWait!.stepId,
+          )
+        : await tx.runs.getOperationalState(
+            correction.runId,
+          );
+    const effectiveProtectedState =
+      protectedState ??
+      (publicRun.status === "completed" ||
+      publicRun.status === "failed" ||
+      publicRun.status === "cancelled"
+        ? {
+            run: publicRun,
+            resolvedSecretValues: [],
+          }
+        : undefined);
+    if (
+      containsKnownSecret(
+        correction.corrected,
+        effectiveProtectedState?.resolvedSecretValues ?? [],
+      )
+    ) {
+      throw new Error(
+        `updateRunOutput: corrected value contains a secret already known to run "${correction.runId}" and cannot be published`,
+      );
+    }
+
+    const updatedAt = new Date().toISOString();
+    let updatedPublic = applyTraceCorrection(
+      publicRun,
+      targetedCorrection,
+      updatedAt,
+    );
+    updatedPublic = await refreshCompletedCorrectionOutputs(
+      tx,
+      updatedPublic,
+    );
+
+    let updatedProtected: RunRecord | undefined;
+    if (
+      effectiveProtectedState !== undefined ||
+      publicRun.status === "waiting"
+    ) {
+      const protectedRun =
+        effectiveProtectedState?.run ?? publicRun;
+      const protectedTarget = protectedRun.trace.findLast(
+        (trace) =>
+          trace.stepId === targetedCorrection.stepId,
+      );
+      if (
+        publicRun.status === "waiting" &&
+        protectedTarget?.status !== "completed"
+      ) {
+        throw new Error(
+          `updateRunOutput: waiting run "${correction.runId}" can correct only an already-completed trace; the unresolved wait result is owned by its eventual resume payload`,
+        );
+      }
+      updatedProtected = applyTraceCorrection(
+        protectedRun,
+        targetedCorrection,
+        updatedAt,
+      );
+      updatedProtected =
+        await refreshCompletedCorrectionOutputs(
+          tx,
+          updatedProtected,
+        );
+    }
+
+    if (
+      publicRun.status === "waiting" &&
+      firstWait !== undefined
+    ) {
+      await tx.waits.replaceOperationalRunState(
+        correction.runId,
+        {
+          run: updatedProtected ?? updatedPublic,
+          resolvedSecretValues:
+            effectiveProtectedState?.resolvedSecretValues ?? [],
+          ...(effectiveProtectedState?.pendingIdempotencyReplays !==
+          undefined
+            ? {
+                pendingIdempotencyReplays:
+                  effectiveProtectedState.pendingIdempotencyReplays,
+              }
+            : {}),
+        },
+      );
+    } else if (updatedProtected !== undefined) {
+      const {
+        pendingIdempotencyReplays: _settledClaims,
+        ...archiveBase
+      } = effectiveProtectedState ?? {};
+      await tx.runs.putOperationalState(
+        correction.runId,
+        {
+          ...archiveBase,
+          run: updatedProtected,
+          resolvedSecretValues:
+            effectiveProtectedState?.resolvedSecretValues ?? [],
+        },
+      );
+    }
+
+    await tx.runs.put(updatedPublic);
+    return updatedPublic;
+  });
 }
 
 export interface CreateEvalExampleOptions {
@@ -121,18 +313,40 @@ export async function createEvalExampleFromCorrection(
   suiteId: string,
   options: CreateEvalExampleOptions = {},
 ): Promise<EvalExample> {
-  const example: EvalExample = {
-    id: options.id ?? `ex_${correctionKey(correction).replace(/[^a-zA-Z0-9]/g, "_")}_${Date.now()}`,
-    suiteId,
-    sourceRunId: correction.runId,
-    input: { stepId: correction.stepId, fieldPath: correction.fieldPath, observed: correction.observed },
-    expected: correction.corrected,
-    scorerConfig: options.scorerConfig,
-    tags: options.tags ?? ["correction"],
-    createdFromCorrection: correctionKey(correction),
-  };
-  await store.evals.putExample(example);
-  return example;
+  return store.transact(async (tx) => {
+    const candidates = await tx.corrections.list({
+      runId: correction.runId,
+      stepId: correction.stepId,
+    });
+    const currentCorrection =
+      candidates.find(
+        (candidate) =>
+          candidate.fieldPath === correction.fieldPath,
+      ) ??
+      (await tx.corrections.findByOperationalTarget(
+        correction.runId,
+        correction.stepId,
+        correction.fieldPath,
+      )) ??
+      correction;
+    const example: EvalExample = {
+      id: options.id ?? `ex_${randomUUID()}`,
+      suiteId,
+      sourceRunId: currentCorrection.runId,
+      input: {
+        stepId: currentCorrection.stepId,
+        fieldPath: currentCorrection.fieldPath,
+        observed: currentCorrection.observed,
+      },
+      expected: currentCorrection.corrected,
+      scorerConfig: options.scorerConfig,
+      tags: options.tags ?? ["correction"],
+      createdFromCorrection:
+        correctionKey(currentCorrection),
+    };
+    await tx.evals.putExample(example);
+    return example;
+  });
 }
 
 /**

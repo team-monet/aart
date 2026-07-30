@@ -71,6 +71,17 @@ async function main() {
     // not just "the query didn't throw."
     const eventsColumns = handle.db.prepare("PRAGMA table_info(events)").all();
     const hasEventsTable = eventsColumns.length > 0;
+    const idempotencyColumns = handle.db.prepare("PRAGMA table_info(idempotency_ledger)").all();
+    const hasIdempotencySchemaVersionColumn = idempotencyColumns.some((c) => c.name === "schema_version");
+    const runColumns = handle.db.prepare("PRAGMA table_info(runs)").all();
+    const hasRunRootTaintColumns = [
+      "secret_tainted_input_paths_json",
+      "secret_tainted_trigger_paths_json",
+    ].every((name) => runColumns.some((c) => c.name === name));
+    const artifactColumns = handle.db.prepare("PRAGMA table_info(artifacts)").all();
+    const hasArtifactAuditVisibilityColumn = artifactColumns.some(
+      (c) => c.name === "redaction_audit_visible",
+    );
     // A cheap real write through the fully-migrated schema — not just a
     // watermark-number check, but proof the schema this process's own
     // connection sees is genuinely usable end to end (the same store
@@ -89,7 +100,7 @@ async function main() {
     // schema-shape check" discipline the workflows.put call above already
     // established.
     await handle.store.events.append({ id: `race-check-event-${label}`, type: "run.started", occurredAt: new Date().toISOString(), summary: "race check" });
-    emit({ label, ok: true, watermark: watermarkRow?.version, hasPromotedColumn, hasAuthenticatedAsColumn, hasEventsTable });
+    emit({ label, ok: true, watermark: watermarkRow?.version, hasPromotedColumn, hasAuthenticatedAsColumn, hasEventsTable, hasIdempotencySchemaVersionColumn, hasRunRootTaintColumns, hasArtifactAuditVisibilityColumn });
   } finally {
     handle.close();
   }

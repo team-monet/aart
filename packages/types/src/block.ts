@@ -40,8 +40,18 @@ export type BlockManifest = z.infer<typeof BlockManifestSchema>;
 export interface BlockExecutionContext {
   readonly runId: string;
   readonly stepId: string;
-  /** Resolves a `secrets.<NAME>`-style symbolic reference to its value — same injected-resolver pattern @aart/expr's secretResolver uses (architecture §3.2), never a direct secret-adapter import from inside a block. */
-  resolveSecret(ref: string): Promise<string>;
+  /**
+   * Resolves a `secrets.<NAME>`-style symbolic reference. `data` is the
+   * safe default: arbitrary outputs from that invocation are treated as
+   * secret-derived. Connector/authentication blocks may request
+   * `credential` when the value is used only at an authentication boundary
+   * and is never reflected into block output, but the engine independently
+   * decides whether that implementation is trusted for the exemption.
+   */
+  resolveSecret(
+    ref: string,
+    options?: { usage?: "data" | "credential" },
+  ): Promise<string>;
   /** Writes an Artifact's bytes + metadata and returns its store identity. */
   writeArtifact(input: {
     name: string;

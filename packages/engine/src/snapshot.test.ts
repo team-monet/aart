@@ -96,6 +96,51 @@ describe("resolveWorkflowForRun", () => {
     expect(resolved.name).toBe("Original"); // NOT "Edited after the run started"
   });
 
+  it("uses the sealed terminal snapshot when public repair withheld the definition and the live version was overwritten", async () => {
+    const store = await setup();
+    const originalWorkflow = fixtureWorkflow({
+      id: "wf-sealed-history",
+      version: "1.0.0",
+      name: "Original historical workflow",
+    });
+    const overwrittenLive = fixtureWorkflow({
+      id: originalWorkflow.id,
+      version: originalWorkflow.version,
+      name: "Overwritten live workflow",
+    });
+    const exactRun = fixtureRun({
+      status: "completed",
+      workflowId: originalWorkflow.id,
+      workflowVersion: originalWorkflow.version,
+      snapshot: {
+        definitions: originalWorkflow,
+        resolvedVersions: {},
+        packHashes: {},
+        capturedAt: new Date().toISOString(),
+      },
+    });
+    const publicRun = {
+      ...exactRun,
+      snapshot: {
+        ...exactRun.snapshot,
+        definitions: null,
+      },
+    };
+    await store.workflows.put(overwrittenLive);
+    await store.runs.put(publicRun);
+    await store.runs.putOperationalState(exactRun.runId, {
+      run: exactRun,
+      resolvedSecretValues: ["historical"],
+    });
+
+    const resolved = await resolveWorkflowForRun(
+      store,
+      publicRun,
+    );
+
+    expect(resolved).toEqual(originalWorkflow);
+  });
+
   it("throws a clear error when no snapshot exists AND the store has no matching workflow (a genuinely broken reference)", async () => {
     const store = await setup();
     const run = fixtureRun({ workflowId: "does-not-exist", workflowVersion: "9.9.9", snapshot: uncapturedSnapshot() });

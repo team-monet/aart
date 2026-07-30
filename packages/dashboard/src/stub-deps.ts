@@ -34,10 +34,15 @@
 // tracked as a distinct, not-yet-done follow-up, not silently assumed
 // resolved).
 import type { AartStore } from "@aart/store";
-import type { ApprovalTask, Correction, EvalExample, EvalRun, EvalSuite, ImprovementBrief, RunRecord, Scorer, StepTrace, Workflow } from "@aart/types";
+import type { ApprovalTask, Correction, EvalExample, EvalRun, EvalSuite, ImprovementBrief, RunRecord, Scorer, Workflow } from "@aart/types";
 import { compactModelFacingOutputs } from "@aart/types";
 import { computeApprovalState, evaluatePromotionForEnvironment, REQUIRED_GATES_BY_MODE, semanticRiskDiff as governanceSemanticRiskDiff } from "@aart/governance";
 import { promoteWorkflowVersionToEnvironment } from "@aart/server";
+import {
+  createEvalExampleFromCorrection as evidenceCreateEvalExampleFromCorrection,
+  recordCorrection as evidenceRecordCorrection,
+  updateRunOutput as evidenceUpdateRunOutput,
+} from "@aart/evidence";
 import { buildCapabilityClosureLookup, closureFor } from "./capability-catalog.js";
 import type { Clock } from "./clock.js";
 import { systemClock } from "./clock.js";
@@ -230,45 +235,30 @@ export function makeRecordCorrection(clock: Clock = systemClock) {
     store: AartStore,
     input: { runId: string; stepId: string; fieldPath: string; observed: unknown; corrected: unknown; reason: string; reviewer: string },
   ): Promise<Correction> {
-    const correction: Correction = { ...input, createdAt: clock.nowIso() };
-    await store.corrections.put(correction);
-    return correction;
+    return evidenceRecordCorrection(
+      store,
+      input,
+      () => clock.now(),
+    );
   };
 }
 
-/** Applies `correction.corrected` to the run: a `fieldPath` of the literal form `outputs.<key>` patches `RunRecord.outputs`; anything else is treated as `<key>` inside the named step's own StepTrace.outputs (and marks that trace `postHocCorrected: true`, architecture §5.3's F5 fix / spec §23.4's "update current run output" outcome). */
-export async function updateRunOutput(store: AartStore, correction: Correction): Promise<RunRecord> {
-  const run = await store.runs.get(correction.runId);
-  if (!run) throw new Error(`run not found: ${correction.runId}`);
-
-  if (correction.fieldPath.startsWith("outputs.")) {
-    const key = correction.fieldPath.slice("outputs.".length);
-    const updated: RunRecord = { ...run, outputs: { ...run.outputs, [key]: correction.corrected } };
-    await store.runs.put(updated);
-    return updated;
-  }
-
-  const trace: StepTrace[] = run.trace.map((t) =>
-    t.stepId === correction.stepId ? { ...t, outputs: { ...t.outputs, [correction.fieldPath]: correction.corrected }, postHocCorrected: true } : t,
-  );
-  const updated: RunRecord = { ...run, trace };
-  await store.runs.put(updated);
-  return updated;
+/** Dashboard compatibility export routed through the canonical evidence policy. */
+export async function updateRunOutput(
+  store: AartStore,
+  correction: Correction,
+): Promise<RunRecord> {
+  return evidenceUpdateRunOutput(store, correction);
 }
 
 export function makeCreateEvalExampleFromCorrection() {
   return async function createEvalExampleFromCorrection(store: AartStore, correction: Correction, suiteId: string, _options?: unknown): Promise<EvalExample> {
     void _options;
-    const example: EvalExample = {
-      id: generateId("evalex"),
+    return evidenceCreateEvalExampleFromCorrection(
+      store,
+      correction,
       suiteId,
-      sourceRunId: correction.runId,
-      input: { stepId: correction.stepId, fieldPath: correction.fieldPath, observed: correction.observed },
-      expected: correction.corrected,
-      createdFromCorrection: `${correction.runId}:${correction.stepId}:${correction.fieldPath}:${correction.createdAt}`,
-    };
-    await store.evals.putExample(example);
-    return example;
+    );
   };
 }
 

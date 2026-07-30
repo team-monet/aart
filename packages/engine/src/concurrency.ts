@@ -102,16 +102,43 @@ export async function releaseQueuedRuns(
   key: string,
   keyFormat: unknown,
 ): Promise<RunRecord | undefined> {
-  const candidates = await store.runs.list({ workflowId, status: "pending" });
-  const queued = candidates
-    .filter(
-      (r) => r.params?.waitingOnConcurrency === true && concurrencyKeysEqual(r, key, keyFormat),
-    )
-    .sort((a, b) => a.startedAt.localeCompare(b.startedAt));
-  const next = queued[0];
-  if (!next) return undefined;
-  const released: RunRecord = { ...next, params: { ...next.params, waitingOnConcurrency: false } };
-  await store.runs.put(released);
-  await store.jobQueue.enqueue(released.runId);
-  return released;
+  return store.transact(async (tx) => {
+    const candidates = await tx.runs.list({
+      workflowId,
+      status: "pending",
+    });
+    const queued = candidates
+      .filter(
+        (r) =>
+          r.params?.waitingOnConcurrency === true &&
+          concurrencyKeysEqual(r, key, keyFormat),
+      )
+      .sort((a, b) => a.startedAt.localeCompare(b.startedAt));
+    const next = queued[0];
+    if (!next) return undefined;
+    const released: RunRecord = {
+      ...next,
+      params: {
+        ...next.params,
+        waitingOnConcurrency: false,
+      },
+    };
+    const operationalState =
+      await tx.runs.getOperationalState(released.runId);
+    await tx.runs.put(released);
+    if (operationalState !== undefined) {
+      await tx.runs.putOperationalState(released.runId, {
+        ...operationalState,
+        run: {
+          ...operationalState.run,
+          params: {
+            ...operationalState.run.params,
+            waitingOnConcurrency: false,
+          },
+        },
+      });
+    }
+    await tx.jobQueue.enqueue(released.runId);
+    return released;
+  });
 }

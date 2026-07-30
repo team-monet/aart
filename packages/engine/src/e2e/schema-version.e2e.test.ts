@@ -60,15 +60,15 @@ describe("rolling-upgrade / schema-version E2E — real process boundary, real h
 
       // Process A: the real, unmodified engine (no --schemaVersion override) triggers a run to its wait.manual checkpoint.
       const triggered = await runScript(["--mode=trigger-and-wait", `--root=${root}`, "--workflowId=schema-compat"]);
-      expect(triggered).toMatchObject({ event: "triggered", status: "waiting", schemaVersion: 1 });
+      expect(triggered).toMatchObject({ event: "triggered", status: "waiting", schemaVersion: 2 });
       const runId = triggered["runId"] as string;
 
-      // Confirm what's actually on disk before resuming — both RunRecord and the WaitCondition carry schemaVersion 1.
+      // Confirm what's actually on disk before resuming — both RunRecord and the WaitCondition carry schemaVersion 2.
       const store = createFsStore(root);
       const persisted = await store.runs.get(runId);
-      expect(persisted?.schemaVersion).toBe(1);
+      expect(persisted?.schemaVersion).toBe(2);
       const wait = await store.waits.get(runId, "pause");
-      expect(wait?.schemaVersion).toBe(1);
+      expect(wait?.schemaVersion).toBe(2);
 
       // Process B: a COMPLETELY FRESH process, also the real unmodified engine — resumes successfully.
       const resumed = await runScript(["--mode=resume", `--root=${root}`, `--runId=${runId}`, "--stepId=pause"]);
@@ -82,7 +82,7 @@ describe("rolling-upgrade / schema-version E2E — real process boundary, real h
   );
 
   it(
-    "INCOMPATIBLE path: a run+wait persisted by a --schemaVersion=2 process (modeling a newer engine build's bumped constant) is loudly refused, not silently misinterpreted, by a fresh process running the real (schemaVersion 1) engine",
+    "INCOMPATIBLE path: a legacy schemaVersion=1 run+wait is loudly refused, not silently misinterpreted, by a fresh process running the real schemaVersion=2 engine",
     async () => {
       const root = await mkdtemp(join(tmpdir(), "aart-e2e-schema-version-incompat-"));
       roots.push(root);
@@ -92,44 +92,42 @@ describe("rolling-upgrade / schema-version E2E — real process boundary, real h
       // omitted — the resume-time check is hardcoded against the literal
       // constant, so a differently-configured engine can't even complete
       // its own trigger sequence, see schema-version-runner.mjs's header
-      // comment for the full reasoning) — then --schemaVersion=2 re-tags
+      // comment for the full reasoning) — then --schemaVersion=1 re-tags
       // ONLY the schemaVersion field on that real, already-correct
-      // checkpoint, modeling what a real v2 build's own bumped constant
-      // would have stamped on an otherwise-identical run.
-      const triggered = await runScript(["--mode=trigger-and-wait", `--root=${root}`, "--workflowId=schema-incompat", "--schemaVersion=2"]);
-      expect(triggered).toMatchObject({ event: "triggered", status: "waiting", schemaVersion: 2 });
+      // checkpoint, modeling a legacy v1 build's persisted record.
+      const triggered = await runScript(["--mode=trigger-and-wait", `--root=${root}`, "--workflowId=schema-incompat", "--schemaVersion=1"]);
+      expect(triggered).toMatchObject({ event: "triggered", status: "waiting", schemaVersion: 1 });
       const runId = triggered["runId"] as string;
 
       const store = createFsStore(root);
-      expect((await store.runs.get(runId))?.schemaVersion).toBe(2);
-      expect((await store.waits.get(runId, "pause"))?.schemaVersion).toBe(2);
+      expect((await store.runs.get(runId))?.schemaVersion).toBe(1);
+      expect((await store.waits.get(runId, "pause"))?.schemaVersion).toBe(1);
 
       // Process D: a completely fresh process running the REAL, unmodified
       // engine (no --schemaVersion override — its hardcoded resume-time
       // check always compares against the actual CURRENT_ENGINE_SCHEMA_
-      // VERSION constant, 1) attempts to resume a run tagged 2.
+      // VERSION constant, 2) attempts to resume a run tagged 1.
       const resumeAttempt = await runScript(["--mode=resume", `--root=${root}`, `--runId=${runId}`, "--stepId=pause"]);
       expect(resumeAttempt).toMatchObject({ event: "resume-error", isSchemaVersionMismatchError: true });
-      expect(resumeAttempt["message"]).toContain("schemaVersion 2");
+      expect(resumeAttempt["message"]).toContain("schemaVersion 1");
       expect(resumeAttempt["message"]).toContain("does not recognize as compatible");
       expect(resumeAttempt["message"]).toContain("refusing to resume");
-      expect(resumeAttempt["detail"]).toMatchObject({ kind: "schemaVersionMismatch", recordVersion: 2, engineVersion: 1 });
+      expect(resumeAttempt["detail"]).toMatchObject({ kind: "schemaVersionMismatch", recordVersion: 1, engineVersion: 2 });
 
       // The critical safety property: the run was NOT silently mutated,
       // half-resumed, or corrupted by the refused attempt — it's exactly
-      // as Process C left it, still genuinely waiting, still tagged 2, its
-      // wait checkpoint intact for a REAL version-2-compatible engine to
-      // resume correctly later.
+      // as Process C left it, still genuinely waiting, still tagged 1, its
+      // wait checkpoint intact for a legacy-compatible migration tool.
       const stillWaiting = await store.runs.get(runId);
       expect(stillWaiting?.status).toBe("waiting");
-      expect(stillWaiting?.schemaVersion).toBe(2);
+      expect(stillWaiting?.schemaVersion).toBe(1);
       // "pause" itself has its own trace entry (status: "waiting", recorded
       // when the wait was entered) alongside "before" — the refused resume
       // attempt added nothing further and removed nothing.
       expect(stillWaiting!.trace.map((t) => t.stepId)).toEqual(["before", "pause"]);
       expect(stillWaiting!.trace.find((t) => t.stepId === "pause")?.status).toBe("waiting");
       const waitStillThere = await store.waits.get(runId, "pause");
-      expect(waitStillThere?.schemaVersion).toBe(2);
+      expect(waitStillThere?.schemaVersion).toBe(1);
     },
     20_000,
   );

@@ -11,15 +11,56 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { MigrationRunner } from "../../migrations/index.js";
-import type { AartStore } from "../../types.js";
-import { openSqliteDb } from "./db.js";
+import type {
+  AartStore,
+  WaitOperationalRunState,
+} from "../../types.js";
+import { createDirectExec, openSqliteDb } from "./db.js";
 import { openSqliteStore, type SqliteStoreHandle } from "./index.js";
 import { ALL_SQLITE_MIGRATIONS } from "./migrations.js";
+import { SqliteArtifactStore } from "./stores/artifacts.js";
 import { SqliteMigrationWatermarkStore } from "./watermark.js";
 
 let dir: string;
 let handle: SqliteStoreHandle;
 let store: AartStore;
+
+function continuationState(
+  secret: string,
+): WaitOperationalRunState {
+  const now = new Date().toISOString();
+  return {
+    run: {
+      runId: "run_state_replay",
+      workflowId: "wf",
+      workflowVersion: "1",
+      status: "waiting",
+      approved: true,
+      approvalMode: "governed",
+      trigger: {
+        type: "manual",
+        id: "trigger",
+        source: "cli",
+        payload: null,
+        receivedAt: now,
+      },
+      inputs: { secret },
+      trace: [],
+      waits: [{ type: "manual", schemaVersion: 1 }],
+      artifacts: [],
+      snapshot: {
+        definitions: {},
+        resolvedVersions: {},
+        packHashes: {},
+        capturedAt: now,
+      },
+      startedAt: now,
+      updatedAt: now,
+      schemaVersion: 1,
+    },
+    resolvedSecretValues: [secret],
+  };
+}
 
 beforeEach(async () => {
   dir = await fs.mkdtemp(join(tmpdir(), "aart-store-sqlite-"));
@@ -38,9 +79,9 @@ describe("SQLite adapter — connection setup (architecture §5.1)", () => {
     expect(row.journal_mode).toBe("wal");
   });
 
-  it("auto-runs migrations by default, advancing the watermark to the latest ordinal (4, since V1's 0004_events_table — AMENDMENTS.md A61; was 3 as of D2a's 0003_approval_task_authenticated_as, AMENDMENTS.md A59)", async () => {
+  it("auto-runs migrations by default, advancing the watermark to the latest ordinal (13, including sealed correction targets)", async () => {
     const watermark = new SqliteMigrationWatermarkStore(handle.db);
-    await expect(watermark.read()).resolves.toBe(4);
+    await expect(watermark.read()).resolves.toBe(13);
   });
 
   it("runMigrations: false skips DDL — store calls fail against the not-yet-created schema", async () => {
@@ -61,18 +102,147 @@ describe("SQLite adapter — connection setup (architecture §5.1)", () => {
       const runner = new MigrationRunner(ALL_SQLITE_MIGRATIONS(handle3.db), new SqliteMigrationWatermarkStore(handle3.db), handle3.store);
       await expect(runner.currentVersion()).resolves.toBe(0);
       // D1 (AMENDMENTS.md A56) + D2a (AMENDMENTS.md A59) + V1 (AMENDMENTS.md
-      // A61): four migrations now registered (0001_init,
+      // A61) plus secret-taint ledger, root provenance, sealed waits, and
+      // operation-generation, protected-continuation metadata, and artifact
+      // audit visibility and sealed correction targets: thirteen migrations
+      // now
+      // registered (0001_init,
       // 0002_deployment_promoted, 0003_approval_task_authenticated_as,
-      // 0004_events_table) — up() from watermark 0 applies all four in one
+      // 0004_events_table, 0005_idempotency_schema_version,
+      // 0006_run_root_taint_paths + 0007_secret_audit_provenance +
+      // 0008_sealed_operational_state +
+      // 0009_wait_operation_generation +
+      // 0010_protected_continuation_state +
+      // 0011_artifact_audit_visibility +
+      // 0012_artifact_blob_generation +
+      // 0013_correction_operational_target) — up() from
+      // watermark 0 applies all thirteen in one
       // call, landing on the latest ordinal.
-      await expect(runner.up()).resolves.toBe(4);
+      await expect(runner.up()).resolves.toBe(13);
       await expect(handle3.store.workflows.listWorkflowIds()).resolves.toEqual([]);
       // Idempotent re-run.
-      await expect(runner.up()).resolves.toBe(4);
+      await expect(runner.up()).resolves.toBe(13);
     } finally {
       handle3.close();
       await fs.rm(dir3, { recursive: true, force: true });
     }
+  });
+});
+
+describe("SQLite adapter — sealed operational generations", () => {
+  it("rejects a prior continuation ciphertext after replacement", async () => {
+    const first = continuationState("first-secret");
+    await store.waits.put(
+      first.run.runId,
+      "pause",
+      { type: "manual", schemaVersion: 1 },
+      new Date().toISOString(),
+      first,
+    );
+    const firstRow = handle.db
+      .prepare(
+        `SELECT operational_generation,
+                operational_run_state_ciphertext
+         FROM waits
+         WHERE run_id = ? AND step_id = ?`,
+      )
+      .get(first.run.runId, "pause") as {
+        operational_generation: string;
+        operational_run_state_ciphertext: string;
+      };
+
+    await store.waits.replaceOperationalRunState(
+      first.run.runId,
+      continuationState("second-secret"),
+    );
+    const secondRow = handle.db
+      .prepare(
+        `SELECT operational_generation
+         FROM waits
+         WHERE run_id = ? AND step_id = ?`,
+      )
+      .get(first.run.runId, "pause") as {
+        operational_generation: string;
+      };
+    expect(secondRow.operational_generation).not.toBe(
+      firstRow.operational_generation,
+    );
+
+    handle.db
+      .prepare(
+        `UPDATE waits
+         SET operational_run_state_ciphertext = ?
+         WHERE run_id = ? AND step_id = ?`,
+      )
+      .run(
+        firstRow.operational_run_state_ciphertext,
+        first.run.runId,
+        "pause",
+      );
+    await expect(
+      store.waits.getOperationalRunState(
+        first.run.runId,
+        "pause",
+      ),
+    ).rejects.toThrow();
+  });
+
+  it("rejects a prior unconsumed signal ciphertext after audit replacement", async () => {
+    const signal = {
+      id: "signal_state_replay",
+      name: "signal-name",
+      correlationId: "signal-correlation",
+      payload: { token: "first-secret" },
+      receivedAt: "2026-01-01T00:00:00.000Z",
+    };
+    await store.signals.append(signal);
+    const firstRow = handle.db
+      .prepare(
+        `SELECT operational_generation,
+                operational_signal_ciphertext
+         FROM signals
+         WHERE signal_id = ?`,
+      )
+      .get(signal.id) as {
+        operational_generation: string;
+        operational_signal_ciphertext: string;
+      };
+
+    await store.signals.replaceAudit(
+      signal.id,
+      {
+        name: "[REDACTED]",
+        correlationId: "[REDACTED]",
+        payload: { token: "[REDACTED]" },
+      },
+      ["first-secret"],
+    );
+    const secondRow = handle.db
+      .prepare(
+        `SELECT operational_generation
+         FROM signals
+         WHERE signal_id = ?`,
+      )
+      .get(signal.id) as {
+        operational_generation: string;
+      };
+    expect(secondRow.operational_generation).not.toBe(
+      firstRow.operational_generation,
+    );
+
+    handle.db
+      .prepare(
+        `UPDATE signals
+         SET operational_signal_ciphertext = ?
+         WHERE signal_id = ?`,
+      )
+      .run(firstRow.operational_signal_ciphertext, signal.id);
+    await expect(
+      store.signals.findUnconsumedMatch(
+        signal.name,
+        signal.correlationId,
+      ),
+    ).rejects.toThrow();
   });
 });
 
@@ -128,6 +298,177 @@ describe("SQLite adapter — job_queue claim race safety across connections (arc
     const future = new Date(Date.now() + 60_000).toISOString();
     await store.jobQueue.setClaim("run_race_3", "worker-B", future);
     await expect(store.jobQueue.get("run_race_3")).resolves.toMatchObject({ claimedBy: "worker-B" });
+  });
+});
+
+describe("SQLite adapter — artifact redaction recovery", () => {
+  const artifact = {
+    id: "artifact-redaction-recovery",
+    runId: "run-redaction-recovery",
+    stepId: "write",
+    name: "late-secret",
+    kind: "late-secret",
+    mime: "text/late-secret",
+    path: "late-secret/report.txt",
+    bytes: 11,
+    createdAt: "2026-01-01T00:00:00.000Z",
+  };
+  const safeAudit = {
+    name: "[REDACTED]",
+    kind: "[REDACTED]",
+    mime: "text/[REDACTED]",
+    path: "[REDACTED]/report.txt",
+  };
+  const safeBytes = new TextEncoder().encode("[REDACTED]");
+
+  it("rolls metadata and blob repair back with the enclosing transaction", async () => {
+    await store.artifacts.put(
+      artifact,
+      new TextEncoder().encode("late-secret"),
+    );
+    await expect(
+      store.transact(async (tx) => {
+        await tx.artifacts.replaceAudit(
+          artifact.id,
+          safeAudit,
+          safeBytes,
+        );
+        throw new Error("later repair failed");
+      }),
+    ).rejects.toThrow("later repair failed");
+
+    await expect(
+      store.artifacts.getMetadata(artifact.id),
+    ).resolves.toEqual(artifact);
+    await expect(
+      store.artifacts.getBytes(artifact.id),
+    ).resolves.toEqual(
+      new TextEncoder().encode("late-secret"),
+    );
+  });
+
+  it("publishes a committed immutable blob generation immediately and reconciles its journal on restart", async () => {
+    const dbPath = join(dir, "aart.db");
+    const blobsDir = `${dbPath}.blobs`;
+    await store.artifacts.put(
+      artifact,
+      new TextEncoder().encode("late-secret"),
+    );
+    handle.db.exec("BEGIN IMMEDIATE");
+    const crashScopedArtifacts = new SqliteArtifactStore(
+      createDirectExec(handle.db),
+      blobsDir,
+      true,
+    );
+    await crashScopedArtifacts.replaceAudit(
+      artifact.id,
+      safeAudit,
+      safeBytes,
+    );
+    handle.db.exec("COMMIT");
+    // This scoped reader deliberately skips recovery. The committed SQLite
+    // pointer already selects matching bytes, so there is no post-COMMIT
+    // finalize window in which another process can observe a mixed pair.
+    await expect(
+      crashScopedArtifacts.getBytes(artifact.id),
+    ).resolves.toEqual(safeBytes);
+    handle.close();
+
+    handle = await openSqliteStore(dbPath);
+    store = handle.store;
+    await expect(
+      store.artifacts.getMetadata(artifact.id),
+    ).resolves.toMatchObject({
+      ...safeAudit,
+      bytes: safeBytes.byteLength,
+    });
+    await expect(
+      store.artifacts.getBytes(artifact.id),
+    ).resolves.toEqual(safeBytes);
+  });
+
+  it("retains a superseded committed generation when delayed journals are reconciled", async () => {
+    const dbPath = join(dir, "aart.db");
+    const blobsDir = `${dbPath}.blobs`;
+    const newestBytes =
+      new TextEncoder().encode("[REDACTED-v2]");
+    await store.artifacts.put(
+      artifact,
+      new TextEncoder().encode("late-secret"),
+    );
+    const transactionArtifacts = new SqliteArtifactStore(
+      createDirectExec(handle.db),
+      blobsDir,
+      true,
+    );
+
+    handle.db.exec("BEGIN IMMEDIATE");
+    await transactionArtifacts.replaceAudit(
+      artifact.id,
+      safeAudit,
+      safeBytes,
+    );
+    handle.db.exec("COMMIT");
+    handle.db.exec("BEGIN IMMEDIATE");
+    await transactionArtifacts.replaceAudit(
+      artifact.id,
+      safeAudit,
+      newestBytes,
+    );
+    handle.db.exec("COMMIT");
+
+    await expect(
+      store.artifacts.getBytes(artifact.id),
+    ).resolves.toEqual(newestBytes);
+    const generations = (
+      await fs.readdir(join(blobsDir, artifact.runId))
+    ).filter((name) => name.includes(".generation-"));
+    expect(generations).toHaveLength(3);
+    const remainingJournals = (
+      await fs.readdir(
+        join(blobsDir, ".artifact-redaction-journal"),
+      )
+    ).filter((name) => name.endsWith(".json"));
+    expect(remainingJournals).toEqual([]);
+  });
+
+  it("keeps a selected immutable blob generation readable while another process advances the pointer", async () => {
+    const dbPath = join(dir, "aart.db");
+    const blobsDir = `${dbPath}.blobs`;
+    const originalBytes =
+      new TextEncoder().encode("late-secret");
+    const replacementBytes =
+      new TextEncoder().encode("[REDACTED]");
+    await store.artifacts.put(artifact, originalBytes);
+    const secondHandle = await openSqliteStore(dbPath);
+    let replaced = false;
+    const racingReader = new SqliteArtifactStore(
+      createDirectExec(handle.db),
+      blobsDir,
+      true,
+      async () => {
+        if (replaced) return;
+        replaced = true;
+        await secondHandle.store.artifacts.replaceAudit(
+          artifact.id,
+          safeAudit,
+          replacementBytes,
+        );
+      },
+    );
+    try {
+      await expect(
+        racingReader.getBytes(artifact.id),
+      ).resolves.toEqual(originalBytes);
+      expect(replaced).toBe(true);
+      await expect(
+        secondHandle.store.artifacts.getBytes(
+          artifact.id,
+        ),
+      ).resolves.toEqual(replacementBytes);
+    } finally {
+      secondHandle.close();
+    }
   });
 });
 

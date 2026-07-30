@@ -50,6 +50,30 @@ export const StepTraceSchema = z.object({
   // (architecture §5.3 `step_traces.post_hoc_corrected`, F5 fix; spec §23.4
   // "update current run output" correction outcome). See AMENDMENTS.md.
   postHocCorrected: z.boolean().optional(),
+  // Persistence-safe taint bit: true when this step's observable behavior
+  // depends on a value removed by secret redaction. The value itself is
+  // never retained; the bit survives store reloads so downstream steps
+  // cannot launder a redaction marker into a public workflow output.
+  secretTainted: z.boolean().optional(),
+  // Output-level provenance. `*` means an arbitrary transformation may
+  // have used secret data; otherwise entries are JSON pointers relative
+  // to `outputs` whose values were changed by redaction.
+  secretTaintedPaths: z.array(z.string()).optional(),
+  // This occurrence, or the edge that selected it, depended on secret
+  // data. Kept separate from output-data taint so a clean final loop
+  // occurrence is not poisoned by an unrelated secret field.
+  controlSecretTainted: z.boolean().optional(),
+  // Stable authored identity. forEach child traces use a rendered stepId
+  // such as `map[0]`, but ownership never depends on parsing that string.
+  authoredStepId: z.string().optional(),
+  iterationIndex: z.number().int().nonnegative().optional(),
+  // Storage identity of the idempotency entry replayed or written by this
+  // occurrence. Persisted so a later secret discovery can revoke a global
+  // ledger entry even when another run originally created it.
+  idempotencyLedgerKey: z.string().optional(),
+  // One-way, stable association retained when the customer-visible ledger
+  // key is later redacted. This is operational provenance, not the key.
+  idempotencyLedgerFingerprint: z.string().optional(),
 });
 export type StepTrace = z.infer<typeof StepTraceSchema>;
 
@@ -87,6 +111,12 @@ export const RunRecordSchema = z.object({
   approvalMode: TrustModeSchema,
   trigger: TriggerSchema,
   inputs: z.record(z.string(), z.unknown()),
+  // JSON pointers within the immutable run inputs / trigger payload that
+  // were changed when a later secret resolution discovered a matching
+  // value. These roots can feed steps and public output mappings just like
+  // StepTrace.outputs, so their provenance must survive persistence too.
+  secretTaintedInputPaths: z.array(z.string()).optional(),
+  secretTaintedTriggerPaths: z.array(z.string()).optional(),
   // Per-run execution options (verbosity, step timeout overrides) —
   // operational tuning, distinct from `inputs` (the workflow's declared
   // data contract); params never affect approval or gates (spec §19.1 Fix F).

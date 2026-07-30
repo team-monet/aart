@@ -47,6 +47,9 @@ interface WorkerResult {
   hasAuthenticatedAsColumn?: boolean;
   /** V1 event log foundation (AMENDMENTS.md A61) — proves the FOURTH migration (0004_events_table) is also correctly coordinated under this exact race — the first of the four that adds a whole TABLE, not just a column. */
   hasEventsTable?: boolean;
+  hasIdempotencySchemaVersionColumn?: boolean;
+  hasRunRootTaintColumns?: boolean;
+  hasArtifactAuditVisibilityColumn?: boolean;
   error?: string;
 }
 
@@ -89,7 +92,7 @@ describe("sqlite adapter — concurrent-startup migration race (AMENDMENTS.md A5
   const ITERATIONS = 8;
 
   it(
-    `two genuinely separate OS processes opening the SAME fresh sqlite store at once, repeated ${ITERATIONS} times: both always come up cleanly, watermark 4, correct schema, no "duplicate column name" / "database is locked" crash`,
+    `two genuinely separate OS processes opening the SAME fresh sqlite store at once, repeated ${ITERATIONS} times: both always come up cleanly, watermark 12, correct schema, no "duplicate column name" / "database is locked" crash`,
     async () => {
       for (let i = 0; i < ITERATIONS; i++) {
         const dir = await mkdtemp(join(tmpdir(), "aart-sqlite-migration-race-"));
@@ -105,11 +108,23 @@ describe("sqlite adapter — concurrent-startup migration race (AMENDMENTS.md A5
           expect(result.ok, `worker ${label} (iteration ${i}) failed: ${result.error}`).toBe(true);
           // V1 event log foundation (AMENDMENTS.md A61) — was 3
           // (0001+0002+0003_approval_task_authenticated_as) as of D2a/A59;
-          // now 4 (+0004_events_table).
-          expect(result.watermark, `worker ${label} (iteration ${i}) watermark`).toBe(4);
+          // now 6 (+0004_events_table,
+          // +0005_idempotency_schema_version, and
+          // +0006_run_root_taint_paths
+          // +0007_secret_audit_provenance
+          // +0008_sealed_operational_state
+          // +0009_wait_operation_generation
+          // +0010_protected_continuation_state
+          // +0011_artifact_audit_visibility
+          // +0012_artifact_blob_generation
+          // +0013_correction_operational_target).
+          expect(result.watermark, `worker ${label} (iteration ${i}) watermark`).toBe(13);
           expect(result.hasPromotedColumn, `worker ${label} (iteration ${i}) deployments.promoted column`).toBe(true);
           expect(result.hasAuthenticatedAsColumn, `worker ${label} (iteration ${i}) approval_tasks.authenticated_as column`).toBe(true);
           expect(result.hasEventsTable, `worker ${label} (iteration ${i}) events table`).toBe(true);
+          expect(result.hasIdempotencySchemaVersionColumn, `worker ${label} (iteration ${i}) idempotency_ledger.schema_version column`).toBe(true);
+          expect(result.hasRunRootTaintColumns, `worker ${label} (iteration ${i}) run root taint columns`).toBe(true);
+          expect(result.hasArtifactAuditVisibilityColumn, `worker ${label} (iteration ${i}) artifacts.redaction_audit_visible column`).toBe(true);
         }
       }
     },

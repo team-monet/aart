@@ -9,8 +9,25 @@ import type { AartStore } from "@aart/store";
 import type { RunRecord, Signal, StepTrace, WaitCondition } from "@aart/types";
 import { CorrelationError } from "@aart/types";
 import { parseDurationMs } from "../duration.js";
-import { applyRedaction, applyRunRedaction } from "../redaction.js";
+import {
+  revokeSecretTaintedIdempotency,
+  type PrepareRevokedIdempotencyConsumer,
+} from "../idempotency.js";
+import {
+  applyRunRedaction,
+  mergeActiveRunProtection,
+  mergeOperationalRunTaint,
+  mergePersistedRunTaint,
+  redactSignalAudit,
+  redactWaitAudit,
+  transactWithGlobalSecretRepair,
+} from "../redaction.js";
 import { assertSchemaVersionCompatible } from "../schema-version.js";
+import { uncapturedSnapshot } from "../snapshot.js";
+import {
+  notifyRunTerminals,
+  type RunTerminalHook,
+} from "../terminal-hooks.js";
 import type { DueWait, ResumeMechanism, ResumeOutcome } from "../types.js";
 import { waitSignalCorrelation } from "./wait-blocks.js";
 
@@ -18,6 +35,8 @@ export interface WaitMachineConfig {
   store: AartStore;
   redact: import("@aart/types").RedactFn;
   now: () => Date;
+  onRunTerminal?: RunTerminalHook;
+  prepareRevokedIdempotencyConsumer?: PrepareRevokedIdempotencyConsumer;
 }
 
 /** Wraps an arbitrary resume payload into the `Record<string, unknown>` shape `StepTrace.outputs` requires (spec §19.2) — a payload that's already a plain object passes through; anything else (a primitive, an array, `undefined`) is wrapped under a `value` key rather than dropped. */
@@ -49,6 +68,27 @@ export interface EnterWaitOptions {
   /** Already schema-version-stamped (architecture §4.7) — see `step-executor.ts`'s dispatch site. */
   wait: WaitCondition;
   resolvedSecretRefs: ReadonlySet<string>;
+  secretTainted?: boolean;
+  controlSecretTainted?: boolean;
+  /**
+   * The caller captured this run's first snapshot specifically for this
+   * wait attempt. If an early signal means no suspension occurs, the
+   * snapshot remains uncaptured and completion (or a later real wait)
+   * becomes the durable capture boundary instead.
+   */
+  snapshotCapturedForWait?: boolean;
+  /**
+   * Completes control-flow provenance against the in-memory early-arrival
+   * trace before the first durable write. This closes the window where an
+   * `until` expression could resolve a secret only after plaintext output
+   * had already been persisted. The transaction-scoped store must be used
+   * for every read/write performed by the callback; re-entering
+   * `config.store` deadlocks non-reentrant adapters such as SQLite.
+   */
+  prepareEarlyArrivalRun?: (
+    run: RunRecord,
+    transactionStore: AartStore,
+  ) => Promise<RunRecord>;
 }
 
 export interface EnterWaitResult {
@@ -67,9 +107,25 @@ export interface EnterWaitResult {
  * which skip the check entirely and always suspend).
  */
 export async function enterWait(config: WaitMachineConfig, options: EnterWaitOptions): Promise<EnterWaitResult> {
-  const { run, stepId, blockId, resolvedInputs, wait, resolvedSecretRefs } = options;
+  const {
+    run,
+    stepId,
+    blockId,
+    resolvedInputs,
+    wait,
+    resolvedSecretRefs: suppliedSecretRefs,
+    secretTainted,
+    controlSecretTainted,
+    snapshotCapturedForWait,
+    prepareEarlyArrivalRun,
+  } = options;
+  const resolvedSecretRefs =
+    suppliedSecretRefs instanceof Set
+      ? suppliedSecretRefs
+      : new Set(suppliedSecretRefs);
   const now = config.now();
   const correlation = waitSignalCorrelation(wait);
+  const invalidatedTerminalRunIds = new Set<string>();
 
   // `[DECISION]` The ENTIRE check-then-act sequence below runs inside ONE
   // `store.transact()` call — architecture §4.4 step 3, verbatim: "FIRST,
@@ -89,19 +145,42 @@ export async function enterWait(config: WaitMachineConfig, options: EnterWaitOpt
   // the SignalStore *audit-copy* write specifically (`tx.signals.append`/
   // `markConsumed` are "deliberately NOT staged" — see types.ts's
   // `SignalStore` doc comment), not to this check-then-act sequence itself.
-  return config.store.transact(async (tx) => {
+  const transition = async (
+    tx: AartStore,
+  ): Promise<EnterWaitResult> => {
+    const activeState =
+      await tx.runs.getOperationalState(run.runId);
+    const activeAwareRun = await mergeActiveRunProtection(
+      tx,
+      run,
+      resolvedSecretRefs,
+    );
+    const persistenceAwareRun =
+      await mergePersistedRunTaint(tx, activeAwareRun);
     if (correlation) {
       const existingSignal = await tx.signals.findUnconsumedMatch(correlation.name, correlation.correlationId);
       if (existingSignal) {
+        for (const value of
+          await tx.signals.getOperationalSecretValues(
+            existingSignal.id,
+          )) {
+          resolvedSecretRefs.add(value);
+        }
         // Early-arrival resolution — none of the wait bookkeeping below is
         // ever persisted as outstanding; this step goes straight from
         // "about to wait" to "completed" in one hop (architecture §4.4 step
         // 3: "the wait resolves immediately... execution proceeds straight
         // to step 8").
-        await tx.signals.markConsumed(existingSignal.id);
+        const earlyArrivalBaseRun = snapshotCapturedForWait
+          ? {
+              ...persistenceAwareRun,
+              snapshot: uncapturedSnapshot(),
+            }
+          : persistenceAwareRun;
         const trace: StepTrace = {
-          seq: run.trace.length,
+          seq: earlyArrivalBaseRun.trace.length,
           stepId,
+          authoredStepId: stepId,
           block: blockId,
           status: "completed",
           inputs: resolvedInputs,
@@ -109,10 +188,61 @@ export async function enterWait(config: WaitMachineConfig, options: EnterWaitOpt
           startedAt: now.toISOString(),
           endedAt: now.toISOString(),
           durationMs: 0,
+          ...(secretTainted
+            ? { secretTainted: true, secretTaintedPaths: ["*"] }
+            : controlSecretTainted
+              ? {
+                  secretTainted: true,
+                  secretTaintedPaths: [],
+                  controlSecretTainted: true,
+                }
+              : {}),
         };
-        const updatedRun: RunRecord = { ...run, trace: [...run.trace, trace], updatedAt: now.toISOString() };
-        const redacted = applyRunRedaction(config.redact, updatedRun, resolvedSecretRefs);
+        const updatedRun: RunRecord = {
+          ...earlyArrivalBaseRun,
+          trace: [...earlyArrivalBaseRun.trace, trace],
+          updatedAt: now.toISOString(),
+        };
+        const preparedRun = prepareEarlyArrivalRun
+          ? await prepareEarlyArrivalRun(updatedRun, tx)
+          : updatedRun;
+        await tx.signals.replaceAudit(
+          existingSignal.id,
+          redactSignalAudit(
+            config.redact,
+            existingSignal,
+            resolvedSecretRefs,
+          ),
+          [...resolvedSecretRefs],
+        );
+        await tx.signals.markConsumed(existingSignal.id, {
+          consumedBy: {
+            runId: earlyArrivalBaseRun.runId,
+            stepId,
+          },
+        });
+        const repairedRun = await revokeSecretTaintedIdempotency(
+          tx,
+          config.redact,
+          preparedRun,
+          resolvedSecretRefs,
+          config.prepareRevokedIdempotencyConsumer,
+          invalidatedTerminalRunIds,
+        );
+        const redacted = applyRunRedaction(
+          config.redact,
+          repairedRun,
+          resolvedSecretRefs,
+        );
         await tx.runs.put(redacted);
+        await tx.runs.putOperationalState(
+          repairedRun.runId,
+          {
+            ...(activeState ?? {}),
+            run: repairedRun,
+            resolvedSecretValues: [...resolvedSecretRefs],
+          },
+        );
         return { run: redacted, suspended: false };
       }
     }
@@ -121,32 +251,105 @@ export async function enterWait(config: WaitMachineConfig, options: EnterWaitOpt
     // at all) — persist the outstanding wait, still inside the same
     // transaction as the check above.
     const trace: StepTrace = {
-      seq: run.trace.length,
+      seq: persistenceAwareRun.trace.length,
       stepId,
+      authoredStepId: stepId,
       block: blockId,
       status: "waiting",
       inputs: resolvedInputs,
       startedAt: now.toISOString(),
+      ...(secretTainted
+        ? { secretTainted: true, secretTaintedPaths: ["*"] }
+        : controlSecretTainted
+          ? {
+              secretTainted: true,
+              secretTaintedPaths: [],
+              controlSecretTainted: true,
+            }
+          : {}),
     };
     const updatedRun: RunRecord = {
-      ...run,
+      ...persistenceAwareRun,
       status: "waiting",
-      waits: [...run.waits, wait],
-      trace: [...run.trace, trace],
+      waits: [...persistenceAwareRun.waits, wait],
+      trace: [...persistenceAwareRun.trace, trace],
       updatedAt: now.toISOString(),
     };
-    const redactedRun = applyRunRedaction(config.redact, updatedRun, resolvedSecretRefs);
-    const redactedWait = applyRedaction(config.redact, wait, resolvedSecretRefs);
+    const repairedRun = await revokeSecretTaintedIdempotency(
+      tx,
+      config.redact,
+      updatedRun,
+      resolvedSecretRefs,
+      config.prepareRevokedIdempotencyConsumer,
+      invalidatedTerminalRunIds,
+    );
+    const redactedRun = applyRunRedaction(
+      config.redact,
+      repairedRun,
+      resolvedSecretRefs,
+    );
+    const auditWait = redactWaitAudit(
+      config.redact,
+      wait,
+      resolvedSecretRefs,
+    );
+    await tx.waits.put(
+      persistenceAwareRun.runId,
+      stepId,
+      wait,
+      now.toISOString(),
+      {
+        run: repairedRun,
+        resolvedSecretValues: [...resolvedSecretRefs],
+      },
+    );
+    if (JSON.stringify(auditWait) !== JSON.stringify(wait)) {
+      await tx.waits.redactAudit(
+        persistenceAwareRun.runId,
+        stepId,
+        auditWait,
+      );
+    }
+    // The filesystem adapter flushes staged files one by one. Stage the
+    // sealed recoverable wait before the public RunRecord transition so a
+    // process exit between those writes leaves either the prior active
+    // continuation or the new wait continuation available, never only a
+    // redacted waiting record.
     await tx.runs.put(redactedRun);
-    await tx.waits.put(run.runId, stepId, redactedWait, now.toISOString());
+    await tx.runs.deleteOperationalState(
+      persistenceAwareRun.runId,
+    );
     return { run: redactedRun, suspended: true };
-  });
+  };
+  const result = await transactWithGlobalSecretRepair(
+    config.store,
+    config.redact,
+    resolvedSecretRefs,
+    transition,
+  );
+  await notifyRunTerminals(
+    config.onRunTerminal,
+    invalidatedTerminalRunIds,
+  );
+  return result;
 }
 
 // ---------------------------------------------------------------------------
 // Resume — architecture §4.4 steps 6-9, §4.4.2's atomic claim (all three
 // mechanisms, per the "scope of the atomic-claim rule" note).
 // ---------------------------------------------------------------------------
+
+/**
+ * Resolves control expressions and secret provenance against the completed
+ * in-memory wait trace before its first durable write. Every exported resume
+ * mechanism requires this callback; callers that do not own the full engine
+ * composition should use the bound methods returned by `createEngine`.
+ */
+export type PrepareCompletedRun = (
+  run: RunRecord,
+  stepId: string,
+  transactionStore: AartStore,
+) => Promise<RunRecord>;
 
 interface ClaimAndCompleteArgs {
   runId: string;
@@ -161,6 +364,8 @@ interface ClaimAndCompleteArgs {
   mechanism: ResumeMechanism;
   outputs: Record<string, unknown>;
   resolvedSecretRefs: ReadonlySet<string>;
+  prepareCompletedRun: PrepareCompletedRun;
+  signalAudit?: Signal;
 }
 
 /**
@@ -190,12 +395,32 @@ interface ClaimAndCompleteArgs {
  * re-entered step, so folding it in makes each cycle's dedupe key unique.
  */
 async function claimAndCompleteWait(config: WaitMachineConfig, args: ClaimAndCompleteArgs): Promise<ResumeOutcome> {
-  const { runId, stepId, dedupeKeySuffix, mechanism, outputs, resolvedSecretRefs } = args;
+  const {
+    runId,
+    stepId,
+    dedupeKeySuffix,
+    mechanism,
+    outputs,
+    resolvedSecretRefs: suppliedSecretRefs,
+    prepareCompletedRun,
+    signalAudit,
+  } = args;
+  const resolvedSecretRefs =
+    suppliedSecretRefs instanceof Set
+      ? suppliedSecretRefs
+      : new Set(suppliedSecretRefs);
+  if (typeof prepareCompletedRun !== "function") {
+    throw new Error(
+      "A prepareCompletedRun callback is required before a resumed wait can be persisted.",
+    );
+  }
   const now = config.now();
-
-  return config.store.transact(async (tx) => {
-    const run = await tx.runs.get(runId);
-    if (!run) {
+  const invalidatedTerminalRunIds = new Set<string>();
+  const transition = async (
+    tx: AartStore,
+  ): Promise<ResumeOutcome> => {
+    const publicRun = await tx.runs.get(runId);
+    if (!publicRun) {
       return { kind: "unmatched", mechanism };
     }
     const wait = await tx.waits.get(runId, stepId);
@@ -210,9 +435,30 @@ async function claimAndCompleteWait(config: WaitMachineConfig, args: ClaimAndCom
       // the seq-keyed dedupe check below is the PRIMARY guard for that
       // window; this covers the case where the row is ALREADY gone by the
       // time this attempt even looks.
-      const alreadyCompleted = run.trace.some((t) => t.stepId === stepId && t.status === "completed");
+      const alreadyCompleted = publicRun.trace.some((t) => t.stepId === stepId && t.status === "completed");
       return { kind: alreadyCompleted ? "duplicate" : "unmatched", mechanism };
     }
+    const operationalRunState =
+      await tx.waits.getOperationalRunState(runId, stepId);
+    for (const value of
+      operationalRunState?.resolvedSecretValues ?? []) {
+      resolvedSecretRefs.add(value);
+    }
+    if (signalAudit !== undefined) {
+      for (const value of
+        await tx.signals.getOperationalSecretValues(
+          signalAudit.id,
+        )) {
+        resolvedSecretRefs.add(value);
+      }
+    }
+    const run =
+      operationalRunState === undefined
+        ? publicRun
+        : mergeOperationalRunTaint(
+            operationalRunState.run,
+            publicRun,
+          );
 
     assertSchemaVersionCompatible(run.schemaVersion, { runId, recordKind: "RunRecord" });
     assertSchemaVersionCompatible(wait.schemaVersion, { runId, stepId, recordKind: "WaitCondition" });
@@ -259,10 +505,52 @@ async function claimAndCompleteWait(config: WaitMachineConfig, args: ClaimAndCom
       trace: newTrace,
       updatedAt: now.toISOString(),
     };
-    const redacted = applyRunRedaction(config.redact, updatedRun, resolvedSecretRefs);
+    const preparedRun = await prepareCompletedRun(updatedRun, stepId, tx);
+    if (signalAudit !== undefined) {
+      await tx.signals.replaceAudit(
+        signalAudit.id,
+        redactSignalAudit(
+          config.redact,
+          signalAudit,
+          resolvedSecretRefs,
+        ),
+        [...resolvedSecretRefs],
+      );
+      await tx.signals.markConsumed(signalAudit.id, {
+        consumedBy: { runId, stepId },
+      });
+    }
+    const repairedRun = await revokeSecretTaintedIdempotency(
+      tx,
+      config.redact,
+      preparedRun,
+      resolvedSecretRefs,
+      config.prepareRevokedIdempotencyConsumer,
+      invalidatedTerminalRunIds,
+    );
+    const redacted = applyRunRedaction(
+      config.redact,
+      repairedRun,
+      resolvedSecretRefs,
+    );
     await tx.runs.put(redacted);
+    await tx.runs.putOperationalState(runId, {
+      run: repairedRun,
+      resolvedSecretValues: [...resolvedSecretRefs],
+    });
     return { kind: "resumed", run: redacted, mechanism };
-  });
+  };
+  const outcome = await transactWithGlobalSecretRepair(
+    config.store,
+    config.redact,
+    resolvedSecretRefs,
+    transition,
+  );
+  await notifyRunTerminals(
+    config.onRunTerminal,
+    invalidatedTerminalRunIds,
+  );
+  return outcome;
 }
 
 // ---------------------------------------------------------------------------
@@ -280,8 +568,8 @@ async function claimAndCompleteWait(config: WaitMachineConfig, args: ClaimAndCom
 // ---------------------------------------------------------------------------
 
 /** Every outstanding wait carrying a `timeout` field whose deadline (relative to the `WaitStore` row's own `createdAt`) has elapsed. `[DECISION]` NOT part of `getDueWaits` (below) — `WaitStore.listDue` (S0-frozen, architecture §4.4.3) is specifically "every timer-type wait whose `resumeAt` has passed"; `timeout` is a DIFFERENT, relative-duration field present on 6 of the 7 `WaitCondition` members (all but `timer`, which has no `timeout` field — a timer's own `resumeAt` due-ness, via `getDueWaits`, is the only time-based resolution it has) and checking it requires comparing against `createdAt` + a parsed duration, not a stored absolute deadline. S2's ticker should sweep this ALONGSIDE `getDueWaits`/`listExternalJobWaits` on the same interval. */
-export async function getExpiredWaits(store: AartStore, now: Date): Promise<Array<{ runId: string; stepId: string; wait: WaitCondition }>> {
-  const all = await store.waits.list();
+export async function getExpiredWaits(store: AartStore, now: Date): Promise<Array<{ runId: string; stepId: string; wait: WaitCondition; }>> {
+  const all = await store.waits.listOperational();
   return all
     .filter((entry) => {
       const timeout = "timeout" in entry.wait ? entry.wait.timeout : undefined;
@@ -302,20 +590,39 @@ export async function getExpiredWaits(store: AartStore, now: Date): Promise<Arra
  * = "expired"` (spec §13.5's terminal-status set includes `"expired"`
  * precisely for this case) — not just the step trace.
  */
-export async function failExpiredWait(config: WaitMachineConfig, runId: string, stepId: string, resolvedSecretRefs: ReadonlySet<string> = new Set()): Promise<ResumeOutcome> {
+export async function failExpiredWait(config: WaitMachineConfig, runId: string, stepId: string, suppliedSecretRefs: ReadonlySet<string> = new Set()): Promise<ResumeOutcome> {
+  const resolvedSecretRefs =
+    suppliedSecretRefs instanceof Set
+      ? suppliedSecretRefs
+      : new Set(suppliedSecretRefs);
   const now = config.now();
   const mechanism: ResumeMechanism = "scheduler-tick";
-
-  return config.store.transact(async (tx) => {
-    const run = await tx.runs.get(runId);
-    if (!run) {
+  const invalidatedTerminalRunIds = new Set<string>();
+  const transition = async (
+    tx: AartStore,
+  ): Promise<ResumeOutcome> => {
+    const publicRun = await tx.runs.get(runId);
+    if (!publicRun) {
       return { kind: "unmatched", mechanism };
     }
     const wait = await tx.waits.get(runId, stepId);
     if (!wait) {
-      const alreadyResolved = run.trace.some((t) => t.stepId === stepId && (t.status === "completed" || t.status === "failed"));
+      const alreadyResolved = publicRun.trace.some((t) => t.stepId === stepId && (t.status === "completed" || t.status === "failed"));
       return { kind: alreadyResolved ? "duplicate" : "unmatched", mechanism };
     }
+    const operationalRunState =
+      await tx.waits.getOperationalRunState(runId, stepId);
+    for (const value of
+      operationalRunState?.resolvedSecretValues ?? []) {
+      resolvedSecretRefs.add(value);
+    }
+    const run =
+      operationalRunState === undefined
+        ? publicRun
+        : mergeOperationalRunTaint(
+            operationalRunState.run,
+            publicRun,
+          );
 
     assertSchemaVersionCompatible(run.schemaVersion, { runId, recordKind: "RunRecord" });
     assertSchemaVersionCompatible(wait.schemaVersion, { runId, stepId, recordKind: "WaitCondition" });
@@ -351,10 +658,37 @@ export async function failExpiredWait(config: WaitMachineConfig, runId: string, 
     newTrace[traceIndex] = failedTrace;
 
     const updatedRun: RunRecord = { ...run, status: "running", trace: newTrace, updatedAt: now.toISOString() };
-    const redacted = applyRunRedaction(config.redact, updatedRun, resolvedSecretRefs);
+    const repairedRun = await revokeSecretTaintedIdempotency(
+      tx,
+      config.redact,
+      updatedRun,
+      resolvedSecretRefs,
+      config.prepareRevokedIdempotencyConsumer,
+      invalidatedTerminalRunIds,
+    );
+    const redacted = applyRunRedaction(
+      config.redact,
+      repairedRun,
+      resolvedSecretRefs,
+    );
     await tx.runs.put(redacted);
+    await tx.runs.putOperationalState(runId, {
+      run: repairedRun,
+      resolvedSecretValues: [...resolvedSecretRefs],
+    });
     return { kind: "resumed", run: redacted, mechanism };
-  });
+  };
+  const outcome = await transactWithGlobalSecretRepair(
+    config.store,
+    config.redact,
+    resolvedSecretRefs,
+    transition,
+  );
+  await notifyRunTerminals(
+    config.onRunTerminal,
+    invalidatedTerminalRunIds,
+  );
+  return outcome;
 }
 
 /**
@@ -383,12 +717,16 @@ export async function failExpiredWait(config: WaitMachineConfig, runId: string, 
  * correctness property that actually matters — the run is never advanced
  * twice — holds under either label.
  */
-export async function resumeBySignal(config: WaitMachineConfig, signal: Signal, resolvedSecretRefs: ReadonlySet<string> = new Set()): Promise<ResumeOutcome> {
-  const allWaits = await config.store.waits.list();
-  const matches = allWaits.filter((entry) => {
-    const correlation = waitSignalCorrelation(entry.wait);
-    return correlation !== undefined && correlation.name === signal.name && correlation.correlationId === signal.correlationId;
-  });
+export async function resumeBySignal(
+  config: WaitMachineConfig,
+  signal: Signal,
+  resolvedSecretRefs: ReadonlySet<string> = new Set(),
+  prepareCompletedRun: PrepareCompletedRun,
+): Promise<ResumeOutcome> {
+  const matches = await config.store.waits.findSignalMatches(
+    signal.name,
+    signal.correlationId,
+  );
 
   if (matches.length === 0) {
     return { kind: "unmatched", mechanism: "signal-matched" };
@@ -408,11 +746,20 @@ export async function resumeBySignal(config: WaitMachineConfig, signal: Signal, 
     mechanism: "signal-matched",
     outputs: normalizePayloadToOutputs(signal.payload),
     resolvedSecretRefs,
+    prepareCompletedRun,
+    signalAudit: signal,
   });
 }
 
 /** **Direct-lookup** resume (architecture §4.4.1 mechanism 3) for a `manual` wait — `aart_resume_run` with just a `runId`+`stepId`, no signal name needed. */
-export async function resumeManual(config: WaitMachineConfig, runId: string, stepId: string, payload: unknown = {}, resolvedSecretRefs: ReadonlySet<string> = new Set()): Promise<ResumeOutcome> {
+export async function resumeManual(
+  config: WaitMachineConfig,
+  runId: string,
+  stepId: string,
+  payload: unknown = {},
+  resolvedSecretRefs: ReadonlySet<string> = new Set(),
+  prepareCompletedRun: PrepareCompletedRun,
+): Promise<ResumeOutcome> {
   return claimAndCompleteWait(config, {
     runId,
     stepId,
@@ -420,11 +767,12 @@ export async function resumeManual(config: WaitMachineConfig, runId: string, ste
     mechanism: "direct-lookup",
     outputs: normalizePayloadToOutputs(payload),
     resolvedSecretRefs,
+    prepareCompletedRun,
   });
 }
 
 /** **Direct-lookup** resume (architecture §4.4.1 mechanism 3) for an `approval` wait — both authorship paths (CLI/dashboard human decision, and PR-merge-as-approval, architecture §7.2) write directly to `ApprovalStore` then call this, never a `Signal` (architecture §4.4.1's explicit statement: "approval... direct ApprovalStore write, either authorship path"). `task.status` must already be terminal (`approved`/`rejected`/`needs_changes`/`expired`) — the caller (governance's approval-write path, S4) is responsible for that state transition; this function only handles the RUN-side resume once it's happened. */
-export async function resumeApproval(config: WaitMachineConfig, runId: string, stepId: string, task: { id: string; status: string; decision?: unknown; reviewer?: string }, resolvedSecretRefs: ReadonlySet<string> = new Set()): Promise<ResumeOutcome> {
+export async function resumeApproval(config: WaitMachineConfig, runId: string, stepId: string, task: { id: string; status: string; decision?: unknown; reviewer?: string; }, resolvedSecretRefs: ReadonlySet<string> = new Set(), prepareCompletedRun: PrepareCompletedRun): Promise<ResumeOutcome> {
   return claimAndCompleteWait(config, {
     runId,
     stepId,
@@ -432,11 +780,12 @@ export async function resumeApproval(config: WaitMachineConfig, runId: string, s
     mechanism: "direct-lookup",
     outputs: { status: task.status, decision: task.decision, reviewer: task.reviewer },
     resolvedSecretRefs,
+    prepareCompletedRun,
   });
 }
 
 /** **Scheduler-tick** resume (architecture §4.4.1 mechanism 2) for a `timer` wait that `getDueWaits` reported as due. S2's ticker calls `getDueWaits(now)` on its interval, then this function for each due entry. */
-export async function resumeTimerWait(config: WaitMachineConfig, runId: string, stepId: string, resolvedSecretRefs: ReadonlySet<string> = new Set()): Promise<ResumeOutcome> {
+export async function resumeTimerWait(config: WaitMachineConfig, runId: string, stepId: string, resolvedSecretRefs: ReadonlySet<string> = new Set(), prepareCompletedRun: PrepareCompletedRun): Promise<ResumeOutcome> {
   const now = config.now();
   return claimAndCompleteWait(config, {
     runId,
@@ -445,11 +794,12 @@ export async function resumeTimerWait(config: WaitMachineConfig, runId: string, 
     mechanism: "scheduler-tick",
     outputs: { resumedAt: now.toISOString() },
     resolvedSecretRefs,
+    prepareCompletedRun,
   });
 }
 
 /** **Scheduler-tick** resume (architecture §4.4.1 mechanism 2) for `external_job`'s poll sub-path — called by S2's poll mechanism (spec §21.2/architecture §6.1's `poll` trigger, shared scheduler-ticker subsystem) once its polling determines the job is complete. Labeled `scheduler-tick` per architecture §4.4.1's explicit classification of this sub-path, even though the call shape is a direct claim (there is no `Signal`/`SignalStore` involvement for poll-mode `external_job` — see `wait/wait-blocks.ts`'s doc comment and `listExternalJobWaits` below). */
-export async function resumeExternalJobResult(config: WaitMachineConfig, runId: string, stepId: string, resultPayload: unknown, resolvedSecretRefs: ReadonlySet<string> = new Set()): Promise<ResumeOutcome> {
+export async function resumeExternalJobResult(config: WaitMachineConfig, runId: string, stepId: string, resultPayload: unknown, resolvedSecretRefs: ReadonlySet<string> = new Set(), prepareCompletedRun: PrepareCompletedRun): Promise<ResumeOutcome> {
   return claimAndCompleteWait(config, {
     runId,
     stepId,
@@ -457,6 +807,7 @@ export async function resumeExternalJobResult(config: WaitMachineConfig, runId: 
     mechanism: "scheduler-tick",
     outputs: normalizePayloadToOutputs(resultPayload),
     resolvedSecretRefs,
+    prepareCompletedRun,
   });
 }
 
@@ -469,12 +820,14 @@ export async function resumeExternalJobResult(config: WaitMachineConfig, runId: 
 export async function getDueWaits(store: AartStore, now: Date): Promise<DueWait[]> {
   const due = await store.waits.listDue(now.toISOString());
   return due
-    .filter((entry): entry is typeof entry & { wait: Extract<WaitCondition, { type: "timer" }> } => entry.wait.type === "timer")
+    .filter((entry): entry is typeof entry & { wait: Extract<WaitCondition, { type: "timer"; }>; } => entry.wait.type === "timer")
     .map((entry) => ({ runId: entry.runId, stepId: entry.stepId, wait: entry.wait }));
 }
 
 /** Every currently-outstanding `external_job` wait — for S2's poll mechanism to sweep on its own interval (no fixed deadline to filter by, unlike `timer` — see `DueWait`'s doc comment in types.ts) and, for each, poll the named provider's job-status endpoint, calling `resumeExternalJobResult` once a poll reports completion. */
-export async function listExternalJobWaits(store: AartStore): Promise<Array<{ runId: string; stepId: string; wait: Extract<WaitCondition, { type: "external_job" }> }>> {
-  const all = await store.waits.list();
-  return all.filter((entry): entry is typeof entry & { wait: Extract<WaitCondition, { type: "external_job" }> } => entry.wait.type === "external_job");
+export async function listExternalJobWaits(store: AartStore): Promise<Array<{ runId: string; stepId: string; wait: Extract<WaitCondition, { type: "external_job"; }>; }>> {
+  const all = await store.waits.listOperational({
+    type: "external_job",
+  });
+  return all.filter((entry): entry is typeof entry & { wait: Extract<WaitCondition, { type: "external_job"; }>; } => entry.wait.type === "external_job");
 }

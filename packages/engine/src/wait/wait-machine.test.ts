@@ -4,12 +4,31 @@
 // hand-rolled mock, per this session's DoD ("it should pass its own tests
 // against the fs adapter from S0").
 import type { AartStore } from "@aart/store";
-import { CorrelationError, type RedactFn } from "@aart/types";
+import { CorrelationError, type RedactFn, type RunRecord, type Signal } from "@aart/types";
 import { afterEach, describe, expect, it } from "vitest";
-import { identityRedactFn } from "../redaction.js";
+import {
+  CONCURRENCY_KEY_FORMAT,
+  fingerprintConcurrencyKey,
+} from "../concurrency.js";
+import {
+  identityRedactFn,
+  repairGlobalAuditsForNewSecrets,
+} from "../redaction.js";
 import { CURRENT_ENGINE_SCHEMA_VERSION } from "../schema-version.js";
 import { createTestStore, fixtureRun, uniqueId } from "../test-utils/fixtures.js";
-import { enterWait, failExpiredWait, getDueWaits, getExpiredWaits, listExternalJobWaits, resumeApproval, resumeBySignal, resumeExternalJobResult, resumeManual, resumeTimerWait, type WaitMachineConfig } from "./wait-machine.js";
+import {
+  enterWait,
+  failExpiredWait,
+  getDueWaits,
+  getExpiredWaits,
+  listExternalJobWaits,
+  resumeApproval as resumeApprovalWithPreparation,
+  resumeBySignal as resumeBySignalWithPreparation,
+  resumeExternalJobResult as resumeExternalJobResultWithPreparation,
+  resumeManual as resumeManualWithPreparation,
+  resumeTimerWait as resumeTimerWaitWithPreparation,
+  type WaitMachineConfig,
+} from "./wait-machine.js";
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {
@@ -24,6 +43,92 @@ async function setup(): Promise<{ store: AartStore; config: WaitMachineConfig }>
 
 function redactLiteral(secret: string): RedactFn {
   return (record) => JSON.parse(JSON.stringify(record).replaceAll(secret, "[REDACTED]"));
+}
+
+const prepareCompletedRun = async (run: RunRecord): Promise<RunRecord> => run;
+
+function resumeBySignal(
+  config: WaitMachineConfig,
+  signal: Signal,
+  resolvedSecretRefs: ReadonlySet<string> = new Set(),
+) {
+  return resumeBySignalWithPreparation(
+    config,
+    signal,
+    resolvedSecretRefs,
+    prepareCompletedRun,
+  );
+}
+
+function resumeManual(
+  config: WaitMachineConfig,
+  runId: string,
+  stepId: string,
+  payload: unknown = {},
+  resolvedSecretRefs: ReadonlySet<string> = new Set(),
+) {
+  return resumeManualWithPreparation(
+    config,
+    runId,
+    stepId,
+    payload,
+    resolvedSecretRefs,
+    prepareCompletedRun,
+  );
+}
+
+function resumeApproval(
+  config: WaitMachineConfig,
+  runId: string,
+  stepId: string,
+  task: {
+    id: string;
+    status: string;
+    decision?: unknown;
+    reviewer?: string;
+  },
+  resolvedSecretRefs: ReadonlySet<string> = new Set(),
+) {
+  return resumeApprovalWithPreparation(
+    config,
+    runId,
+    stepId,
+    task,
+    resolvedSecretRefs,
+    prepareCompletedRun,
+  );
+}
+
+function resumeTimerWait(
+  config: WaitMachineConfig,
+  runId: string,
+  stepId: string,
+  resolvedSecretRefs: ReadonlySet<string> = new Set(),
+) {
+  return resumeTimerWaitWithPreparation(
+    config,
+    runId,
+    stepId,
+    resolvedSecretRefs,
+    prepareCompletedRun,
+  );
+}
+
+function resumeExternalJobResult(
+  config: WaitMachineConfig,
+  runId: string,
+  stepId: string,
+  resultPayload: unknown,
+  resolvedSecretRefs: ReadonlySet<string> = new Set(),
+) {
+  return resumeExternalJobResultWithPreparation(
+    config,
+    runId,
+    stepId,
+    resultPayload,
+    resolvedSecretRefs,
+    prepareCompletedRun,
+  );
 }
 
 describe("enterWait — no early match (architecture §4.4 steps 1-4)", () => {
@@ -43,6 +148,54 @@ describe("enterWait — no early match (architecture §4.4 steps 1-4)", () => {
     expect(persisted?.status).toBe("waiting");
     const waitRow = await store.waits.get(run.runId, "wait_step");
     expect(waitRow).toEqual(wait);
+  });
+
+  it("atomically transfers an active protected continuation into the new wait boundary", async () => {
+    const { store, config } = await setup();
+    const secret = "active-segment-secret";
+    const run = fixtureRun({
+      status: "running",
+      inputs: { value: secret },
+    });
+    await store.runs.put({
+      ...run,
+      inputs: { value: "[REDACTED]" },
+    });
+    await store.runs.putOperationalState(run.runId, {
+      run,
+      resolvedSecretValues: [secret],
+    });
+
+    await enterWait(
+      { ...config, redact: redactLiteral(secret) },
+      {
+        run,
+        stepId: "pause",
+        blockId: "wait.manual",
+        resolvedInputs: {},
+        wait: {
+          type: "manual",
+          schemaVersion: CURRENT_ENGINE_SCHEMA_VERSION,
+        },
+        resolvedSecretRefs: new Set([secret]),
+      },
+    );
+
+    await expect(
+      store.runs.getOperationalState(run.runId),
+    ).resolves.toBeUndefined();
+    await expect(
+      store.waits.getOperationalRunState(run.runId, "pause"),
+    ).resolves.toMatchObject({
+      run: {
+        status: "waiting",
+        inputs: { value: secret },
+      },
+      resolvedSecretValues: [secret],
+    });
+    expect(
+      JSON.stringify(await store.runs.get(run.runId)),
+    ).not.toContain(secret);
   });
 
   it("records a StepTrace with status 'waiting' for the wait step, capturing resolvedInputs and startedAt", async () => {
@@ -73,7 +226,7 @@ describe("enterWait — no early match (architecture §4.4 steps 1-4)", () => {
     expect(result.run.status).toBe("waiting");
   });
 
-  it("preserves the active concurrency key when wait-entry redaction sees the same secret value", async () => {
+  it("preserves active concurrency coordination with a fingerprint when wait-entry discovers the raw key is secret", async () => {
     const { store, config } = await setup();
     const concurrencyKey = "case-secret";
     const run = fixtureRun({ status: "running", params: { concurrencyKey } });
@@ -92,8 +245,14 @@ describe("enterWait — no early match (architecture §4.4 steps 1-4)", () => {
     );
 
     expect(result.run.status).toBe("waiting");
-    expect(result.run.params?.concurrencyKey).toBe(concurrencyKey);
-    await expect(store.runs.get(run.runId)).resolves.toMatchObject({ params: { concurrencyKey } });
+    const fingerprint = fingerprintConcurrencyKey(concurrencyKey);
+    expect(result.run.params).toMatchObject({
+      concurrencyKey: fingerprint,
+      concurrencyKeyFormat: CONCURRENCY_KEY_FORMAT,
+    });
+    await expect(store.runs.get(run.runId)).resolves.toMatchObject({
+      params: { concurrencyKey: fingerprint },
+    });
   });
 });
 
@@ -102,19 +261,32 @@ describe("enterWait — early-arrival resolution (architecture §4.4 step 3 / §
     const { store, config } = await setup();
     const run = fixtureRun({ status: "running" });
     await store.runs.put(run);
+    const waitReadyRun = fixtureRun({
+      ...run,
+      snapshot: {
+        definitions: { frozen: true },
+        resolvedVersions: {},
+        packHashes: {},
+        capturedAt: "2026-07-29T00:00:00.000Z",
+      },
+    });
 
     const signal = { id: uniqueId("sig"), name: "quote.received", correlationId: "corr1", payload: { price: 42 }, receivedAt: new Date().toISOString() };
     await store.signals.append(signal);
 
     const wait = { type: "signal" as const, name: "quote.received", correlationId: "corr1", schemaVersion: CURRENT_ENGINE_SCHEMA_VERSION };
-    const result = await enterWait(config, { run, stepId: "wait_step", blockId: "wait.for_signal", resolvedInputs: {}, wait, resolvedSecretRefs: new Set() });
+    const result = await enterWait(config, { run: waitReadyRun, stepId: "wait_step", blockId: "wait.for_signal", resolvedInputs: {}, wait, resolvedSecretRefs: new Set(), snapshotCapturedForWait: true });
 
     expect(result.suspended).toBe(false);
     expect(result.run.status).toBe("running"); // unchanged from before — never flipped to "waiting"
     expect(result.run.waits).toEqual([]); // never appended — "none of a/b/c is persisted as an outstanding wait"
+    expect(result.run.snapshot.capturedAt).toBe(""); // an early arrival never became a durable suspension boundary
 
     const waitRow = await store.waits.get(run.runId, "wait_step");
     expect(waitRow).toBeUndefined();
+    await expect(store.runs.get(run.runId)).resolves.toMatchObject({
+      snapshot: { capturedAt: "" },
+    });
 
     const trace = result.run.trace.find((t) => t.stepId === "wait_step");
     expect(trace).toMatchObject({ status: "completed", outputs: { price: 42 } });
@@ -133,7 +305,7 @@ describe("enterWait — early-arrival resolution (architecture §4.4 step 3 / §
     await expect(store.signals.findUnconsumedMatch("quote.received", "corr1")).resolves.toBeUndefined();
   });
 
-  it("preserves the active concurrency key across early-arrival resolution redaction", async () => {
+  it("preserves active concurrency coordination with a fingerprint across early-arrival redaction", async () => {
     const { store, config } = await setup();
     const concurrencyKey = "case-secret";
     const run = fixtureRun({ status: "running", params: { concurrencyKey } });
@@ -159,14 +331,29 @@ describe("enterWait — early-arrival resolution (architecture §4.4 step 3 / §
     );
 
     expect(result.suspended).toBe(false);
-    expect(result.run.params?.concurrencyKey).toBe(concurrencyKey);
-    await expect(store.runs.get(run.runId)).resolves.toMatchObject({ params: { concurrencyKey } });
+    const fingerprint = fingerprintConcurrencyKey(concurrencyKey);
+    expect(result.run.params).toMatchObject({
+      concurrencyKey: fingerprint,
+      concurrencyKeyFormat: CONCURRENCY_KEY_FORMAT,
+    });
+    await expect(store.runs.get(run.runId)).resolves.toMatchObject({
+      params: { concurrencyKey: fingerprint },
+    });
   });
 
   it("THE EARLY-ARRIVAL RACE TEST: the SignalStore check and the WaitStore/RunRecord writes happen inside ONE store.transact() call (architecture §4.4 step 3) — a simulated crash after the check but before the wait row commits leaves NEITHER a resolved-immediately outcome NOR a persisted outstanding wait", async () => {
     const { store, config } = await setup();
     const run = fixtureRun({ status: "running" });
     await store.runs.put(run);
+    const capturedRun = fixtureRun({
+      ...run,
+      snapshot: {
+        definitions: { note: "snapshot-secret" },
+        resolvedVersions: {},
+        packHashes: {},
+        capturedAt: "2026-07-29T00:00:00.000Z",
+      },
+    });
     // Deliberately NO matching signal exists — this exercises the
     // "no-match, persist the wait" branch, which is the one that used to
     // NOT be wrapped in transact() before this session's fix.
@@ -182,8 +369,17 @@ describe("enterWait — early-arrival resolution (architecture §4.4 step 3 / §
             ...tx,
             waits: {
               get: tx.waits.get.bind(tx.waits),
+              getOperationalRunState:
+                tx.waits.getOperationalRunState.bind(tx.waits),
+              replaceOperationalRunState:
+                tx.waits.replaceOperationalRunState.bind(
+                  tx.waits,
+                ),
+              redactAudit: tx.waits.redactAudit.bind(tx.waits),
               delete: tx.waits.delete.bind(tx.waits),
               list: tx.waits.list.bind(tx.waits),
+              listOperational: tx.waits.listOperational.bind(tx.waits),
+              findSignalMatches: tx.waits.findSignalMatches.bind(tx.waits),
               listDue: tx.waits.listDue.bind(tx.waits),
               put: () => {
                 waitPutCalls += 1;
@@ -194,9 +390,13 @@ describe("enterWait — early-arrival resolution (architecture §4.4 step 3 / §
           return fn(wrappedTx);
         }),
     };
-    const crashingConfig: WaitMachineConfig = { ...config, store: crashingStore };
+    const crashingConfig: WaitMachineConfig = {
+      ...config,
+      store: crashingStore,
+      redact: redactLiteral("snapshot-secret"),
+    };
 
-    await expect(enterWait(crashingConfig, { run, stepId: "wait_step", blockId: "wait.for_signal", resolvedInputs: {}, wait, resolvedSecretRefs: new Set() })).rejects.toThrow(SimulatedCrash);
+    await expect(enterWait(crashingConfig, { run: capturedRun, stepId: "wait_step", blockId: "wait.for_signal", resolvedInputs: {}, wait, resolvedSecretRefs: new Set(["snapshot-secret"]) })).rejects.toThrow(SimulatedCrash);
     expect(waitPutCalls).toBe(1); // confirms the injected failure point was actually reached
 
     // Re-read through the REAL (unwrapped) store — the RunRecord.put that
@@ -205,6 +405,7 @@ describe("enterWait — early-arrival resolution (architecture §4.4 step 3 / §
     const reloaded = await store.runs.get(run.runId);
     expect(reloaded?.status).toBe("running"); // NOT "waiting" — the transaction rolled back
     expect(reloaded?.trace).toHaveLength(0); // no "waiting" StepTrace was persisted either
+    expect(reloaded?.snapshot.capturedAt).toBe("");
     await expect(store.waits.get(run.runId, "wait_step")).resolves.toBeUndefined();
   });
 });
@@ -229,6 +430,151 @@ describe("resumeBySignal — signal-matched mechanism (architecture §4.4.1)", (
 
     // WaitStore row is gone — resumed exactly once.
     await expect(store.waits.get(run.runId, "wait_step")).resolves.toBeUndefined();
+  });
+
+  it("rewrites the complete signal audit before consumption clears protected secret state", async () => {
+    const { store, config } = await setup();
+    const secret = "signal-metadata-secret";
+    const run = fixtureRun({ status: "running" });
+    await store.runs.put(run);
+    const wait = {
+      type: "signal" as const,
+      name: secret,
+      correlationId: secret,
+      schemaVersion: CURRENT_ENGINE_SCHEMA_VERSION,
+    };
+    await enterWait(
+      { ...config, redact: redactLiteral(secret) },
+      {
+        run,
+        stepId: "wait_step",
+        blockId: "wait.for_signal",
+        resolvedInputs: {},
+        wait,
+        resolvedSecretRefs: new Set([secret]),
+      },
+    );
+    const signal = {
+      id: uniqueId("sig"),
+      name: secret,
+      correlationId: secret,
+      payload: { echoed: secret },
+      receivedAt: new Date().toISOString(),
+    };
+    await store.signals.append(signal);
+
+    let sawSafeAuditBeforeConsume = false;
+    const observingStore: AartStore = {
+      ...store,
+      transact: (fn) =>
+        store.transact((tx) => {
+          const observingSignals = new Proxy(tx.signals, {
+            get(target, property, receiver) {
+              if (property === "markConsumed") {
+                return async (...args: unknown[]) => {
+                  const audit = (await target.list()).find(
+                    (candidate) => candidate.id === signal.id,
+                  );
+                  expect(JSON.stringify(audit)).not.toContain(
+                    secret,
+                  );
+                  sawSafeAuditBeforeConsume = true;
+                  return Reflect.apply(
+                    target.markConsumed,
+                    target,
+                    args,
+                  ) as Promise<void>;
+                };
+              }
+              const value = Reflect.get(
+                target,
+                property,
+                receiver,
+              );
+              return typeof value === "function"
+                ? value.bind(target)
+                : value;
+            },
+          });
+          return fn({ ...tx, signals: observingSignals });
+        }),
+    };
+
+    const outcome = await resumeBySignal(
+      {
+        ...config,
+        store: observingStore,
+        redact: redactLiteral(secret),
+      },
+      signal,
+    );
+
+    expect(outcome.kind).toBe("resumed");
+    expect(sawSafeAuditBeforeConsume).toBe(true);
+    await expect(store.signals.list()).resolves.toContainEqual({
+      ...signal,
+      name: "[REDACTED]",
+      correlationId: "[REDACTED]",
+      payload: { echoed: "[REDACTED]" },
+    });
+  });
+
+  it("restores secret refs from a late-repaired matched signal before completing the wait", async () => {
+    const { store, config } = await setup();
+    const secret = "signal-only-secret";
+    const run = fixtureRun({ status: "running" });
+    await store.runs.put(run);
+    await enterWait(config, {
+      run,
+      stepId: "wait_step",
+      blockId: "wait.for_signal",
+      resolvedInputs: {},
+      wait: {
+        type: "signal",
+        name: "ready",
+        correlationId: "corr",
+        schemaVersion: CURRENT_ENGINE_SCHEMA_VERSION,
+      },
+      resolvedSecretRefs: new Set(),
+    });
+    const signal = {
+      id: uniqueId("sig"),
+      name: "ready",
+      correlationId: "corr",
+      payload: { value: secret },
+      receivedAt: new Date().toISOString(),
+    };
+    await store.signals.append(signal);
+    const redact = redactLiteral(secret);
+    await repairGlobalAuditsForNewSecrets(
+      store,
+      redact,
+      new Set([secret]),
+    );
+
+    const outcome = await resumeBySignal(
+      { ...config, redact },
+      signal,
+    );
+
+    expect(outcome.kind).toBe("resumed");
+    if (outcome.kind !== "resumed") throw new Error("unreachable");
+    expect(JSON.stringify(outcome.run)).not.toContain(secret);
+    expect(
+      JSON.stringify(await store.runs.get(run.runId)),
+    ).not.toContain(secret);
+    await expect(
+      store.runs.getOperationalState(run.runId),
+    ).resolves.toMatchObject({
+      run: {
+        trace: [
+          expect.objectContaining({
+            outputs: { value: secret },
+          }),
+        ],
+      },
+      resolvedSecretValues: expect.arrayContaining([secret]),
+    });
   });
 
   it("redelivery of the same logical signal AFTER the wait has already been fully resolved and cleaned up does NOT double-advance the run — reported as unmatched (safe/inspectable), not an error, and critically not a second 'resumed'", async () => {
@@ -304,6 +650,40 @@ describe("resumeBySignal — signal-matched mechanism (architecture §4.4.1)", (
 });
 
 describe("resumeManual — direct-lookup mechanism", () => {
+  it("refuses to persist a resumed payload when preparation is omitted", async () => {
+    const { store, config } = await setup();
+    const run = fixtureRun({ status: "running" });
+    await store.runs.put(run);
+    await enterWait(config, {
+      run,
+      stepId: "manual_step",
+      blockId: "wait.manual",
+      resolvedInputs: {},
+      wait: {
+        type: "manual",
+        schemaVersion: CURRENT_ENGINE_SCHEMA_VERSION,
+      },
+      resolvedSecretRefs: new Set(),
+    });
+
+    await expect(
+      resumeManualWithPreparation(
+        config,
+        run.runId,
+        "manual_step",
+        { secret: "plaintext" },
+        new Set(),
+        undefined as never,
+      ),
+    ).rejects.toThrow(/prepareCompletedRun callback is required/);
+
+    await expect(store.runs.get(run.runId)).resolves.toMatchObject({
+      status: "waiting",
+      trace: [expect.objectContaining({ status: "waiting" })],
+    });
+    await expect(store.waits.get(run.runId, "manual_step")).resolves.toBeDefined();
+  });
+
   it("resumes a manual wait with the supplied payload as output", async () => {
     const { store, config } = await setup();
     const run = fixtureRun({ status: "running" });
@@ -328,7 +708,7 @@ describe("resumeManual — direct-lookup mechanism", () => {
     expect(second.kind).toBe("duplicate");
   });
 
-  it("preserves the active concurrency key across resume redaction", async () => {
+  it("preserves active concurrency coordination with a fingerprint across resume redaction", async () => {
     const { store, config } = await setup();
     const concurrencyKey = "case-secret";
     const run = fixtureRun({ status: "running", params: { concurrencyKey } });
@@ -348,8 +728,14 @@ describe("resumeManual — direct-lookup mechanism", () => {
 
     expect(outcome.kind).toBe("resumed");
     if (outcome.kind !== "resumed") throw new Error("unreachable");
-    expect(outcome.run.params?.concurrencyKey).toBe(concurrencyKey);
-    await expect(store.runs.get(run.runId)).resolves.toMatchObject({ params: { concurrencyKey } });
+    const fingerprint = fingerprintConcurrencyKey(concurrencyKey);
+    expect(outcome.run.params).toMatchObject({
+      concurrencyKey: fingerprint,
+      concurrencyKeyFormat: CONCURRENCY_KEY_FORMAT,
+    });
+    await expect(store.runs.get(run.runId)).resolves.toMatchObject({
+      params: { concurrencyKey: fingerprint },
+    });
   });
 
   it("resuming a step that was never waited on is unmatched", async () => {
@@ -469,6 +855,43 @@ describe("listExternalJobWaits — S2's poll-mechanism sweep query", () => {
     expect(jobs).toHaveLength(1);
     expect(jobs[0]).toMatchObject({ stepId: "job_wait" });
   });
+
+  it("polls with sealed provider/job values after their audit copy is redacted", async () => {
+    const { store } = await setup();
+    const wait = {
+      type: "external_job" as const,
+      provider: "late-secret",
+      jobId: "late-secret",
+      schemaVersion: CURRENT_ENGINE_SCHEMA_VERSION,
+    };
+    await store.waits.put(
+      "run-sealed-job",
+      "job_wait",
+      wait,
+      new Date().toISOString(),
+    );
+    await store.waits.redactAudit(
+      "run-sealed-job",
+      "job_wait",
+      {
+        ...wait,
+        provider: "[REDACTED]",
+        jobId: "[REDACTED]",
+      },
+    );
+    await expect(listExternalJobWaits(store)).resolves.toEqual([
+      expect.objectContaining({ wait }),
+    ]);
+    await expect(store.waits.list()).resolves.toEqual([
+      expect.objectContaining({
+        wait: {
+          ...wait,
+          provider: "[REDACTED]",
+          jobId: "[REDACTED]",
+        },
+      }),
+    ]);
+  });
 });
 
 describe("getExpiredWaits / failExpiredWait — wait TIMEOUT expiry (architecture §4.4.1's Expiry note)", () => {
@@ -493,6 +916,42 @@ describe("getExpiredWaits / failExpiredWait — wait TIMEOUT expiry (architectur
 
     const expired = await getExpiredWaits(store, new Date());
     expect(expired.map((e) => e.stepId)).not.toContain("wait_step");
+  });
+
+  it("uses sealed operational timeout values after the public audit is redacted", async () => {
+    const { store } = await setup();
+    const wait = {
+      type: "signal" as const,
+      name: "late-secret",
+      correlationId: "late-secret",
+      timeout: "1s",
+      schemaVersion: CURRENT_ENGINE_SCHEMA_VERSION,
+    };
+    await store.waits.put(
+      "run-sealed-timeout",
+      "pause",
+      wait,
+      new Date(Date.now() - 10_000).toISOString(),
+    );
+    await store.waits.redactAudit(
+      "run-sealed-timeout",
+      "pause",
+      {
+        ...wait,
+        name: "[REDACTED]",
+        correlationId: "[REDACTED]",
+        timeout: "[REDACTED]",
+      },
+    );
+    await expect(
+      getExpiredWaits(store, new Date()),
+    ).resolves.toEqual([
+      expect.objectContaining({
+        runId: "run-sealed-timeout",
+        stepId: "pause",
+        wait,
+      }),
+    ]);
   });
 
   it("getExpiredWaits excludes a wait with no timeout field at all (e.g. manual, or signal without one declared)", async () => {
@@ -614,6 +1073,14 @@ describe("THE REQUIRED TEST — exactly-once resume's transaction boundary holds
             runs: {
               get: tx.runs.get.bind(tx.runs),
               list: tx.runs.list.bind(tx.runs),
+              getOperationalState:
+                tx.runs.getOperationalState.bind(tx.runs),
+              putOperationalState:
+                tx.runs.putOperationalState.bind(tx.runs),
+              replaceOperationalState:
+                tx.runs.replaceOperationalState.bind(tx.runs),
+              deleteOperationalState:
+                tx.runs.deleteOperationalState.bind(tx.runs),
               hasDedupeKey: tx.runs.hasDedupeKey.bind(tx.runs),
               recordDedupeKey: tx.runs.recordDedupeKey.bind(tx.runs),
               put: async () => {
@@ -659,6 +1126,14 @@ describe("THE REQUIRED TEST — exactly-once resume's transaction boundary holds
             runs: {
               get: tx.runs.get.bind(tx.runs),
               list: tx.runs.list.bind(tx.runs),
+              getOperationalState:
+                tx.runs.getOperationalState.bind(tx.runs),
+              putOperationalState:
+                tx.runs.putOperationalState.bind(tx.runs),
+              replaceOperationalState:
+                tx.runs.replaceOperationalState.bind(tx.runs),
+              deleteOperationalState:
+                tx.runs.deleteOperationalState.bind(tx.runs),
               hasDedupeKey: tx.runs.hasDedupeKey.bind(tx.runs),
               recordDedupeKey: tx.runs.recordDedupeKey.bind(tx.runs),
               put: (r) => (shouldCrash ? Promise.reject(new SimulatedCrash("crash")) : tx.runs.put(r)),

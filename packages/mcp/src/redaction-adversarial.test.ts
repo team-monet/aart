@@ -148,8 +148,9 @@ describe("adversarial redaction e2e — real engine + real redactRecord", () => 
     const json = JSON.stringify(persisted);
     expect(json).not.toContain(SECRET); // neither step 1's direct output nor step 2's carried-forward copy leaks
     expect(json).toContain("REDACTED");
-    // Step 2's carried value is the ALREADY-REDACTED marker, not the raw secret.
-    expect((persisted!.trace[1]!.outputs as { value: string }).value).toBe("carried: [REDACTED:secret-1]");
+    // Matching public leaves are withheld as a unit so a later overlapping
+    // secret cannot expose an adjacent suffix.
+    expect((persisted!.trace[1]!.outputs as { value: string }).value).toBe("[REDACTED]");
   });
 
   it("[SAFE] a secret thrown inside a block's Error message is redacted from the persisted StepTrace.error (error paths go through the chokepoint)", async () => {
@@ -163,10 +164,9 @@ describe("adversarial redaction e2e — real engine + real redactRecord", () => 
     const persisted = await store.runs.get(run.runId);
     const json = JSON.stringify(persisted);
     expect(json).not.toContain(SECRET);
-    // The failed step's error text is present but scrubbed.
+    // The failed step's error text is withheld as a unit.
     const errText = persisted!.trace[0]!.error!;
-    expect(errText).toContain("upstream auth failed");
-    expect(errText).toContain("[REDACTED:secret-1]");
+    expect(errText).toBe("[REDACTED]");
     expect(errText).not.toContain(SECRET);
     // The run-level error (finalizeTerminal) is likewise scrubbed.
     expect(persisted!.error ?? "").not.toContain(SECRET);
@@ -219,8 +219,8 @@ describe("adversarial redaction e2e — real engine + real redactRecord", () => 
     // checkpoint, post-resume echo of a pre-wait secret, AND a fresh
     // post-resume re-resolution) the raw secret never appears once.
     expect(json).not.toContain(SECRET);
-    expect((persisted!.trace.find((t) => t.stepId === "s3")!.outputs as { value: string }).value).toContain("[REDACTED:secret-1]");
-    expect((persisted!.trace.find((t) => t.stepId === "s4")!.outputs as { value: string }).value).toContain("[REDACTED:secret-1]");
+    expect((persisted!.trace.find((t) => t.stepId === "s3")!.outputs as { value: string }).value).toBe("[REDACTED]");
+    expect((persisted!.trace.find((t) => t.stepId === "s4")!.outputs as { value: string }).value).toBe("[REDACTED]");
   });
 
   it("[SAFE: F5] TEXT-mime artifact bytes are now redacted before persist (root AMENDMENTS.md, S10 completion — was: '[FINDING: F5] artifact bytes BYPASS the redaction chokepoint')", async () => {
@@ -236,8 +236,8 @@ describe("adversarial redaction e2e — real engine + real redactRecord", () => 
     expect(JSON.stringify(persisted)).not.toContain(SECRET);
 
     // The fix: ctx.writeArtifact (step-executor.ts buildBlockContext) now
-    // decodes TEXT-mime bytes, runs them through the SAME applyRedaction
-    // chokepoint every other persist call site uses, and re-encodes before
+    // decodes TEXT-mime bytes, runs them through the same conservative
+    // whole-leaf redaction used for irreversible public audits, and re-encodes before
     // calling store.artifacts.put — so the artifact content itself is
     // scrubbed too, not just the RunRecord's reference to it.
     const artifacts = await store.artifacts.listByRun(run.runId);
@@ -246,7 +246,7 @@ describe("adversarial redaction e2e — real engine + real redactRecord", () => 
     const bytes = await store.artifacts.getBytes(artifacts[0]!.id);
     const text = new TextDecoder().decode(bytes!);
     expect(text).not.toContain(SECRET);
-    expect(text).toBe("report body — apiKey=[REDACTED:secret-1]");
+    expect(text).toBe("[REDACTED]");
   });
 
   it("[LIMIT: F5] BINARY-mime artifact bytes are deliberately NOT scan-redacted — the documented boundary, not a residual gap", async () => {

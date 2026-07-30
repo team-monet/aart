@@ -10,11 +10,141 @@ import {
   resolveExpression,
   type ResolveOptions,
 } from "@aart/expr";
-import type { RunRecord, Workflow } from "@aart/types";
-import { buildExprContext } from "./expr-context.js";
+import type { RunRecord, StepTrace, Workflow } from "@aart/types";
+import {
+  buildExprContext,
+  traceRepresentsAuthoredStep,
+} from "./expr-context.js";
 
 function referencesSecret(expression: string): boolean {
   return findExpressionTokens(expression).some((token) => parseExpression(token[0]).root === "secrets");
+}
+
+function outputPointer(path: ReturnType<typeof parseExpression>["path"]): string {
+  return path
+    .slice(2)
+    .map((segment) =>
+      segment.kind === "property"
+        ? `/${segment.name.replaceAll("~", "~0").replaceAll("/", "~1")}`
+        : `/${segment.index}`,
+    )
+    .join("");
+}
+
+function rootPointer(path: ReturnType<typeof parseExpression>["path"]): string {
+  return path
+    .map((segment) =>
+      segment.kind === "property"
+        ? `/${segment.name.replaceAll("~", "~0").replaceAll("/", "~1")}`
+        : `/${segment.index}`,
+    )
+    .join("");
+}
+
+function pathsOverlap(left: string, right: string): boolean {
+  if (left === "*" || right === "") return true;
+  return (
+    left === right ||
+    left.startsWith(`${right}/`) ||
+    right.startsWith(`${left}/`)
+  );
+}
+
+function traceDataTaintsPointer(trace: StepTrace, pointer: string): boolean {
+  if (trace.secretTainted !== true) return false;
+  const paths =
+    trace.secretTaintedPaths ??
+    // Records created before path-level provenance conservatively taint all
+    // outputs. An explicit empty list denotes control-only provenance.
+    ["*"];
+  return paths.some((path) => pathsOverlap(path, pointer));
+}
+
+export function assertNoSecretTaintedOutputSources(
+  workflow: Pick<Workflow, "execution">,
+  run: RunRecord,
+): void {
+  if (!workflow.execution.outputMapping) return;
+  for (const [outputName, expression] of Object.entries(workflow.execution.outputMapping)) {
+    for (const token of findExpressionTokens(expression)) {
+      const parsed = parseExpression(token[0]);
+      if (parsed.root === "inputs" || parsed.root === "trigger") {
+        const paths =
+          parsed.root === "inputs"
+            ? run.secretTaintedInputPaths
+            : run.secretTaintedTriggerPaths;
+        const pointer = rootPointer(parsed.path);
+        if (paths?.some((path) => pathsOverlap(path, pointer))) {
+          throw new Error(
+            `public outputMapping "${outputName}" depends on secret-tainted ${parsed.root} path "${pointer || "/"}"; expose a non-secret derived value instead`,
+          );
+        }
+        continue;
+      }
+      if (parsed.root !== "steps") continue;
+      const first = parsed.path[0];
+      if (first === undefined) {
+        const latestByStepId = new Map<string, StepTrace>();
+        for (const trace of run.trace) {
+          if (trace.iterationIndex !== undefined) continue;
+          latestByStepId.set(trace.authoredStepId ?? trace.stepId, trace);
+        }
+        if (
+          [...latestByStepId.values()].some(
+            (trace) =>
+              trace.controlSecretTainted === true ||
+              traceDataTaintsPointer(trace, ""),
+          )
+        ) {
+          throw new Error(
+            `public outputMapping "${outputName}" depends on the full steps context containing secret-tainted traces; expose a non-secret derived value instead`,
+          );
+        }
+        continue;
+      }
+      if (first.kind !== "property") continue;
+      const source = run.trace
+        .filter((trace) => traceRepresentsAuthoredStep(trace, first.name))
+        .at(-1);
+      if (
+        source === undefined &&
+        run.trace.some((trace) => trace.controlSecretTainted === true)
+      ) {
+        throw new Error(
+          `public outputMapping "${outputName}" depends on absent step "${first.name}" after secret-controlled flow; optional field presence must not reveal a secret branch decision`,
+        );
+      }
+      if (source?.controlSecretTainted === true) {
+        throw new Error(
+          `public outputMapping "${outputName}" depends on secret-tainted step "${first.name}" because its execution path was secret-controlled; expose a result whose selection does not depend on secret data`,
+        );
+      }
+      const second = parsed.path[1];
+      if (source && second?.kind === "property" && second.name === "outputs") {
+        const pointer = outputPointer(parsed.path);
+        if (traceDataTaintsPointer(source, pointer)) {
+          throw new Error(
+            `public outputMapping "${outputName}" depends on secret-tainted step "${first.name}" output path "${pointer || "/"}"; expose a non-secret derived value instead`,
+          );
+        }
+      } else if (
+        source &&
+        second?.kind === "property" &&
+        second.name === "status" &&
+        parsed.path.length === 2
+      ) {
+        // A step's status is execution metadata, not a read of its output
+        // data. Secret-controlled execution was rejected above, so
+        // path-level data taint alone must not make this public mapping
+        // fail.
+        continue;
+      } else if (source && traceDataTaintsPointer(source, "")) {
+        throw new Error(
+          `public outputMapping "${outputName}" depends on secret-tainted step "${first.name}"; expose a non-secret derived value instead`,
+        );
+      }
+    }
+  }
 }
 
 function defineOutput(outputs: Record<string, unknown>, name: string, value: unknown): void {
@@ -66,7 +196,9 @@ function resolutionFailedForSkippedWorkflowStep(
   if (!findExpressionTokens(expression).some((token) => token[0] === error.expression)) return false;
   const stepId = isValidWorkflowStepSource(error.expression, declaredStepIds);
   if (stepId === undefined) return false;
-  const latest = run.trace.filter((trace) => trace.stepId === stepId).at(-1);
+  const latest = run.trace
+    .filter((trace) => traceRepresentsAuthoredStep(trace, stepId))
+    .at(-1);
   return latest === undefined || latest.status === "skipped";
 }
 
@@ -85,6 +217,7 @@ export async function materializeWorkflowOutputs(
 ): Promise<Record<string, unknown>> {
   if (!workflow.execution.outputMapping) return run.outputs ?? {};
 
+  assertNoSecretTaintedOutputSources(workflow, run);
   const context = buildExprContext(run);
   const fieldsByName = new Map(workflow.outputs.map((field) => [field.name, field]));
   const outputs: Record<string, unknown> = {};

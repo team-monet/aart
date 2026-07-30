@@ -330,6 +330,11 @@ export function createRealEngine(
   activePackBlockIds: ReadonlySet<string> = new Set(),
   packRoot?: string,
 ): Engine {
+  const trustedCredentialBlocks = new Map(
+    Object.entries(blocks).filter(
+      ([blockId]) => !activePackBlockIds.has(blockId),
+    ),
+  );
   const runtimePackBlocksByHash = new Map(packBlocksByHash);
   const loadPackVersion = (contentHash: string): BlockRegistry | undefined => {
     const cached = runtimePackBlocksByHash.get(contentHash);
@@ -373,6 +378,8 @@ export function createRealEngine(
     capabilityCheck: checkCapability,
     getGrantedCapabilities: createGetGrantedCapabilities(store, blocks, trustMode),
     blocks,
+    canUseCredentialSecrets: ({ block }) =>
+      trustedCredentialBlocks.get(block.manifest.id) === block,
     resolveBlockForRun: (run, blockId) => {
       let missingSnapshottedPack = false;
       for (const hash of Object.values(run.snapshot.packHashes)) {

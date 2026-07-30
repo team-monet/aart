@@ -3,8 +3,17 @@
 // module doc comment for why trace/waits/artifacts are stored as columns
 // on `runs` directly rather than architecture's literal separate
 // `step_traces` table.
+import { randomUUID } from "node:crypto";
+import { join } from "node:path";
 import type { RunFlag, RunRecord, RunStatus } from "@aart/types";
-import type { RunStore } from "../../../types.js";
+import type {
+  RunOperationalState,
+  RunStore,
+} from "../../../types.js";
+import {
+  openOperationalState,
+  sealOperationalState,
+} from "../../operational-state-seal.js";
 import { dbAll, dbGet, dbRun, fromBool, fromJson, toBool, toJson, type SqlExec } from "../db.js";
 
 interface RunRow {
@@ -16,6 +25,8 @@ interface RunRow {
   approval_mode: string;
   trigger_json: string;
   inputs_json: string;
+  secret_tainted_input_paths_json: string | null;
+  secret_tainted_trigger_paths_json: string | null;
   params_json: string | null;
   trace_json: string;
   waits_json: string;
@@ -28,6 +39,8 @@ interface RunRow {
   started_at: string;
   updated_at: string;
   ended_at: string | null;
+  operational_generation: string | null | undefined;
+  operational_run_state_ciphertext: string | null | undefined;
 }
 
 function rowToRun(row: RunRow): RunRecord {
@@ -40,6 +53,20 @@ function rowToRun(row: RunRow): RunRecord {
     approvalMode: row.approval_mode as RunRecord["approvalMode"],
     trigger: fromJson(row.trigger_json)!,
     inputs: fromJson(row.inputs_json)!,
+    ...(row.secret_tainted_input_paths_json !== null
+      ? {
+          secretTaintedInputPaths: fromJson<string[]>(
+            row.secret_tainted_input_paths_json,
+          )!,
+        }
+      : {}),
+    ...(row.secret_tainted_trigger_paths_json !== null
+      ? {
+          secretTaintedTriggerPaths: fromJson<string[]>(
+            row.secret_tainted_trigger_paths_json,
+          )!,
+        }
+      : {}),
     params: fromJson(row.params_json),
     trace: fromJson(row.trace_json)!,
     waits: fromJson(row.waits_json)!,
@@ -56,7 +83,17 @@ function rowToRun(row: RunRow): RunRecord {
 }
 
 export class SqliteRunStore implements RunStore {
-  constructor(private readonly exec: SqlExec) {}
+  private readonly operationKeyPath: string;
+
+  constructor(
+    private readonly exec: SqlExec,
+    operationalStateDir: string,
+  ) {
+    this.operationKeyPath = join(
+      operationalStateDir,
+      ".run-operational-key",
+    );
+  }
 
   async get(runId: string): Promise<RunRecord | undefined> {
     const row = await this.exec((db) => dbGet<RunRow>(db, "SELECT * FROM runs WHERE run_id = ?", [runId]));
@@ -67,8 +104,8 @@ export class SqliteRunStore implements RunStore {
     await this.exec((db) =>
       dbRun(
         db,
-        `INSERT INTO runs (run_id, workflow_id, workflow_version, status, approved, approval_mode, trigger_json, inputs_json, params_json, trace_json, waits_json, outputs_json, error, artifacts_json, snapshot_json, flag_json, schema_version, started_at, updated_at, ended_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO runs (run_id, workflow_id, workflow_version, status, approved, approval_mode, trigger_json, inputs_json, secret_tainted_input_paths_json, secret_tainted_trigger_paths_json, params_json, trace_json, waits_json, outputs_json, error, artifacts_json, snapshot_json, flag_json, schema_version, started_at, updated_at, ended_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(run_id) DO UPDATE SET
            workflow_id = excluded.workflow_id,
            workflow_version = excluded.workflow_version,
@@ -77,6 +114,8 @@ export class SqliteRunStore implements RunStore {
            approval_mode = excluded.approval_mode,
            trigger_json = excluded.trigger_json,
            inputs_json = excluded.inputs_json,
+           secret_tainted_input_paths_json = excluded.secret_tainted_input_paths_json,
+           secret_tainted_trigger_paths_json = excluded.secret_tainted_trigger_paths_json,
            params_json = excluded.params_json,
            trace_json = excluded.trace_json,
            waits_json = excluded.waits_json,
@@ -98,6 +137,8 @@ export class SqliteRunStore implements RunStore {
           run.approvalMode,
           toJson(run.trigger)!,
           toJson(run.inputs)!,
+          toJson(run.secretTaintedInputPaths),
+          toJson(run.secretTaintedTriggerPaths),
           toJson(run.params),
           toJson(run.trace)!,
           toJson(run.waits)!,
@@ -133,6 +174,88 @@ export class SqliteRunStore implements RunStore {
     const where = clauses.length ? ` WHERE ${clauses.join(" AND ")}` : "";
     const rows = await this.exec((db) => dbAll<RunRow>(db, `SELECT * FROM runs${where}`, params));
     return rows.map(rowToRun);
+  }
+
+  async getOperationalState(
+    runId: string,
+  ): Promise<RunOperationalState | undefined> {
+    const row = await this.exec((db) =>
+      dbGet<RunRow>(
+        db,
+        "SELECT * FROM runs WHERE run_id = ?",
+        [runId],
+      ),
+    );
+    if (
+      row?.operational_generation === null ||
+      row?.operational_generation === undefined ||
+      row.operational_run_state_ciphertext === null ||
+      row.operational_run_state_ciphertext === undefined
+    ) {
+      return undefined;
+    }
+    return openOperationalState<RunOperationalState>(
+      this.operationKeyPath,
+      [runId, row.operational_generation, "active-run-state"],
+      row.operational_run_state_ciphertext,
+    );
+  }
+
+  async putOperationalState(
+    runId: string,
+    state: RunOperationalState,
+  ): Promise<void> {
+    const generation = randomUUID();
+    const ciphertext = await sealOperationalState(
+      this.operationKeyPath,
+      [runId, generation, "active-run-state"],
+      state,
+    );
+    const changed = await this.exec((db) =>
+      dbRun(
+        db,
+        `UPDATE runs
+         SET operational_generation = ?,
+             operational_run_state_ciphertext = ?
+         WHERE run_id = ?`,
+        [generation, ciphertext, runId],
+      ),
+    );
+    if (changed.changes === 0) {
+      throw new Error(
+        `putOperationalState: no run ${runId} exists.`,
+      );
+    }
+  }
+
+  async replaceOperationalState(
+    runId: string,
+    state: RunOperationalState,
+  ): Promise<void> {
+    const existing = await this.exec((db) =>
+      dbGet<{ found: number }>(
+        db,
+        `SELECT 1 AS found FROM runs
+         WHERE run_id = ?
+           AND operational_run_state_ciphertext IS NOT NULL`,
+        [runId],
+      ),
+    );
+    if (existing === undefined) return;
+    await this.putOperationalState(runId, state);
+  }
+
+  async deleteOperationalState(runId: string): Promise<void> {
+    await this.exec((db) =>
+      dbRun(
+        db,
+        `UPDATE runs
+         SET operational_generation = NULL,
+             operational_run_state_ciphertext = NULL
+         WHERE run_id = ?`,
+        [runId],
+      ),
+    );
   }
 
   async hasDedupeKey(runId: string, dedupeKey: string): Promise<boolean> {

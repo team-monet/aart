@@ -342,13 +342,13 @@ One real bug in my own first draft of this test, not the system under test: I in
 
 ### A38 — Rolling-upgrade / schema-version E2E (plan §4): a real constraint in `assertSchemaVersionCompatible` shaped how "a newer engine process" had to be modeled
 
-**The constraint, found while designing this test, not previously documented anywhere:** `assertSchemaVersionCompatible` (`packages/engine/src/schema-version.ts`) is called from `run-lifecycle.ts`/`wait-machine.ts` WITHOUT a third `engineVersion` argument at every real call site — meaning the check is hardcoded against the literal `CURRENT_ENGINE_SCHEMA_VERSION` constant, and does **not** respect `EngineConfig.schemaVersion` (which only controls what NEW records get *tagged* with at write time, in `triggerRun`/`executeWaitDispatch`). Consequence: configuring `EngineConfig.schemaVersion: 2` to simulate "a newer engine build" breaks that SAME process's own subsequent `executeRun`/resume calls too — a "v2-configured" engine immediately refuses the v2-tagged record it just wrote itself, since its read-time check still compares against the real constant (1), never the config override. Confirmed directly (an earlier draft of the test script hit exactly this).
+**The constraint, found while designing this test, not previously documented anywhere:** `assertSchemaVersionCompatible` (`packages/engine/src/schema-version.ts`) is called from `run-lifecycle.ts`/`wait-machine.ts` WITHOUT a third `engineVersion` argument at every real call site — meaning the check is hardcoded against the literal `CURRENT_ENGINE_SCHEMA_VERSION` constant, and does **not** respect `EngineConfig.schemaVersion` (which only controls what NEW records get *tagged* with at write time, in `triggerRun`/`executeWaitDispatch`). Consequence: configuring a different `EngineConfig.schemaVersion` to simulate another engine build breaks that SAME process's own subsequent `executeRun`/resume calls too — it immediately refuses the differently-tagged record it just wrote itself, since its read-time check still compares against the real constant, never the config override. Confirmed directly (an earlier draft of the test script hit exactly this).
 
 **What this means for the test, honestly:** a fully faithful "two genuinely different engine builds" simulation would require a real second compiled build with the literal constant bumped (temporarily mutating this repo's source mid-test, rebuilding, then reverting) — fragile, and risky to attempt live in a shared working tree. Instead, `schema-version-runner.mjs` (`packages/engine/src/e2e/`) uses the REAL, unmodified engine to run a step and reach a `wait.manual` checkpoint through 100% real execution, then — only when `--schemaVersion=N` differs from the real constant — re-tags ONLY the `schemaVersion` field on that already-correct, real checkpoint via a direct store write, modeling what a real v-N build's own bumped constant would have stamped on an otherwise-identical run. This is real on the READ/RESUME side (the interesting side for this test — a completely real, unmodified engine, in a completely fresh process, hitting the real hardcoded check) and an honestly-disclosed simplification on the WRITE side.
 
 **Two real process boundaries, two scenarios, both in `packages/engine/src/e2e/schema-version.e2e.test.ts`:**
-- COMPATIBLE: a run+wait persisted (schemaVersion 1, the real default) by one process resumes successfully in a completely fresh process running the same real engine.
-- INCOMPATIBLE: a run+wait re-tagged to schemaVersion 2 is resumed by a completely fresh process running the real (schemaVersion 1) engine — asserts the exact thrown `SchemaVersionMismatchError`, its message content, and its `detail: {kind: "schemaVersionMismatch", recordVersion: 2, engineVersion: 1}` — **and** the critical safety property: the refused run is left exactly as it was (still `"waiting"`, still tagged 2, trace/wait checkpoint untouched), not half-mutated by the refused attempt.
+- COMPATIBLE: a run+wait persisted with the real current schema version by one process resumes successfully in a completely fresh process running the same real engine.
+- INCOMPATIBLE: a legacy schemaVersion 1 run+wait is resumed by a completely fresh process running the real schemaVersion 2 engine — asserts the exact thrown `SchemaVersionMismatchError`, its message content, and its `detail: {kind: "schemaVersionMismatch", recordVersion: 1, engineVersion: 2}` — **and** the critical safety property: the refused run is left exactly as it was (still `"waiting"`, still tagged 1, trace/wait checkpoint untouched), not half-mutated by the refused attempt.
 
 Two of my own assertions were wrong in the first draft, not the system: I assumed the "before" step alone would be in the trace at the wait checkpoint — the wait step itself (`"pause"`) also gets its own trace entry (`status: "waiting"`, recorded when the wait is entered), so the real trace is `["before", "pause"]`, not `["before"]`. Fixed to match observed, verified behavior. Verified stable: 4/4 clean runs across both scenarios.
 
@@ -1129,7 +1129,7 @@ John-ratified, 2026-07-12, on the D2+V1 wave and the "build the real event log" 
 
 `packages/store/src/types.ts`: new `EventLogStore { append(entry): Promise<void>; list(filter?: {since?, limit?}): Promise<EventLogEntry[]> }`, added as `events` on `AartStore` — the header's own "16 members" counted-fact comment (and its two sibling references to the same count, on the `job_queue`/`idempotencyLedger` "not one of the 16" notes and the interface's own closing comment) updated to 17 throughout; `conformance.ts`'s `jobQueue` describe label and `adapters/sqlite/schema.ts` + `stores/simple-stores.ts`'s own identical "not one of AartStore's 16 members" comments swept to 17 too, for internal consistency (a small superset of what the brief asked for verbatim — trivial, zero-risk comment edits, flagged here rather than silently done).
 
-fs adapter (`adapters/fs/events.ts`, new `FsEventLogStore`): mirrors `signals.ts`'s pattern exactly — one file per entry (`<occurredAt>__<id>.json`), scan-based `list()` with newest-first sort + `since`/`limit` applied on top, and — the load-bearing part of "mirror signals.ts" — **deliberately NOT staged by `transact()`**, the same non-atomic-gap precedent `SignalStore` established (constructor takes only `dir`, no `staging` param). `AartStore.transact()`'s own doc comment (types.ts) extended with a new paragraph naming `tx.events` as a second non-staged member, alongside the existing `tx.signals` one, with the reasoning: every real write site in this session appends its event OUTSIDE any `store.transact()` call, so there is no caller today relying on an event append rolling back with a failed transaction.
+fs adapter (`adapters/fs/events.ts`, new `FsEventLogStore`): mirrors `signals.ts`'s pattern exactly — one file per entry (`<occurredAt>__<id>.json`), scan-based `list()` with newest-first sort + `since`/`limit` applied on top. This entry originally excluded both members from `transact()` staging; A76 supersedes that local-development gap and places their writes in the shared durable redo journal.
 
 sqlite adapter: new migration `0004_events_table` (`adapters/sqlite/migrations.ts`) — this adapter's FIRST migration that adds a whole TABLE rather than a column on an existing one. `CREATE TABLE IF NOT EXISTS`/`CREATE INDEX IF NOT EXISTS` are naturally idempotent (unlike `ALTER TABLE ADD COLUMN`, which SQLite gives no `IF NOT EXISTS` for — 0002/0003's own reason for their try/catch "duplicate column name" tolerance), so 0004 does NOT need that dance. `down()` mirrors `0001_init`'s own `DROP TABLE IF EXISTS` idiom, not 0002/0003's `DROP COLUMN`. `events` is NOT added to `SQLITE_SCHEMA_STATEMENTS` (schema.ts) — same "0001's baseline DDL stays exactly as it always was" precedent 0002/0003 established, so a fresh 0001→0004 sequence and an upgraded pre-existing database converge on one identical shape. `stores/events.ts` (new `SqliteEventLogStore`): unlike the fs adapter, this member IS staged/transactional (mirrors `SqliteSignalStore`'s own documented reasoning — sqlite has a REAL `BEGIN`/`COMMIT`, so there's no fs-specific gap to preserve here; only the fs side needed the SignalStore-style carve-out). Optional-field row mapping uses this codebase's own established `row.field ?? undefined` idiom (verified directly against `ApprovalTaskRow.authenticated_as` -> `authenticatedAs`, not invented), so an omitted correlation field round-trips as genuinely absent under `toEqual`, never a stray populated value.
 
@@ -1182,7 +1182,7 @@ Coverage proof, mirroring A48's own four-entry-point discipline, one test each (
 **Deviations flagged, not silent:**
 1. The two self-caught `workflow.approved`/`approval.decided` gaps above (`applyGateResult`, `decideApprovalTask`, `approveHandler`) — additions beyond the brief's own write-site list, kept in scope since leaving them out would have shipped a known, test-demonstrated silent gap in the exact bug class this session's own standing imperative names.
 2. The "16 members" -> "17 members" comment sweep touched two files beyond `packages/store/src/types.ts` (`conformance.ts`'s `jobQueue` describe label, `schema.ts`/`stores/simple-stores.ts`'s own duplicate "not one of the 16" comments) — trivial, zero-behavior-change text edits for internal consistency within a package this session already owns; `packages/server/src/triggers/intake.ts`'s own unrelated "16 members" mention (about a completely different concern, the trigger dedupe-key ledger) was deliberately left untouched — out of scope, not silently missed.
-3. `EventLogStore`'s fs-adapter staging behavior (NOT staged, mirroring `SignalStore`) was a genuine design choice, not dictated unambiguously by the brief's "mirror signals.ts" instruction alone — reasoning recorded in `AartStore.transact()`'s own extended doc comment (types.ts) and above.
+3. `EventLogStore`'s original fs-adapter staging behavior (not staged, mirroring `SignalStore`) was a genuine design choice, not dictated unambiguously by the brief's "mirror signals.ts" instruction alone. A76 later removes that gap because secret repair now requires the complete public transition to commit atomically.
 
 **Commits (local only, none pushed), six, all on `v1/event-log` on top of `main`@`3f62a73`:** `52eb114` (PART 1 — types + store foundation), `defef86` (migration-count ripple + the down()-reverts-last-migration trap fix), `0a7cad6` (PART 2 — mcp handler instrumentation), `f3caf87` (RISK 1 — both engine composition roots + mandatory 4-entry-point tests), `a707fb4` (PART 2 — server instrumentation + reclaim, RISK 1's 3rd site), `86d02f8` (PART 3 — `GET /events`).
 
@@ -2020,3 +2020,561 @@ remote-discovery configuration error, the checked-in Pack catalog remains
 preview data rather than a fake production registry, and npm publication was
 not performed. Those are launch/configuration boundaries, not failures of
 the isolated reuse-and-execute acceptance loop above.
+
+### A75 — Secret taint survives trace persistence without retaining secret values
+
+Step traces are redacted before they are persisted, while exact execution
+state is kept separately from the public audit. The engine creates an
+AES-GCM-sealed executable continuation atomically with the initial pending
+run, carries it through queue release and claim, and refreshes it with every
+public running-progress write. A late global audit repair initializes the
+same protection for legacy pending/running rows before it rewrites their
+public values, and each worker rejoins newly protected secret literals before
+its next effect or persistence boundary. At a durable wait boundary that
+state transfers to the sealed wait continuation; at a terminal boundary it
+becomes a sealed historical archive with settled replay claims removed. A worker
+crashing immediately after wait resumption, or between later steps, can
+therefore continue with the values and frozen workflow it actually had
+without exposing either through `RunStore.get()`/`list()`.
+`StepTrace.secretTainted` remains the
+backward-compatible summary bit. `secretTaintedPaths` records output JSON
+pointers (or `"*"` when arbitrary output may be derived from secret data), while
+`controlSecretTainted` separately records that a branch, loop exit, or
+downstream occurrence was selected by secret data. None stores a secret or a
+secret name. Bare `{{ steps }}` references inspect the latest visible
+occurrence of each step. Wait traces carry the same provenance through entry,
+durable suspension, and completion.
+
+Public workflow outputs reject control-tainted sources and data-tainted output
+paths, naming both the public field and source path in the error.
+An optional mapping is not a secrecy escape hatch: when a referenced step is
+absent after secret-controlled flow, the workflow fails instead of publishing
+an output object whose field presence reveals the branch decision. Ordinary
+optional omission remains valid when no secret-controlled flow contributed to
+the run.
+This prevents an intermediate block from laundering a persisted redaction
+marker or a non-literal derivative into a successful public result. Block
+secret access defaults to data use and therefore taints arbitrary output;
+trusted connector blocks may explicitly mark authentication-only credential
+use, which leaves a public API response clean. The request is not
+self-authorizing: `EngineConfig.canUseCredentialSecrets` independently trusts
+the exact implementation, and an absent/negative decision treats the request
+as ordinary data use. The real catalog trusts the built-in implementation
+objects captured at engine construction and excludes active, historical, and
+dynamically loaded Pack implementations; a Pack cannot gain the exemption by
+copying a trusted block id. Secret-derived outputs are not written to the
+idempotency cache. The cache decision also compares every
+successful output with its redacted form before the ledger write, covering an
+output that matches a secret resolved by an earlier step even when the current
+block did not itself consume secret data. Immediately before admission, the
+engine rejoins any secret literals another run discovered while the block was
+executing and repeats key/input/output plus data/control eligibility inside
+the same transaction as the ledger write. A global repair therefore either
+lands first and blocks admission, or lands second and sees/revokes the new
+entry; a stale worker cannot write a raw cache value after repair passed it.
+Replay uses the same no-gap rule: the ledger lookup and a sealed
+`pendingIdempotencyReplays` consumer claim commit together before a cached
+trace is returned. The normal progress transaction replaces that claim with
+the durable trace association. Revocation therefore observes either form,
+imports the newly known secret literals into a not-yet-persisted consumer,
+and cannot finish its scan in the window between lookup and trace write.
+If the matching secret is discovered
+only by a later step, every subsequent persistence boundary revisits both the
+current run's authored entries and the exact global entries replayed by its
+traces. Deletion and the redacted `RunRecord` write share one store
+transaction. An entry is revoked when its key or output is changed by
+redaction, or when the consuming trace is data/control tainted; this also
+covers non-literal derivatives and cache entries originally written by another
+run. Control-tainted dispatches are neither replayed from nor admitted to the
+global cache. Active `next`/`until` dependencies are classified before
+dispatch, so a secret-controlled loop condition cannot open a cache replay or
+write window before its post-step evaluation.
+The retrospective boundary is global, not source-run-only.
+Each newly resolved literal triggers one audit scan across retained run
+records, all signal audits, artifacts, approvals, waits, corrections, and
+activity events, using the segment's complete currently known literal set.
+Public persistence and retrospective repair withhold an entire matching
+scalar leaf or object key rather than retaining adjacent text. This is the
+recoverable-source alternative for overlapping discoveries: if `abc` is
+learned before `abcdef`, the first rewrite cannot permanently expose `def`
+after the exact public source is gone. Late-repaired text artifacts use the
+same whole-content rule; active executable values remain exact only in their
+sealed continuation, and terminal definition/provenance authority remains
+exact only in its sealed historical archive. The literal-only scan does not
+reconstruct unrelated historical workflows, and its successful transaction is
+remembered only for the lifetime of the current execution segment. Thus an
+ordinary multi-step secret-using workflow does not rescan all history at every
+persistence boundary, while a lineage or correction path that must
+re-materialize a terminal result uses the exact frozen definition rather than
+a mutable registry row.
+`IdempotencyLedgerStore.list()` exposes the current ledger closure whenever a
+segment learns a secret. Before concluding that no key changed under literal
+redaction, the engine reconstructs the active run and the persisted producer
+runs named by current ledger entries against expanded root-input/trigger
+provenance. This catches a cached non-literal derivative whose ledger key and
+output contain no literal secret text without re-running every historical
+workflow. Once an affected key is found, the engine builds a retained
+key-to-consumer index and follows only the reachable consumer graph. Changed
+entries are deleted and each reached run whose trace records that ledger
+association is re-redacted and re-tainted in the same store transaction. The
+active run is part of that graph even though it is not yet in `RunStore`; its
+raw operational value receives the repaired taint metadata in memory while
+only the independently redacted audit value is persisted.
+The filesystem adapter serializes every top-level member operation and
+`transact()` call under one process-local, root-scoped mutex shared by every
+handle opened for the same canonical filesystem root, including handles
+created through symlink aliases before the `.aart` child exists. Security
+repair therefore cannot flush a stale
+whole-run image over a concurrently completed step. Because a step may prepare
+its next trace before acquiring that mutex, every engine run-write transaction
+also merges the latest persisted security provenance after it acquires the
+lock, preserving both the new progress and any repair that won first. The
+staged multi-file flush first writes a durable redo journal under
+`.transactions/`; every top-level operation idempotently completes outstanding
+journals before reading or writing the store and removes a journal only after
+all of its writes/deletes land.
+A process exit after a ledger deletion but before a repaired consumer run
+flushes therefore resumes the same revocation transaction on restart instead
+of permanently losing its lineage. The filesystem adapter remains the
+local-development store; multi-process server workers use the database
+adapter.
+An active concurrency key remains backward-readable while it is ordinary
+coordination data. If later secret resolution classifies that raw value as a
+secret, the public `RunRecord` atomically switches to the existing tagged
+SHA-256 representation; intake and queue release compare both forms without
+publishing the newly sensitive key.
+Historical data/control analysis then follows descendants; if a repaired
+consumer cached a non-literal derivative, that key is revoked and its own
+consumers are repaired until the lineage reaches closure. Waiting runs remain
+resumable with protected provenance. A previously completed run keeps success
+only when re-materializing its public `outputMapping` proves the result
+independent of the revoked lineage; otherwise its stored result becomes failed
+with no public outputs.
+`StepTrace.idempotencyLedgerKey` is customer-visible audit metadata and is
+redacted if a later secret matches it. Every new trace also records
+`idempotencyLedgerFingerprint`, a one-way stable association that lets cache
+revocation find producers and prior consumers after the mutable key is
+redacted. Ledger rows record the producer trace sequence; if a process dies
+after the ledger commit but before that trace commits, the missing occurrence
+is conservatively revoked rather than treated as trusted. Thrown finalization
+paths perform the same preparation and
+revocation as normal step/wait boundaries. Idempotency storage keys remain namespaced,
+but replay safety does not rely on a string prefix: every current entry also
+carries the engine schema version, and entries without that metadata are
+rejected even when a legacy authored key happens to equal the v2-prefixed key.
+SQLite migration `0005_idempotency_schema_version` adds the nullable metadata
+column so upgraded legacy rows remain readable but never replayable, plus a
+`run_id` index for the persistence-boundary revocation lookup.
+
+Normal dispatch now prepares the raw trace in memory, evaluates `until`
+against that provisional trace, computes data/control provenance, redacts,
+and only then performs the first durable write. Early-arrival waits use the
+same prepare-before-persist hook; ordinary wait resumes also prepare the
+completed trace inside the atomic claim transaction before its first write.
+Post-dispatch control resolution is represented as an outcome rather than an
+exception that can erase history. Once a block effect or wait event succeeds,
+its completed trace is persisted before a failing `until`/continuation
+expression terminalizes the run. The same ordering applies to normal
+dispatch, early-arrival signals, atomic wait claims, and worker reclaim:
+operators see that the effect already happened and do not retry it as though
+the dispatch had failed. Control reconstruction failure never replaces the
+completed trace with a synthetic failed step.
+Signal audit records follow the same retrospective rule. Both the
+ordinary signal-resume claim and the separate early-arrival path replace the
+stored name, correlation id, payload, and fs filename with their redacted audit
+values when post-completion control first discovers a matching secret.
+Each consumption path reconstructs and writes all three audit fields with
+literal structural keys before clearing the sealed operational copy, so a
+crash after the claim cannot discard the only known-secret set while leaving
+plaintext signal metadata durable.
+Consumption also records the owning run/step as adapter-internal provenance. If
+an entirely later workflow step first discovers the secret, the global
+persisted-run reconstruction uses that link to re-redact the already-consumed
+audit. Consumed signals written before provenance existed are conservatively
+included when repairing the active run, so an upgraded store cannot retain an
+unrepairable legacy audit. SQLite performs audit replacement, consumed marking,
+cache cleanup, and `RunRecord` persistence in the same transaction; the fs
+adapter writes safe file content before renaming away a secret-bearing filename
+and persists an opaque recovery nonce in that content. Every fs signal-store
+operation completes any interrupted rename before exposing a row, while the
+adapter retains its already-documented signal-audit transaction non-atomicity.
+An unconsumed early-arrival signal is not exempt: its public audit is redacted
+immediately while its exact name/correlation/payload and the secret literals
+that caused the rewrite are sealed under a random authenticated generation.
+Each audit replacement rotates that generation, so an earlier operational
+ciphertext cannot be substituted after the known-secret set expands.
+Matching opens that copy only inside the engine, rehydrates those literals
+into the consuming segment, and removes the operational copy on consumption.
+The ordinary outstanding-wait resume path also loads the matched signal's
+sealed secret-literal set before rebuilding the completed trace or replacing
+the audit, so an earlier global repair cannot be undone by a later consumer
+that knew only the wait's secret set.
+Thus a signal remains actionable without publishing its original audit or
+reintroducing its payload into the completed wait trace.
+Approval and outstanding-wait audits are members of the same durable-copy
+closure. Approval title, description, reviewer, authenticated identity, and
+decision values are re-redacted for the affected run. Run-linked correction
+field paths, observed/corrected values, reason, and reviewer receive the same
+security rewrite; changing a secret-bearing correction key replaces the old
+row, with a non-secret ordinal suffix if two redacted paths collide.
+Corrections can change only `outputs` or a safe, non-empty descendant output
+path, never trace identity, status, timing, inputs, engine security metadata,
+or object prototypes; replacing `outputs` requires an object. Applying one to
+an already-completed trace in a durably waiting run updates its sealed exact
+continuation before the public audit, so downstream execution observes the
+accepted value after resume. The unresolved wait occurrence itself is not
+correctable because its eventual resume payload owns that result. Corrections
+against pending/running runs fail clearly instead of racing an in-flight
+effect and appearing accepted before being overwritten; terminal evidence
+remains directly correctable.
+Activity-event summary/actor fields are rewritten while their structural
+identity and ordering fields remain stable. An outstanding wait keeps a
+redacted user-visible condition while its signal correlation remains matchable
+through an adapter-internal SHA-256 fingerprint. The complete original wait
+condition is separately sealed with AES-256-GCM under an adapter-local,
+mode-0600 key, so timer deadlines, timeout policy, and external-job identifiers
+still work after audit repair and process restart without appearing in
+`WaitStore.list()`, `/waiting-runs`, or the SQLite `resume_at` column.
+Every wait `put` receives a random operational generation authenticated
+together with run/step identity, so an older loop iteration cannot be replayed
+into a later entry of the same wait step. Existing v1 seals remain readable and
+rotate to generation-bound v2 on first operational access.
+The same generation also authenticates a separately sealed full
+`WaitOperationalRunState`: the raw suspended `RunRecord`, exact frozen
+workflow snapshot, and every secret literal known before suspension. Global
+late-secret repair merges new taint metadata and literals into this protected
+copy and rotates/reseals the wait generation before rewriting the public
+RunRecord. Resume and expiry rehydrate it before completing the wait, then
+atomically move the exact running state into the run's sealed active
+continuation before deleting the wait row. That active copy advances with
+each subsequent step and is removed only when another sealed wait or terminal
+record commits. A boolean/numeric secret therefore cannot corrupt
+structural fields such as `approved`/`schemaVersion`, a redacted snapshot
+cannot change continuation semantics, and an echoed pre-restart secret is
+redacted on its first post-restart write. The public RunRecord is reconstructed
+from a structural allowlist; if a snapshot definition tree would be partially
+rewritten, its public `definitions` becomes `null` instead of an invalid
+workflow while the exact executable tree remains sealed. Numeric observational
+metrics are not exempt from the value policy: an optional `durationMs` or
+status is omitted when it matches a numeric secret, an affected external-call
+row is withheld when its required duration cannot remain numeric, and the
+optional `llmCall` audit is withheld as a unit when `tokensIn`, `tokensOut`,
+or `latencyMs` would require a string marker; a secret-valued optional cost is
+omitted independently. Artifact byte counts follow the same rule: because
+the count is required and numeric, an affected artifact audit row is withheld
+from both the run and trace views as a unit. Artifact audit objects are rebuilt
+from literal schema keys so a secret matching `name`, `kind`, `mime`, or
+`path` cannot invalidate the public `RunRecord`.
+`WaitStore.listOperational()` is the engine-only access path. A signal carrying
+the original correlation can therefore still resume the run without the
+public audit exposing the late-discovered value. SQLite migration
+`0007_secret_audit_provenance` adds the wait fingerprint and consumed-signal
+run/step link, backfilling existing outstanding waits before their audit copy
+can be repaired. Migration `0008_sealed_operational_state` adds the encrypted
+wait state, removes the raw scheduling shadow during repair, and records a
+stable text-eligibility bit for existing artifacts. Migration
+`0009_wait_operation_generation` adds the per-entry generation for SQLite.
+Migration `0010_protected_continuation_state` adds sealed unconsumed-signal
+state, signal fingerprints/generations, sealed suspended and active-run
+continuation state, and the producer trace sequence used by stable cache
+revocation. Legacy
+unconsumed signals are sealed lazily before their first audit rewrite.
+Text artifacts obey the same retrospective discovery rule as traces and cache
+entries. Every boundary that can enlarge the resolved-secret set—normal
+dispatch, wait entry/early arrival, atomic resume, reclaim, and terminal
+finalization—re-scans the run's stored text artifacts, overwrites changed
+bytes, redacts name/kind/MIME/path metadata, refreshes byte-count metadata, and
+carries the refreshed metadata into the `RunRecord`. Text eligibility is fixed
+from the original MIME before its public audit value is redacted, then survives
+every later MIME audit rewrite, so a
+second, later secret discovery still scans the bytes. Binary artifacts retain
+the existing pre-capture masking/explicit-read boundary because arbitrary
+encoded bytes cannot be safely search-and-replaced.
+Both filesystem and SQLite artifact adapters durably journal their complete
+safe transition. Filesystem access completes an interrupted metadata/blob redo
+journal before returning data. SQLite writes bytes to an immutable generation
+and commits that generation's internal pointer with the metadata row; rollback
+keeps the prior pointer, and startup removes only unreferenced generations
+while holding the database writer lock. A process exit or a later failing
+repair therefore cannot make a rolled-back blob replacement visible or leave a
+committed safe metadata/blob pair permanently split.
+The individually exported low-level resume mechanisms require this preparation
+callback and reject a missing callback before touching the transaction; callers
+that do not own the full preparation pipeline use `createEngine`'s bound resume
+methods instead. Both ordinary wait completion and early-arrival preparation
+receive the transaction-scoped `AartStore` view and route workflow/artifact
+reads through it. They never re-enter the top-level store while the atomic
+claim is open, so SQLite's intentionally non-reentrant mutex cannot turn a
+resume into an indefinitely hanging customer operation.
+`authoredStepId` and `iterationIndex`
+identify forEach traces without parsing a `[n]` suffix, so an authored id such
+as `gate[0]` is never mistaken for generated iteration identity. Provenance
+fields are structural engine metadata: value redaction and post-hoc
+corrections cannot rewrite them.
+
+Run inputs and trigger payloads carry the same persisted JSON-pointer
+provenance as step outputs. A later secret resolution that discovers a
+matching input/trigger value therefore taints downstream transforms and
+blocks direct public mappings instead of publishing a redaction marker.
+SQLite migration `0006_run_root_taint_paths` persists both path arrays so
+worker reloads and server restarts preserve the same decision. If a later
+secret matches text inside an already-recorded pointer, that root's pointer
+set collapses to `"*"`; security coverage remains conservative without
+persisting the secret-bearing path segment itself.
+The same collapse rule applies to per-trace output pointers, so later secret
+discovery cannot turn provenance metadata itself into a disclosure channel.
+forEach aggregate traces likewise inherit child data/control provenance.
+Historical cache repair rebuilds that child-to-aggregate edge from explicit
+`authoredStepId`/`iterationIndex` ownership, so a repaired iteration taints the
+corresponding `/items/<index>` aggregate path and every downstream public/cache
+consumer.
+The same retrospective rule applies to each trace's resolved inputs: if a
+later-discovered secret changes a prior trace input, that trace's outputs are
+conservatively tainted at `"*"`, including non-literal derivatives. Historical
+`if`/active-`until` dependencies are then replayed as provenance analysis over
+the persisted trace order, so a branch selected earlier through that derivative
+taints its selected continuation before terminal output materialization.
+Historical `with`, `idempotencyKey`, and `forEach` expressions receive the same
+replay analysis, including a completed forEach aggregate whose source only
+becomes known as secret later.
+Cache replay admission records a sealed pending consumer claim before returning
+the cached output. If revocation reaches that claim before its trace is
+durable, the claim also records whether the producer output was provenance-
+tainted; the next progress/reclaim merge transfers that wildcard taint to the
+matching occurrence before clearing the claim. Deleting the ledger entry
+therefore cannot erase non-literal derivative provenance in the claim-to-trace
+gap.
+
+Workflow outputs are validated against the exact conservative representation
+that the public `RunRecord` will store, both at ordinary terminal completion
+and during retrospective cache repair. A partially redacted scalar can no
+longer pass a pattern/enum contract and then be replaced by a whole-leaf
+`[REDACTED]` value that violates that same contract; the run fails instead of
+publishing an invalid completed result.
+
+Trace identity and execution metadata (`stepId`, `block`, timestamps, status,
+and the explicit authored/iteration identity) are intentionally structural,
+not secret-derived value channels. They remain stable across redaction so a
+persisted run can still resume and expressions can still address prior steps;
+only data-bearing trace fields are value-redacted. A coincidental equality
+between a runtime secret and an authored identifier does not make that
+identifier a derivative of the secret.
+Expression contexts expose authored traces only. Synthetic forEach child
+occurrences (`iterationIndex` present) cannot satisfy or shadow an authored
+step source; the aggregate parent is the public expression source. Bracketed
+occurrence text is also not an alternate identifier syntax in the closed
+expression grammar.
+A skipped step produced no outputs. Secret-bearing resolved `with` inputs are
+still value-redacted in its trace, but they do not create wildcard output
+provenance on an occurrence whose `outputs` field is absent. Optional workflow
+output mappings therefore keep their established omitted-field behavior
+instead of failing solely because an undispatched step would have received a
+secret input. A worker reclaim treats that persisted skipped trace as the
+authoritative `if: false` result and reproduces the original transition order
+(`next`, then `else`, then array order) without evaluating `until`; restart
+cannot select a branch the first execution never considered.
+
+Standalone artifact access now closes the same numeric-observation boundary as
+embedded run/trace audits. If a required byte count matches a secret, the
+artifact disappears from public metadata, listing, run listing, and byte-read
+surfaces as one unit. The engine retains a non-public repair candidate and byte
+source so later secret discovery can continue rewriting it; public suppression
+is one-way. `ArtifactStore.listForRedaction()` and
+`getBytesForRedaction()` are therefore engine-only counterparts to the public
+methods, and `replaceAudit(..., { auditVisible: false })` records the one-way
+transition. SQLite migration `0011_artifact_audit_visibility` preserves legacy
+rows as visible by default and persists that boundary across restarts.
+Migration `0012_artifact_blob_generation` adds the internal immutable byte
+pointer; NULL rows continue reading the legacy `<artifactId>.blob` path.
+
+Secret audit repair, cache revocation, and the run/wait transition that learned
+the secret now share one store transaction on normal dispatch, control refresh,
+wait entry, wait resume/expiry, and terminal finalization. The global repair
+watermark advances only after that complete transition commits, so a crash
+cannot leave customer audits repaired while a secret-tainted cache remains
+replayable. A reclaimed occurrence that falls back to fresh execution because
+its ledger row is absent or inadmissible clears the stale replay claim for that
+exact step/trace occurrence; fresh output cannot inherit an older cache
+generation's revocation taint.
+
+Retrospective cache repair can transition an already completed consumer to
+failed. That transition now invokes `onRunTerminal` after the failed
+`RunRecord` commits, using the same best-effort observer contract as ordinary
+completion/cancellation. Event and resource observers therefore see the
+customer-visible final state instead of a silent database-only rewrite.
+
+Because this metadata changes the security interpretation of persisted
+RunRecords, the engine record schema version is bumped from 1 to 2. Version 2
+does not claim v1 resume compatibility: an older record may already contain a
+redaction marker without provenance, so the v2 engine refuses it loudly
+rather than guessing.
+
+### A76 — Public visibility is decided before write; every repair is one atomic policy transition over a sealed exact authority
+
+Five review findings exposed one product-level gap rather than five unrelated
+bugs: a customer-facing audit could briefly or permanently disagree with the
+engine's own secret knowledge. The fix is organized around four invariants.
+
+1. **Decide visibility before the first public write.** Artifact byte count is
+   evaluated against the run's known secret set before `ArtifactStore.put`.
+   When that required numeric observation is sensitive, the initial metadata
+   and byte-read surfaces are withheld in the same write; no later repair is
+   responsible for closing an exposure window. Text bytes and metadata still
+   receive their normal pre-write conservative redaction.
+2. **Commit the complete public transition or none of it.** Filesystem
+   transactions now stage signal rows, event rows, artifact metadata, and
+   artifact blobs in the same durable redo journal as run/cache/wait state.
+   SQLite writes transaction-scoped bytes as immutable generations and commits
+   the selected generation pointer in the same row as the audit metadata.
+   Rollback therefore continues to select the prior bytes without a
+   post-commit lock-reacquisition window; recovery only removes generations no
+   committed row references. Read-your-writes and rollback conformance cover
+   all three formerly separate filesystem members plus artifact metadata/bytes
+   on both adapters.
+3. **Keep exact execution/history separate from the public audit.** A public
+   `params.environment` is never restored merely because it is also used for
+   capability selection. The exact value stays in the sealed operational run.
+   At completion, failure, or cancellation, that protected state becomes a
+   sealed terminal archive with settled idempotency claims removed. Historical
+   workflow resolution prefers this archive's frozen snapshot, so a redacted
+   public definition cannot cause retrospective repair or correction to use a
+   later mutable registry row.
+4. **Corrections cross the same publication boundary as execution.** A
+   corrected value is checked recursively, including object keys and canonical
+   scalar forms, against the run's sealed known-secret set before either the
+   public run or exact continuation/archive changes. Waiting corrections update
+   the sealed wait continuation; terminal corrections update the sealed
+   historical archive. Rejected corrections leave both views unchanged.
+
+The customer outcome is deliberately simple: once AART knows a value is
+secret, no artifact listing/read, run parameter, retrospective recomputation,
+or human correction can publish it; a crash or rollback cannot split that
+decision across backends; and historical results are recomputed from the
+workflow that actually ran rather than whatever definition happens to occupy
+the registry later.
+
+**Verification.** `check:tsconfig-refs`, full build, production and test
+typechecks, and `lint:redaction` are clean (300 reviewed suppressions). The
+full workspace suite passes **247 files / 3,028 tests**, including both adapter
+conformance suites, SQLite migration/restart and two-process migration-race
+coverage, terminal/wait correction rejection, sealed historical snapshot
+resolution, initial artifact withholding, and read-your-writes/rollback for
+artifact, signal, and event state.
+
+### A77 — Rejoin protection at the last responsible boundary; one correction policy and a reader-safe blob lifecycle
+
+A76 established pre-write visibility and atomic repair, but six concurrency and
+upgrade findings showed that a caller can still hold a stale view of protection
+or storage state between an earlier read and the operation that makes data
+public. They are one boundary rule, not six special cases:
+
+1. **Rejoin sealed protection in the transaction that publishes.** An initial
+   artifact write reloads the run's latest sealed secret set inside the same
+   store transaction as `ArtifactStore.put`. Cancellation likewise reloads
+   the public run, durable wait/active protection, progress, and outstanding
+   waits inside one transaction before constructing the terminal audit and
+   sealed archive. Whichever side commits first is safe: an earlier global
+   repair sees and repairs the new public record, or the later publisher sees
+   the enlarged protected set before writing.
+2. **Validate the correction audit itself, before persistence.** The canonical
+   `recordCorrection` path recursively checks `fieldPath`, `observed`,
+   `corrected`, `reason`, `reviewer`, and object keys against the latest sealed
+   secret set inside the correction transaction. Server, MCP, and the
+   dashboard's default embedded path all use that implementation; only the
+   explicit known-secret policy error becomes an HTTP 400, while genuine
+   storage failures still surface as server failures. This supersedes A41's
+   earlier residual-limitation statement for values already known to the
+   target run; arbitrary external text that no run has classified remains
+   outside value-based detection.
+3. **Preserve one exact historical authority for legacy terminals.** The first
+   correction to a completed, failed, or cancelled legacy row that predates
+   sealed terminal archives bootstraps the archive from that row and applies
+   the correction to both exact history and public audit. The dashboard's
+   compatibility outcome delegates to this same evidence implementation
+   instead of maintaining a second, weaker mutation path.
+4. **Finish storage intent only after the durable boundary.** Recovery of a
+   legacy SQLite artifact journal removes the journal only after SQLite
+   `COMMIT`, so a crash before commit preserves replay intent. Immutable blob
+   generations that were ever selected by committed metadata are retained:
+   another process may already have selected an older generation and still be
+   about to open it. Recovery therefore never reclaims a transaction-journal
+   generation: once a later pointer has superseded it, recovery cannot prove
+   whether it was never committed or was previously public. Only a synchronous
+   write failure that knows its new file never became observable deletes that
+   file; offline/exclusive garbage collection is a separate maintenance
+   concern. A deterministic two-handle test advances the pointer between a
+   reader's metadata selection and file open and proves both the selected old
+   bytes and the new authoritative bytes remain readable.
+
+The customer-visible contract is now independent of timing and client surface:
+once AART has classified a value, an in-flight artifact, cancellation, or
+correction cannot republish it; correcting an older terminal does not discard
+the exact history needed for future reasoning; and concurrent SQLite readers
+do not observe a present artifact as missing during a rewrite.
+
+**Verification.** `check:tsconfig-refs`, full build, production and test
+typechecks, and `lint:redaction` are clean (**295 reviewed suppressions**).
+The full workspace suite passes **247 files / 3,035 tests**, including
+cross-run initial-artifact rejoin, pre-persist correction rejection across
+every public field, HTTP rejection with no audit row, dashboard canonical
+outcome routing, legacy terminal archive bootstrap, atomic cancellation with
+exact bracketed authored-step identity, delayed-journal generation retention,
+and the two-handle immutable-generation reader race.
+
+### A78 — A correction is a safe public audit plus a sealed executable target; every derived surface follows that split
+
+Six follow-up findings exposed one remaining product boundary: correction
+capture was safe only while its public identity, derived evals, and historical
+workflow snapshot all stayed unchanged. The durable contract is now:
+
+1. **Admit only a real, safe correction target.** The canonical correction
+   transaction reloads the run's latest sealed state, checks every
+   customer-supplied public field—including `stepId` and object keys—against
+   known secrets before revealing whether the target exists, requires the
+   supplied step to occur in that run, and accepts only writable `outputs`
+   paths. HTTP, MCP, CLI, and dashboard paths share this policy. Their tests
+   now create real run traces rather than relying on the former ability to
+   attach corrections to invented runs or steps.
+2. **Separate the audit identity from execution authority.** A correction's
+   customer-visible fields may be retrospectively redacted, while its exact
+   `(stepId, fieldPath)` target is AES-GCM sealed under adapter-owned key
+   material. The redacted record can still update the correct historical
+   output, and a previously issued exact correction key still resolves to the
+   current safe audit. The first repair of a pre-migration filesystem or
+   SQLite row captures its exact target before moving the public key, so
+   upgrades do not lose functionality. SQLite migration
+   `0013_correction_operational_target` adds the sealed generation and
+   ciphertext columns.
+3. **Repair the complete correction-derived graph.** Late-secret repair now
+   covers standalone and suite-embedded eval examples, including examples
+   whose suite metadata has not yet been created. It redacts input, expected
+   output, scorer configuration, tags, and correction references; replaces a
+   sensitive example ID with an opaque UUID; and rewrites eval-run
+   regression/improvement references. Eval creation re-reads the current
+   correction audit and persists the example in one transaction, so repair
+   and creation commute without recreating stale secret-bearing data. MCP and
+   dashboard compatibility paths delegate to this canonical implementation.
+4. **Resolve historical policy from sealed history in every lifecycle.**
+   Waiting cache repair loads the exact frozen snapshot retained by
+   `WaitStore` when `RunStore` active state has already been removed.
+   Completed, failed, and cancelled legacy runs bootstrap a terminal archive
+   before the first public rewrite, not only when a later correction happens.
+   Mutable workflow registry rows therefore cannot change retrospective taint
+   or cache-lineage decisions.
+5. **Preserve caller semantics at the adapters.** A dashboard-injected clock
+   is invoked through its receiver, so stateful clocks behave exactly like
+   the system clock contract instead of failing only on correction capture.
+
+The customer outcome is one coherent loop: a correction must point to evidence
+that actually exists, its public record remains safe as secret knowledge
+grows, its intended fix remains executable, and every eval or historical
+decision derived from it transitions with the same policy.
+
+**Verification.** `check:tsconfig-refs`, full build, production and test
+typechecks, and `lint:redaction` are clean (**296 reviewed suppressions**).
+The full workspace suite passes **247 files / 3,044 tests**, including both
+adapter conformance suites, legacy correction-target upgrade, exact-key
+resolution after redaction, correction-derived eval/orphan repair, waiting
+snapshot cache repair, ordinary legacy-terminal archive bootstrap, stateful
+clock forwarding, and real-run correction fixtures across HTTP, MCP, CLI, and
+dashboard surfaces.

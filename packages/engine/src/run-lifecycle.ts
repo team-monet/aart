@@ -5,17 +5,30 @@
 // what a worker calls after claiming a run from `job_queue` (job_queue
 // claim/lease/reclaim itself is explicitly S2/`@aart/server`'s scope,
 // architecture §4.7 — this package never touches claim/lease/release).
+import type { AartStore } from "@aart/store";
 import type { RunRecord, StepTrace, Workflow, WorkflowStep } from "@aart/types";
 import { ConcurrencyRejectedError } from "@aart/types";
 import { buildExprContext, resolveBooleanExpression } from "./expr-context.js";
 import { decideConcurrency, fingerprintConcurrencyKey, releaseQueuedRuns, resolveConcurrencyKey } from "./concurrency.js";
-import { applyRedaction, applyRunRedaction, createTrackingSecretResolver, throwingSecretResolver } from "./redaction.js";
+import { applyConservativeRedaction, applyRunRedaction, createTrackingSecretResolver, mergeActiveRunProtection, mergeOperationalRunTaint, mergePersistedRunTaint, redactStoredTextArtifacts, throwingSecretResolver, transactWithGlobalSecretRepair } from "./redaction.js";
 import { assertSchemaVersionCompatible, CURRENT_ENGINE_SCHEMA_VERSION } from "./schema-version.js";
 import { captureExecutionSnapshot, isSnapshotCaptured, resolveWorkflowForRun, uncapturedSnapshot } from "./snapshot.js";
 import { validateWorkflowOutputs, WorkflowOutputValidationError } from "./output-validation.js";
-import { determineNextStepId, executeStep, type StepOutcome } from "./step-executor.js";
+import {
+  authoredStepIdForTrace,
+  executeStep,
+  prepareRevokedIdempotencyConsumer,
+  prepareTaintAfterControlResolution,
+  refreshTaintAfterControlResolution,
+  resolveCompletedStepControl,
+  type StepOutcome,
+} from "./step-executor.js";
+import { revokeSecretTaintedIdempotency } from "./idempotency.js";
 import type { EngineConfig, TriggerRunInput } from "./types.js";
-import { isWaitBlockId } from "./wait/wait-blocks.js";
+import {
+  notifyRunTerminal,
+  notifyRunTerminals,
+} from "./terminal-hooks.js";
 import { materializeWorkflowOutputs } from "./workflow-outputs.js";
 
 // ---------------------------------------------------------------------------
@@ -105,10 +118,16 @@ export async function triggerRun(config: EngineConfig, input: TriggerRunInput): 
 
   const resolvedSecretRefs = new Set<string>();
   const redacted = applyRunRedaction(config.redact, run, resolvedSecretRefs);
-  await config.store.runs.put(redacted);
-  if (!waitingOnConcurrency) {
-    await config.store.jobQueue.enqueue(redacted.runId);
-  }
+  await config.store.transact(async (tx) => {
+    await tx.runs.put(redacted);
+    await tx.runs.putOperationalState(run.runId, {
+      run,
+      resolvedSecretValues: [],
+    });
+    if (!waitingOnConcurrency) {
+      await tx.jobQueue.enqueue(redacted.runId);
+    }
+  });
   return redacted;
 }
 
@@ -137,7 +156,11 @@ export async function finalizeTerminal(
   errorMessage?: string,
 ): Promise<RunRecord> {
   const now = config.now?.() ?? new Date();
-  let updated = run;
+  let updated = await mergeActiveRunProtection(
+    config.store,
+    run,
+    resolvedSecretRefs,
+  );
   let terminalStatus = status;
   let terminalError = errorMessage;
   let outputs = updated.outputs;
@@ -160,7 +183,11 @@ export async function finalizeTerminal(
       // redaction boundary. A raw number that becomes a string marker, or an
       // enum/pattern value changed by redaction, is not a valid completed
       // public result.
-      const observableOutputs = applyRedaction(config.redact, outputs, resolvedSecretRefs);
+      const observableOutputs = applyConservativeRedaction(
+        config.redact,
+        outputs,
+        resolvedSecretRefs,
+      );
       validateWorkflowOutputs(workflow, observableOutputs);
     } catch (err) {
       // A declared result that cannot be produced is a failed workflow, even
@@ -179,33 +206,98 @@ export async function finalizeTerminal(
   // ExecutionSnapshot capture (architecture §4.5) — "once per run, at the
   // earlier of (a) the run's first wait, or (b) run completion if it never
   // waits." A run that entered at least one wait already has one (captured
-  // in the step-loop below, right before dispatching a wait-type step); a
-  // run that never waited captures it here, at its first terminal status.
+  // by executeWaitDispatch as part of the durable suspension transition);
+  // a run that never waited captures it here, at its first terminal status.
   if (!isSnapshotCaptured(updated.snapshot)) {
     updated = { ...updated, snapshot: await captureExecutionSnapshot(workflow, config.blocks, now, config.computePackHashes) };
   }
   updated = { ...updated, status: terminalStatus, outputs, error: terminalError, endedAt: now.toISOString(), updatedAt: now.toISOString() };
-  const redacted = applyRedaction(config.redact, updated, resolvedSecretRefs);
-  await config.store.runs.put(redacted);
+  const invalidatedTerminalRunIds = new Set<string>();
+  const transition = async (
+    tx: AartStore,
+  ): Promise<RunRecord> => {
+    updated = {
+      ...updated,
+      artifacts: await redactStoredTextArtifacts(
+        tx,
+        config.redact,
+        updated.runId,
+        resolvedSecretRefs,
+      ),
+    };
+    updated = await mergeActiveRunProtection(
+      tx,
+      updated,
+      resolvedSecretRefs,
+    );
+    const persistenceAwareUpdated =
+      await mergePersistedRunTaint(tx, updated);
+    const repaired = await revokeSecretTaintedIdempotency(
+      tx,
+      config.redact,
+      persistenceAwareUpdated,
+      resolvedSecretRefs,
+      (
+        store,
+        consumerRun,
+        outputTaintedLedgerKeys,
+        secretRefs,
+        repairOptions,
+      ) =>
+        prepareRevokedIdempotencyConsumer(
+          config,
+          store,
+          consumerRun,
+          outputTaintedLedgerKeys,
+          secretRefs,
+          consumerRun.runId === updated.runId
+            ? workflow
+            : undefined,
+          repairOptions?.includeUnattributedSignalAudits,
+        ),
+      invalidatedTerminalRunIds,
+    );
+    const persistenceSafeRun = applyRunRedaction(
+      config.redact,
+      repaired,
+      resolvedSecretRefs,
+    );
+    await tx.runs.put(persistenceSafeRun);
+    const protectedState =
+      await tx.runs.getOperationalState(repaired.runId);
+    const {
+      pendingIdempotencyReplays: _pendingClaims,
+      ...archiveBase
+    } = protectedState ?? {};
+    await tx.runs.putOperationalState(repaired.runId, {
+      ...archiveBase,
+      run: repaired,
+      resolvedSecretValues: [
+        ...new Set([
+          ...(protectedState?.resolvedSecretValues ?? []),
+          ...resolvedSecretRefs,
+        ]),
+      ],
+    });
+    return persistenceSafeRun;
+  };
+  const redacted = await transactWithGlobalSecretRepair(
+    config.store,
+    config.redact,
+    resolvedSecretRefs,
+    transition,
+  );
 
   if (typeof concurrencyKey === "string") {
     await releaseQueuedRuns(config.store, redacted.workflowId, concurrencyKey, concurrencyKeyFormat);
   }
-  await runOnRunTerminal(config, redacted.runId);
+  invalidatedTerminalRunIds.delete(redacted.runId);
+  await notifyRunTerminals(
+    config.onRunTerminal,
+    invalidatedTerminalRunIds,
+  );
+  await notifyRunTerminal(config.onRunTerminal, redacted.runId);
   return redacted;
-}
-
-/** Best-effort per-run resource cleanup (S9 reconciliation ledger item 10, SEAMS.md S3-E1) — never lets a cleanup-hook failure fail the run's own (already-persisted) terminal transition. */
-async function runOnRunTerminal(config: EngineConfig, runId: string): Promise<void> {
-  if (!config.onRunTerminal) return;
-  try {
-    await config.onRunTerminal(runId);
-  } catch {
-    // Best-effort: the run's terminal status is already durably persisted;
-    // a resource-cleanup hook failing (e.g. a browser context that was
-    // already closed, or a transient error closing it) must never
-    // retroactively fail an already-completed/failed/cancelled run.
-  }
 }
 
 async function recordThrownFailureAndFinalize(
@@ -228,7 +320,15 @@ async function recordThrownFailureAndFinalize(
   // normal dispatch failure gets.
   const trace: StepTrace = { seq: run.trace.length, stepId: step.id, block: step.uses, status: "failed", inputs: {}, error: message, startedAt: now, endedAt: now, durationMs: 0 };
   const withTrace: RunRecord = { ...run, trace: [...run.trace, trace] };
-  return finalizeTerminal(config, withTrace, workflow, "failed", resolvedSecretRefs, message);
+  const prepared = prepareTaintAfterControlResolution(
+    config,
+    workflow,
+    step,
+    withTrace,
+    1,
+    resolvedSecretRefs,
+  );
+  return finalizeTerminal(config, prepared, workflow, "failed", resolvedSecretRefs, message);
 }
 
 /**
@@ -246,29 +346,135 @@ async function recordThrownFailureAndFinalize(
  * crash mid-single-step can re-attempt it — `idempotencyKey` is what turns
  * either into an exactly-once EFFECT, same as always.
  */
-async function resolveContinuationStepId(config: EngineConfig, run: RunRecord, workflow: Workflow, resolvedSecretRefs: Set<string>): Promise<string | undefined> {
+async function resolveContinuation(
+  config: EngineConfig,
+  run: RunRecord,
+  workflow: Workflow,
+  resolvedSecretRefs: Set<string>,
+): Promise<{
+  run: RunRecord;
+  nextStepId: string | undefined;
+  controlError?: Error;
+}> {
   if (run.trace.length === 0) {
-    return workflow.execution.steps[0]?.id;
+    return { run, nextStepId: workflow.execution.steps[0]?.id };
   }
   const lastTrace = run.trace[run.trace.length - 1]!;
-  const ownerStepId = lastTrace.stepId.replace(/\[\d+\]$/, "");
-  const isForEachSubEntry = lastTrace.stepId !== ownerStepId;
+  const ownerStepId = authoredStepIdForTrace(workflow, lastTrace);
+  const ownerStep = workflow.execution.steps.find(
+    (step) => step.id === ownerStepId,
+  );
+  const isForEachSubEntry =
+    ownerStep?.forEach !== undefined &&
+    (lastTrace.iterationIndex !== undefined ||
+      lastTrace.stepId !== ownerStepId);
 
   if (lastTrace.status === "failed" || isForEachSubEntry) {
-    return ownerStepId;
+    return { run, nextStepId: ownerStepId };
   }
 
-  const lastStep = workflow.execution.steps.find((s) => s.id === ownerStepId);
+  const lastStep = ownerStep;
   if (!lastStep) {
     throw new Error(`Cannot resolve continuation point for run "${run.runId}": step "${ownerStepId}" (from trailing trace entry "${lastTrace.stepId}") not found in workflow ${workflow.id}@${workflow.version}.`);
   }
-  let ifResult: boolean | undefined;
-  if (lastStep.if !== undefined) {
-    const context = buildExprContext(run);
-    const secretResolver = createTrackingSecretResolver(config.resolveSecret ?? throwingSecretResolver, resolvedSecretRefs);
-    ifResult = await resolveBooleanExpression(lastStep.if, context, { secretResolver });
+
+  // A persisted skipped trace is already the authoritative result of
+  // `if: false`. Fresh execution never evaluates `until` on that path and
+  // chooses `next`, then `else`, then array order. Reclaim must reproduce
+  // that exact transition rather than feeding the skipped step through the
+  // completed-step control resolver.
+  if (lastTrace.status === "skipped") {
+    const stepIndex = workflow.execution.steps.findIndex(
+      (step) => step.id === lastStep.id,
+    );
+    const refreshedRun = await refreshTaintAfterControlResolution(
+      config,
+      workflow,
+      lastStep,
+      run,
+      1,
+      resolvedSecretRefs,
+      resolvedSecretRefs.size,
+    );
+    return {
+      run: refreshedRun,
+      nextStepId:
+        lastStep.next ??
+        lastStep.else ??
+        workflow.execution.steps[stepIndex + 1]?.id,
+    };
   }
-  return determineNextStepId(workflow, lastStep, run, ifResult, resolvedSecretRefs, config);
+
+  let ifResult: boolean | undefined;
+  let preDispatchControlError: Error | undefined;
+  const secretCountBeforeControlResolution = resolvedSecretRefs.size;
+  try {
+    if (lastStep.if !== undefined) {
+      const context = buildExprContext(run);
+      const secretResolver = createTrackingSecretResolver(config.resolveSecret ?? throwingSecretResolver, resolvedSecretRefs);
+      ifResult = await resolveBooleanExpression(lastStep.if, context, { secretResolver });
+    }
+  } catch (err) {
+    preDispatchControlError =
+      err instanceof Error ? err : new Error(String(err));
+  }
+  const controlResolution = preDispatchControlError
+    ? { kind: "failed" as const, error: preDispatchControlError }
+    : await resolveCompletedStepControl(
+        workflow,
+        lastStep,
+        run,
+        ifResult,
+        resolvedSecretRefs,
+        config,
+      );
+  let currentTraceCount = 1;
+  if (lastStep.forEach !== undefined) {
+    const declaredStepIds = new Set(
+      workflow.execution.steps.map((step) => step.id),
+    );
+    const escapedOwnerStepId = ownerStepId.replace(
+      /[.*+?^${}()|[\]\\]/g,
+      "\\$&",
+    );
+    const iterationTracePattern = new RegExp(
+      `^${escapedOwnerStepId}\\[\\d+\\]$`,
+    );
+    for (let index = run.trace.length - 2; index >= 0; index -= 1) {
+      const candidate = run.trace[index]!;
+      const candidateStepId = candidate.stepId;
+      if (
+        declaredStepIds.has(candidateStepId) ||
+        !(
+          (candidate.authoredStepId === ownerStepId &&
+            candidate.iterationIndex !== undefined) ||
+          iterationTracePattern.test(candidateStepId)
+        )
+      ) {
+        break;
+      }
+      currentTraceCount += 1;
+    }
+  }
+  const refreshedRun = await refreshTaintAfterControlResolution(
+    config,
+    workflow,
+    lastStep,
+    run,
+    currentTraceCount,
+    resolvedSecretRefs,
+    secretCountBeforeControlResolution,
+  );
+  return {
+    run: refreshedRun,
+    nextStepId:
+      controlResolution.kind === "resolved"
+        ? controlResolution.nextStepId
+        : undefined,
+    ...(controlResolution.kind === "failed"
+      ? { controlError: controlResolution.error }
+      : {}),
+  };
 }
 
 /**
@@ -286,13 +492,6 @@ export async function runStepsLoop(config: EngineConfig, initialRun: RunRecord, 
     const step = workflow.execution.steps.find((s) => s.id === currentStepId);
     if (!step) {
       throw new Error(`Step "${currentStepId}" referenced but not found in workflow ${workflow.id}@${workflow.version} (run "${run.runId}").`);
-    }
-
-    if (!isSnapshotCaptured(run.snapshot) && isWaitBlockId(step.uses)) {
-      const now = config.now?.() ?? new Date();
-      const withSnapshot: RunRecord = { ...run, snapshot: await captureExecutionSnapshot(workflow, config.blocks, now, config.computePackHashes) };
-      run = applyRunRedaction(config.redact, withSnapshot, resolvedSecretRefs);
-      await config.store.runs.put(run);
     }
 
     let outcome: StepOutcome;
@@ -325,32 +524,133 @@ export async function runStepsLoop(config: EngineConfig, initialRun: RunRecord, 
  * plan S1 DoD). Transitions `pending` → `running` (architecture §4.1); a
  * run already `running` (the reclaim case — a prior attempt crashed
  * mid-step without reaching a wait or terminal status) resumes from
- * `resolveContinuationStepId`'s computed continuation point instead of
+ * `resolveContinuation`'s computed continuation point instead of
  * restarting at step 0.
  */
 export async function executeRun(config: EngineConfig, runId: string): Promise<RunRecord> {
-  const loaded = await config.store.runs.get(runId);
-  if (!loaded) {
-    throw new Error(`executeRun: no RunRecord found for runId "${runId}".`);
-  }
-  assertSchemaVersionCompatible(loaded.schemaVersion, { runId, recordKind: "RunRecord" });
+  const initial = await config.store.transact(async (tx) => {
+    const publicRun = await tx.runs.get(runId);
+    if (!publicRun) {
+      throw new Error(
+        `executeRun: no RunRecord found for runId "${runId}".`,
+      );
+    }
+    assertSchemaVersionCompatible(publicRun.schemaVersion, {
+      runId,
+      recordKind: "RunRecord",
+    });
+    if (
+      publicRun.status !== "pending" &&
+      publicRun.status !== "running"
+    ) {
+      const protectedState =
+        await tx.runs.getOperationalState(runId);
+      if (
+        protectedState !== undefined &&
+        protectedState.run.status !== publicRun.status
+      ) {
+        // Public terminal state wins over a stale active continuation left
+        // by an interrupted or out-of-band legacy transition. Valid terminal
+        // archives carry the same terminal status and remain retained.
+        await tx.runs.deleteOperationalState(runId);
+      }
+      return {
+        executable: false as const,
+        publicRun,
+        run: publicRun,
+        resolvedSecretValues: [] as string[],
+      };
+    }
 
-  const workflow = await resolveWorkflowForRun(config.store, loaded);
-  const resolvedSecretRefs = new Set<string>();
-
-  let run = loaded;
-  if (run.status === "pending") {
+    const operationalState =
+      await tx.runs.getOperationalState(runId);
+    const resolvedSecretValues =
+      operationalState?.resolvedSecretValues ?? [];
+    const protectedBase =
+      operationalState === undefined
+        ? publicRun
+        : operationalState.run.trace.length >=
+            publicRun.trace.length
+          ? operationalState.run
+          : publicRun;
+    const exactRun = {
+      ...mergeOperationalRunTaint(
+        protectedBase,
+        publicRun,
+      ),
+      // Public lifecycle status is authoritative. A terminal value was
+      // handled above; this also self-heals a legacy/direct progress write
+      // whose protected predecessor still says pending.
+      status: publicRun.status,
+      updatedAt: publicRun.updatedAt,
+    };
     const now = (config.now?.() ?? new Date()).toISOString();
-    run = applyRunRedaction(config.redact, { ...run, status: "running", updatedAt: now }, resolvedSecretRefs);
-    await config.store.runs.put(run);
-  } else if (run.status !== "running") {
-    // Already `waiting`/`completed`/`failed`/`cancelled` — idempotent no-op
-    // for a caller that races executeRun against another resume mechanism.
-    return run;
+    const run =
+      publicRun.status === "pending"
+        ? {
+            ...exactRun,
+            status: "running" as const,
+            updatedAt: now,
+          }
+        : exactRun;
+    const publicRunning = applyRunRedaction(
+      config.redact,
+      run,
+      new Set(resolvedSecretValues),
+    );
+    if (publicRun.status === "pending") {
+      await tx.runs.put(publicRunning);
+    }
+    // Also initializes migrated running rows whose protected columns are
+    // null before any newly discovered secret can make their next public
+    // progress write irreversible.
+    await tx.runs.putOperationalState(runId, {
+      ...(operationalState ?? {}),
+      run,
+      resolvedSecretValues,
+    });
+    return {
+      executable: true as const,
+      publicRun: publicRunning,
+      run,
+      resolvedSecretValues,
+    };
+  });
+  if (!initial.executable) {
+    // Waiting and terminal public status is authoritative even if a stale
+    // active ciphertext survived an older/out-of-band transition.
+    return initial.publicRun;
   }
 
-  const startStepId = await resolveContinuationStepId(config, run, workflow, resolvedSecretRefs);
-  return runStepsLoop(config, run, workflow, startStepId, resolvedSecretRefs);
+  const resolvedSecretRefs = new Set(
+    initial.resolvedSecretValues,
+  );
+  let run = initial.run;
+  const workflow = await resolveWorkflowForRun(config.store, run);
+
+  const continuation = await resolveContinuation(
+    config,
+    run,
+    workflow,
+    resolvedSecretRefs,
+  );
+  if (continuation.controlError) {
+    return finalizeTerminal(
+      config,
+      continuation.run,
+      workflow,
+      "failed",
+      resolvedSecretRefs,
+      continuation.controlError.message,
+    );
+  }
+  return runStepsLoop(
+    config,
+    continuation.run,
+    workflow,
+    continuation.nextStepId,
+    resolvedSecretRefs,
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -365,39 +665,154 @@ export async function executeRun(config: EngineConfig, runId: string): Promise<R
  * and by `triggerRun`'s `cancel_existing` concurrency policy.
  */
 export async function cancelRun(config: EngineConfig, runId: string): Promise<RunRecord> {
-  const run = await config.store.runs.get(runId);
-  if (!run) {
-    throw new Error(`cancelRun: no RunRecord found for runId "${runId}".`);
-  }
-  if (run.status === "completed" || run.status === "failed" || run.status === "cancelled") {
-    return run;
-  }
+  const result = await config.store.transact(async (tx) => {
+    const publicRun = await tx.runs.get(runId);
+    if (!publicRun) {
+      throw new Error(
+        `cancelRun: no RunRecord found for runId "${runId}".`,
+      );
+    }
+    const outstandingWaits = await tx.waits.list({ runId });
+    if (
+      publicRun.status === "completed" ||
+      publicRun.status === "failed" ||
+      publicRun.status === "cancelled"
+    ) {
+      for (const wait of outstandingWaits) {
+        await tx.waits.delete(wait.runId, wait.stepId);
+      }
+      return {
+        transitioned: false as const,
+        run: publicRun,
+      };
+    }
+    const currentWait = outstandingWaits[0];
+    const protection =
+      currentWait === undefined
+        ? await tx.runs.getOperationalState(runId)
+        : await tx.waits.getOperationalRunState(
+            currentWait.runId,
+            currentWait.stepId,
+          );
+    const protectedBase =
+      protection === undefined
+        ? publicRun
+        : protection.run.trace.length >=
+            publicRun.trace.length
+          ? protection.run
+          : publicRun;
+    const run = {
+      ...mergeOperationalRunTaint(
+        protectedBase,
+        publicRun,
+      ),
+      status: publicRun.status,
+      updatedAt: publicRun.updatedAt,
+    };
+    const workflow = await resolveWorkflowForRun(tx, run);
+    const authoredWorkflowStepIds = new Set(
+      workflow.execution.steps.map((step) => step.id),
+    );
+    const reachedStepIds = new Set(
+      run.trace
+        .map((trace) => {
+          if (trace.authoredStepId !== undefined) {
+            return trace.authoredStepId;
+          }
+          // Prefer exact authored identity, so an authored id such as
+          // `gate[0]` is never mistaken for a generated occurrence. The
+          // suffix fallback only preserves pre-provenance forEach traces
+          // when the exact text is not itself an authored workflow step.
+          if (authoredWorkflowStepIds.has(trace.stepId)) {
+            return trace.stepId;
+          }
+          const legacyIteration =
+            /^(.*)\[\d+\]$/.exec(trace.stepId);
+          return legacyIteration !== null &&
+            authoredWorkflowStepIds.has(legacyIteration[1]!)
+            ? legacyIteration[1]
+            : undefined;
+        })
+        .filter((stepId): stepId is string =>
+          stepId !== undefined
+        ),
+    );
+    const nowDate = config.now?.() ?? new Date();
+    const now = nowDate.toISOString();
+    const skippedTraces: StepTrace[] =
+      workflow.execution.steps
+        .filter((step) => !reachedStepIds.has(step.id))
+        .map(
+          (step, index): StepTrace => ({
+            seq: run.trace.length + index,
+            stepId: step.id,
+            block: step.uses,
+            status: "skipped",
+            inputs: {},
+            startedAt: now,
+            endedAt: now,
+            durationMs: 0,
+          }),
+        );
+    const resolvedSecretRefs = new Set(
+      protection?.resolvedSecretValues ?? [],
+    );
+    const updated: RunRecord = {
+      ...run,
+      status: "cancelled",
+      trace: [...run.trace, ...skippedTraces],
+      endedAt: now,
+      updatedAt: now,
+      snapshot: isSnapshotCaptured(run.snapshot)
+        ? run.snapshot
+        : await captureExecutionSnapshot(
+            workflow,
+            config.blocks,
+            nowDate,
+            config.computePackHashes,
+          ),
+    };
+    const persistenceAwareUpdated =
+      await mergePersistedRunTaint(tx, updated);
+    const persistenceSafeRun = applyRunRedaction(
+      config.redact,
+      persistenceAwareUpdated,
+      resolvedSecretRefs,
+    );
+    await tx.runs.put(persistenceSafeRun);
+    const {
+      pendingIdempotencyReplays: _pendingClaims,
+      ...archiveBase
+    } = protection ?? {};
+    await tx.runs.putOperationalState(runId, {
+      ...archiveBase,
+      run: persistenceAwareUpdated,
+      resolvedSecretValues: [...resolvedSecretRefs],
+    });
+    for (const wait of outstandingWaits) {
+      await tx.waits.delete(wait.runId, wait.stepId);
+    }
+    return {
+      transitioned: true as const,
+      run: persistenceSafeRun,
+      concurrencyKey: run.params?.concurrencyKey,
+      concurrencyKeyFormat:
+        run.params?.concurrencyKeyFormat,
+    };
+  });
 
-  const workflow = await resolveWorkflowForRun(config.store, run);
-  const reachedStepIds = new Set(run.trace.map((t) => t.stepId.replace(/\[\d+\]$/, "")));
-  const now = (config.now?.() ?? new Date()).toISOString();
-  const skippedTraces: StepTrace[] = workflow.execution.steps
-    .filter((s) => !reachedStepIds.has(s.id))
-    .map((s, i): StepTrace => ({ seq: run.trace.length + i, stepId: s.id, block: s.uses, status: "skipped", inputs: {}, startedAt: now, endedAt: now, durationMs: 0 }));
-
-  const resolvedSecretRefs = new Set<string>();
-  const nowDate = config.now?.() ?? new Date();
-  const concurrencyKey = run.params?.concurrencyKey;
-  const concurrencyKeyFormat = run.params?.concurrencyKeyFormat;
-  const updated: RunRecord = {
-    ...run,
-    status: "cancelled",
-    trace: [...run.trace, ...skippedTraces],
-    endedAt: now,
-    updatedAt: now,
-    snapshot: isSnapshotCaptured(run.snapshot) ? run.snapshot : await captureExecutionSnapshot(workflow, config.blocks, nowDate, config.computePackHashes),
-  };
-  const redacted = applyRedaction(config.redact, updated, resolvedSecretRefs);
-  await config.store.runs.put(redacted);
-
-  if (typeof concurrencyKey === "string") {
-    await releaseQueuedRuns(config.store, redacted.workflowId, concurrencyKey, concurrencyKeyFormat);
+  if (!result.transitioned) return result.run;
+  if (typeof result.concurrencyKey === "string") {
+    await releaseQueuedRuns(
+      config.store,
+      result.run.workflowId,
+      result.concurrencyKey,
+      result.concurrencyKeyFormat,
+    );
   }
-  await runOnRunTerminal(config, redacted.runId);
-  return redacted;
+  await notifyRunTerminal(
+    config.onRunTerminal,
+    result.run.runId,
+  );
+  return result.run;
 }

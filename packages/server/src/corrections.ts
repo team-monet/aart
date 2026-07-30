@@ -21,5 +21,12 @@ export async function findCorrectionByKey(store: AartStore, key: string): Promis
   const fieldPath = fieldPathParts.join(":");
   if (!runId || !stepId || !fieldPath) return undefined;
   const candidates = await store.corrections.list({ runId, stepId });
-  return candidates.find((c) => c.fieldPath === fieldPath);
+  return (
+    candidates.find((c) => c.fieldPath === fieldPath) ??
+    (await store.corrections.findByOperationalTarget(
+      runId,
+      stepId,
+      fieldPath,
+    ))
+  );
 }

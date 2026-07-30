@@ -12,7 +12,10 @@ import { MigrationRunner } from "../../migrations/index.js";
 import type { AartStore } from "../../types.js";
 import { AsyncMutex, createDirectExec, createLockedExec, openSqliteDb, withSqliteBusyRetry, type SqlExec } from "./db.js";
 import { ALL_SQLITE_MIGRATIONS } from "./migrations.js";
-import { SqliteArtifactStore } from "./stores/artifacts.js";
+import {
+  recoverSqliteArtifactRedactions,
+  SqliteArtifactStore,
+} from "./stores/artifacts.js";
 import { SqliteEventLogStore } from "./stores/events.js";
 import { SqliteRunStore } from "./stores/runs.js";
 import { SqliteSignalStore } from "./stores/signals.js";
@@ -123,15 +126,24 @@ async function runMigrationsCoordinated(db: DatabaseSync, topStore: AartStore): 
   }
 }
 
-function buildStore(exec: SqlExec, blobsDir: string, transact: AartStore["transact"]): AartStore {
+function buildStore(
+  exec: SqlExec,
+  blobsDir: string,
+  transact: AartStore["transact"],
+  transactionScoped: boolean,
+): AartStore {
   return {
     workflows: new SqliteWorkflowStore(exec),
-    runs: new SqliteRunStore(exec),
-    waits: new SqliteWaitStore(exec),
-    signals: new SqliteSignalStore(exec),
-    artifacts: new SqliteArtifactStore(exec, blobsDir),
+    runs: new SqliteRunStore(exec, blobsDir),
+    waits: new SqliteWaitStore(exec, blobsDir),
+    signals: new SqliteSignalStore(exec, blobsDir),
+    artifacts: new SqliteArtifactStore(
+      exec,
+      blobsDir,
+      transactionScoped,
+    ),
     approvals: new SqliteApprovalStore(exec),
-    corrections: new SqliteCorrectionStore(exec),
+    corrections: new SqliteCorrectionStore(exec, blobsDir),
     evals: new SqliteEvalStore(exec),
     deployments: new SqliteDeploymentStore(exec),
     environments: new SqliteEnvironmentStore(exec),
@@ -180,7 +192,12 @@ export async function openSqliteStore(path: string, options: CreateSqliteStoreOp
   // through, matching the fs adapter's documented behavior ("Nested
   // transact() calls reuse the same buffer/view rather than creating a
   // fresh nested one").
-  const txStore: AartStore = buildStore(directExec, blobsDir, async (fn) => fn(txStore));
+  const txStore: AartStore = buildStore(
+    directExec,
+    blobsDir,
+    async (fn) => fn(txStore),
+    true,
+  );
 
   // The top-level view: every member's SQL acquires the mutex per call
   // (auto-committing per SQLite statement when issued outside an explicit
@@ -189,10 +206,10 @@ export async function openSqliteStore(path: string, options: CreateSqliteStoreOp
   const topStore: AartStore = buildStore(lockedExec, blobsDir, (fn) =>
     mutex.run(async () => {
       db.exec("BEGIN IMMEDIATE");
+      let result: Awaited<ReturnType<typeof fn>>;
       try {
-        const result = await fn(txStore);
+        result = await fn(txStore);
         db.exec("COMMIT");
-        return result;
       } catch (err) {
         try {
           db.exec("ROLLBACK");
@@ -202,9 +219,19 @@ export async function openSqliteStore(path: string, options: CreateSqliteStoreOp
           // to roll back in that case; the original `err` is what matters
           // to the caller regardless, re-thrown below.
         }
+        await recoverSqliteArtifactRedactions(
+          directExec,
+          blobsDir,
+        );
         throw err;
       }
+      await recoverSqliteArtifactRedactions(
+        directExec,
+        blobsDir,
+      );
+      return result;
     }),
+    false,
   );
 
   if (options.runMigrations !== false) {
@@ -216,6 +243,10 @@ export async function openSqliteStore(path: string, options: CreateSqliteStoreOp
     // reproduced crash and the fix.
     await runMigrationsCoordinated(db, topStore);
   }
+  await recoverSqliteArtifactRedactions(
+    lockedExec,
+    blobsDir,
+  );
 
   return {
     store: topStore,
@@ -232,5 +263,16 @@ export async function createSqliteStore(path: string, options: CreateSqliteStore
 
 /** Applies this adapter's migration DDL directly against a connection, bypassing `MigrationRunner`/the watermark table entirely — exposed for the rare case a caller wants schema-only setup with no migration bookkeeping (e.g. a disposable test fixture). Prefer `openSqliteStore`'s default (`runMigrations: true`, watermark-tracked) for anything that behaves like a real deployment. */
 export { runMigrationDdl } from "./db.js";
-export { createSqliteInitMigration, createSqliteAddDeploymentPromotedMigration, createSqliteAddEventsTableMigration, ALL_SQLITE_MIGRATIONS } from "./migrations.js";
+export {
+  createSqliteInitMigration,
+  createSqliteAddDeploymentPromotedMigration,
+  createSqliteAddEventsTableMigration,
+  createSqliteAddIdempotencySchemaVersionMigration,
+  createSqliteAddSecretAuditProvenanceMigration,
+  createSqliteAddSealedOperationalStateMigration,
+  createSqliteAddWaitOperationGenerationMigration,
+  createSqliteAddProtectedContinuationStateMigration,
+  createSqliteAddArtifactAuditVisibilityMigration,
+  ALL_SQLITE_MIGRATIONS,
+} from "./migrations.js";
 export { SqliteMigrationWatermarkStore } from "./watermark.js";

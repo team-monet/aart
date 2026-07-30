@@ -3,24 +3,39 @@
 // retry/timeout -> idempotency -> redact -> record StepTrace -> determine
 // next. Wait-type block ids (wait/wait-blocks.ts) are intercepted before
 // normal dispatch and handed to wait/wait-machine.ts instead.
-import { findExpressionTokens, parseExpression, resolveExpression, type ExprContext, type ResolveOptions } from "@aart/expr";
+import { findExpressionTokens, parseExpression, type ExprContext, type ResolveOptions } from "@aart/expr";
+import type { AartStore } from "@aart/store";
 import type { ApprovalTask, LlmCallMetadata, RetryPolicy, RunRecord, StepTrace, WaitCondition, Workflow, WorkflowStep } from "@aart/types";
 import { AartError, DEFAULT_EFFECTFUL_CAPABILITIES, isEffectfulCapability, IterationLimitExceededError, TimeoutError } from "@aart/types";
 import { checkCapabilityDispatch, alwaysEmptyGrantedCapabilities } from "./capability.js";
 import { parseDurationMs } from "./duration.js";
-import { buildExprContext, resolveArrayExpression, resolveBooleanExpression, resolveStringExpression, resolveWithRecord } from "./expr-context.js";
-import { checkIdempotency, recordIdempotency } from "./idempotency.js";
-import { jsonCompatibilityProblem, jsonValuesEqual } from "./output-validation.js";
-import { applyRedaction, applyRunRedaction, createTrackingSecretResolver, isTextMime, throwingSecretResolver } from "./redaction.js";
+import { buildExprContext, resolveArrayExpression, resolveBooleanExpression, resolveStringExpression, resolveWithRecord, traceRepresentsAuthoredStep } from "./expr-context.js";
+import {
+  claimIdempotencyReplay,
+  idempotencyStorageKey,
+  recordIdempotency,
+  retainUnsettledIdempotencyReplayClaims,
+  revokeSecretTaintedIdempotency,
+} from "./idempotency.js";
+import { idempotencyAssociationFingerprint } from "./idempotency-association.js";
+import { jsonCompatibilityProblem, jsonValuesEqual, validateWorkflowOutputs } from "./output-validation.js";
+import { applyConservativeRedaction, applyRedaction, applyRunRedaction, changedJsonPointers, createTrackingSecretResolver, isTextMime, mergeActiveRunProtection, mergeOperationalRunTaint, mergePersistedRunTaint, redactStoredTextArtifacts, repairCustomerVisibleAudits, throwingSecretResolver, transactWithGlobalSecretRepair } from "./redaction.js";
 import { CURRENT_ENGINE_SCHEMA_VERSION } from "./schema-version.js";
+import {
+  captureExecutionSnapshot,
+  isSnapshotCaptured,
+  resolveWorkflowForRun,
+} from "./snapshot.js";
 import type { EngineBlockExecutionContext, EngineConfig } from "./types.js";
+import { notifyRunTerminals } from "./terminal-hooks.js";
 import { enterWait, type WaitMachineConfig } from "./wait/wait-machine.js";
 import { buildWaitConditionFromBlock, isWaitBlockId, type WaitBlockId } from "./wait/wait-blocks.js";
+import { materializeWorkflowOutputs } from "./workflow-outputs.js";
 
 export type StepOutcome =
-  | { kind: "continue"; run: RunRecord; nextStepId: string | undefined }
-  | { kind: "waiting"; run: RunRecord }
-  | { kind: "failed"; run: RunRecord; error: Error };
+  | { kind: "continue"; run: RunRecord; nextStepId: string | undefined; }
+  | { kind: "waiting"; run: RunRecord; }
+  | { kind: "failed"; run: RunRecord; error: Error; };
 
 const DEFAULT_FOR_EACH_LIMIT = 10_000;
 const DEFAULT_RETRY_BASE_DELAY_MS = 50;
@@ -39,7 +54,7 @@ function countPriorExecutions(run: RunRecord, stepId: string): number {
 function classifyErrorClass(error: unknown): string {
   if (error instanceof AartError) return error.errorClass;
   if (error && typeof error === "object") {
-    const status = (error as { status?: unknown; statusCode?: unknown }).status ?? (error as { statusCode?: unknown }).statusCode;
+    const status = (error as { status?: unknown; statusCode?: unknown; }).status ?? (error as { statusCode?: unknown; }).statusCode;
     if (typeof status === "number") {
       if (status >= 500) return "HttpServerError";
       if (status >= 400 && status < 500) return "HttpClientError";
@@ -71,7 +86,7 @@ function sleep(ms: number): Promise<void> {
 }
 
 /** `[DECISION]` per-attempt timeout via `Promise.race` (architecture micro-decision #10: "timeout applies per-attempt... a fresh timeout budget"). Note this is best-effort cancellation, a real JS/Node constraint: the underlying `execute()` call is not forcibly aborted when it loses the race (no ambient `AbortSignal` in the frozen `BlockExecutionContext`, architecture §2.5) — a block that ignores its own long-running work will keep running in the background even after this function has moved on. The one block type this engine itself builds (the isolated-vm sandbox, sandbox/node-sandbox.ts) DOES get true cancellation, since isolated-vm's own `timeout` option genuinely terminates isolate execution. */
-async function withTimeout<T>(promise: Promise<T>, timeoutMs: number | undefined, context: { stepId: string }): Promise<T> {
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number | undefined, context: { stepId: string; }): Promise<T> {
   if (timeoutMs === undefined) return promise;
   let timer: ReturnType<typeof setTimeout>;
   const timeoutPromise = new Promise<never>((_resolve, reject) => {
@@ -97,7 +112,7 @@ async function dispatchWithRetry(
   retry: RetryPolicy | undefined,
   timeoutMs: number | undefined,
   computeDelay: (attempt: number, backoff: string | undefined) => number,
-  context: { stepId: string },
+  context: { stepId: string; },
 ): Promise<RetryOutcome> {
   const maxAttempts = Math.max(1, retry?.maxAttempts ?? 1);
   let lastError: Error | undefined;
@@ -174,13 +189,21 @@ function buildBlockContext(
   runId: string,
   stepId: string,
   secretResolver: ReturnType<typeof createTrackingSecretResolver>,
-  resolvedSecretRefs: ReadonlySet<string>,
+  resolvedSecretRefs: Set<string>,
   onRecordLlmCall: (metadata: LlmCallMetadata) => void,
+  onSecretAccess: (usage: "data" | "credential") => void,
+  credentialSecretsAllowed: boolean,
 ): EngineBlockExecutionContext {
   return {
     runId,
     stepId,
-    resolveSecret: async (ref: string) => {
+    resolveSecret: async (ref: string, options) => {
+      const requestedUsage = options?.usage ?? "data";
+      onSecretAccess(
+        requestedUsage === "credential" && credentialSecretsAllowed
+          ? "credential"
+          : "data",
+      );
       const value = await secretResolver(ref);
       return typeof value === "string" ? value : String(value);
     },
@@ -193,13 +216,60 @@ function buildBlockContext(
       // other persist call site — a block that resolves a secret and THEN
       // writes an artifact within the same execute() call is covered, not
       // just secrets resolved before dispatch began.
-      const bytes = isTextMime(input.mime)
-        ? new TextEncoder().encode(applyRedaction(config.redact, new TextDecoder().decode(input.bytes), resolvedSecretRefs))
-        : input.bytes;
-      await config.store.artifacts.put(
-        { id, runId, stepId, name: input.name, kind: input.kind, mime: input.mime, path, bytes: bytes.byteLength, createdAt: (config.now?.() ?? new Date()).toISOString() },
-        bytes,
-      );
+      await config.store.transact(async (tx) => {
+        // A different run can classify a value while this block is still
+        // executing. Rejoin the latest sealed set under the same store lock
+        // as the initial artifact write: repair either commits first and is
+        // applied here, or this write commits first and the repair sees it.
+        const protectedState =
+          await tx.runs.getOperationalState(runId);
+        for (const value of
+          protectedState?.resolvedSecretValues ?? []) {
+          resolvedSecretRefs.add(value);
+        }
+        const bytes = isTextMime(input.mime)
+          ? new TextEncoder().encode(
+              applyConservativeRedaction(
+                config.redact,
+                new TextDecoder().decode(input.bytes),
+                resolvedSecretRefs,
+              ),
+            )
+          : input.bytes;
+        const name = applyConservativeRedaction(
+          config.redact,
+          input.name,
+          resolvedSecretRefs,
+        );
+        const kind = applyConservativeRedaction(
+          config.redact,
+          input.kind,
+          resolvedSecretRefs,
+        );
+        const mime = applyConservativeRedaction(
+          config.redact,
+          input.mime,
+          resolvedSecretRefs,
+        );
+        const publicByteCount = applyConservativeRedaction(
+          config.redact,
+          bytes.byteLength,
+          resolvedSecretRefs,
+        );
+        const auditVisible =
+          typeof publicByteCount === "number" &&
+          Object.is(publicByteCount, bytes.byteLength);
+        await tx.artifacts.put(
+          { id, runId, stepId, name, kind, mime, path, bytes: bytes.byteLength, createdAt: (config.now?.() ?? new Date()).toISOString() },
+          bytes,
+          {
+            redactionTextEligible: isTextMime(input.mime),
+            ...(auditVisible
+              ? {}
+              : { auditVisible: false }),
+          },
+        );
+      });
       return { id, path };
     },
     recordLlmCall: onRecordLlmCall,
@@ -217,6 +287,8 @@ async function dispatchOnce(
   exprContext: ExprContext,
   resolveOptions: ResolveOptions,
   resolvedSecretRefs: Set<string>,
+  dataSecretTaintedBeforeDispatch = false,
+  controlSecretTaintedBeforeDispatch = false,
 ): Promise<StepTrace> {
   const impl = config.resolveBlockForRun?.(run, step.uses) ?? config.blocks[step.uses];
   if (!impl) {
@@ -226,16 +298,88 @@ async function dispatchOnce(
   const startedAt = now().toISOString();
 
   const resolvedIdempotencyKey = await resolveStringExpression(step.idempotencyKey, exprContext, resolveOptions);
-  if (resolvedIdempotencyKey !== undefined) {
-    const check = await checkIdempotency(config.store, resolvedIdempotencyKey);
+  const idempotencyLedgerKey =
+    resolvedIdempotencyKey === undefined
+      ? undefined
+      : idempotencyStorageKey(resolvedIdempotencyKey);
+  if (
+    resolvedIdempotencyKey !== undefined &&
+    !dataSecretTaintedBeforeDispatch &&
+    !controlSecretTaintedBeforeDispatch
+  ) {
+    const check = await claimIdempotencyReplay(
+      config.store,
+      resolvedIdempotencyKey,
+      run,
+      stepIdForTrace,
+      seq,
+      resolvedSecretRefs,
+      (protectedRun, recordedOutput) => {
+        const protectedInputs = applyRedaction(
+          config.redact,
+          resolvedInputs,
+          resolvedSecretRefs,
+        );
+        const protectedOutput = applyRedaction(
+          config.redact,
+          recordedOutput,
+          resolvedSecretRefs,
+        );
+        const protectedKey = applyRedaction(
+          config.redact,
+          resolvedIdempotencyKey,
+          resolvedSecretRefs,
+        );
+        return (
+          !recomputeDataSecretTaint(
+            config,
+            step,
+            protectedRun,
+            resolvedSecretRefs,
+          ) &&
+          !runHasSecretControlledFlow(protectedRun) &&
+          !valueReferencesSecretTaintedTrace(
+            step.if,
+            protectedRun,
+          ) &&
+          !(
+            step.next !== undefined &&
+            valueReferencesSecretTaintedTrace(
+              step.until,
+              protectedRun,
+              step.id,
+            )
+          ) &&
+          jsonValuesEqual(resolvedInputs, protectedInputs) &&
+          jsonValuesEqual(recordedOutput, protectedOutput) &&
+          resolvedIdempotencyKey === protectedKey
+        );
+      },
+    );
     if (check.alreadyCompleted) {
       const endedAt = now().toISOString();
       const outputs = check.recordedOutput as Record<string, unknown>;
       const compatibilityProblem = jsonCompatibilityProblem(outputs, `step "${stepIdForTrace}" outputs`);
       if (compatibilityProblem) {
-        return { seq, stepId: stepIdForTrace, block: step.uses, status: "failed", inputs: resolvedInputs, error: compatibilityProblem, startedAt, endedAt, durationMs: 0 };
+        return { seq, stepId: stepIdForTrace, authoredStepId: step.id, block: step.uses, status: "failed", inputs: resolvedInputs, error: compatibilityProblem, startedAt, endedAt, durationMs: 0 };
       }
-      return { seq, stepId: stepIdForTrace, block: step.uses, status: "completed", inputs: resolvedInputs, outputs, startedAt, endedAt, durationMs: 0 };
+      return {
+        seq,
+        stepId: stepIdForTrace,
+        authoredStepId: step.id,
+        block: step.uses,
+        status: "completed",
+        inputs: resolvedInputs,
+        outputs,
+        startedAt,
+        endedAt,
+        durationMs: 0,
+        idempotencyLedgerKey,
+        idempotencyLedgerFingerprint:
+          idempotencyAssociationFingerprint(
+            idempotencyLedgerKey!,
+          ),
+      };
     }
   }
 
@@ -245,9 +389,12 @@ async function dispatchOnce(
   // blocks) — attached to the trace entry below once dispatch completes.
   // A non-llm block simply never calls it, leaving this undefined.
   let capturedLlmCall: LlmCallMetadata | undefined;
+  let dataSecretAccessed = false;
   const ctx = buildBlockContext(config, run.runId, stepIdForTrace, secretResolver, resolvedSecretRefs, (metadata) => {
     capturedLlmCall = metadata;
-  });
+  }, (usage) => {
+    if (usage === "data") dataSecretAccessed = true;
+  }, config.canUseCredentialSecrets?.({ run, block: impl }) === true);
   const timeoutMs = step.timeout ? parseDurationMs(step.timeout) : undefined;
   const computeDelay = config.computeRetryDelayMs ?? defaultComputeRetryDelayMs;
 
@@ -275,7 +422,21 @@ async function dispatchOnce(
     // successful call+validate (core.ts's llmCall/llmExtract/etc.) — a
     // thrown error means recordLlmCall was never reached, so there's
     // nothing to attach here even on a genuinely-failed LLM call.
-    return { seq, stepId: stepIdForTrace, block: step.uses, status: "failed", inputs: resolvedInputs, error: error.message, startedAt, endedAt, durationMs };
+    return {
+      seq,
+      stepId: stepIdForTrace,
+      authoredStepId: step.id,
+      block: step.uses,
+      status: "failed",
+      inputs: resolvedInputs,
+      error: error.message,
+      startedAt,
+      endedAt,
+      durationMs,
+      ...(dataSecretAccessed
+        ? { secretTainted: true, secretTaintedPaths: ["*"] }
+        : {}),
+    };
   }
 
   const outputs = output !== null && typeof output === "object" && !Array.isArray(output) ? (output as Record<string, unknown>) : { value: output };
@@ -291,15 +452,99 @@ async function dispatchOnce(
       startedAt,
       endedAt,
       durationMs,
+      authoredStepId: step.id,
+      ...(dataSecretAccessed
+        ? { secretTainted: true, secretTaintedPaths: ["*"] }
+        : {}),
     };
   }
+  const redactedOutputs = applyRedaction(
+    config.redact,
+    outputs,
+    resolvedSecretRefs,
+  );
+  const outputsContainResolvedSecret =
+    changedJsonPointers(outputs, redactedOutputs).length > 0;
   // A faked (dry-run) dispatch never records idempotency: recording a
   // synthetic "would have called X" result under the real idempotencyKey
   // would wrongly short-circuit a LATER, genuinely real invocation of this
   // same step into skipping the actual effectful action idempotencyKey
   // exists to gate in the first place.
-  if (resolvedIdempotencyKey !== undefined && !shouldFake) {
-    await recordIdempotency(config.store, resolvedIdempotencyKey, run.runId, stepIdForTrace, outputs, now());
+  let idempotencyRecorded = false;
+  if (
+    resolvedIdempotencyKey !== undefined &&
+    !shouldFake &&
+    !dataSecretTaintedBeforeDispatch &&
+    !dataSecretAccessed &&
+    !controlSecretTaintedBeforeDispatch &&
+    !outputsContainResolvedSecret
+  ) {
+    idempotencyRecorded = await config.store.transact(
+      async (tx) => {
+        const protectedRun = await mergeActiveRunProtection(
+          tx,
+          run,
+          resolvedSecretRefs,
+        );
+        const protectedInputs = applyRedaction(
+          config.redact,
+          resolvedInputs,
+          resolvedSecretRefs,
+        );
+        const protectedOutputs = applyRedaction(
+          config.redact,
+          outputs,
+          resolvedSecretRefs,
+        );
+        const protectedIdempotencyKey = applyRedaction(
+          config.redact,
+          resolvedIdempotencyKey,
+          resolvedSecretRefs,
+        );
+        const protectedDataTaint =
+          recomputeDataSecretTaint(
+            config,
+            step,
+            protectedRun,
+            resolvedSecretRefs,
+          ) ||
+          !jsonValuesEqual(resolvedInputs, protectedInputs);
+        const protectedControlTaint =
+          runHasSecretControlledFlow(protectedRun) ||
+          valueReferencesSecretTaintedTrace(
+            step.if,
+            protectedRun,
+          ) ||
+          (step.next !== undefined &&
+            valueReferencesSecretTaintedTrace(
+              step.until,
+              protectedRun,
+              step.id,
+            ));
+        if (
+          protectedDataTaint ||
+          protectedControlTaint ||
+          protectedIdempotencyKey !==
+            resolvedIdempotencyKey ||
+          changedJsonPointers(
+            outputs,
+            protectedOutputs,
+          ).length > 0
+        ) {
+          return false;
+        }
+        await recordIdempotency(
+          tx,
+          resolvedIdempotencyKey,
+          run.runId,
+          stepIdForTrace,
+          outputs,
+          now(),
+          seq,
+        );
+        return true;
+      },
+    );
   }
   return {
     seq,
@@ -311,6 +556,19 @@ async function dispatchOnce(
     startedAt,
     endedAt,
     durationMs,
+    authoredStepId: step.id,
+    ...(idempotencyRecorded
+      ? {
+          idempotencyLedgerKey,
+          idempotencyLedgerFingerprint:
+            idempotencyAssociationFingerprint(
+              idempotencyLedgerKey!,
+            ),
+        }
+      : {}),
+    ...(dataSecretAccessed
+      ? { secretTainted: true, secretTaintedPaths: ["*"] }
+      : {}),
     ...(capturedLlmCall !== undefined ? { llmCall: capturedLlmCall } : {}),
   };
 }
@@ -320,7 +578,9 @@ async function executeForEachStep(
   run: RunRecord,
   step: WorkflowStep,
   resolvedSecretRefs: Set<string>,
-): Promise<{ traces: StepTrace[]; failed: boolean }> {
+  dataSecretTaintedBeforeDispatch: boolean,
+  controlSecretTaintedBeforeDispatch: boolean,
+): Promise<{ traces: StepTrace[]; failed: boolean; }> {
   const baseContext = buildExprContext(run);
   const secretResolver = createTrackingSecretResolver(config.resolveSecret ?? throwingSecretResolver, resolvedSecretRefs);
   const resolveOptions: ResolveOptions = { secretResolver };
@@ -365,7 +625,21 @@ async function executeForEachStep(
     };
     const resolvedInputs = await resolveWithRecord(step.with, iterationContext, resolveOptions);
     const stepIdForTrace = `${step.id}[${index}]`;
-    const trace = await dispatchOnce(config, run, step, stepIdForTrace, seq, resolvedInputs, iterationContext, resolveOptions, resolvedSecretRefs);
+    const trace = await dispatchOnce(
+      config,
+      run,
+      step,
+      stepIdForTrace,
+      seq,
+      resolvedInputs,
+      iterationContext,
+      resolveOptions,
+      resolvedSecretRefs,
+      dataSecretTaintedBeforeDispatch,
+      controlSecretTaintedBeforeDispatch,
+    );
+    trace.authoredStepId = step.id;
+    trace.iterationIndex = index;
     seq += 1;
     traces.push(trace);
     itemOutputs.push(trace.status === "completed" ? trace.outputs : null);
@@ -377,6 +651,15 @@ async function executeForEachStep(
 
   const now = (config.now?.() ?? new Date()).toISOString();
   const firstFailure = traces.find((t) => t.status === "failed");
+  const secretTaintedPaths = traces.flatMap((trace, index) => {
+    const paths =
+      trace.secretTaintedPaths ??
+      (trace.secretTainted === true ? ["*"] : []);
+    return paths.length > 0 ? [`/items/${index}`] : [];
+  });
+  const controlSecretTainted = traces.some(
+    (trace) => trace.controlSecretTainted === true,
+  );
   const aggregate: StepTrace = {
     seq: seq,
     stepId: step.id,
@@ -388,6 +671,16 @@ async function executeForEachStep(
     startedAt: traces[0]?.startedAt ?? now,
     endedAt: now,
     durationMs: traces.reduce((sum, t) => sum + (t.durationMs ?? 0), 0),
+    authoredStepId: step.id,
+    ...(secretTaintedPaths.length > 0 || controlSecretTainted
+      ? {
+          secretTainted: true,
+          secretTaintedPaths,
+          ...(controlSecretTainted
+            ? { controlSecretTainted: true }
+            : {}),
+        }
+      : {}),
   };
 
   return { traces: [...traces, aggregate], failed };
@@ -418,58 +711,900 @@ async function executeForEachStep(
  * `dispatchOnce` has already returned, so any `writeArtifact` calls the
  * step made are already durably in the store, ready to query.
  */
-async function appendTracesAndPersist(config: EngineConfig, run: RunRecord, newTraces: StepTrace[], resolvedSecretRefs: ReadonlySet<string>): Promise<RunRecord> {
-  const artifacts = await config.store.artifacts.listByRun(run.runId);
-  const updated: RunRecord = { ...run, trace: [...run.trace, ...newTraces], artifacts, updatedAt: (config.now?.() ?? new Date()).toISOString() };
-  const redacted = applyRunRedaction(config.redact, updated, resolvedSecretRefs);
-  await config.store.runs.put(redacted);
-  return redacted;
+async function appendTracesAndPersist(
+  config: EngineConfig,
+  run: RunRecord,
+  workflow: Workflow,
+  step: WorkflowStep,
+  newTraces: StepTrace[],
+  resolvedSecretRefs: Set<string>,
+  secretCountBeforeStep: number,
+): Promise<RunRecord> {
+  const invalidatedTerminalRunIds = new Set<string>();
+  const transition = async (
+    tx: AartStore,
+  ): Promise<RunRecord> => {
+    run = await mergeActiveRunProtection(
+      tx,
+      run,
+      resolvedSecretRefs,
+    );
+    const artifacts =
+      resolvedSecretRefs.size > secretCountBeforeStep
+        ? await redactStoredTextArtifacts(
+            tx,
+            config.redact,
+            run.runId,
+            resolvedSecretRefs,
+          )
+        : await tx.artifacts.listByRun(run.runId);
+    const updated: RunRecord = {
+      ...run,
+      trace: [...run.trace, ...newTraces],
+      artifacts,
+      updatedAt: (config.now?.() ?? new Date()).toISOString(),
+    };
+    const prepared = prepareTaintAfterControlResolution(
+      config,
+      workflow,
+      step,
+      updated,
+      newTraces.length,
+      resolvedSecretRefs,
+    );
+    const activeAwarePrepared =
+      await mergeActiveRunProtection(
+        tx,
+        prepared,
+        resolvedSecretRefs,
+      );
+    const persistenceAwarePrepared =
+      await mergePersistedRunTaint(tx, activeAwarePrepared);
+    const repaired = await revokeSecretTaintedIdempotency(
+      tx,
+      config.redact,
+      persistenceAwarePrepared,
+      resolvedSecretRefs,
+      (
+        store,
+        consumerRun,
+        outputTaintedLedgerKeys,
+        secretRefs,
+        repairOptions,
+      ) =>
+        prepareRevokedIdempotencyConsumer(
+          config,
+          store,
+          consumerRun,
+          outputTaintedLedgerKeys,
+          secretRefs,
+          consumerRun.runId === prepared.runId
+            ? workflow
+            : undefined,
+          repairOptions?.includeUnattributedSignalAudits,
+        ),
+      invalidatedTerminalRunIds,
+    );
+    const redacted = applyRunRedaction(
+      config.redact,
+      repaired,
+      resolvedSecretRefs,
+    );
+    await tx.runs.put(redacted);
+    const activeState =
+      await tx.runs.getOperationalState(repaired.runId);
+    const pendingIdempotencyReplays =
+      retainUnsettledIdempotencyReplayClaims(
+        activeState,
+        repaired,
+      );
+    const {
+      pendingIdempotencyReplays: _priorPendingClaims,
+      ...retainedActiveState
+    } = activeState ?? {};
+    await tx.runs.putOperationalState(repaired.runId, {
+      ...retainedActiveState,
+      run: repaired,
+      resolvedSecretValues: [...resolvedSecretRefs],
+      ...(pendingIdempotencyReplays !== undefined
+        ? { pendingIdempotencyReplays }
+        : {}),
+    });
+    return repaired;
+  };
+  const persisted = await transactWithGlobalSecretRepair(
+    config.store,
+    config.redact,
+    resolvedSecretRefs,
+    transition,
+  );
+  await notifyRunTerminals(
+    config.onRunTerminal,
+    invalidatedTerminalRunIds,
+  );
+  return persisted;
 }
 
-/**
- * A trace is redacted before it is persisted, so a later terminal output
- * projection cannot tell whether a marker was authored by the block or
- * substituted for a secret. Check newly available mapped values while the
- * raw trace still exists and reject only values that the persistence
- * redactor would alter.
- */
-async function assertPubliclyMappedTraceValuesSurviveRedaction(
-  config: EngineConfig,
+export function authoredStepIdForTrace(
   workflow: Workflow,
-  run: RunRecord,
-  newTraces: StepTrace[],
-  resolvedSecretRefs: ReadonlySet<string>,
-): Promise<void> {
-  const outputMapping = workflow.execution.outputMapping;
-  if (!outputMapping || resolvedSecretRefs.size === 0) return;
+  trace: StepTrace,
+): string {
+  if (trace.authoredStepId !== undefined) return trace.authoredStepId;
+  if (
+    workflow.execution.steps.some((step) => step.id === trace.stepId)
+  ) {
+    return trace.stepId;
+  }
+  const match = /^(.*)\[(\d+)\]$/.exec(trace.stepId);
+  if (
+    match &&
+    workflow.execution.steps.some(
+      (step) => step.id === match[1] && step.forEach !== undefined,
+    )
+  ) {
+    return match[1]!;
+  }
+  return trace.stepId;
+}
 
-  const completedStepIds = new Set(
-    newTraces.filter((trace) => trace.status === "completed").map((trace) => trace.stepId),
+function pointerForOutputPath(
+  path: ReturnType<typeof parseExpression>["path"],
+): string | undefined {
+  if (
+    path[1]?.kind !== "property" ||
+    path[1].name !== "outputs"
+  ) {
+    return undefined;
+  }
+  return pointerForPath(path, 2);
+}
+
+function pointerForPath(
+  path: ReturnType<typeof parseExpression>["path"],
+  startIndex = 0,
+): string {
+  return path
+    .slice(startIndex)
+    .map((segment) =>
+      segment.kind === "property"
+        ? `/${segment.name.replaceAll("~", "~0").replaceAll("/", "~1")}`
+        : `/${segment.index}`,
+    )
+    .join("");
+}
+
+function pathsOverlap(left: string, right: string): boolean {
+  if (left === "*" || right === "") return true;
+  return (
+    left === right ||
+    left.startsWith(`${right}/`) ||
+    right.startsWith(`${left}/`)
   );
-  if (completedStepIds.size === 0) return;
+}
 
-  const candidateRun: RunRecord = { ...run, trace: [...run.trace, ...newTraces] };
-  const context = buildExprContext(candidateRun);
-  for (const [outputName, expression] of Object.entries(outputMapping)) {
+function valueReferencesSecretTaintedTrace(
+  expression: unknown,
+  run: RunRecord,
+  shadowedStepId?: string,
+): boolean {
+    if (Array.isArray(expression)) {
+      return expression.some((value) =>
+        valueReferencesSecretTaintedTrace(value, run, shadowedStepId),
+      );
+    }
+    if (expression !== null && typeof expression === "object") {
+      return Object.values(expression).some((value) =>
+        valueReferencesSecretTaintedTrace(value, run, shadowedStepId),
+      );
+    }
+    if (typeof expression !== "string") return false;
     for (const token of findExpressionTokens(expression)) {
       const parsed = parseExpression(token[0]);
+      if (parsed.root === "inputs" || parsed.root === "trigger") {
+        const paths =
+          parsed.root === "inputs"
+            ? run.secretTaintedInputPaths
+            : run.secretTaintedTriggerPaths;
+        if (
+          paths?.some((path) =>
+            pathsOverlap(path, pointerForPath(parsed.path)),
+          )
+        ) {
+          return true;
+        }
+        continue;
+      }
       const first = parsed.path[0];
+      if (parsed.root !== "steps") continue;
+      if (first === undefined) {
+        const latestByStepId = new Map<string, StepTrace>();
+        for (const trace of run.trace) {
+          if (trace.iterationIndex !== undefined) continue;
+          latestByStepId.set(trace.authoredStepId ?? trace.stepId, trace);
+        }
+        if (
+          [...latestByStepId.values()].some(
+            (trace) =>
+              (trace.secretTainted === true ||
+                trace.controlSecretTainted === true) &&
+              trace.stepId !== shadowedStepId,
+          )
+        ) {
+          return true;
+        }
+        continue;
+      }
+      if (first.kind !== "property") continue;
+      if (first.name === shadowedStepId) continue;
+      const source = run.trace
+        .filter((trace) => traceRepresentsAuthoredStep(trace, first.name))
+        .at(-1);
+      if (source?.controlSecretTainted === true) return true;
+      if (source?.secretTainted !== true) continue;
+      const second = parsed.path[1];
       if (
-        parsed.root !== "steps" ||
-        first?.kind !== "property" ||
-        !completedStepIds.has(first.name)
+        second?.kind === "property" &&
+        second.name === "status" &&
+        parsed.path.length === 2
       ) {
         continue;
       }
-      const rawValue = await resolveExpression(token[0], context);
-      const observableValue = applyRedaction(config.redact, rawValue, resolvedSecretRefs);
-      if (!jsonValuesEqual(rawValue, observableValue)) {
-        throw new Error(
-          `public outputMapping "${outputName}" resolves from step "${first.name}" to a value changed by secret redaction; expose a non-secret derived value instead`,
+      const pointer = pointerForOutputPath(parsed.path);
+      if (pointer === undefined) return true;
+      const paths =
+        source.secretTaintedPaths ??
+        (source.secretTainted === true ? ["*"] : []);
+      if (paths.some((path) => pathsOverlap(path, pointer))) return true;
+    }
+    return false;
+}
+
+function valueReferencesSecret(value: unknown): boolean {
+  if (Array.isArray(value)) {
+    return value.some(valueReferencesSecret);
+  }
+  if (value !== null && typeof value === "object") {
+    return Object.values(value).some(valueReferencesSecret);
+  }
+  if (typeof value !== "string") return false;
+  return findExpressionTokens(value).some(
+    (token) => parseExpression(token[0]).root === "secrets",
+  );
+}
+
+function runHasSecretControlledFlow(
+  run: RunRecord,
+): boolean {
+  return run.trace.some((trace) => trace.controlSecretTainted === true);
+}
+
+function annotateHistoricalDataTaint(
+  workflow: Workflow,
+  run: RunRecord,
+): RunRecord {
+  const trace: StepTrace[] = [];
+  for (const entry of run.trace) {
+    const authoredStepId = authoredStepIdForTrace(workflow, entry);
+    const step = workflow.execution.steps.find(
+      (candidate) => candidate.id === authoredStepId,
+    );
+    if (!step) {
+      trace.push(entry);
+      continue;
+    }
+    const priorRun = { ...run, trace };
+    const iterationBinding =
+      step.forEach === undefined ? undefined : (step.as ?? "item");
+    const dependencies = [
+      ...Object.values(step.with ?? {}),
+      step.idempotencyKey,
+      step.forEach,
+    ];
+    const dataTainted = dependencies.some(
+      (expression) =>
+        valueReferencesSecret(expression) ||
+        valueReferencesSecretTaintedTrace(
+          expression,
+          priorRun,
+          iterationBinding,
+        ),
+    );
+    let annotated =
+      dataTainted && entry.outputs !== undefined
+        ? {
+            ...entry,
+            secretTainted: true,
+            secretTaintedPaths: ["*"],
+          }
+        : entry;
+
+    // A forEach aggregate is a synthetic trace whose `outputs.items` are
+    // copied from the immediately preceding iteration traces. Historical
+    // reconstruction must rebuild that ownership edge explicitly; the
+    // authored `with`/`forEach` expressions do not reference those child
+    // traces and therefore cannot carry repaired cache taint on their own.
+    if (
+      step.forEach !== undefined &&
+      entry.iterationIndex === undefined &&
+      entry.stepId === step.id
+    ) {
+      const children: StepTrace[] = [];
+      for (let index = trace.length - 1; index >= 0; index -= 1) {
+        const candidate = trace[index]!;
+        if (
+          authoredStepIdForTrace(workflow, candidate) !== step.id ||
+          candidate.iterationIndex === undefined
+        ) {
+          break;
+        }
+        children.unshift(candidate);
+      }
+      const childPaths = children.flatMap((child, childIndex) => {
+        const paths =
+          child.secretTaintedPaths ??
+          (child.secretTainted === true ? ["*"] : []);
+        const itemIndex = child.iterationIndex ?? childIndex;
+        return paths.map((path) =>
+          path === "*"
+            ? `/items/${itemIndex}`
+            : `/items/${itemIndex}${path}`,
         );
+      });
+      const childControlTainted = children.some(
+        (child) => child.controlSecretTainted === true,
+      );
+      if (childPaths.length > 0 || childControlTainted) {
+        annotated = {
+          ...annotated,
+          secretTainted: true,
+          secretTaintedPaths: [
+            ...new Set([
+              ...(annotated.secretTaintedPaths ?? []),
+              ...childPaths,
+            ]),
+          ],
+          ...(childControlTainted
+            ? { controlSecretTainted: true }
+            : {}),
+        };
       }
     }
+    trace.push(annotated);
   }
+  return { ...run, trace };
+}
+
+function annotateHistoricalControlTaint(
+  workflow: Workflow,
+  run: RunRecord,
+): RunRecord {
+  let inheritedControlTaint = false;
+  const trace: StepTrace[] = [];
+  for (const entry of run.trace) {
+    const authoredStepId = authoredStepIdForTrace(workflow, entry);
+    const step = workflow.execution.steps.find(
+      (candidate) => candidate.id === authoredStepId,
+    );
+    const priorRun = { ...run, trace };
+    const ifControlTainted =
+      step?.if !== undefined &&
+      (valueReferencesSecret(step.if) ||
+        valueReferencesSecretTaintedTrace(step.if, priorRun));
+    const untilWasEvaluated =
+      step?.next !== undefined &&
+      step.until !== undefined &&
+      entry.status === "completed";
+    const untilControlTainted =
+      untilWasEvaluated &&
+      (valueReferencesSecret(step.until) ||
+        valueReferencesSecretTaintedTrace(step.until, priorRun));
+    const controlTainted: boolean =
+      inheritedControlTaint ||
+      entry.controlSecretTainted === true ||
+      ifControlTainted ||
+      untilControlTainted;
+    const annotated = controlTainted
+      ? {
+          ...entry,
+          secretTainted: true as const,
+          secretTaintedPaths: entry.secretTaintedPaths ?? [],
+          controlSecretTainted: true as const,
+        }
+      : entry;
+    trace.push(annotated);
+    inheritedControlTaint ||= controlTainted;
+  }
+  return { ...run, trace };
+}
+
+function annotateSecretTaint(
+  config: EngineConfig,
+  traces: StepTrace[],
+  resolvedSecretRefs: ReadonlySet<string>,
+  dataTaint: boolean,
+  controlTaint = false,
+): StepTrace[] {
+  return traces.map((trace) => {
+    const redactedInputs = applyRedaction(
+      config.redact,
+      trace.inputs,
+      resolvedSecretRefs,
+    );
+    const inputTainted =
+      trace.outputs !== undefined &&
+      changedJsonPointers(trace.inputs, redactedInputs).length > 0;
+    const redactedOutputs =
+      trace.outputs === undefined
+        ? undefined
+        : applyRedaction(config.redact, trace.outputs, resolvedSecretRefs);
+    const discoveredPaths =
+      trace.outputs === undefined || redactedOutputs === undefined
+        ? []
+        : changedJsonPointers(trace.outputs, redactedOutputs);
+    const existingPaths = trace.secretTaintedPaths ?? [];
+    const outputTainted =
+      trace.outputs !== undefined &&
+      (dataTaint ||
+        inputTainted ||
+        existingPaths.length > 0 ||
+        discoveredPaths.length > 0);
+    if (!outputTainted && !controlTaint) return trace;
+    return {
+      ...trace,
+      secretTainted: true,
+      ...(outputTainted
+        ? {
+            secretTaintedPaths:
+              dataTaint ||
+              inputTainted ||
+              existingPaths.includes("*")
+                ? ["*"]
+                : [...new Set([...existingPaths, ...discoveredPaths])],
+          }
+        : { secretTaintedPaths: [] }),
+      ...(controlTaint ? { controlSecretTainted: true } : {}),
+    };
+  });
+}
+
+function withRunRootSecretTaint(
+  config: EngineConfig,
+  run: RunRecord,
+  resolvedSecretRefs: ReadonlySet<string>,
+): RunRecord {
+  const inputPaths = [
+    ...new Set([
+      ...(run.secretTaintedInputPaths ?? []),
+      ...changedJsonPointers(
+        run.inputs,
+        applyRedaction(config.redact, run.inputs, resolvedSecretRefs),
+      ),
+    ]),
+  ];
+  const triggerPaths = [
+    ...new Set([
+      ...(run.secretTaintedTriggerPaths ?? []),
+      ...changedJsonPointers(
+        run.trigger,
+        applyRedaction(config.redact, run.trigger, resolvedSecretRefs),
+      ),
+    ]),
+  ];
+  return {
+    ...run,
+    ...(inputPaths.length > 0
+      ? { secretTaintedInputPaths: inputPaths }
+      : {}),
+    ...(triggerPaths.length > 0
+      ? { secretTaintedTriggerPaths: triggerPaths }
+      : {}),
+  };
+}
+
+function recomputeDataSecretTaint(
+  config: EngineConfig,
+  step: WorkflowStep,
+  run: RunRecord,
+  resolvedSecretRefs: ReadonlySet<string>,
+): boolean {
+  const taintAwareTrace = annotateSecretTaint(
+    config,
+    run.trace,
+    resolvedSecretRefs,
+    false,
+  );
+  const taintAwareRun = withRunRootSecretTaint(
+    config,
+    { ...run, trace: taintAwareTrace },
+    resolvedSecretRefs,
+  );
+  const iterationBinding =
+    step.forEach === undefined ? undefined : (step.as ?? "item");
+  return [
+    ...Object.values(step.with ?? {}),
+    step.idempotencyKey,
+    step.forEach,
+  ].some((expression) =>
+    valueReferencesSecretTaintedTrace(
+      expression,
+      taintAwareRun,
+      iterationBinding,
+    ),
+  );
+}
+
+function prepareHistoricalSecretTaint(
+  config: EngineConfig,
+  workflow: Workflow,
+  run: RunRecord,
+  resolvedSecretRefs: ReadonlySet<string>,
+): RunRecord {
+  const refreshedTrace = annotateSecretTaint(
+    config,
+    run.trace,
+    resolvedSecretRefs,
+    false,
+  );
+  const taintAwareRun = withRunRootSecretTaint(
+    config,
+    { ...run, trace: refreshedTrace },
+    resolvedSecretRefs,
+  );
+  const historicallyDataTaintAwareRun = annotateHistoricalDataTaint(
+    workflow,
+    taintAwareRun,
+  );
+  return annotateHistoricalControlTaint(
+    workflow,
+    historicallyDataTaintAwareRun,
+  );
+}
+
+export function prepareTaintAfterControlResolution(
+  config: EngineConfig,
+  workflow: Workflow,
+  step: WorkflowStep,
+  run: RunRecord,
+  currentTraceCount: number,
+  resolvedSecretRefs: ReadonlySet<string>,
+): RunRecord {
+  const historicallyTaintAwareRun = prepareHistoricalSecretTaint(
+    config,
+    workflow,
+    run,
+    resolvedSecretRefs,
+  );
+  let refreshedTrace = historicallyTaintAwareRun.trace;
+  const currentTraces = refreshedTrace.slice(
+    Math.max(0, refreshedTrace.length - currentTraceCount),
+  );
+  const untilWasEvaluated =
+    step.next !== undefined &&
+    step.until !== undefined &&
+    currentTraces.some((trace) => trace.status === "completed");
+  const indirectlySecretControlled =
+    valueReferencesSecretTaintedTrace(
+      step.if,
+      historicallyTaintAwareRun,
+    ) ||
+    (untilWasEvaluated &&
+      valueReferencesSecretTaintedTrace(
+        step.until,
+        historicallyTaintAwareRun,
+      ));
+  const directlySecretControlled =
+    valueReferencesSecret(step.if) ||
+    (untilWasEvaluated && valueReferencesSecret(step.until));
+  if (
+    directlySecretControlled ||
+    indirectlySecretControlled ||
+    runHasSecretControlledFlow(run)
+  ) {
+    const currentTraceStart = Math.max(
+      0,
+      refreshedTrace.length - currentTraceCount,
+    );
+    refreshedTrace = refreshedTrace.map((trace, index) =>
+      index >= currentTraceStart
+        ? {
+            ...trace,
+            secretTainted: true,
+            secretTaintedPaths: trace.secretTaintedPaths ?? [],
+            controlSecretTainted: true,
+          }
+        : trace,
+    );
+  }
+
+  return {
+    ...historicallyTaintAwareRun,
+    trace: refreshedTrace,
+    updatedAt: (config.now?.() ?? new Date()).toISOString(),
+  };
+}
+
+async function repairRunDurableAudits(
+  config: EngineConfig,
+  store: AartStore,
+  runId: string,
+  resolvedSecretRefs: ReadonlySet<string>,
+  includeUnattributedSignalAudits: boolean,
+): Promise<void> {
+  await repairCustomerVisibleAudits(
+    store,
+    config.redact,
+    resolvedSecretRefs,
+    {
+      runId,
+      includeRuns: false,
+      includeArtifacts: false,
+      includeUnattributedSignalAudits,
+    },
+  );
+}
+
+/**
+ * Repairs a persisted run that replayed a cache output another execution
+ * later proved secret-derived. Direct consumers are pre-marked by
+ * `revokeSecretTaintedIdempotency`; this pass reconstructs downstream
+ * data/control provenance, re-redacts text artifacts, and re-evaluates an
+ * already-completed public result so stored success cannot survive when its
+ * outputMapping depended on the revoked value.
+ */
+export async function prepareRevokedIdempotencyConsumer(
+  config: EngineConfig,
+  store: AartStore,
+  run: RunRecord,
+  outputTaintedLedgerKeys: ReadonlySet<string>,
+  resolvedSecretRefs: ReadonlySet<string>,
+  currentWorkflow?: Workflow,
+  includeUnattributedSignalAudits = false,
+): Promise<RunRecord> {
+  await repairRunDurableAudits(
+    config,
+    store,
+    run.runId,
+    resolvedSecretRefs,
+    includeUnattributedSignalAudits,
+  );
+  let workflow: Workflow;
+  if (currentWorkflow) {
+    // The caller's in-memory run can precede its first durable write (and
+    // therefore have neither a stored workflow row nor a captured
+    // snapshot). Its already-resolved authored workflow is the exact
+    // execution authority for this pass.
+    workflow = currentWorkflow;
+  } else {
+    let protectedState =
+      await store.runs.getOperationalState(run.runId);
+    if (
+      protectedState === undefined &&
+      run.status === "waiting"
+    ) {
+      const outstandingWaits = await store.waits.list({
+        runId: run.runId,
+      });
+      for (const wait of outstandingWaits) {
+        const waitingState =
+          await store.waits.getOperationalRunState(
+            wait.runId,
+            wait.stepId,
+          );
+        if (
+          waitingState !== undefined &&
+          (protectedState === undefined ||
+            waitingState.run.trace.length >=
+              protectedState.run.trace.length)
+        ) {
+          protectedState = waitingState;
+        }
+      }
+    }
+    try {
+      workflow = await resolveWorkflowForRun(
+        store,
+        protectedState?.run ?? run,
+      );
+    } catch (snapshotError) {
+      // Legacy terminal rows may predate the sealed archive. Retain their
+      // historical fallback, but never prefer the mutable registry when an
+      // exact protected snapshot exists.
+      const storedWorkflow = await store.workflows.get(
+        run.workflowId,
+        run.workflowVersion,
+      );
+      if (!storedWorkflow) throw snapshotError;
+      workflow = storedWorkflow;
+    }
+  }
+  let prepared = prepareHistoricalSecretTaint(
+    config,
+    workflow,
+    run,
+    resolvedSecretRefs,
+  );
+  prepared = {
+    ...prepared,
+    artifacts: await redactStoredTextArtifacts(
+      store,
+      config.redact,
+      run.runId,
+      resolvedSecretRefs,
+    ),
+  };
+  const taintChanged =
+    prepared.trace.some(
+      (trace, index) =>
+        trace.secretTainted !== run.trace[index]?.secretTainted ||
+        trace.controlSecretTainted !==
+          run.trace[index]?.controlSecretTainted ||
+        JSON.stringify(trace.secretTaintedPaths) !==
+          JSON.stringify(run.trace[index]?.secretTaintedPaths),
+    ) ||
+    JSON.stringify(prepared.secretTaintedInputPaths) !==
+      JSON.stringify(run.secretTaintedInputPaths) ||
+    JSON.stringify(prepared.secretTaintedTriggerPaths) !==
+      JSON.stringify(run.secretTaintedTriggerPaths);
+
+  if (
+    prepared.status === "completed" &&
+    (outputTaintedLedgerKeys.size > 0 || taintChanged)
+  ) {
+    try {
+      const outputs = await materializeWorkflowOutputs(workflow, prepared, {
+        secretResolver: throwingSecretResolver,
+      });
+      const observableOutputs = applyConservativeRedaction(
+        config.redact,
+        outputs,
+        resolvedSecretRefs,
+      );
+      validateWorkflowOutputs(workflow, observableOutputs);
+      prepared = { ...prepared, outputs };
+    } catch {
+      prepared = {
+        ...prepared,
+        status: "failed",
+        outputs: undefined,
+        error:
+          "Run invalidated because a replayed cache result was later identified as secret-derived.",
+      };
+    }
+  }
+
+  return {
+    ...prepared,
+    updatedAt: (config.now?.() ?? new Date()).toISOString(),
+  };
+}
+
+export async function refreshTaintAfterControlResolution(
+  config: EngineConfig,
+  workflow: Workflow,
+  step: WorkflowStep,
+  run: RunRecord,
+  currentTraceCount: number,
+  resolvedSecretRefs: Set<string>,
+  secretCountBeforeResolution: number,
+): Promise<RunRecord> {
+  const invalidatedTerminalRunIds = new Set<string>();
+  const transition = async (
+    tx: AartStore,
+  ): Promise<RunRecord> => {
+    run = await mergeActiveRunProtection(
+      tx,
+      run,
+      resolvedSecretRefs,
+    );
+    let preparedRun = prepareTaintAfterControlResolution(
+      config,
+      workflow,
+      step,
+      run,
+      currentTraceCount,
+      resolvedSecretRefs,
+    );
+    preparedRun = {
+      ...preparedRun,
+      artifacts: await redactStoredTextArtifacts(
+        tx,
+        config.redact,
+        run.runId,
+        resolvedSecretRefs,
+      ),
+    };
+    const taintChanged = preparedRun.trace.some(
+      (trace, index) =>
+        trace.secretTainted !==
+          run.trace[index]?.secretTainted ||
+        trace.controlSecretTainted !==
+          run.trace[index]?.controlSecretTainted ||
+        JSON.stringify(trace.secretTaintedPaths) !==
+          JSON.stringify(run.trace[index]?.secretTaintedPaths),
+    ) ||
+      JSON.stringify(preparedRun.secretTaintedInputPaths) !==
+        JSON.stringify(run.secretTaintedInputPaths) ||
+      JSON.stringify(preparedRun.secretTaintedTriggerPaths) !==
+        JSON.stringify(run.secretTaintedTriggerPaths);
+    const artifactsChanged =
+      JSON.stringify(preparedRun.artifacts) !==
+      JSON.stringify(run.artifacts);
+    if (
+      !taintChanged &&
+      !artifactsChanged &&
+      resolvedSecretRefs.size === secretCountBeforeResolution
+    ) {
+      return run;
+    }
+    const activeAwarePrepared =
+      await mergeActiveRunProtection(
+        tx,
+        preparedRun,
+        resolvedSecretRefs,
+      );
+    const persistenceAwarePrepared =
+      await mergePersistedRunTaint(tx, activeAwarePrepared);
+    const repaired = await revokeSecretTaintedIdempotency(
+      tx,
+      config.redact,
+      persistenceAwarePrepared,
+      resolvedSecretRefs,
+      (
+        store,
+        consumerRun,
+        outputTaintedLedgerKeys,
+        secretRefs,
+        repairOptions,
+      ) =>
+        prepareRevokedIdempotencyConsumer(
+          config,
+          store,
+          consumerRun,
+          outputTaintedLedgerKeys,
+          secretRefs,
+          consumerRun.runId === preparedRun.runId ? workflow : undefined,
+          repairOptions?.includeUnattributedSignalAudits,
+        ),
+      invalidatedTerminalRunIds,
+    );
+    const refreshedRun = applyRunRedaction(
+      config.redact,
+      repaired,
+      resolvedSecretRefs,
+    );
+    await tx.runs.put(refreshedRun);
+    const activeState =
+      await tx.runs.getOperationalState(repaired.runId);
+    const pendingIdempotencyReplays =
+      retainUnsettledIdempotencyReplayClaims(
+        activeState,
+        repaired,
+      );
+    const {
+      pendingIdempotencyReplays: _priorPendingClaims,
+      ...retainedActiveState
+    } = activeState ?? {};
+    await tx.runs.putOperationalState(repaired.runId, {
+      ...retainedActiveState,
+      run: repaired,
+      resolvedSecretValues: [...resolvedSecretRefs],
+      ...(pendingIdempotencyReplays !== undefined
+        ? { pendingIdempotencyReplays }
+        : {}),
+    });
+    return repaired;
+  };
+  const refreshed = await transactWithGlobalSecretRepair(
+    config.store,
+    config.redact,
+    resolvedSecretRefs,
+    transition,
+  );
+  await notifyRunTerminals(
+    config.onRunTerminal,
+    invalidatedTerminalRunIds,
+  );
+  return refreshed;
 }
 
 /**
@@ -509,6 +1644,43 @@ async function determineNextStepId(
   return nextStepIdInArrayOrder(workflow, step.id);
 }
 
+export type CompletedStepControlResolution =
+  | { kind: "resolved"; nextStepId?: string; }
+  | { kind: "failed"; error: Error; };
+
+/**
+ * Resolves post-dispatch control without discarding a successful effect
+ * trace when `until` evaluation fails. Callers persist the completed trace
+ * first, then surface `error` as the run-level failure.
+ */
+export async function resolveCompletedStepControl(
+  workflow: Workflow,
+  step: WorkflowStep,
+  run: RunRecord,
+  ifResult: boolean | undefined,
+  resolvedSecretRefs: Set<string>,
+  config: EngineConfig,
+): Promise<CompletedStepControlResolution> {
+  try {
+    return {
+      kind: "resolved",
+      nextStepId: await determineNextStepId(
+        workflow,
+        step,
+        run,
+        ifResult,
+        resolvedSecretRefs,
+        config,
+      ),
+    };
+  } catch (err) {
+    return {
+      kind: "failed",
+      error: err instanceof Error ? err : new Error(String(err)),
+    };
+  }
+}
+
 /**
  * The full per-step dispatch pipeline (architecture §4.2). Returns a
  * `StepOutcome` telling the run-loop (`run-lifecycle.ts`) whether to
@@ -523,9 +1695,29 @@ export async function executeStep(
   resolvedSecretRefs: Set<string>,
   environment: string | undefined,
 ): Promise<StepOutcome> {
+  run = await mergeActiveRunProtection(
+    config.store,
+    run,
+    resolvedSecretRefs,
+  );
+  const secretCountBeforeStep = resolvedSecretRefs.size;
   const secretResolver = createTrackingSecretResolver(config.resolveSecret ?? throwingSecretResolver, resolvedSecretRefs);
   const resolveOptions: ResolveOptions = { secretResolver };
   const exprContextBeforeDispatch = buildExprContext(run);
+  let dataSecretTaint =
+    (step.forEach === undefined &&
+      Object.values(step.with ?? {}).some(valueReferencesSecret)) ||
+    valueReferencesSecret(step.forEach) ||
+    valueReferencesSecret(step.idempotencyKey) ||
+    recomputeDataSecretTaint(config, step, run, resolvedSecretRefs);
+  let controlSecretTaint =
+    runHasSecretControlledFlow(run) ||
+    valueReferencesSecret(step.if) ||
+    valueReferencesSecretTaintedTrace(step.if, run) ||
+    (step.next !== undefined &&
+      step.until !== undefined &&
+      (valueReferencesSecret(step.until) ||
+        valueReferencesSecretTaintedTrace(step.until, run, step.id)));
 
   // 1. resolve step.with — EXCEPT for a forEach step, whose `with:` is
   // resolved per-iteration instead (executeForEachStep, below), with the
@@ -535,16 +1727,49 @@ export async function executeStep(
   // work, it's a genuine bug: `{{ steps.item }}` has no meaning until a
   // specific iteration's context exists.
   const resolvedWith = step.forEach === undefined ? await resolveWithRecord(step.with, exprContextBeforeDispatch, resolveOptions) : {};
+  dataSecretTaint ||= recomputeDataSecretTaint(
+    config,
+    step,
+    run,
+    resolvedSecretRefs,
+  );
 
   // 2. check step.if — architecture micro-decision #7: absent `if` always
   // falls through; `then`/`else` only consulted when `if` is present.
   let ifResult: boolean | undefined;
   if (step.if !== undefined) {
     ifResult = await resolveBooleanExpression(step.if, exprContextBeforeDispatch, resolveOptions);
+    controlSecretTaint ||=
+      valueReferencesSecret(step.if) ||
+      valueReferencesSecretTaintedTrace(step.if, run);
     if (!ifResult) {
       const now = (config.now?.() ?? new Date()).toISOString();
-      const skippedTrace: StepTrace = { seq: run.trace.length, stepId: step.id, block: step.uses, status: "skipped", inputs: resolvedWith, startedAt: now, endedAt: now, durationMs: 0 };
-      const updatedRun = await appendTracesAndPersist(config, run, [skippedTrace], resolvedSecretRefs);
+      const skippedTrace: StepTrace = {
+        seq: run.trace.length,
+        stepId: step.id,
+        block: step.uses,
+        status: "skipped",
+        inputs: resolvedWith,
+        startedAt: now,
+        endedAt: now,
+        durationMs: 0,
+        authoredStepId: step.id,
+      };
+      const updatedRun = await appendTracesAndPersist(
+        config,
+        run,
+        workflow,
+        step,
+        annotateSecretTaint(
+          config,
+          [skippedTrace],
+          resolvedSecretRefs,
+          dataSecretTaint,
+          controlSecretTaint,
+        ),
+        resolvedSecretRefs,
+        secretCountBeforeStep,
+      );
       const nextStepId = step.next ?? step.else ?? nextStepIdInArrayOrder(workflow, step.id);
       return { kind: "continue", run: updatedRun, nextStepId };
     }
@@ -579,8 +1804,28 @@ export async function executeStep(
   // rather than calling a block's `execute()` at all (see wait-blocks.ts's
   // module doc comment for the fuller design rationale).
   if (isWaitBlockId(step.uses)) {
-    return executeWaitDispatch(config, run, workflow, step, resolvedWith, resolvedSecretRefs, ifResult);
+    const waitDataSecretTainted =
+      dataSecretTaint ||
+      !jsonValuesEqual(
+        resolvedWith,
+        applyRedaction(config.redact, resolvedWith, resolvedSecretRefs),
+      );
+    return executeWaitDispatch(
+      config,
+      run,
+      workflow,
+      step,
+      resolvedWith,
+      resolvedSecretRefs,
+      ifResult,
+      waitDataSecretTainted,
+      controlSecretTaint,
+    );
   }
+
+  dataSecretTaint ||=
+    step.forEach !== undefined &&
+    Object.values(step.with ?? {}).some(valueReferencesSecret);
 
   const impl = config.resolveBlockForRun?.(run, step.uses) ?? config.blocks[step.uses];
   if (!impl) {
@@ -600,33 +1845,114 @@ export async function executeStep(
   const newTraces: StepTrace[] = [];
   let stepFailed = false;
   if (step.forEach !== undefined) {
-    const result = await executeForEachStep(config, run, step, resolvedSecretRefs);
+    const result = await executeForEachStep(
+      config,
+      run,
+      step,
+      resolvedSecretRefs,
+      dataSecretTaint,
+      controlSecretTaint,
+    );
     newTraces.push(...result.traces);
     stepFailed = result.failed;
   } else {
-    const trace = await dispatchOnce(config, run, step, step.id, run.trace.length, resolvedWith, exprContextBeforeDispatch, resolveOptions, resolvedSecretRefs);
+    const trace = await dispatchOnce(
+      config,
+      run,
+      step,
+      step.id,
+      run.trace.length,
+      resolvedWith,
+      exprContextBeforeDispatch,
+      resolveOptions,
+      resolvedSecretRefs,
+      dataSecretTaint,
+      controlSecretTaint,
+    );
     newTraces.push(trace);
     stepFailed = trace.status === "failed";
   }
 
-  if (!stepFailed) {
-    await assertPubliclyMappedTraceValuesSurviveRedaction(
-      config,
-      workflow,
-      run,
-      newTraces,
-      resolvedSecretRefs,
-    );
-  }
-  const updatedRun = await appendTracesAndPersist(config, run, newTraces, resolvedSecretRefs);
+  dataSecretTaint ||= recomputeDataSecretTaint(
+    config,
+    step,
+    run,
+    resolvedSecretRefs,
+  );
+  const taintAnnotatedTraces = annotateSecretTaint(
+    config,
+    newTraces,
+    resolvedSecretRefs,
+    dataSecretTaint,
+    controlSecretTaint,
+  );
+  const provisionalRun: RunRecord = {
+    ...run,
+    trace: [...run.trace, ...taintAnnotatedTraces],
+  };
 
   if (stepFailed) {
-    const failure = newTraces[newTraces.length - 1]!;
+    const updatedRun = await appendTracesAndPersist(
+      config,
+      run,
+      workflow,
+      step,
+      taintAnnotatedTraces,
+      resolvedSecretRefs,
+      secretCountBeforeStep,
+    );
+    const failure = taintAnnotatedTraces[taintAnnotatedTraces.length - 1]!;
     return { kind: "failed", run: updatedRun, error: new Error(failure.error ?? `Step "${step.id}" failed.`) };
   }
 
-  const nextStepId = await determineNextStepId(workflow, step, updatedRun, ifResult, resolvedSecretRefs, config);
-  return { kind: "continue", run: updatedRun, nextStepId };
+  const controlResolution = await resolveCompletedStepControl(
+    workflow,
+    step,
+    provisionalRun,
+    ifResult,
+    resolvedSecretRefs,
+    config,
+  );
+  const provisionalTaintAwareRun = withRunRootSecretTaint(
+    config,
+    provisionalRun,
+    resolvedSecretRefs,
+  );
+  controlSecretTaint ||=
+    step.next !== undefined &&
+    (valueReferencesSecret(step.until) ||
+      valueReferencesSecretTaintedTrace(
+        step.until,
+        provisionalTaintAwareRun,
+      ));
+  const finalTraces = annotateSecretTaint(
+    config,
+    taintAnnotatedTraces,
+    resolvedSecretRefs,
+    dataSecretTaint,
+    controlSecretTaint,
+  );
+  const updatedRun = await appendTracesAndPersist(
+    config,
+    run,
+    workflow,
+    step,
+    finalTraces,
+    resolvedSecretRefs,
+    secretCountBeforeStep,
+  );
+  if (controlResolution.kind === "failed") {
+    return {
+      kind: "failed",
+      run: updatedRun,
+      error: controlResolution.error,
+    };
+  }
+  return {
+    kind: "continue",
+    run: updatedRun,
+    nextStepId: controlResolution.nextStepId,
+  };
 }
 
 /**
@@ -644,9 +1970,62 @@ async function executeWaitDispatch(
   resolvedWith: Record<string, unknown>,
   resolvedSecretRefs: Set<string>,
   ifResult: boolean | undefined,
+  dataSecretTainted: boolean,
+  controlSecretTainted: boolean,
 ): Promise<StepOutcome> {
   const schemaVersion = config.schemaVersion ?? CURRENT_ENGINE_SCHEMA_VERSION;
-  const waitMachineConfig: WaitMachineConfig = { store: config.store, redact: config.redact, now: config.now ?? (() => new Date()) };
+  const waitMachineConfig: WaitMachineConfig = {
+    store: config.store,
+    redact: config.redact,
+    now: config.now ?? (() => new Date()),
+    prepareRevokedIdempotencyConsumer: (
+      store,
+      consumerRun,
+      outputTaintedLedgerKeys,
+      secretRefs,
+      repairOptions,
+    ) =>
+      prepareRevokedIdempotencyConsumer(
+        config,
+        store,
+        consumerRun,
+        outputTaintedLedgerKeys,
+        secretRefs,
+        consumerRun.runId === run.runId ? workflow : undefined,
+        repairOptions?.includeUnattributedSignalAudits,
+      ),
+  };
+  const preparedHistoricalRun = prepareTaintAfterControlResolution(
+    config,
+    workflow,
+    step,
+    run,
+    0,
+    resolvedSecretRefs,
+  );
+  const historicallyTaintAwareRun = {
+    ...preparedHistoricalRun,
+    artifacts: await redactStoredTextArtifacts(
+      config.store,
+      config.redact,
+      run.runId,
+      resolvedSecretRefs,
+    ),
+  };
+  const snapshotCapturedForWait = !isSnapshotCaptured(
+    historicallyTaintAwareRun.snapshot,
+  );
+  const waitReadyRun = snapshotCapturedForWait
+    ? {
+        ...historicallyTaintAwareRun,
+        snapshot: await captureExecutionSnapshot(
+          workflow,
+          config.blocks,
+          config.now?.() ?? new Date(),
+          config.computePackHashes,
+        ),
+      }
+    : historicallyTaintAwareRun;
 
   let wait: WaitCondition;
   if (step.uses === "human.approval") {
@@ -679,20 +2058,84 @@ async function executeWaitDispatch(
     wait = buildWaitConditionFromBlock(step.uses as Exclude<WaitBlockId, "human.approval">, resolvedWith, schemaVersion);
   }
 
+  let preparedNextStepId: string | undefined;
+  let preparedControlError: Error | undefined;
+  let preparedOperationalRun: RunRecord | undefined;
   const result = await enterWait(waitMachineConfig, {
-    run,
+    run: waitReadyRun,
     stepId: step.id,
     blockId: step.uses,
     resolvedInputs: resolvedWith,
     wait,
     resolvedSecretRefs,
+    secretTainted: dataSecretTainted,
+    controlSecretTainted,
+    snapshotCapturedForWait,
+    prepareEarlyArrivalRun: async (
+      provisionalRun,
+      transactionStore: AartStore,
+    ) => {
+      const controlResolution = await resolveCompletedStepControl(
+        workflow,
+        step,
+        provisionalRun,
+        ifResult,
+        resolvedSecretRefs,
+        config,
+      );
+      if (controlResolution.kind === "failed") {
+        preparedControlError = controlResolution.error;
+      } else {
+        preparedNextStepId = controlResolution.nextStepId;
+      }
+      const preparedRun = prepareTaintAfterControlResolution(
+        config,
+        workflow,
+        step,
+        provisionalRun,
+        1,
+        resolvedSecretRefs,
+      );
+      preparedOperationalRun = {
+        ...preparedRun,
+        artifacts: await redactStoredTextArtifacts(
+          transactionStore,
+          config.redact,
+          provisionalRun.runId,
+          resolvedSecretRefs,
+        ),
+      };
+      return preparedOperationalRun;
+    },
   });
 
   if (!result.suspended) {
     // Early-arrival resolution — continue exactly as if this step completed
     // normally (architecture §4.4 step 3).
-    const nextStepId = await determineNextStepId(workflow, step, result.run, ifResult, resolvedSecretRefs, config);
-    return { kind: "continue", run: result.run, nextStepId };
+    if (preparedControlError) {
+      return {
+        kind: "failed",
+        run:
+          preparedOperationalRun === undefined
+            ? result.run
+            : mergeOperationalRunTaint(
+                preparedOperationalRun,
+                result.run,
+              ),
+        error: preparedControlError,
+      };
+    }
+    return {
+      kind: "continue",
+      run:
+        preparedOperationalRun === undefined
+          ? result.run
+          : mergeOperationalRunTaint(
+              preparedOperationalRun,
+              result.run,
+            ),
+      nextStepId: preparedNextStepId,
+    };
   }
   return { kind: "waiting", run: result.run };
 }

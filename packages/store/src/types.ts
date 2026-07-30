@@ -58,6 +58,28 @@ export interface RunStore {
   put(run: RunRecord): Promise<void>;
   list(filter?: { status?: RunStatus; workflowId?: string }): Promise<RunRecord[]>;
   /**
+   * Engine-only exact state whose public RunRecord may contain redaction
+   * markers. It is sealed at rest from intake onward. Active runs use it for
+   * continuation; terminal runs retain it as the canonical historical
+   * definition/provenance authority for future secret repair and governed
+   * correction.
+   */
+  getOperationalState(
+    runId: string,
+  ): Promise<RunOperationalState | undefined>;
+  /** Creates or replaces the protected continuation/archive. */
+  putOperationalState(
+    runId: string,
+    state: RunOperationalState,
+  ): Promise<void>;
+  /** Replaces it only when one already exists. */
+  replaceOperationalState(
+    runId: string,
+    state: RunOperationalState,
+  ): Promise<void>;
+  /** Removes it after transfer to another sealed boundary or when proven stale. */
+  deleteOperationalState(runId: string): Promise<void>;
+  /**
    * The exactly-once resume dedupe ledger (architecture §4.4.2): has this
    * exact key — `(runId, waitStepId, signal.name + signal.correlationId)`
    * for signal-matched resume, or an equivalent caller-constructed key for
@@ -81,9 +103,56 @@ export interface RunStore {
 
 export interface WaitStore {
   get(runId: string, stepId: string): Promise<WaitCondition | undefined>;
-  put(runId: string, stepId: string, wait: WaitCondition, createdAt: string): Promise<void>;
+  put(
+    runId: string,
+    stepId: string,
+    wait: WaitCondition,
+    createdAt: string,
+    operationalRunState?: WaitOperationalRunState,
+  ): Promise<void>;
+  /**
+   * Engine-only run state captured at suspension. Public RunRecord fields
+   * may be redacted after a later secret discovery, so exact continuation
+   * reads this sealed copy and rehydrates the segment's known literals.
+   */
+  getOperationalRunState(
+    runId: string,
+    stepId: string,
+  ): Promise<WaitOperationalRunState | undefined>;
+  /**
+   * Replaces the protected continuation state for every outstanding wait
+   * on a run. The engine uses this before rewriting its public RunRecord.
+   */
+  replaceOperationalRunState(
+    runId: string,
+    state: WaitOperationalRunState,
+  ): Promise<void>;
+  /**
+   * Replaces only the user-visible audit copy while preserving the
+   * adapter-internal one-way match fingerprint written by `put()`.
+   */
+  redactAudit(runId: string, stepId: string, wait: WaitCondition): Promise<void>;
   delete(runId: string, stepId: string): Promise<void>;
-  list(): Promise<Array<{ runId: string; stepId: string; wait: WaitCondition; createdAt: string }>>;
+  /** User-visible, persistence-safe audit rows. */
+  list(filter?: { runId?: string }): Promise<Array<{ runId: string; stepId: string; wait: WaitCondition; createdAt: string }>>;
+  /**
+   * Engine-only operational rows. Values are sealed at rest separately
+   * from the public audit copy and materialized only for scheduling,
+   * expiry, polling, or an atomic claim.
+   */
+  listOperational(filter?: {
+    runId?: string;
+    type?: WaitCondition["type"];
+  }): Promise<Array<{ runId: string; stepId: string; wait: WaitCondition; createdAt: string }>>;
+  /**
+   * Matches a resolving signal through an adapter-internal one-way
+   * fingerprint, so a redacted correlation value need not remain in the
+   * durable audit row.
+   */
+  findSignalMatches(
+    name: string,
+    correlationId: string,
+  ): Promise<Array<{ runId: string; stepId: string }>>;
   /**
    * The engine-owned query architecture §4.4.3/§4.7 names explicitly:
    * `getDueWaits(now)` — every `timer`-type wait (and poll-mode
@@ -97,24 +166,115 @@ export interface WaitStore {
 export interface SignalStore {
   /**
    * Appends the durable, append-only audit record (architecture §5.2:
-   * `signals/<correlationId>__<receivedAt>.json`). Deliberately NOT staged
-   * by `transact()` (see AartStore.transact's own doc comment) — this
-   * write always lands immediately, matching the fs adapter's documented
-   * non-atomic gap (architecture §5.8).
+   * `signals/<correlationId>__<receivedAt>.json`). When called through a
+   * transaction view, both the audit row and its sealed operational copy
+   * participate in that transaction.
    */
   append(signal: Signal): Promise<void>;
   /** The check-at-creation lookup architecture §4.4/§5.6 requires: an unconsumed Signal matching (name, correlationId), if one already arrived before its wait was created. */
   findUnconsumedMatch(name: string, correlationId: string): Promise<Signal | undefined>;
-  /** Marks the audit copy consumed — see `append`'s doc comment on the same non-atomicity. */
-  markConsumed(signalId: string): Promise<void>;
+  /** Secret literals that caused an unconsumed signal's audit redaction. */
+  getOperationalSecretValues(signalId: string): Promise<string[]>;
+  /**
+   * Marks the audit copy consumed. When a resolving control expression has
+   * just enlarged the known-secret set, callers also replace the payload
+   * with its redacted form in the same adapter operation.
+   * See `append`'s doc comment on the fs adapter's non-atomicity.
+   */
+  markConsumed(
+    signalId: string,
+    options?: {
+      payload?: unknown;
+      consumedBy?: { runId: string; stepId: string };
+    },
+  ): Promise<void>;
+  /** Consumed audit copies associated with a run, for late-secret repair. */
+  listConsumedByRun(runId: string): Promise<Signal[]>;
+  /** Pre-provenance consumed rows from stores created before migration 0007. */
+  listConsumedWithoutProvenance(): Promise<Signal[]>;
+  /**
+   * Security-only audit rewrite. Unconsumed signals retain a separately
+   * sealed operational copy so exact early-arrival matching still works;
+   * consumption state, provenance, identity, and receipt time are immutable.
+   */
+  replaceAudit(
+    signalId: string,
+    audit: Pick<Signal, "name" | "correlationId" | "payload">,
+    resolvedSecretValues?: readonly string[],
+  ): Promise<void>;
   list(): Promise<Signal[]>;
 }
 
+export interface WaitOperationalRunState {
+  run: RunRecord;
+  resolvedSecretValues: string[];
+  /**
+   * Cache replays claimed from the ledger but not yet represented by a
+   * durable StepTrace. Kept in sealed state so revocation can reach a
+   * consumer even when it races the replay's normal progress write.
+   */
+  pendingIdempotencyReplays?: IdempotencyReplayClaim[];
+}
+
+export type RunOperationalState = WaitOperationalRunState;
+
+export interface ArtifactRedactionCandidate {
+  artifact: Artifact;
+  /** False once the complete artifact surface has been withheld publicly. */
+  auditVisible: boolean;
+}
+
 export interface ArtifactStore {
-  put(artifact: Artifact, bytes: Uint8Array): Promise<void>;
+  put(
+    artifact: Artifact,
+    bytes: Uint8Array,
+    options?: {
+      /**
+       * Classification captured from the original MIME before its public
+       * audit value is redacted. Once stored, adapters keep the first value.
+       */
+      redactionTextEligible?: boolean;
+      /** Withhold every customer-visible artifact surface from first write. */
+      auditVisible?: false;
+    },
+  ): Promise<void>;
   getMetadata(artifactId: string): Promise<Artifact | undefined>;
+  /** Customer-visible bytes; withheld artifacts return undefined. */
   getBytes(artifactId: string): Promise<Uint8Array | undefined>;
+  /** All customer-visible artifact audit rows. */
+  list(): Promise<Artifact[]>;
   listByRun(runId: string): Promise<Artifact[]>;
+  /**
+   * Engine-only scan that includes rows already withheld from public APIs,
+   * so later secret discovery can continue repairing their audit and bytes.
+   */
+  listForRedaction(
+    runId?: string,
+  ): Promise<ArtifactRedactionCandidate[]>;
+  /** Engine-only byte access paired with listForRedaction(). */
+  getBytesForRedaction(
+    artifactId: string,
+  ): Promise<Uint8Array | undefined>;
+  /** Stable classification retained before audit MIME values are redacted. */
+  isTextEligible(artifactId: string): Promise<boolean>;
+  /**
+   * Rewrites only customer-visible metadata and, optionally, content bytes.
+   * Artifact identity/ownership/timestamps and the text classification stay
+   * fixed.
+   */
+  replaceAudit(
+    artifactId: string,
+    audit: Pick<Artifact, "name" | "kind" | "mime" | "path">,
+    bytes?: Uint8Array,
+    options?: {
+      /**
+       * One-way public suppression. Adapters never restore visibility once
+       * false because the secret set that justified it may not be present in
+       * a later execution segment's local scan.
+       */
+      auditVisible?: false;
+    },
+  ): Promise<Artifact | undefined>;
 }
 
 export interface ApprovalStore {
@@ -123,8 +283,40 @@ export interface ApprovalStore {
   list(filter?: { runId?: string; status?: ApprovalTask["status"] }): Promise<ApprovalTask[]>;
 }
 
+/** Exact correction target retained outside the customer-visible audit. */
+export interface CorrectionOperationalTarget {
+  stepId: string;
+  fieldPath: string;
+}
+
 export interface CorrectionStore {
-  put(correction: Correction): Promise<void>;
+  put(
+    correction: Correction,
+    operationalTarget?: CorrectionOperationalTarget,
+  ): Promise<void>;
+  /**
+   * Replaces a correction audit even when redaction changes its fieldPath
+   * key. The old keyed row/file is removed in the same adapter operation,
+   * while its sealed exact target remains attached.
+   */
+  replaceAudit(
+    original: Pick<Correction, "runId" | "stepId" | "fieldPath">,
+    audit: Pick<
+      Correction,
+      "fieldPath" | "observed" | "corrected" | "reason" | "reviewer"
+    >,
+  ): Promise<Correction | undefined>;
+  getOperationalTarget(
+    correction: Pick<
+      Correction,
+      "runId" | "stepId" | "fieldPath"
+    >,
+  ): Promise<CorrectionOperationalTarget | undefined>;
+  findByOperationalTarget(
+    runId: string,
+    stepId: string,
+    fieldPath: string,
+  ): Promise<Correction | undefined>;
   list(filter?: { runId?: string; stepId?: string }): Promise<Correction[]>;
 }
 
@@ -133,7 +325,12 @@ export interface EvalStore {
   getSuite(id: string): Promise<EvalSuite | undefined>;
   listSuites(): Promise<EvalSuite[]>;
   putExample(example: EvalExample): Promise<void>;
-  listExamples(suiteId: string): Promise<EvalExample[]>;
+  /** Atomically replaces/moves a customer-visible example audit by id. */
+  replaceExampleAudit(
+    originalId: string,
+    example: EvalExample,
+  ): Promise<void>;
+  listExamples(suiteId?: string): Promise<EvalExample[]>;
   putRun(run: EvalRun): Promise<void>;
   listRuns(filter?: { suiteId?: string; workflowId?: string }): Promise<EvalRun[]>;
 }
@@ -199,12 +396,10 @@ export interface StandingApprovalStore {
 // (AMENDMENTS.md A61, V1 "event log foundation") rather than architecture
 // §5's original 16-member enumeration above — the activity-feed +
 // live-updates spine every real write site across CLI/MCP/dashboard appends
-// to. Append-only, same shape/precedent as SignalStore/RejectedTriggerStore
-// above (`append` + filtered `list`, no `get`/`put`-by-id — an event log
-// entry is never looked up individually or mutated after the fact).
-// Deliberately NOT staged by the fs adapter's `transact()` — see that
-// method's own doc comment below and adapters/fs/events.ts's module
-// comment; every real write site goes through packages/store/src/
+// to. Facts are append-only: `replaceAudit` may rewrite only data-bearing
+// presentation fields after a value is learned to be secret; it cannot
+// change event identity, type, ordering, or correlation fields.
+// Every real write site goes through packages/store/src/
 // event-log.ts's `recordEvent`, never `store.events.append` directly, so
 // the "a failed event-log write must never fail the primary operation it's
 // observing" contract is enforced in one place.
@@ -212,8 +407,20 @@ export interface StandingApprovalStore {
 
 export interface EventLogStore {
   append(entry: EventLogEntry): Promise<void>;
+  /**
+   * Security-only rewrite of an existing audit row after a value is learned
+   * to be secret. Structural identity and ordering fields stay unchanged.
+   */
+  replaceAudit(
+    eventId: string,
+    audit: { summary: string; actor?: string },
+  ): Promise<void>;
   /** Newest-first (descending `occurredAt`). `since` and `limit` are independent, freely-combinable optional filters. */
-  list(filter?: { since?: string; limit?: number }): Promise<EventLogEntry[]>;
+  list(filter?: {
+    since?: string;
+    limit?: number;
+    runId?: string;
+  }): Promise<EventLogEntry[]>;
 }
 
 // ---------------------------------------------------------------------------
@@ -259,13 +466,32 @@ export interface IdempotencyLedgerEntry {
   resolvedKey: string;
   runId: string;
   stepId: string;
+  /** Stable producer occurrence; absent on legacy ledger rows. */
+  traceSeq?: number;
   recordedOutput: unknown;
   createdAt: string;
+  /** Absent on legacy entries written before provenance-aware replay. */
+  schemaVersion?: number;
+}
+
+export interface IdempotencyReplayClaim {
+  ledgerKey: string;
+  stepId: string;
+  traceSeq: number;
+  /**
+   * The claimed output was revoked through provenance, even if no currently
+   * known literal occurs in the output. Retained until the matching trace is
+   * durable so restart/reclaim cannot launder a derivative through replay.
+   */
+  outputSecretTainted?: boolean;
 }
 
 export interface IdempotencyLedgerStore {
   get(resolvedKey: string): Promise<IdempotencyLedgerEntry | undefined>;
   put(entry: IdempotencyLedgerEntry): Promise<void>;
+  list(): Promise<IdempotencyLedgerEntry[]>;
+  listByRun(runId: string): Promise<IdempotencyLedgerEntry[]>;
+  delete(resolvedKey: string): Promise<void>;
 }
 
 // ---------------------------------------------------------------------------
@@ -309,22 +535,10 @@ export interface AartStore {
    * SQLite/Postgres adapters implement this with a real BEGIN/COMMIT/
    * ROLLBACK. The fs adapter has no native cross-file transaction
    * primitive (architecture §5.8) — see adapters/fs/index.ts for its
-   * concrete mechanism (buffer every write issued through `tx` in memory;
-   * flush each touched file atomically via write-temp-then-rename only if
-   * `fn` resolves; discard everything if `fn` throws) and, critically, its
-   * documented non-atomic gap: `tx.signals` writes are NOT staged — they
-   * always land immediately, independent of whether the rest of the
-   * transaction ultimately commits. This is a deliberate, accepted gap for
-   * local dev (fs adapter only), not an oversight — see the comment on
-   * SignalStore.append/markConsumed above and adapters/fs/index.ts.
-   *
-   * `tx.events` (AMENDMENTS.md A61) follows the identical non-staged
-   * pattern, for an analogous reason: every real write site appends its
-   * event OUTSIDE of any `store.transact()` call (a best-effort, fire-
-   * and-forget audit line via event-log.ts's `recordEvent`, never
-   * expected to participate in the primary write's own atomicity), so
-   * there is no caller today relying on an event append rolling back
-   * alongside a failed transaction — see adapters/fs/events.ts.
+   * concrete mechanism: buffer every JSON and binary write issued through
+   * `tx`, persist one redo journal, then apply its entries. A callback error
+   * discards the buffer; a process exit during flush is completed from the
+   * journal before the next top-level operation.
    */
   transact<T>(fn: (tx: AartStore) => Promise<T>): Promise<T>;
 }

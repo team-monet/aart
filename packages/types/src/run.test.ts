@@ -98,6 +98,20 @@ describe("StepTraceSchema", () => {
     });
     expect(parsed.postHocCorrected).toBe(true);
   });
+
+  it("preserves the persistence-safe secret taint bit", () => {
+    const parsed = StepTraceSchema.parse({
+      seq: 0,
+      stepId: "echo",
+      block: "test.echo",
+      status: "completed",
+      inputs: {},
+      outputs: { value: "[REDACTED]" },
+      startedAt: "2026-07-28T00:00:00.000Z",
+      secretTainted: true,
+    });
+    expect(parsed.secretTainted).toBe(true);
+  });
 });
 
 describe("RunRecordSchema", () => {

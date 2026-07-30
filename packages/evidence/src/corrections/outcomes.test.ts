@@ -51,6 +51,17 @@ describe("outcome 1/6 — updateRunOutput (spec §23.4 'update current run outpu
       snapshot: { definitions: workflow, resolvedVersions: {}, packHashes: {}, capturedAt: "2026-01-01T00:00:00.000Z" },
     });
     await store.runs.put(run);
+    await store.runs.putOperationalState(run.runId, {
+      run,
+      resolvedSecretValues: ["known-secret"],
+      pendingIdempotencyReplays: [
+        {
+          ledgerKey: "settled-ledger-key",
+          stepId: "extract",
+          traceSeq: 0,
+        },
+      ],
+    });
 
     const updated = await updateRunOutput(store, fixtureCorrection());
 
@@ -58,6 +69,457 @@ describe("outcome 1/6 — updateRunOutput (spec §23.4 'update current run outpu
     expect(trace.outputs?.nmi).toBe("6401234568");
     expect(trace.postHocCorrected).toBe(true);
     await expect(store.runs.get("run_1")).resolves.toMatchObject({ trace: [{ outputs: { nmi: "6401234568" }, postHocCorrected: true }] });
+    await expect(
+      store.runs.getOperationalState(run.runId),
+    ).resolves.toEqual({
+      run: expect.objectContaining({
+        trace: [
+          expect.objectContaining({
+            outputs: { nmi: "6401234568" },
+            postHocCorrected: true,
+          }),
+        ],
+      }),
+      resolvedSecretValues: ["known-secret"],
+    });
+  });
+
+  it("creates a sealed historical archive when a legacy terminal receives its first correction", async () => {
+    const workflow = fixtureWorkflow({
+      id: "legacy-terminal-workflow",
+      version: "1.0.0",
+    });
+    const run = fixtureRunRecord({
+      runId: "run_1",
+      workflowId: workflow.id,
+      workflowVersion: workflow.version,
+      trace: [
+        {
+          seq: 0,
+          stepId: "extract",
+          block: "llm.extract",
+          status: "completed",
+          inputs: {},
+          outputs: { nmi: "6401234567" },
+          startedAt: "t",
+        },
+      ],
+      snapshot: {
+        definitions: workflow,
+        resolvedVersions: {},
+        packHashes: {},
+        capturedAt: "2026-01-01T00:00:00.000Z",
+      },
+    });
+    await store.runs.put(run);
+    await expect(
+      store.runs.getOperationalState(run.runId),
+    ).resolves.toBeUndefined();
+
+    await updateRunOutput(store, fixtureCorrection());
+
+    await expect(
+      store.runs.getOperationalState(run.runId),
+    ).resolves.toEqual({
+      run: expect.objectContaining({
+        status: "completed",
+        snapshot: run.snapshot,
+        trace: [
+          expect.objectContaining({
+            outputs: { nmi: "6401234568" },
+            postHocCorrected: true,
+          }),
+        ],
+      }),
+      resolvedSecretValues: [],
+    });
+  });
+
+  it("applies a correction through its sealed exact target after the public field path is redacted", async () => {
+    const run = fixtureRunRecord({
+      runId: "run_1",
+      trace: [
+        {
+          seq: 0,
+          stepId: "extract",
+          block: "llm.extract",
+          status: "completed",
+          inputs: {},
+          outputs: { amount: 10 },
+          startedAt: "t",
+        },
+      ],
+      outputs: undefined,
+    });
+    const correction = fixtureCorrection({
+      fieldPath: "outputs.amount",
+      corrected: 11,
+    });
+    await store.runs.put(run);
+    await store.corrections.put(correction, {
+      stepId: correction.stepId,
+      fieldPath: correction.fieldPath,
+    });
+    await store.corrections.replaceAudit(correction, {
+      fieldPath: "[REDACTED]",
+      observed: correction.observed,
+      corrected: correction.corrected,
+      reason: correction.reason,
+      reviewer: correction.reviewer,
+    });
+    const [publicCorrection] =
+      await store.corrections.list({
+        runId: correction.runId,
+      });
+
+    const updated = await updateRunOutput(
+      store,
+      publicCorrection!,
+    );
+
+    expect(updated.trace[0]?.outputs).toEqual({
+      amount: 11,
+    });
+    await expect(
+      store.corrections.getOperationalTarget(
+        publicCorrection!,
+      ),
+    ).resolves.toEqual({
+      stepId: correction.stepId,
+      fieldPath: correction.fieldPath,
+    });
+  });
+
+  it("updates the sealed continuation when correcting a durably waiting run", async () => {
+    const exactRun = fixtureRunRecord({
+      runId: "run_1",
+      status: "waiting",
+      endedAt: undefined,
+      trace: [
+        {
+          seq: 0,
+          stepId: "extract",
+          block: "llm.extract",
+          status: "completed",
+          inputs: {},
+          outputs: { nmi: "6401234567" },
+          startedAt: "t",
+        },
+        {
+          seq: 1,
+          stepId: "pause",
+          block: "wait.manual",
+          status: "waiting",
+          inputs: {},
+          startedAt: "t",
+        },
+      ],
+    });
+    await store.runs.put({
+      ...exactRun,
+      trace: exactRun.trace.map((trace) =>
+        trace.stepId === "extract"
+          ? { ...trace, outputs: { nmi: "[REDACTED]" } }
+          : trace,
+      ),
+    });
+    await store.waits.put(
+      exactRun.runId,
+      "pause",
+      { type: "manual", schemaVersion: 1 },
+      "2026-01-01T00:00:00.000Z",
+      {
+        run: exactRun,
+        resolvedSecretValues: ["6401234567"],
+      },
+    );
+
+    const updated = await updateRunOutput(
+      store,
+      fixtureCorrection(),
+    );
+
+    expect(updated.trace[0]).toMatchObject({
+      outputs: { nmi: "6401234568" },
+      postHocCorrected: true,
+    });
+    const protectedState =
+      await store.waits.getOperationalRunState(
+        "run_1",
+        "pause",
+      );
+    expect(protectedState?.resolvedSecretValues).toEqual([
+      "6401234567",
+    ]);
+    expect(
+      protectedState?.run.trace.find(
+        (trace) => trace.stepId === "extract",
+      ),
+    ).toMatchObject({
+      outputs: { nmi: "6401234568" },
+      postHocCorrected: true,
+    });
+  });
+
+  it("rejects a waiting-run correction that contains an already known secret", async () => {
+    const secret = "known-correction-secret";
+    const exactRun = fixtureRunRecord({
+      runId: "run_1",
+      status: "waiting",
+      endedAt: undefined,
+      trace: [
+        {
+          seq: 0,
+          stepId: "extract",
+          block: "llm.extract",
+          status: "completed",
+          inputs: {},
+          outputs: { nmi: "original" },
+          startedAt: "t",
+        },
+        {
+          seq: 1,
+          stepId: "pause",
+          block: "wait.manual",
+          status: "waiting",
+          inputs: {},
+          startedAt: "t",
+        },
+      ],
+    });
+    await store.runs.put(exactRun);
+    await store.waits.put(
+      exactRun.runId,
+      "pause",
+      { type: "manual", schemaVersion: 1 },
+      "2026-01-01T00:00:00.000Z",
+      {
+        run: exactRun,
+        resolvedSecretValues: [secret],
+      },
+    );
+
+    await expect(
+      updateRunOutput(
+        store,
+        fixtureCorrection({
+          corrected: `prefix-${secret}-suffix`,
+        }),
+      ),
+    ).rejects.toThrow(/contains a secret already known/);
+    await expect(
+      store.runs.get(exactRun.runId),
+    ).resolves.toEqual(exactRun);
+    await expect(
+      store.waits.getOperationalRunState(
+        exactRun.runId,
+        "pause",
+      ),
+    ).resolves.toMatchObject({
+      run: {
+        trace: expect.arrayContaining([
+          expect.objectContaining({
+            outputs: { nmi: "original" },
+          }),
+        ]),
+      },
+      resolvedSecretValues: [secret],
+    });
+  });
+
+  it("rejects a terminal correction against its retained sealed secret set", async () => {
+    const secret = "terminal-correction-secret";
+    const run = fixtureRunRecord({
+      runId: "run_1",
+      trace: [
+        {
+          seq: 0,
+          stepId: "extract",
+          block: "llm.extract",
+          status: "completed",
+          inputs: {},
+          outputs: { nmi: "original" },
+          startedAt: "t",
+        },
+      ],
+    });
+    await store.runs.put(run);
+    await store.runs.putOperationalState(run.runId, {
+      run,
+      resolvedSecretValues: [secret],
+    });
+
+    await expect(
+      updateRunOutput(
+        store,
+        fixtureCorrection({ corrected: secret }),
+      ),
+    ).rejects.toThrow(/contains a secret already known/);
+    await expect(store.runs.get(run.runId)).resolves.toEqual(
+      run,
+    );
+    await expect(
+      store.runs.getOperationalState(run.runId),
+    ).resolves.toMatchObject({
+      run: {
+        trace: [
+          expect.objectContaining({
+            outputs: { nmi: "original" },
+          }),
+        ],
+      },
+      resolvedSecretValues: [secret],
+    });
+  });
+
+  it("rejects corrections while a run is actively executing instead of accepting a value that can race and disappear", async () => {
+    const run = fixtureRunRecord({
+      runId: "run_1",
+      status: "running",
+      endedAt: undefined,
+      trace: [
+        {
+          seq: 0,
+          stepId: "extract",
+          block: "llm.extract",
+          status: "completed",
+          inputs: {},
+          outputs: { nmi: "6401234567" },
+          startedAt: "t",
+        },
+      ],
+    });
+    await store.runs.put(run);
+    await store.runs.putOperationalState(run.runId, {
+      run,
+      resolvedSecretValues: [],
+    });
+
+    await expect(
+      updateRunOutput(store, fixtureCorrection()),
+    ).rejects.toThrow(/actively executing/);
+    await expect(store.runs.get("run_1")).resolves.toEqual(run);
+    await expect(
+      store.runs.getOperationalState("run_1"),
+    ).resolves.toMatchObject({
+      run: {
+        trace: [
+          expect.objectContaining({
+            outputs: { nmi: "6401234567" },
+          }),
+        ],
+      },
+    });
+  });
+
+  it("rejects lifecycle and identity mutations instead of writing them into executable state", async () => {
+    const run = fixtureRunRecord({
+      runId: "run_1",
+      status: "waiting",
+      endedAt: undefined,
+      trace: [
+        {
+          seq: 0,
+          stepId: "extract",
+          block: "llm.extract",
+          status: "completed",
+          inputs: {},
+          outputs: { nmi: "wrong" },
+          startedAt: "t",
+        },
+      ],
+    });
+    await store.runs.put(run);
+    await store.waits.put(
+      run.runId,
+      "pause",
+      { type: "manual", schemaVersion: 1 },
+      "2026-01-01T00:00:00.000Z",
+      { run, resolvedSecretValues: [] },
+    );
+
+    for (const fieldPath of [
+      "status",
+      "stepId",
+      "seq",
+      "inputs.token",
+      "secretTainted",
+      "outputs.",
+      "outputs.__proto__.polluted",
+      "outputs.constructor.prototype.polluted",
+    ]) {
+      await expect(
+        updateRunOutput(
+          store,
+          fixtureCorrection({
+            fieldPath,
+            corrected: "mutated",
+          }),
+        ),
+      ).rejects.toThrow(/not a writable step output path/);
+    }
+    expect(
+      (Object.prototype as Record<string, unknown>)["polluted"],
+    ).toBeUndefined();
+
+    await expect(
+      updateRunOutput(
+        store,
+        fixtureCorrection({
+          fieldPath: "outputs",
+          corrected: "not-an-output-object",
+        }),
+      ),
+    ).rejects.toThrow(/requires an object value/);
+  });
+
+  it("rejects a correction to the unresolved wait occurrence whose resume payload owns the result", async () => {
+    const run = fixtureRunRecord({
+      runId: "run_1",
+      status: "waiting",
+      endedAt: undefined,
+      trace: [
+        {
+          seq: 0,
+          stepId: "pause",
+          block: "wait.manual",
+          status: "waiting",
+          inputs: {},
+          startedAt: "t",
+        },
+      ],
+    });
+    await store.runs.put(run);
+    await store.waits.put(
+      run.runId,
+      "pause",
+      { type: "manual", schemaVersion: 1 },
+      "2026-01-01T00:00:00.000Z",
+      { run, resolvedSecretValues: [] },
+    );
+
+    await expect(
+      updateRunOutput(
+        store,
+        fixtureCorrection({
+          stepId: "pause",
+          fieldPath: "outputs.answer",
+          corrected: "premature",
+        }),
+      ),
+    ).rejects.toThrow(/already-completed trace/);
+    await expect(
+      store.waits.getOperationalRunState("run_1", "pause"),
+    ).resolves.toMatchObject({
+      run: {
+        trace: [
+          expect.objectContaining({
+            stepId: "pause",
+            status: "waiting",
+          }),
+        ],
+      },
+    });
   });
 
   it("preserves corrections on legacy completed runs without materialized public outputs", async () => {
@@ -260,6 +722,46 @@ describe("outcome 1/6 — updateRunOutput (spec §23.4 'update current run outpu
   it("throws when the step does not exist on the run", async () => {
     await store.runs.put(fixtureRunRecord({ runId: "run_2", trace: [] }));
     await expect(updateRunOutput(store, fixtureCorrection({ runId: "run_2" }))).rejects.toThrow(/no step/);
+  });
+
+  it("cannot overwrite protected secret-taint metadata", async () => {
+    await store.runs.put(
+      fixtureRunRecord({
+        runId: "run_1",
+        trace: [
+          {
+            seq: 0,
+            stepId: "extract",
+            block: "llm.extract",
+            status: "completed",
+            inputs: {},
+            outputs: { nmi: "[REDACTED]" },
+            startedAt: "t",
+            secretTainted: true,
+          },
+        ],
+      }),
+    );
+
+    for (const fieldPath of [
+      "secretTainted",
+      "secretTaintedPaths",
+      "controlSecretTainted",
+      "authoredStepId",
+      "iterationIndex",
+      "idempotencyLedgerKey",
+      "idempotencyLedgerFingerprint",
+    ]) {
+      await expect(
+        updateRunOutput(
+          store,
+          fixtureCorrection({ fieldPath, corrected: false }),
+        ),
+      ).rejects.toThrow(/not a writable step output path/);
+    }
+    await expect(store.runs.get("run_1")).resolves.toMatchObject({
+      trace: [{ secretTainted: true }],
+    });
   });
 });
 

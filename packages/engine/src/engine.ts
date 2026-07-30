@@ -2,12 +2,22 @@
 // (architecture §4.6/§7.9's DI framing applied to this whole package). This
 // is what a composition root (`@aart/server`/`@aart/cli`/`@aart/mcp`, or
 // this package's own tests) actually instantiates.
-import type { Signal } from "@aart/types";
-import { createTrackingSecretResolver, throwingSecretResolver } from "./redaction.js";
+import type { RunRecord, Signal, Workflow } from "@aart/types";
+import type { AartStore } from "@aart/store";
+import {
+  createTrackingSecretResolver,
+  mergeOperationalRunTaint,
+  redactStoredTextArtifacts,
+  throwingSecretResolver,
+} from "./redaction.js";
 import { buildExprContext, resolveBooleanExpression } from "./expr-context.js";
 import { cancelRun, executeRun, finalizeTerminal, runStepsLoop, triggerRun } from "./run-lifecycle.js";
 import { resolveWorkflowForRun } from "./snapshot.js";
-import { determineNextStepId } from "./step-executor.js";
+import {
+  prepareRevokedIdempotencyConsumer,
+  prepareTaintAfterControlResolution,
+  resolveCompletedStepControl,
+} from "./step-executor.js";
 import type { DueWait, EngineConfig, ResumeOutcome, TriggerRunInput } from "./types.js";
 import {
   failExpiredWait as failExpiredWaitMechanism,
@@ -50,7 +60,25 @@ export interface Engine {
 }
 
 function waitMachineConfig(config: EngineConfig): WaitMachineConfig {
-  return { store: config.store, redact: config.redact, now: config.now ?? (() => new Date()) };
+  return {
+    store: config.store,
+    redact: config.redact,
+    now: config.now ?? (() => new Date()),
+    onRunTerminal: config.onRunTerminal,
+    prepareRevokedIdempotencyConsumer: (
+      store,
+      run,
+      outputTaintedLedgerKeys,
+      resolvedSecretRefs,
+    ) =>
+      prepareRevokedIdempotencyConsumer(
+        config,
+        store,
+        run,
+        outputTaintedLedgerKeys,
+        resolvedSecretRefs,
+      ),
+  };
 }
 
 /**
@@ -61,24 +89,130 @@ function waitMachineConfig(config: EngineConfig): WaitMachineConfig {
  * priority (architecture §4.2's last pipeline line) exactly as the normal
  * (non-wait) dispatch path would, then runs the step-loop from there.
  */
-async function continueAfterResume(config: EngineConfig, outcome: ResumeOutcome, stepId: string): Promise<ResumeOutcome> {
-  if (outcome.kind !== "resumed") return outcome;
+interface PreparedResume {
+  workflow?: Workflow;
+  operationalRun?: RunRecord;
+  nextStepId?: string;
+  controlError?: Error;
+}
 
-  const workflow = await resolveWorkflowForRun(config.store, outcome.run);
-  const step = workflow.execution.steps.find((s) => s.id === stepId);
+async function prepareResumedRun(
+  config: EngineConfig,
+  transactionStore: AartStore,
+  run: RunRecord,
+  stepId: string,
+  resolvedSecretRefs: Set<string>,
+  prepared: PreparedResume,
+): Promise<RunRecord> {
+  const workflow = await resolveWorkflowForRun(transactionStore, run);
+  const step = workflow.execution.steps.find((candidate) => candidate.id === stepId);
   if (!step) {
-    throw new Error(`Resumed step "${stepId}" not found in workflow ${workflow.id}@${workflow.version} (run "${outcome.run.runId}").`);
+    throw new Error(`Resumed step "${stepId}" not found in workflow ${workflow.id}@${workflow.version} (run "${run.runId}").`);
   }
 
-  const resolvedSecretRefs = new Set<string>();
   let ifResult: boolean | undefined;
-  if (step.if !== undefined) {
-    const context = buildExprContext(outcome.run);
-    const secretResolver = createTrackingSecretResolver(config.resolveSecret ?? throwingSecretResolver, resolvedSecretRefs);
-    ifResult = await resolveBooleanExpression(step.if, context, { secretResolver });
+  let preDispatchControlError: Error | undefined;
+  try {
+    if (step.if !== undefined) {
+      const context = buildExprContext(run);
+      const secretResolver = createTrackingSecretResolver(config.resolveSecret ?? throwingSecretResolver, resolvedSecretRefs);
+      ifResult = await resolveBooleanExpression(step.if, context, { secretResolver });
+    }
+  } catch (err) {
+    preDispatchControlError =
+      err instanceof Error ? err : new Error(String(err));
   }
-  const nextStepId = await determineNextStepId(workflow, step, outcome.run, ifResult, resolvedSecretRefs, config);
-  const finalRun = await runStepsLoop(config, outcome.run, workflow, nextStepId, resolvedSecretRefs);
+  const controlResolution = preDispatchControlError
+    ? { kind: "failed" as const, error: preDispatchControlError }
+    : await resolveCompletedStepControl(
+        workflow,
+        step,
+        run,
+        ifResult,
+        resolvedSecretRefs,
+        config,
+      );
+  prepared.workflow = workflow;
+  if (controlResolution.kind === "failed") {
+    prepared.controlError = controlResolution.error;
+  } else {
+    prepared.nextStepId = controlResolution.nextStepId;
+  }
+  const preparedRun = prepareTaintAfterControlResolution(
+    config,
+    workflow,
+    step,
+    run,
+    1,
+    resolvedSecretRefs,
+  );
+  const operationalRun = {
+    ...preparedRun,
+    artifacts: await redactStoredTextArtifacts(
+      transactionStore,
+      config.redact,
+      run.runId,
+      resolvedSecretRefs,
+    ),
+  };
+  prepared.operationalRun = operationalRun;
+  return operationalRun;
+}
+
+async function resumeWithPreparation(
+  config: EngineConfig,
+  invoke: (
+    resolvedSecretRefs: Set<string>,
+    prepare: (
+      run: RunRecord,
+      stepId: string,
+      transactionStore: AartStore,
+    ) => Promise<RunRecord>,
+  ) => Promise<ResumeOutcome>,
+): Promise<ResumeOutcome> {
+  const resolvedSecretRefs = new Set<string>();
+  const prepared: PreparedResume = {};
+  const outcome = await invoke(
+    resolvedSecretRefs,
+    (run, stepId, transactionStore) =>
+      prepareResumedRun(
+        config,
+        transactionStore,
+        run,
+        stepId,
+        resolvedSecretRefs,
+        prepared,
+      ),
+  );
+  if (outcome.kind !== "resumed") return outcome;
+  if (!prepared.workflow) {
+    throw new Error(
+      `Resumed run "${outcome.run.runId}" was persisted without preparing its control-flow provenance.`,
+    );
+  }
+  if (prepared.controlError) {
+    const finalRun = await finalizeTerminal(
+      config,
+      outcome.run,
+      prepared.workflow,
+      "failed",
+      resolvedSecretRefs,
+      prepared.controlError.message,
+    );
+    return { ...outcome, run: finalRun };
+  }
+  const finalRun = await runStepsLoop(
+    config,
+    prepared.operationalRun === undefined
+      ? outcome.run
+      : mergeOperationalRunTaint(
+          prepared.operationalRun,
+          outcome.run,
+        ),
+    prepared.workflow,
+    prepared.nextStepId,
+    resolvedSecretRefs,
+  );
   return { ...outcome, run: finalRun };
 }
 
@@ -97,58 +231,100 @@ export function createEngine(config: EngineConfig): Engine {
     executeRun: (runId) => executeRun(config, runId),
     cancelRun: (runId) => cancelRun(config, runId),
 
-    resumeBySignal: async (signal) => {
-      const outcome = await resumeBySignalMechanism(waitMachineConfig(config), signal);
-      if (outcome.kind !== "resumed") return outcome;
-      // `resumeBySignalMechanism` doesn't know the resolved `stepId` ahead
-      // of the caller — but it's on the outcome's run only implicitly (the
-      // just-completed trailing trace entry). Re-derive it the same way
-      // `resolveContinuationStepId` would, by reading the trailing trace.
-      const stepId = trailingCompletedStepId(outcome.run);
-      return continueAfterResume(config, outcome, stepId);
-    },
-    resumeManual: async (runId, stepId, payload) => {
-      const outcome = await resumeManualMechanism(waitMachineConfig(config), runId, stepId, payload);
-      return continueAfterResume(config, outcome, stepId);
-    },
-    resumeApproval: async (runId, stepId, task) => {
-      const outcome = await resumeApprovalMechanism(waitMachineConfig(config), runId, stepId, task);
-      return continueAfterResume(config, outcome, stepId);
-    },
-    resumeTimerWait: async (runId, stepId) => {
-      const outcome = await resumeTimerWaitMechanism(waitMachineConfig(config), runId, stepId);
-      return continueAfterResume(config, outcome, stepId);
-    },
-    resumeExternalJobResult: async (runId, stepId, resultPayload) => {
-      const outcome = await resumeExternalJobResultMechanism(waitMachineConfig(config), runId, stepId, resultPayload);
-      return continueAfterResume(config, outcome, stepId);
-    },
+    resumeBySignal: (signal) =>
+      resumeWithPreparation(config, (refs, prepare) =>
+        resumeBySignalMechanism(
+          waitMachineConfig(config),
+          signal,
+          refs,
+          prepare,
+        ),
+      ),
+    resumeManual: (runId, stepId, payload) =>
+      resumeWithPreparation(config, (refs, prepare) =>
+        resumeManualMechanism(
+          waitMachineConfig(config),
+          runId,
+          stepId,
+          payload,
+          refs,
+          prepare,
+        ),
+      ),
+    resumeApproval: (runId, stepId, task) =>
+      resumeWithPreparation(config, (refs, prepare) =>
+        resumeApprovalMechanism(
+          waitMachineConfig(config),
+          runId,
+          stepId,
+          task,
+          refs,
+          prepare,
+        ),
+      ),
+    resumeTimerWait: (runId, stepId) =>
+      resumeWithPreparation(config, (refs, prepare) =>
+        resumeTimerWaitMechanism(
+          waitMachineConfig(config),
+          runId,
+          stepId,
+          refs,
+          prepare,
+        ),
+      ),
+    resumeExternalJobResult: (runId, stepId, resultPayload) =>
+      resumeWithPreparation(config, (refs, prepare) =>
+        resumeExternalJobResultMechanism(
+          waitMachineConfig(config),
+          runId,
+          stepId,
+          resultPayload,
+          refs,
+          prepare,
+        ),
+      ),
 
     getDueWaits: (now) => getDueWaitsQuery(config.store, now ?? config.now?.() ?? new Date()),
     listExternalJobWaits: () => listExternalJobWaitsQuery(config.store),
     getExpiredWaits: (now) => getExpiredWaitsQuery(config.store, now ?? config.now?.() ?? new Date()),
 
     failExpiredWait: async (runId, stepId) => {
-      const outcome = await failExpiredWaitMechanism(waitMachineConfig(config), runId, stepId);
+      const resolvedSecretRefs = new Set<string>();
+      const operationalRunState =
+        await config.store.waits.getOperationalRunState(
+          runId,
+          stepId,
+        );
+      for (const value of
+        operationalRunState?.resolvedSecretValues ?? []) {
+        resolvedSecretRefs.add(value);
+      }
+      const resumableRun =
+        operationalRunState?.run ??
+        (await config.store.runs.get(runId));
+      const workflow =
+        resumableRun === undefined
+          ? undefined
+          : await resolveWorkflowForRun(config.store, resumableRun);
+      const outcome = await failExpiredWaitMechanism(
+        waitMachineConfig(config),
+        runId,
+        stepId,
+        resolvedSecretRefs,
+      );
       if (outcome.kind !== "resumed") return outcome;
       // Unlike the resume wrappers above, a failed wait has no "next step"
       // to continue to — finalize the run as failed directly (the same
       // finalization path a normal step failure takes: snapshot-capture-
       // if-needed, terminal status, concurrency-queue release).
-      const workflow = await resolveWorkflowForRun(config.store, outcome.run);
-      const resolvedSecretRefs = new Set<string>();
+      if (workflow === undefined) {
+        throw new Error(
+          `Expired run "${runId}" was resolved without a workflow snapshot.`,
+        );
+      }
       const failedTrace = outcome.run.trace.find((t) => t.stepId === stepId && t.status === "failed");
       const finalRun = await finalizeTerminal(config, outcome.run, workflow, "failed", resolvedSecretRefs, failedTrace?.error ?? `Step "${stepId}" failed.`);
       return { ...outcome, run: finalRun };
     },
   };
-}
-
-/** The `stepId` of the most recently completed trace entry — used by `resumeBySignal`'s wrapper, which (unlike `resumeManual`/`resumeApproval`/`resumeTimerWait`/`resumeExternalJobResult`) isn't handed `stepId` directly by its caller (a signal only carries `name`/`correlationId`, matched internally by `wait/wait-machine.ts`). */
-function trailingCompletedStepId(run: import("@aart/types").RunRecord): string {
-  const last = run.trace[run.trace.length - 1];
-  if (!last) {
-    throw new Error(`Resumed run "${run.runId}" has no trace entries — cannot determine which step was just resumed.`);
-  }
-  return last.stepId;
 }

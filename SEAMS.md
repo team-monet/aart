@@ -28,11 +28,17 @@ function listExternalJobWaits(store: AartStore): Promise<Array<{ runId: string; 
 
 **Resume calls** S2's ticker makes once it identifies a due/completed wait (standalone functions, take an explicit `runId`/`stepId` — no `Engine` instance required for the claim step itself, but see Seam 4 below for how to actually CONTINUE execution afterward):
 ```ts
-function resumeTimerWait(config: WaitMachineConfig, runId: string, stepId: string, resolvedSecretRefs?: ReadonlySet<string>): Promise<ResumeOutcome>
-function resumeExternalJobResult(config: WaitMachineConfig, runId: string, stepId: string, resultPayload: unknown, resolvedSecretRefs?: ReadonlySet<string>): Promise<ResumeOutcome>
-function resumeBySignal(config: WaitMachineConfig, signal: Signal, resolvedSecretRefs?: ReadonlySet<string>): Promise<ResumeOutcome>
-function resumeManual(config: WaitMachineConfig, runId: string, stepId: string, payload?: unknown, resolvedSecretRefs?: ReadonlySet<string>): Promise<ResumeOutcome>
-function resumeApproval(config: WaitMachineConfig, runId: string, stepId: string, task: { id: string; status: string; decision?: unknown; reviewer?: string }, resolvedSecretRefs?: ReadonlySet<string>): Promise<ResumeOutcome>
+type PrepareCompletedRun = (
+  run: RunRecord,
+  stepId: string,
+  transactionStore: AartStore,
+) => Promise<RunRecord>
+
+function resumeTimerWait(config: WaitMachineConfig, runId: string, stepId: string, resolvedSecretRefs: ReadonlySet<string> | undefined, prepareCompletedRun: PrepareCompletedRun): Promise<ResumeOutcome>
+function resumeExternalJobResult(config: WaitMachineConfig, runId: string, stepId: string, resultPayload: unknown, resolvedSecretRefs: ReadonlySet<string> | undefined, prepareCompletedRun: PrepareCompletedRun): Promise<ResumeOutcome>
+function resumeBySignal(config: WaitMachineConfig, signal: Signal, resolvedSecretRefs: ReadonlySet<string> | undefined, prepareCompletedRun: PrepareCompletedRun): Promise<ResumeOutcome>
+function resumeManual(config: WaitMachineConfig, runId: string, stepId: string, payload: unknown | undefined, resolvedSecretRefs: ReadonlySet<string> | undefined, prepareCompletedRun: PrepareCompletedRun): Promise<ResumeOutcome>
+function resumeApproval(config: WaitMachineConfig, runId: string, stepId: string, task: { id: string; status: string; decision?: unknown; reviewer?: string }, resolvedSecretRefs: ReadonlySet<string> | undefined, prepareCompletedRun: PrepareCompletedRun): Promise<ResumeOutcome>
 
 // ResumeOutcome =
 //   | { kind: "resumed"; run: RunRecord; mechanism: ResumeMechanism }
@@ -40,7 +46,79 @@ function resumeApproval(config: WaitMachineConfig, runId: string, stepId: string
 //   | { kind: "unmatched"; mechanism: ResumeMechanism }
 ```
 
-**IMPORTANT — these standalone functions only perform the atomic CLAIM, they do NOT continue execution past the resumed step.** To actually advance the run to its next step (or its next wait/terminal status), call the SAME-NAMED method on a constructed `Engine` instance instead (`engine.resumeTimerWait(runId, stepId)` etc. — see Seam 4) — the `Engine`-bound versions wrap the standalone claim call and then run the step-loop forward. S2's ticker should use the `Engine`-bound methods in production; the standalone functions are exposed mainly for a caller that genuinely only wants the claim primitive (e.g. a lower-level test, or a future architecture where claim and continuation are split across processes).
+**IMPORTANT — these standalone functions only perform the atomic CLAIM, they do NOT continue execution past the resumed step.** They now require `prepareCompletedRun` because control expressions and secret provenance must be resolved against the completed in-memory trace before its first durable write. Omitting it fails before the claim transaction mutates storage. The callback runs inside that claim transaction and receives its `transactionStore`; every store/artifact read or write made during preparation must use this scoped view. Re-entering the top-level `config.store` can deadlock a non-reentrant adapter such as SQLite. A caller constructing this callback must own the full workflow resolver, secret resolver, and taint-preparation pipeline; passing an identity callback is test-only and is not a safe production implementation. To actually advance the run to its next step (or its next wait/terminal status), call the SAME-NAMED method on a constructed `Engine` instance instead (`engine.resumeTimerWait(runId, stepId)` etc. — see Seam 4). The `Engine`-bound versions construct the preparation callback, perform the atomic claim, and run the step-loop forward. S2's ticker and every production composition root must use those bound methods; the standalone functions remain exposed only for engine-internal tests or a future split-process architecture that supplies an equivalent trusted preparer.
+
+`WaitMachineConfig.prepareRevokedIdempotencyConsumer` is the sibling trusted
+callback used when that preparation invalidates a global cache entry already
+replayed by another persisted run. The bound `Engine` supplies it and repairs
+the full transitive consumer lineage inside the active transaction. The active
+run and ledger-named producer runs are reconstructed before the ledger is
+declared clean; only after an affected key is found does the engine index
+retained consumers and follow its reachable graph. The callback returns the
+repaired active run so a same-execution cache consumer cannot later overwrite
+it with stale in-memory state. It also repairs run-associated artifact bytes
+and metadata, approval audits (including authenticated identity), consumed
+signal names/correlations/payloads, outstanding-wait audit copies, correction
+field paths and values, and activity-event summary/actor fields. A
+standalone caller omitting it can delete the cache entry and directly redact
+literal consumer data, but cannot reconstruct downstream workflow provenance;
+this is another reason standalone resume functions are test/split-process
+mechanisms rather than the production composition surface.
+Separately, the bound engine performs one literal-only global audit scan for
+each newly resolved value in an execution segment. That pass covers unrelated
+non-cached runs and their customer-visible audits but never reconstructs their
+workflow provenance; expensive reconstruction remains producer/reachable-
+consumer-only. Artifact byte/metadata rewrites are recovery-journaled by both
+local adapters. SQLite writes immutable blob generations and commits their
+internal pointer with the metadata row; rollback keeps the prior pointer, and
+startup removes only unreferenced generations while holding the database
+writer lock.
+`RunStore.getOperationalState(runId)` is also the engine-only exact authority
+for active and terminal runs. A terminal entry is a sealed historical archive,
+not an executable continuation: settled replay claims are removed, workflow
+resolution prefers its frozen definition over a redacted public snapshot or
+mutable registry row, and governed corrections update it alongside the public
+audit. Waiting exact state remains owned by
+`WaitStore.getOperationalRunState(runId, stepId)`.
+
+`WaitStore.list()` returns the redacted audit condition.
+`WaitStore.listOperational()` is the engine-only view that opens the complete
+AES-256-GCM-sealed condition used for timer/timeout scheduling and external-job
+polling; the adapter-local key is persisted mode `0600` so restart does not
+break outstanding waits. Every put uses a random, authenticated operation
+generation, preventing an earlier loop entry for the same run/step from being
+replayed into the current row; legacy v1 seals rotate to v2 on access. SQLite
+does not retain a raw `resume_at` shadow.
+`WaitStore.getOperationalRunState(runId, stepId)` opens the separately sealed
+raw suspended run and its known secret literals. The engine rehydrates both
+before resume/expiry; `replaceOperationalRunState(runId, state)` refreshes
+late-discovered taint, rotating and resealing the authenticated wait generation
+so earlier continuation ciphertext cannot be replayed, without exposing
+executable values through `RunStore`.
+`WaitStore.findSignalMatches(name, correlationId)` is the engine-only exact
+match seam backed by a one-way adapter fingerprint, and
+`WaitStore.redactAudit(runId, stepId, wait)` replaces only the audit copy
+without changing either the fingerprint or sealed operation. `SignalStore.markConsumed(...,
+{ consumedBy: { runId, stepId } })` records internal repair provenance;
+`listConsumedByRun(runId)` retrieves only those already-consumed audit copies
+so a later secret discovery never consumes an unrelated early-arrival signal.
+`replaceAudit(...)` rewrites all public fields (and the fs filename), including
+for an unconsumed signal. Such a signal keeps a sealed operational copy plus a
+one-way match fingerprint until consumption; `getOperationalSecretValues(id)`
+rehydrates the literals that caused its earlier audit rewrite before the
+engine completes an early-arrival wait. Each replacement rotates the signal's
+authenticated generation. Resume paths call `replaceAudit` for name,
+correlation ID, and payload before `markConsumed` clears that protected copy.
+`listConsumedWithoutProvenance()` supplies the conservative upgrade path for
+already-consumed rows written before migration `0007`.
+
+The filesystem store serializes top-level operations and transactions under a
+process-local mutex shared by every handle to the same normalized root. Every
+JSON audit row and artifact blob written through a transaction shares one
+durable redo journal, including signals and events. Engine run writes merge
+the latest persisted taint metadata after entering that critical section, so
+retrospective repair and forward execution cannot overwrite one another.
+Database adapters remain the authority for multi-process server workers.
 
 **Wait-TIMEOUT-expiry sibling seam (architecture §4.4.1's "Expiry note") — a DIFFERENT terminal outcome from resume, S2's ticker should sweep this too, on the same interval:**
 ```ts
@@ -102,8 +180,9 @@ interface EngineConfig {
   getGrantedCapabilities?: GetGrantedCapabilities      // (workflow, environment) => string[] | Promise<string[]> — NOT a frozen type, this package's own DI seam pairing with capabilityCheck; S4 supplies the real policy computation here. Defaults to alwaysEmptyGrantedCapabilities.
   resolveSecret?: SecretResolver                       // @aart/expr's injected secret-resolver shape — S4/whoever owns the secret adapter supplies the real one; defaults to a resolver that throws SecretResolutionError if actually invoked
   blocks: BlockRegistry                                // Record<string, BlockImplementation> — S3/S7's real catalog in production
+  canUseCredentialSecrets?: ({run, block}) => boolean  // engine-owned authentication-only trust decision; absent/false means a block's credential request is conservatively treated as data use
   forEachArrayLimit?: number                           // default 10,000
-  schemaVersion?: number                                // defaults to CURRENT_ENGINE_SCHEMA_VERSION (currently 1)
+  schemaVersion?: number                                // defaults to CURRENT_ENGINE_SCHEMA_VERSION (currently 2)
   now?: () => Date
   computeRetryDelayMs?: (attempt: number, backoff: string | undefined) => number
 }
@@ -132,7 +211,7 @@ This session stashes 3 keys into the existing free-form `RunRecord.params` bag r
 
 - `params.concurrencyKey: string` — the resolved `workflow.concurrency.key` value for this run, set by `triggerRun` whenever the workflow declares a `concurrency` block.
 - `params.waitingOnConcurrency: boolean` — `true` while a `queue`-policy run is held behind another non-terminal run of the same key (not yet enqueued to `job_queue`); flipped to `false` by `releaseQueuedRuns` when released.
-- `params.environment: string` — threaded through from `TriggerRunInput.environment` (architecture ADR-06: environment context is resolved per claimed run, never a process-start global) — read back on every subsequent step dispatch (including after a resume) to resolve `getGrantedCapabilities(workflow, environment)`.
+- `params.environment: string` — threaded through from `TriggerRunInput.environment` (architecture ADR-06: environment context is resolved per claimed run, never a process-start global). Execution reads the exact value from the sealed operational continuation/archive on every subsequent dispatch, including after resume. If later secret discovery matches the environment name, the public `RunRecord.params.environment` is redacted and is never restored merely because the field also controls capability selection.
 
 **Anyone reading `RunRecord.params` for other purposes (dashboard, reports, evidence renderers) should treat these 3 keys as engine-internal** — not part of any user-facing "run parameters" surface, even though they share the same bag as whatever operational params a trigger caller supplies.
 
@@ -523,11 +602,11 @@ export async function closeAllBrowserSessions(): Promise<void>;               //
 Nothing in `@aart/blocks-core`'s own scope ever calls `closeBrowserSession`/`closeAllBrowserSessions` — this package has no run-completion or process-shutdown signal of its own to act on. **Expected consumer:** the engine (S1) once a run reaches a terminal status, and/or the worker process (S2, architecture §4.7's graceful-shutdown sequence) on `SIGTERM`, should call `closeBrowserSession(runId)` / `closeAllBrowserSessions()` respectively. Until wired in, a run's browser session is only ever cleaned up by explicit test teardown or process exit — this is a real, currently-unclosed resource-lifecycle gap, flagged here rather than silently left for S9's integration pass to discover. If S1/S2's real shape for "a run reached a terminal state" or "the worker is shutting down" doesn't fit a bare `closeBrowserSession(runId)` call (e.g. it wants a registered callback instead of being the caller), reconcile via this file / the amendment protocol rather than either side silently guessing.
 
 **S9 resolution (2026-07-10, reconciliation ledger item 10): RESOLVED — per-run close on terminal transition, coarse SIGTERM safety net, both via generic DI hooks (not a direct `@aart/blocks-core` import from either package, preserving `@aart/engine`'s/`@aart/server`'s existing block-catalog-agnostic layering):**
-- `EngineConfig.onRunTerminal?: (runId) => void|Promise<void>` (`packages/engine/src/types.ts`) — called from BOTH of the engine's terminal-transition paths (`finalizeTerminal` AND `cancelRun`'s own separate inline terminal transition — these are two distinct code paths, both needed the hook), after the terminal `RunRecord` is durably persisted. Best-effort: a throwing hook is caught and swallowed, never fails the run's own (already-persisted) terminal status. Defaults to a no-op.
+- `EngineConfig.onRunTerminal?: (runId) => void|Promise<void>` (`packages/engine/src/types.ts`) — called after every durable transition into a terminal status: ordinary finalization, explicit cancellation, and retrospective `completed → failed` cache invalidation discovered at a later dispatch/wait boundary. Best-effort: a throwing hook is caught and swallowed, never fails the run's own (already-persisted) terminal status. Defaults to a no-op.
 - `LeaseConfig.onShutdown?: () => void|Promise<void>` (`packages/server/src/config.ts`) — called once from `gracefulShutdown` (`worker/shutdown.ts`), after the claim-drain/force-release loop, as a coarser safety net (catches whatever a force-released or crashed run's per-run close missed). Best-effort: caught and logged, never blocks process exit. Defaults to a no-op.
 - **Cadence decision:** per-run close (not periodic/coarse-only) is the primary mechanism, since sessions are already keyed 1:1 by `runId` — closing at the natural terminal-transition chokepoint matches that scoping exactly and avoids keeping Playwright contexts alive across many concurrent runs. The SIGTERM-time `closeAllBrowserSessions()` is a true safety net for the abnormal case (force-release, process crash), not the primary cleanup path.
 - The real composition root wires `onRunTerminal: (runId) => closeBrowserSession(runId)` and `onShutdown: () => closeAllBrowserSessions()`, importing `@aart/blocks-core` only at that one integration point.
-- Tests: `packages/engine/src/run-lifecycle.test.ts` (fires on both completion and cancellation paths, throwing hook doesn't fail the run) and `packages/server/src/worker/worker.test.ts` (fires once during graceful shutdown, throwing hook doesn't block `stop()`).
+- Tests: `packages/engine/src/run-lifecycle.test.ts` (fires on completion and cancellation, throwing hook doesn't fail the run), `packages/engine/src/engine.test.ts` (a completed cache consumer later invalidated to failed emits a post-commit `run.failed` event), and `packages/server/src/worker/worker.test.ts` (fires once during graceful shutdown, throwing hook doesn't block `stop()`).
 
 ### S3-E2 — Block catalog composition — `createBlockCatalog`/`getBlockCatalog`, expected to be called by S1 (`@aart/engine`'s dispatch loop) and/or S9 (integration composition root)
 

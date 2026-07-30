@@ -19,6 +19,46 @@ describe("buildExprContext", () => {
     const steps = ctx.steps as Record<string, { outputs: unknown }>;
     expect(steps.extract?.outputs).toEqual({ nmi: "123" });
   });
+
+  it("does not let a forEach child occurrence impersonate an authored bracket-suffixed step", () => {
+    const run = fixtureRun({
+      trace: [
+        {
+          seq: 0,
+          stepId: "map[0]",
+          authoredStepId: "map",
+          iterationIndex: 0,
+          block: "test.echo",
+          status: "completed",
+          inputs: {},
+          outputs: { value: "child" },
+          startedAt: "t",
+          endedAt: "t",
+        },
+        {
+          seq: 1,
+          stepId: "map",
+          authoredStepId: "map",
+          block: "test.echo",
+          status: "completed",
+          inputs: {},
+          outputs: { items: [{ value: "child" }] },
+          startedAt: "t",
+          endedAt: "t",
+        },
+      ],
+    });
+
+    const steps = buildExprContext(run).steps as Record<
+      string,
+      { outputs: unknown }
+    >;
+
+    expect(steps["map[0]"]).toBeUndefined();
+    expect(steps.map?.outputs).toEqual({
+      items: [{ value: "child" }],
+    });
+  });
 });
 
 describe("resolveWithRecord", () => {

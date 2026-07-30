@@ -139,6 +139,67 @@ export function runAartStoreConformanceSuite(label: string, options: Conformance
         await expect(store.runs.get(run.runId)).resolves.toEqual(run);
       });
 
+      it("keeps active operational state separate from the public run and preserves it across audit writes", async () => {
+        const run = fixtureRun({
+          inputs: { token: "[REDACTED]" },
+        });
+        const operationalRun = {
+          ...run,
+          inputs: { token: "exact-secret" },
+        };
+        await store.runs.put(run);
+        await store.runs.putOperationalState(run.runId, {
+          run: operationalRun,
+          resolvedSecretValues: ["exact-secret"],
+        });
+
+        await store.runs.put({
+          ...run,
+          updatedAt: "audit-write",
+        });
+        await expect(
+          store.runs.getOperationalState(run.runId),
+        ).resolves.toEqual({
+          run: operationalRun,
+          resolvedSecretValues: ["exact-secret"],
+        });
+        await expect(store.runs.get(run.runId)).resolves.toMatchObject({
+          inputs: { token: "[REDACTED]" },
+          updatedAt: "audit-write",
+        });
+
+        const progressed = {
+          ...operationalRun,
+          updatedAt: "progressed",
+        };
+        await store.runs.replaceOperationalState(run.runId, {
+          run: progressed,
+          resolvedSecretValues: ["exact-secret"],
+        });
+        await expect(
+          store.runs.getOperationalState(run.runId),
+        ).resolves.toMatchObject({
+          run: { updatedAt: "progressed" },
+        });
+
+        await store.runs.deleteOperationalState(run.runId);
+        await expect(
+          store.runs.getOperationalState(run.runId),
+        ).resolves.toBeUndefined();
+      });
+
+      it("round-trips persisted input and trigger secret-taint paths", async () => {
+        const run = fixtureRun({
+          secretTaintedInputPaths: ["/token"],
+          secretTaintedTriggerPaths: ["*"],
+        });
+        await store.runs.put(run);
+        await expect(store.runs.get(run.runId)).resolves.toMatchObject({
+          secretTaintedInputPaths: ["/token"],
+          secretTaintedTriggerPaths: ["*"],
+        });
+      });
+
       it("get returns undefined for a run that was never put", async () => {
         await expect(store.runs.get("no-such-run")).resolves.toBeUndefined();
       });
@@ -183,6 +244,148 @@ export function runAartStoreConformanceSuite(label: string, options: Conformance
         await expect(store.waits.get(runId, "wait_step")).resolves.toEqual(wait);
       });
 
+      it("redacts the wait audit while preserving exact signal matching through a one-way key", async () => {
+        const runId = uniqueId("run");
+        const wait: WaitCondition = {
+          type: "signal",
+          name: "quote.received",
+          correlationId: "late-secret-correlation",
+          schemaVersion: 1,
+        };
+        await store.waits.put(
+          runId,
+          "wait_step",
+          wait,
+          new Date().toISOString(),
+        );
+        await store.waits.redactAudit(runId, "wait_step", {
+          ...wait,
+          correlationId: "[REDACTED]",
+        });
+
+        await expect(store.waits.list()).resolves.toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              runId,
+              stepId: "wait_step",
+              wait: {
+                ...wait,
+                correlationId: "[REDACTED]",
+              },
+            }),
+          ]),
+        );
+        await expect(
+          store.waits.findSignalMatches(
+            "quote.received",
+            "late-secret-correlation",
+          ),
+        ).resolves.toEqual([{ runId, stepId: "wait_step" }]);
+      });
+
+      it("keeps redacted audit values separate from sealed operational scheduling values", async () => {
+        const runId = uniqueId("run");
+        const resumeAt = new Date(Date.now() - 60_000).toISOString();
+        const wait: WaitCondition = {
+          type: "timer",
+          resumeAt,
+          schemaVersion: 1,
+        };
+        await store.waits.put(
+          runId,
+          "timer_step",
+          wait,
+          new Date().toISOString(),
+        );
+        await store.waits.redactAudit(runId, "timer_step", {
+          ...wait,
+          resumeAt: "[REDACTED]",
+        });
+        await expect(
+          store.waits.list({ runId }),
+        ).resolves.toEqual([
+          expect.objectContaining({
+            wait: { ...wait, resumeAt: "[REDACTED]" },
+          }),
+        ]);
+        await expect(
+          store.waits.listOperational({ runId, type: "timer" }),
+        ).resolves.toEqual([
+          expect.objectContaining({ wait }),
+        ]);
+        await expect(
+          store.waits.listDue(new Date().toISOString()),
+        ).resolves.toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              runId,
+              stepId: "timer_step",
+              wait: { ...wait, resumeAt: "[REDACTED]" },
+            }),
+          ]),
+        );
+      });
+
+      it("round-trips and replaces sealed run continuation state independently of the wait audit", async () => {
+        const run = fixtureRun({
+          status: "waiting",
+          inputs: { token: "raw-secret" },
+        });
+        const wait = fixtureWait();
+        await store.waits.put(
+          run.runId,
+          "pause",
+          wait,
+          new Date().toISOString(),
+          {
+            run,
+            resolvedSecretValues: ["raw-secret"],
+          },
+        );
+        await expect(
+          store.waits.getOperationalRunState(
+            run.runId,
+            "pause",
+          ),
+        ).resolves.toEqual({
+          run,
+          resolvedSecretValues: ["raw-secret"],
+        });
+
+        const updated = {
+          run: {
+            ...run,
+            trace: [
+              {
+                seq: 0,
+                stepId: "source",
+                block: "test.source",
+                status: "completed" as const,
+                inputs: {},
+                outputs: { token: "raw-secret" },
+                secretTainted: true,
+                secretTaintedPaths: ["*"],
+                startedAt: new Date().toISOString(),
+              },
+            ],
+          },
+          resolvedSecretValues: [
+            "raw-secret",
+            "second-secret",
+          ],
+        };
+        await store.waits.replaceOperationalRunState(
+          run.runId,
+          updated,
+        );
+        await expect(
+          store.waits.getOperationalRunState(
+            run.runId,
+            "pause",
+          ),
+        ).resolves.toEqual(updated);
+      });
+
       it("delete removes a wait", async () => {
         const runId = uniqueId("run");
         await store.waits.put(runId, "wait_step", fixtureWait(), new Date().toISOString());
@@ -225,6 +428,129 @@ export function runAartStoreConformanceSuite(label: string, options: Conformance
         await store.signals.markConsumed(signal.id);
         await expect(store.signals.list()).resolves.toEqual(expect.arrayContaining([signal]));
       });
+
+      it("markConsumed can replace the persisted audit payload", async () => {
+        const signal: Signal = {
+          id: uniqueId("sig"),
+          name: "x",
+          correlationId: "corr-redacted",
+          payload: { token: "plaintext" },
+          receivedAt: new Date().toISOString(),
+        };
+        await store.signals.append(signal);
+        await store.signals.markConsumed(signal.id, {
+          payload: { token: "[REDACTED]" },
+        });
+        await expect(store.signals.list()).resolves.toEqual(
+          expect.arrayContaining([
+            { ...signal, payload: { token: "[REDACTED]" } },
+          ]),
+        );
+        await expect(
+          store.signals.findUnconsumedMatch("x", "corr-redacted"),
+        ).resolves.toBeUndefined();
+      });
+
+      it("records the consuming run without exposing provenance in the public Signal shape", async () => {
+        const runId = uniqueId("run");
+        const signal: Signal = {
+          id: uniqueId("sig"),
+          name: "x",
+          correlationId: uniqueId("corr"),
+          payload: { token: "plaintext" },
+          receivedAt: new Date().toISOString(),
+        };
+        await store.signals.append(signal);
+        await store.signals.markConsumed(signal.id, {
+          consumedBy: { runId, stepId: "pause" },
+        });
+        await expect(
+          store.signals.listConsumedByRun(runId),
+        ).resolves.toEqual([signal]);
+        await expect(store.signals.list()).resolves.toEqual(
+          expect.arrayContaining([signal]),
+        );
+      });
+
+      it("replaces every consumed-signal audit field while preserving identity and consumption", async () => {
+        const signal: Signal = {
+          id: uniqueId("sig"),
+          name: "late-secret",
+          correlationId: "late-secret",
+          payload: { value: "late-secret" },
+          receivedAt: new Date().toISOString(),
+        };
+        await store.signals.append(signal);
+        await store.signals.markConsumed(signal.id, {
+          consumedBy: { runId: uniqueId("run"), stepId: "pause" },
+        });
+        await store.signals.replaceAudit(signal.id, {
+          name: "[REDACTED]",
+          correlationId: "[REDACTED]",
+          payload: { value: "[REDACTED]" },
+        });
+        await expect(store.signals.list()).resolves.toEqual(
+          expect.arrayContaining([
+            {
+              ...signal,
+              name: "[REDACTED]",
+              correlationId: "[REDACTED]",
+              payload: { value: "[REDACTED]" },
+            },
+          ]),
+        );
+        await expect(
+          store.signals.findUnconsumedMatch(
+            "[REDACTED]",
+            "[REDACTED]",
+          ),
+        ).resolves.toBeUndefined();
+      });
+
+      it("redacts an unconsumed signal audit without breaking its exact early-arrival match", async () => {
+        const signal: Signal = {
+          id: uniqueId("sig"),
+          name: "late-secret-name",
+          correlationId: "late-secret-correlation",
+          payload: { value: "late-secret-payload" },
+          receivedAt: new Date().toISOString(),
+        };
+        await store.signals.append(signal);
+        await store.signals.replaceAudit(signal.id, {
+          name: "[REDACTED]",
+          correlationId: "[REDACTED]",
+          payload: { value: "[REDACTED]" },
+        }, ["late-secret-name", "late-secret-correlation"]);
+
+        await expect(store.signals.list()).resolves.toEqual(
+          expect.arrayContaining([
+            {
+              ...signal,
+              name: "[REDACTED]",
+              correlationId: "[REDACTED]",
+              payload: { value: "[REDACTED]" },
+            },
+          ]),
+        );
+        await expect(
+          store.signals.findUnconsumedMatch(
+            signal.name,
+            signal.correlationId,
+          ),
+        ).resolves.toEqual(signal);
+        await expect(
+          store.signals.getOperationalSecretValues(signal.id),
+        ).resolves.toEqual([
+          "late-secret-name",
+          "late-secret-correlation",
+        ]);
+        await expect(
+          store.signals.findUnconsumedMatch(
+            "[REDACTED]",
+            "[REDACTED]",
+          ),
+        ).resolves.toBeUndefined();
+      });
     });
 
     describe("artifacts", () => {
@@ -264,6 +590,187 @@ export function runAartStoreConformanceSuite(label: string, options: Conformance
         const list = await store.artifacts.listByRun(runId);
         expect(list).toHaveLength(1);
         expect(list[0]?.runId).toBe(runId);
+        await expect(store.artifacts.list()).resolves.toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({ runId }),
+            expect.objectContaining({ runId: other }),
+          ]),
+        );
+      });
+
+      it("replaces artifact audit metadata and text bytes without changing structural ownership", async () => {
+        const runId = uniqueId("run");
+        const artifact: Artifact = {
+          id: uniqueId("art"),
+          runId,
+          stepId: "capture",
+          name: "late-secret",
+          kind: "late-secret",
+          mime: "text/late-secret",
+          path: "late-secret/report.txt",
+          bytes: 11,
+          createdAt: new Date().toISOString(),
+        };
+        await store.artifacts.put(
+          artifact,
+          new TextEncoder().encode("late-secret"),
+        );
+        await expect(
+          store.artifacts.isTextEligible(artifact.id),
+        ).resolves.toBe(true);
+        const updated = await store.artifacts.replaceAudit(
+          artifact.id,
+          {
+            name: "[REDACTED]",
+            kind: "[REDACTED]",
+            mime: "[REDACTED]",
+            path: "[REDACTED]",
+          },
+          new TextEncoder().encode("[REDACTED]"),
+        );
+        expect(updated).toEqual({
+          ...artifact,
+          name: "[REDACTED]",
+          kind: "[REDACTED]",
+          mime: "[REDACTED]",
+          path: "[REDACTED]",
+          bytes: new TextEncoder().encode("[REDACTED]").byteLength,
+        });
+        await expect(
+          store.artifacts.isTextEligible(artifact.id),
+        ).resolves.toBe(true);
+        await expect(
+          store.artifacts.getBytes(artifact.id),
+        ).resolves.toEqual(new TextEncoder().encode("[REDACTED]"));
+      });
+
+      it("retains text eligibility captured before the public MIME is redacted", async () => {
+        const runId = uniqueId("run");
+        const artifact: Artifact = {
+          id: uniqueId("art"),
+          runId,
+          name: "result.txt",
+          kind: "report",
+          mime: "[REDACTED]",
+          path: `artifacts/${runId}/result.txt`,
+          bytes: 12,
+          createdAt: new Date().toISOString(),
+        };
+        await store.artifacts.put(
+          artifact,
+          new TextEncoder().encode("future-value"),
+          { redactionTextEligible: true },
+        );
+
+        await expect(
+          store.artifacts.isTextEligible(artifact.id),
+        ).resolves.toBe(true);
+      });
+
+      it("withholds a secret-sized artifact from every public surface while retaining its repair source", async () => {
+        const runId = uniqueId("run");
+        const artifact: Artifact = {
+          id: uniqueId("art"),
+          runId,
+          name: "secret-sized.bin",
+          kind: "file",
+          mime: "application/octet-stream",
+          path: `artifacts/${runId}/secret-sized.bin`,
+          bytes: 4,
+          createdAt: new Date().toISOString(),
+        };
+        const bytes = new Uint8Array([1, 2, 3, 4]);
+        await store.artifacts.put(artifact, bytes);
+
+        await store.artifacts.replaceAudit(
+          artifact.id,
+          {
+            name: artifact.name,
+            kind: artifact.kind,
+            mime: artifact.mime,
+            path: artifact.path,
+          },
+          undefined,
+          { auditVisible: false },
+        );
+
+        await expect(
+          store.artifacts.getMetadata(artifact.id),
+        ).resolves.toBeUndefined();
+        await expect(
+          store.artifacts.getBytes(artifact.id),
+        ).resolves.toBeUndefined();
+        await expect(store.artifacts.list()).resolves.not.toContainEqual(
+          expect.objectContaining({ id: artifact.id }),
+        );
+        await expect(
+          store.artifacts.listByRun(runId),
+        ).resolves.not.toContainEqual(
+          expect.objectContaining({ id: artifact.id }),
+        );
+        await expect(
+          store.artifacts.listForRedaction(runId),
+        ).resolves.toContainEqual({
+          artifact,
+          auditVisible: false,
+        });
+        await expect(
+          store.artifacts.getBytesForRedaction(artifact.id),
+        ).resolves.toEqual(bytes);
+
+        await store.artifacts.replaceAudit(artifact.id, {
+          name: "repaired.bin",
+          kind: artifact.kind,
+          mime: artifact.mime,
+          path: artifact.path,
+        });
+        await expect(
+          store.artifacts.getMetadata(artifact.id),
+        ).resolves.toBeUndefined();
+        await expect(
+          store.artifacts.listForRedaction(runId),
+        ).resolves.toContainEqual({
+          artifact: { ...artifact, name: "repaired.bin" },
+          auditVisible: false,
+        });
+      });
+
+      it("can withhold an artifact atomically on its initial write", async () => {
+        const runId = uniqueId("run");
+        const artifact: Artifact = {
+          id: uniqueId("art"),
+          runId,
+          name: "withheld-at-source.bin",
+          kind: "file",
+          mime: "application/octet-stream",
+          path: `artifacts/${runId}/withheld-at-source.bin`,
+          bytes: 3,
+          createdAt: new Date().toISOString(),
+        };
+        const bytes = new Uint8Array([7, 8, 9]);
+
+        await store.artifacts.put(artifact, bytes, {
+          auditVisible: false,
+        });
+
+        await expect(
+          store.artifacts.getMetadata(artifact.id),
+        ).resolves.toBeUndefined();
+        await expect(
+          store.artifacts.getBytes(artifact.id),
+        ).resolves.toBeUndefined();
+        await expect(
+          store.artifacts.listByRun(runId),
+        ).resolves.toEqual([]);
+        await expect(
+          store.artifacts.listForRedaction(runId),
+        ).resolves.toContainEqual({
+          artifact,
+          auditVisible: false,
+        });
+        await expect(
+          store.artifacts.getBytesForRedaction(artifact.id),
+        ).resolves.toEqual(bytes);
       });
     });
 
@@ -323,6 +830,119 @@ export function runAartStoreConformanceSuite(label: string, options: Conformance
         await store.corrections.put(correction);
         await expect(store.corrections.list({ runId: correction.runId })).resolves.toEqual([correction]);
       });
+
+      it("replaceAudit moves a correction whose redacted fieldPath changes its store key", async () => {
+        const correction: Correction = {
+          runId: uniqueId("run"),
+          stepId: "extract",
+          fieldPath: "outputs.late-secret",
+          observed: "late-secret",
+          corrected: "late-secret",
+          reason: "late-secret",
+          reviewer: "late-secret",
+          createdAt: new Date().toISOString(),
+        };
+        // A pre-migration row has no sealed target. Its first retrospective
+        // repair must capture the exact identity before moving the public
+        // audit to a redacted key.
+        await store.corrections.put(correction);
+        const replacement =
+          await store.corrections.replaceAudit(correction, {
+            fieldPath: "outputs.[REDACTED]",
+            observed: "[REDACTED]",
+            corrected: "[REDACTED]",
+            reason: "[REDACTED]",
+            reviewer: "[REDACTED]",
+          });
+        expect(replacement).toMatchObject({
+          fieldPath: "outputs.[REDACTED]",
+        });
+        await expect(
+          store.corrections.list({ runId: correction.runId }),
+        ).resolves.toEqual([
+          {
+            ...correction,
+            fieldPath: "outputs.[REDACTED]",
+            observed: "[REDACTED]",
+            corrected: "[REDACTED]",
+            reason: "[REDACTED]",
+            reviewer: "[REDACTED]",
+          },
+        ]);
+        await expect(
+          store.corrections.getOperationalTarget(
+            replacement!,
+          ),
+        ).resolves.toEqual({
+          stepId: correction.stepId,
+          fieldPath: correction.fieldPath,
+        });
+        await expect(
+          store.corrections.findByOperationalTarget(
+            correction.runId,
+            correction.stepId,
+            correction.fieldPath,
+          ),
+        ).resolves.toEqual(replacement);
+      });
+
+      it("replaceAudit preserves colliding redacted corrections without deriving a suffix from the secret path", async () => {
+        const runId = uniqueId("run");
+        const first: Correction = {
+          runId,
+          stepId: "extract",
+          fieldPath: "outputs.first-secret",
+          observed: "first-secret",
+          corrected: "a",
+          reason: "repair",
+          reviewer: "reviewer",
+          createdAt: "2026-01-01T00:00:00.000Z",
+        };
+        const second: Correction = {
+          ...first,
+          fieldPath: "outputs.second-secret",
+          observed: "second-secret",
+          corrected: "b",
+          createdAt: "2026-01-01T00:00:01.000Z",
+        };
+        await store.corrections.put(first);
+        await store.corrections.put(second);
+        for (const correction of [first, second]) {
+          await store.corrections.replaceAudit(correction, {
+            fieldPath: "outputs.[REDACTED]",
+            observed: "[REDACTED]",
+            corrected: correction.corrected,
+            reason: correction.reason,
+            reviewer: correction.reviewer,
+          });
+        }
+        const repaired = await store.corrections.list({ runId });
+        expect(repaired).toHaveLength(2);
+        expect(repaired.map((entry) => entry.fieldPath).sort()).toEqual([
+          "outputs.[REDACTED]",
+          "outputs.[REDACTED]#2",
+        ]);
+        expect(JSON.stringify(repaired)).not.toContain("first-secret");
+        expect(JSON.stringify(repaired)).not.toContain("second-secret");
+        await expect(
+          store.corrections.findByOperationalTarget(
+            runId,
+            first.stepId,
+            first.fieldPath,
+          ),
+        ).resolves.toMatchObject({
+          fieldPath: "outputs.[REDACTED]",
+        });
+        await expect(
+          store.corrections.findByOperationalTarget(
+            runId,
+            second.stepId,
+            second.fieldPath,
+          ),
+        ).resolves.toMatchObject({
+          fieldPath: "outputs.[REDACTED]#2",
+        });
+      });
     });
 
     describe("evals", () => {
@@ -331,6 +951,31 @@ export function runAartStoreConformanceSuite(label: string, options: Conformance
         await store.evals.putSuite(suite);
         await expect(store.evals.getSuite(suite.id)).resolves.toEqual(suite);
         await expect(store.evals.listSuites()).resolves.toEqual(expect.arrayContaining([suite]));
+      });
+
+      it("replaceExampleAudit atomically moves an example id", async () => {
+        const example: EvalExample = {
+          id: uniqueId("example"),
+          suiteId: uniqueId("suite"),
+          input: { value: "secret" },
+          expected: "secret",
+        };
+        await store.evals.putExample(example);
+        const repaired = {
+          ...example,
+          id: uniqueId("example-safe"),
+          input: { value: "[REDACTED]" },
+          expected: "[REDACTED]",
+        };
+
+        await store.evals.replaceExampleAudit(
+          example.id,
+          repaired,
+        );
+
+        await expect(
+          store.evals.listExamples(example.suiteId),
+        ).resolves.toEqual([repaired]);
       });
 
       it("putExample/listExamples filters by suiteId", async () => {
@@ -462,6 +1107,31 @@ export function runAartStoreConformanceSuite(label: string, options: Conformance
         };
         await store.events.append(entry);
         await expect(store.events.list()).resolves.toEqual(expect.arrayContaining([entry]));
+      });
+
+      it("replaceAudit rewrites data fields without changing event identity or ordering", async () => {
+        const entry: EventLogEntry = {
+          id: uniqueId("evt"),
+          type: "approval.decided",
+          occurredAt: new Date().toISOString(),
+          summary: "approved by late-secret",
+          runId: uniqueId("run"),
+          actor: "late-secret",
+        };
+        await store.events.append(entry);
+        await store.events.replaceAudit(entry.id, {
+          summary: "approved by [REDACTED]",
+          actor: "[REDACTED]",
+        });
+        await expect(store.events.list()).resolves.toEqual(
+          expect.arrayContaining([
+            {
+              ...entry,
+              summary: "approved by [REDACTED]",
+              actor: "[REDACTED]",
+            },
+          ]),
+        );
       });
 
       it("append then list round-trips an EventLogEntry with every correlation field omitted — never collapsed into an explicit undefined/null value", async () => {
@@ -666,6 +1336,33 @@ export function runAartStoreConformanceSuite(label: string, options: Conformance
       it("get returns undefined for a key that was never recorded", async () => {
         await expect(store.idempotencyLedger.get("never-seen-key")).resolves.toBeUndefined();
       });
+
+      it("lists all entries, lists entries by run, and deletes by resolved key", async () => {
+        const runId = uniqueId("run");
+        const resolvedKey = `${runId}:send_email`;
+        await store.idempotencyLedger.put({
+          resolvedKey,
+          runId,
+          stepId: "send_email",
+          recordedOutput: { sent: true },
+          createdAt: new Date().toISOString(),
+          schemaVersion: 2,
+        });
+        await expect(
+          store.idempotencyLedger.listByRun(runId),
+        ).resolves.toEqual([
+          expect.objectContaining({ resolvedKey, schemaVersion: 2 }),
+        ]);
+        await expect(store.idempotencyLedger.list()).resolves.toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({ resolvedKey, schemaVersion: 2 }),
+          ]),
+        );
+        await store.idempotencyLedger.delete(resolvedKey);
+        await expect(
+          store.idempotencyLedger.get(resolvedKey),
+        ).resolves.toBeUndefined();
+      });
     });
 
     describe("transact() — the transactional unit-of-work contract (architecture §5.8)", () => {
@@ -722,6 +1419,184 @@ export function runAartStoreConformanceSuite(label: string, options: Conformance
 
         await expect(store.runs.get(run.runId)).resolves.toBeUndefined();
         await expect(store.waits.get(run.runId, "step1")).resolves.toBeUndefined();
+      });
+
+      it("stages artifact blobs plus signal and event audits with read-your-writes and rollback", async () => {
+        const runId = uniqueId("run");
+        const artifact: Artifact = {
+          id: uniqueId("art"),
+          runId,
+          name: "transaction.txt",
+          kind: "file",
+          mime: "text/plain",
+          path: `artifacts/${runId}/transaction.txt`,
+          bytes: 4,
+          createdAt: new Date().toISOString(),
+        };
+        const artifactBytes =
+          new TextEncoder().encode("safe");
+        const signal: Signal = {
+          id: uniqueId("sig"),
+          name: "transaction.signal",
+          correlationId: uniqueId("corr"),
+          payload: { safe: true },
+          receivedAt: new Date().toISOString(),
+        };
+        const event: EventLogEntry = {
+          id: uniqueId("evt"),
+          type: "run.started",
+          occurredAt: new Date().toISOString(),
+          summary: "transaction event",
+          runId,
+        };
+
+        await expect(
+          store.transact(async (tx) => {
+            await tx.artifacts.put(artifact, artifactBytes);
+            await tx.signals.append(signal);
+            await tx.events.append(event);
+
+            await expect(
+              tx.artifacts.getMetadata(artifact.id),
+            ).resolves.toEqual(artifact);
+            await expect(
+              tx.artifacts.getBytes(artifact.id),
+            ).resolves.toEqual(artifactBytes);
+            await expect(
+              tx.signals.list(),
+            ).resolves.toContainEqual(signal);
+            await expect(
+              tx.events.list(),
+            ).resolves.toContainEqual(event);
+            throw new Error("rollback all audit members");
+          }),
+        ).rejects.toThrow(/rollback all audit members/);
+
+        await expect(
+          store.artifacts.getMetadata(artifact.id),
+        ).resolves.toBeUndefined();
+        await expect(
+          store.artifacts.getBytesForRedaction(artifact.id),
+        ).resolves.toBeUndefined();
+        await expect(
+          store.signals.list(),
+        ).resolves.not.toContainEqual(
+          expect.objectContaining({ id: signal.id }),
+        );
+        await expect(
+          store.events.list(),
+        ).resolves.not.toContainEqual(
+          expect.objectContaining({ id: event.id }),
+        );
+      });
+
+      it("rolls an existing artifact audit and blob back together", async () => {
+        const runId = uniqueId("run");
+        const artifact: Artifact = {
+          id: uniqueId("art"),
+          runId,
+          name: "original.txt",
+          kind: "file",
+          mime: "text/plain",
+          path: `artifacts/${runId}/original.txt`,
+          bytes: 8,
+          createdAt: new Date().toISOString(),
+        };
+        const originalBytes =
+          new TextEncoder().encode("original");
+        const repairedBytes =
+          new TextEncoder().encode("[REDACTED]");
+        await store.artifacts.put(
+          artifact,
+          originalBytes,
+        );
+
+        await expect(
+          store.transact(async (tx) => {
+            await tx.artifacts.replaceAudit(
+              artifact.id,
+              {
+                name: "[REDACTED]",
+                kind: artifact.kind,
+                mime: artifact.mime,
+                path: artifact.path,
+              },
+              repairedBytes,
+            );
+            await expect(
+              tx.artifacts.getMetadata(artifact.id),
+            ).resolves.toMatchObject({
+              name: "[REDACTED]",
+              bytes: repairedBytes.byteLength,
+            });
+            await expect(
+              tx.artifacts.getBytes(artifact.id),
+            ).resolves.toEqual(repairedBytes);
+            throw new Error("rollback artifact repair");
+          }),
+        ).rejects.toThrow(/rollback artifact repair/);
+
+        await expect(
+          store.artifacts.getMetadata(artifact.id),
+        ).resolves.toEqual(artifact);
+        await expect(
+          store.artifacts.getBytes(artifact.id),
+        ).resolves.toEqual(originalBytes);
+      });
+
+      it("keeps a staged artifact blob when a later write in the same transaction changes only metadata", async () => {
+        const runId = uniqueId("run");
+        const artifact: Artifact = {
+          id: uniqueId("art"),
+          runId,
+          name: "original.txt",
+          kind: "file",
+          mime: "text/plain",
+          path: `artifacts/${runId}/original.txt`,
+          bytes: 8,
+          createdAt: new Date().toISOString(),
+        };
+        const originalBytes =
+          new TextEncoder().encode("original");
+        const repairedBytes =
+          new TextEncoder().encode("[REDACTED]");
+        await store.artifacts.put(artifact, originalBytes);
+
+        await store.transact(async (tx) => {
+          await tx.artifacts.replaceAudit(
+            artifact.id,
+            {
+              name: "first-safe-name.txt",
+              kind: artifact.kind,
+              mime: artifact.mime,
+              path: artifact.path,
+            },
+            repairedBytes,
+          );
+          await tx.artifacts.replaceAudit(
+            artifact.id,
+            {
+              name: "final-safe-name.txt",
+              kind: artifact.kind,
+              mime: artifact.mime,
+              path: `artifacts/${runId}/final-safe-name.txt`,
+            },
+          );
+          await expect(
+            tx.artifacts.getBytes(artifact.id),
+          ).resolves.toEqual(repairedBytes);
+        });
+
+        await expect(
+          store.artifacts.getMetadata(artifact.id),
+        ).resolves.toMatchObject({
+          name: "final-safe-name.txt",
+          path: `artifacts/${runId}/final-safe-name.txt`,
+          bytes: repairedBytes.byteLength,
+        });
+        await expect(
+          store.artifacts.getBytes(artifact.id),
+        ).resolves.toEqual(repairedBytes);
       });
 
       it("exercises the real §4.4.2 dedupe-check-and-transition pattern end-to-end: duplicate delivery is a no-op", async () => {

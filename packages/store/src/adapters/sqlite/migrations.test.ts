@@ -307,7 +307,7 @@ describe("0004_events_table — pre-populated-db upgrade (V1, AMENDMENTS.md A61)
 
     // The real upgrade path: MigrationRunner sees watermark 3, applies
     // exactly 0004 (0001/0002/0003 already accounted for), advances to 4.
-    const runner = new MigrationRunner(ALL_SQLITE_MIGRATIONS(handle.db), new SqliteMigrationWatermarkStore(handle.db), handle.store);
+    const runner = new MigrationRunner(ALL_SQLITE_MIGRATIONS(handle.db).slice(0, 4), new SqliteMigrationWatermarkStore(handle.db), handle.store);
     expect(await runner.currentVersion()).toBe(3);
     await expect(runner.up()).resolves.toBe(4);
 
@@ -321,9 +321,10 @@ describe("0004_events_table — pre-populated-db upgrade (V1, AMENDMENTS.md A61)
   it("down() reverts 0004 (drops the events table) cleanly, and up() re-adds it", async () => {
     dir = await fs.mkdtemp(join(tmpdir(), "aart-sqlite-migration-test-"));
     const dbPath = join(dir, "aart.db");
-    handle = await openSqliteStore(dbPath); // default now runs 0001+0002+0003+0004 (AMENDMENTS.md A61)
+    handle = await openSqliteStore(dbPath, { runMigrations: false });
 
-    const runner = new MigrationRunner(ALL_SQLITE_MIGRATIONS(handle.db), new SqliteMigrationWatermarkStore(handle.db), handle.store);
+    const runner = new MigrationRunner(ALL_SQLITE_MIGRATIONS(handle.db).slice(0, 4), new SqliteMigrationWatermarkStore(handle.db), handle.store);
+    await expect(runner.up()).resolves.toBe(4);
     expect(await runner.currentVersion()).toBe(4);
 
     await expect(runner.down()).resolves.toBe(3);
@@ -335,5 +336,516 @@ describe("0004_events_table — pre-populated-db upgrade (V1, AMENDMENTS.md A61)
     await expect(runner.up()).resolves.toBe(4);
     expect(() => handle!.db.exec("SELECT * FROM events LIMIT 1")).not.toThrow();
     await expect(handle.store.events.list()).resolves.toEqual([]);
+  });
+});
+
+describe("0005_idempotency_schema_version", () => {
+  it("keeps legacy rows readable as unversioned and persists versioned rows", async () => {
+    dir = await fs.mkdtemp(join(tmpdir(), "aart-sqlite-migration-test-"));
+    const dbPath = join(dir, "aart.db");
+    handle = await openSqliteStore(dbPath, { runMigrations: false });
+
+    const through0004 = new MigrationRunner(
+      ALL_SQLITE_MIGRATIONS(handle.db).slice(0, 4),
+      new SqliteMigrationWatermarkStore(handle.db),
+      handle.store,
+    );
+    await expect(through0004.up()).resolves.toBe(4);
+    handle.db.exec(`
+      INSERT INTO idempotency_ledger
+        (resolved_key, run_id, step_id, recorded_output_json, created_at)
+      VALUES
+        ('v2:legacy-collision', 'legacy-run', 'work', '{"value":"legacy"}', '2026-01-01T00:00:00.000Z')
+    `);
+
+    const through0005 = new MigrationRunner(
+      ALL_SQLITE_MIGRATIONS(handle.db).slice(0, 5),
+      new SqliteMigrationWatermarkStore(handle.db),
+      handle.store,
+    );
+    await expect(through0005.up()).resolves.toBe(5);
+    const indexes = handle.db
+      .prepare("PRAGMA index_list(idempotency_ledger)")
+      .all() as Array<{ name: string }>;
+    expect(indexes.map((index) => index.name)).toContain(
+      "idx_idempotency_ledger_run_id",
+    );
+    const legacy = await handle.store.idempotencyLedger.get(
+      "v2:legacy-collision",
+    );
+    expect(legacy?.resolvedKey).toBe("v2:legacy-collision");
+    expect(legacy?.schemaVersion).toBeUndefined();
+
+    await handle.store.idempotencyLedger.put({
+      resolvedKey: "v2:current",
+      runId: "current-run",
+      stepId: "work",
+      recordedOutput: { value: "current" },
+      createdAt: "2026-01-01T00:00:00.000Z",
+      schemaVersion: 2,
+    });
+    await expect(
+      handle.store.idempotencyLedger.get("v2:current"),
+    ).resolves.toMatchObject({ schemaVersion: 2 });
+  });
+});
+
+describe("0006_run_root_taint_paths", () => {
+  it("adds nullable legacy-safe columns and round-trips both provenance arrays", async () => {
+    dir = await fs.mkdtemp(join(tmpdir(), "aart-sqlite-migration-test-"));
+    const dbPath = join(dir, "aart.db");
+    handle = await openSqliteStore(dbPath, { runMigrations: false });
+
+    const through0005 = new MigrationRunner(
+      ALL_SQLITE_MIGRATIONS(handle.db).slice(0, 5),
+      new SqliteMigrationWatermarkStore(handle.db),
+      handle.store,
+    );
+    await expect(through0005.up()).resolves.toBe(5);
+
+    const all = new MigrationRunner(
+      ALL_SQLITE_MIGRATIONS(handle.db).slice(0, 6),
+      new SqliteMigrationWatermarkStore(handle.db),
+      handle.store,
+    );
+    await expect(all.up()).resolves.toBe(6);
+    const columns = handle.db
+      .prepare("PRAGMA table_info(runs)")
+      .all() as Array<{
+        name: string;
+        notnull: number;
+        dflt_value: string | null;
+      }>;
+    expect(columns.map((column) => column.name)).toEqual(
+      expect.arrayContaining([
+        "secret_tainted_input_paths_json",
+        "secret_tainted_trigger_paths_json",
+      ]),
+    );
+    for (const name of [
+      "secret_tainted_input_paths_json",
+      "secret_tainted_trigger_paths_json",
+    ]) {
+      expect(columns.find((column) => column.name === name)).toMatchObject({
+        notnull: 0,
+        dflt_value: null,
+      });
+    }
+
+    const now = "2026-01-01T00:00:00.000Z";
+    await handle.store.runs.put({
+      runId: "root-taint-run",
+      workflowId: "wf",
+      workflowVersion: "1.0.0",
+      status: "running",
+      approved: true,
+      approvalMode: "governed",
+      trigger: {
+        type: "manual",
+        id: "trigger",
+        source: "test",
+        payload: null,
+        receivedAt: now,
+      },
+      inputs: {},
+      secretTaintedInputPaths: ["/token"],
+      secretTaintedTriggerPaths: ["*"],
+      trace: [],
+      waits: [],
+      artifacts: [],
+      snapshot: {
+        definitions: {},
+        resolvedVersions: {},
+        packHashes: {},
+        capturedAt: now,
+      },
+      schemaVersion: 2,
+      startedAt: now,
+      updatedAt: now,
+    });
+    await expect(
+      handle.store.runs.get("root-taint-run"),
+    ).resolves.toMatchObject({
+      secretTaintedInputPaths: ["/token"],
+      secretTaintedTriggerPaths: ["*"],
+    });
+  });
+});
+
+describe("0007_secret_audit_provenance", () => {
+  it("backfills wait match fingerprints and records signal consumers without retaining a raw wait correlation in the audit copy", async () => {
+    dir = await fs.mkdtemp(join(tmpdir(), "aart-sqlite-migration-test-"));
+    const dbPath = join(dir, "aart.db");
+    handle = await openSqliteStore(dbPath, { runMigrations: false });
+
+    const through0006 = new MigrationRunner(
+      ALL_SQLITE_MIGRATIONS(handle.db).slice(0, 6),
+      new SqliteMigrationWatermarkStore(handle.db),
+      handle.store,
+    );
+    await expect(through0006.up()).resolves.toBe(6);
+    const wait = {
+      type: "signal" as const,
+      name: "ready",
+      correlationId: "late-secret-correlation",
+      schemaVersion: 1,
+    };
+    handle.db
+      .prepare(
+        `INSERT INTO waits (run_id, step_id, wait_condition_json, wait_type, resume_at, created_at)
+         VALUES (?, ?, ?, ?, NULL, ?)`,
+      )
+      .run(
+        "run-audit",
+        "pause",
+        JSON.stringify(wait),
+        "signal",
+        "2026-01-01T00:00:00.000Z",
+      );
+    handle.db
+      .prepare(
+        `INSERT INTO signals (signal_id, name, correlation_id, payload_json, received_at, consumed_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        "signal-audit",
+        "ready",
+        "late-secret-correlation",
+        JSON.stringify({ value: "secret" }),
+        "2026-01-01T00:00:00.000Z",
+        "2026-01-01T00:01:00.000Z",
+      );
+
+    const all = new MigrationRunner(
+      ALL_SQLITE_MIGRATIONS(handle.db),
+      new SqliteMigrationWatermarkStore(handle.db),
+      handle.store,
+    );
+    await expect(all.up()).resolves.toBe(13);
+    await handle.store.waits.redactAudit("run-audit", "pause", {
+      ...wait,
+      correlationId: "[REDACTED]",
+    });
+    await expect(handle.store.waits.list()).resolves.toEqual([
+      expect.objectContaining({
+        runId: "run-audit",
+        stepId: "pause",
+        wait: { ...wait, correlationId: "[REDACTED]" },
+      }),
+    ]);
+    await expect(
+      handle.store.waits.findSignalMatches(
+        "ready",
+        "late-secret-correlation",
+      ),
+    ).resolves.toEqual([{ runId: "run-audit", stepId: "pause" }]);
+    const storedWait = handle.db
+      .prepare("SELECT * FROM waits WHERE run_id = ? AND step_id = ?")
+      .get("run-audit", "pause");
+    expect(JSON.stringify(storedWait)).not.toContain(
+      "late-secret-correlation",
+    );
+    expect(storedWait).toMatchObject({ resume_at: null });
+    await expect(
+      handle.store.waits.get("run-audit", "pause"),
+    ).resolves.toEqual(wait);
+
+    await expect(
+      handle.store.signals.listConsumedWithoutProvenance(),
+    ).resolves.toEqual([
+      expect.objectContaining({ id: "signal-audit" }),
+    ]);
+    await handle.store.signals.markConsumed("signal-audit", {
+      consumedBy: { runId: "run-audit", stepId: "pause" },
+    });
+    await expect(
+      handle.store.signals.listConsumedByRun("run-audit"),
+    ).resolves.toEqual([
+      expect.objectContaining({ id: "signal-audit" }),
+    ]);
+    const originalConsumedAt = "2026-01-02T03:04:05.000Z";
+    handle.db
+      .prepare(
+        "UPDATE signals SET consumed_at = ? WHERE signal_id = ?",
+      )
+      .run(originalConsumedAt, "signal-audit");
+    await handle.store.signals.markConsumed("signal-audit", {
+      payload: { value: "[REDACTED]" },
+    });
+    expect(
+      handle.db
+        .prepare(
+          "SELECT consumed_at FROM signals WHERE signal_id = ?",
+        )
+        .get("signal-audit"),
+    ).toEqual({ consumed_at: originalConsumedAt });
+  });
+});
+
+describe("0008/0009 sealed operational state", () => {
+  it("upgrades legacy waits to generation-bound seals on first audit repair and preserves artifact text eligibility", async () => {
+    dir = await fs.mkdtemp(join(tmpdir(), "aart-sqlite-migration-test-"));
+    const dbPath = join(dir, "aart.db");
+    handle = await openSqliteStore(dbPath, { runMigrations: false });
+    const through0007 = new MigrationRunner(
+      ALL_SQLITE_MIGRATIONS(handle.db).slice(0, 7),
+      new SqliteMigrationWatermarkStore(handle.db),
+      handle.store,
+    );
+    await expect(through0007.up()).resolves.toBe(7);
+    const wait = {
+      type: "timer" as const,
+      resumeAt: "2027-01-01T00:00:00.000Z",
+      schemaVersion: 1,
+    };
+    handle.db
+      .prepare(
+        `INSERT INTO waits
+          (run_id, step_id, wait_condition_json, signal_match_fingerprint, wait_type, resume_at, created_at)
+         VALUES (?, ?, ?, NULL, ?, ?, ?)`,
+      )
+      .run(
+        "run-sealed-upgrade",
+        "pause",
+        JSON.stringify(wait),
+        "timer",
+        wait.resumeAt,
+        "2026-01-01T00:00:00.000Z",
+      );
+    handle.db
+      .prepare(
+        `INSERT INTO artifacts
+          (artifact_id, run_id, step_id, name, kind, mime, path_or_uri, bytes, created_at)
+         VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        "artifact-upgrade",
+        "run-sealed-upgrade",
+        "report",
+        "report",
+        "text/plain",
+        "report.txt",
+        0,
+        "2026-01-01T00:00:00.000Z",
+      );
+    const all = new MigrationRunner(
+      ALL_SQLITE_MIGRATIONS(handle.db),
+      new SqliteMigrationWatermarkStore(handle.db),
+      handle.store,
+    );
+    await expect(all.up()).resolves.toBe(13);
+    await handle.store.waits.redactAudit(
+      "run-sealed-upgrade",
+      "pause",
+      { ...wait, resumeAt: "[REDACTED]" },
+    );
+    await expect(
+      handle.store.waits.get("run-sealed-upgrade", "pause"),
+    ).resolves.toEqual(wait);
+    const storedWait = handle.db
+      .prepare(
+        "SELECT * FROM waits WHERE run_id = ? AND step_id = ?",
+      )
+      .get("run-sealed-upgrade", "pause") as {
+        operational_generation?: unknown;
+      };
+    expect(JSON.stringify(storedWait)).not.toContain(wait.resumeAt);
+    expect(typeof storedWait.operational_generation).toBe("string");
+    await expect(
+      handle.store.artifacts.isTextEligible("artifact-upgrade"),
+    ).resolves.toBe(true);
+    await handle.store.artifacts.replaceAudit("artifact-upgrade", {
+      name: "[REDACTED]",
+      kind: "[REDACTED]",
+      mime: "[REDACTED]",
+      path: "[REDACTED]",
+    });
+    await expect(
+      handle.store.artifacts.isTextEligible("artifact-upgrade"),
+    ).resolves.toBe(true);
+    handle.close();
+    handle = await openSqliteStore(dbPath);
+    await expect(
+      handle.store.waits.get("run-sealed-upgrade", "pause"),
+    ).resolves.toEqual(wait);
+  });
+});
+
+describe("0010 protected continuation state", () => {
+  it("lazily seals a legacy unconsumed signal before replacing its public audit", async () => {
+    dir = await fs.mkdtemp(
+      join(tmpdir(), "aart-sqlite-migration-test-"),
+    );
+    handle = await openSqliteStore(join(dir, "aart.db"), {
+      runMigrations: false,
+      blobsDir: join(dir, "blobs"),
+    });
+    const through0009 = new MigrationRunner(
+      ALL_SQLITE_MIGRATIONS(handle.db).slice(0, 9),
+      new SqliteMigrationWatermarkStore(handle.db),
+      handle.store,
+    );
+    await expect(through0009.up()).resolves.toBe(9);
+    handle.db
+      .prepare(
+        `INSERT INTO signals
+          (signal_id, name, correlation_id, payload_json, received_at, consumed_at, consumed_by_run_id, consumed_by_step_id)
+         VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL)`,
+      )
+      .run(
+        "legacy-unconsumed",
+        "late-secret",
+        "late-secret",
+        JSON.stringify({ value: "late-secret" }),
+        "2026-07-29T00:00:00.000Z",
+      );
+
+    const all = new MigrationRunner(
+      ALL_SQLITE_MIGRATIONS(handle.db),
+      new SqliteMigrationWatermarkStore(handle.db),
+      handle.store,
+    );
+    await expect(all.up()).resolves.toBe(13);
+    const runColumns = handle.db
+      .prepare("PRAGMA table_info(runs)")
+      .all() as Array<{ name: string }>;
+    expect(runColumns.map((column) => column.name)).toEqual(
+      expect.arrayContaining([
+        "operational_generation",
+        "operational_run_state_ciphertext",
+      ]),
+    );
+    await handle.store.signals.replaceAudit(
+      "legacy-unconsumed",
+      {
+        name: "[REDACTED]",
+        correlationId: "[REDACTED]",
+        payload: { value: "[REDACTED]" },
+      },
+      ["late-secret"],
+    );
+
+    await expect(handle.store.signals.list()).resolves.toEqual([
+      {
+        id: "legacy-unconsumed",
+        name: "[REDACTED]",
+        correlationId: "[REDACTED]",
+        payload: { value: "[REDACTED]" },
+        receivedAt: "2026-07-29T00:00:00.000Z",
+      },
+    ]);
+    await expect(
+      handle.store.signals.findUnconsumedMatch(
+        "late-secret",
+        "late-secret",
+      ),
+    ).resolves.toMatchObject({ id: "legacy-unconsumed" });
+    await expect(
+      handle.store.signals.getOperationalSecretValues(
+        "legacy-unconsumed",
+      ),
+    ).resolves.toEqual(["late-secret"]);
+    const stored = handle.db
+      .prepare(
+        `SELECT signal_match_fingerprint,
+                operational_signal_ciphertext,
+                operational_generation
+         FROM signals WHERE signal_id = ?`,
+      )
+      .get("legacy-unconsumed") as Record<string, unknown>;
+    expect(stored.signal_match_fingerprint).toEqual(
+      expect.any(String),
+    );
+    expect(stored.operational_signal_ciphertext).toEqual(
+      expect.any(String),
+    );
+    expect(stored.operational_generation).toEqual(
+      expect.any(String),
+    );
+    expect(JSON.stringify(stored)).not.toContain("late-secret");
+  });
+});
+
+describe("0011 artifact audit visibility", () => {
+  it("keeps legacy rows public by default and supports one-way withholding", async () => {
+    dir = await fs.mkdtemp(
+      join(tmpdir(), "aart-sqlite-migration-test-"),
+    );
+    handle = await openSqliteStore(join(dir, "aart.db"), {
+      runMigrations: false,
+      blobsDir: join(dir, "blobs"),
+    });
+    const through0010 = new MigrationRunner(
+      ALL_SQLITE_MIGRATIONS(handle.db).slice(0, 10),
+      new SqliteMigrationWatermarkStore(handle.db),
+      handle.store,
+    );
+    await expect(through0010.up()).resolves.toBe(10);
+    handle.db
+      .prepare(
+        `INSERT INTO artifacts
+          (artifact_id, run_id, step_id, name, kind, mime, path_or_uri, bytes, created_at, redaction_text_eligible)
+         VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        "legacy-artifact",
+        "legacy-run",
+        "report.bin",
+        "file",
+        "application/octet-stream",
+        "report.bin",
+        42,
+        "2026-07-29T00:00:00.000Z",
+        0,
+      );
+
+    const all = new MigrationRunner(
+      ALL_SQLITE_MIGRATIONS(handle.db),
+      new SqliteMigrationWatermarkStore(handle.db),
+      handle.store,
+    );
+    await expect(all.up()).resolves.toBe(13);
+    const migratedBlobGeneration = handle.db
+      .prepare(
+        "SELECT blob_generation FROM artifacts WHERE artifact_id = ?",
+      )
+      .get("legacy-artifact") as {
+      blob_generation: string | null;
+    };
+    expect(
+      migratedBlobGeneration.blob_generation,
+    ).toBeNull();
+    await expect(
+      handle.store.artifacts.getMetadata("legacy-artifact"),
+    ).resolves.toMatchObject({
+      id: "legacy-artifact",
+      bytes: 42,
+    });
+
+    await handle.store.artifacts.replaceAudit(
+      "legacy-artifact",
+      {
+        name: "report.bin",
+        kind: "file",
+        mime: "application/octet-stream",
+        path: "report.bin",
+      },
+      undefined,
+      { auditVisible: false },
+    );
+    await expect(
+      handle.store.artifacts.getMetadata("legacy-artifact"),
+    ).resolves.toBeUndefined();
+    await expect(
+      handle.store.artifacts.listForRedaction("legacy-run"),
+    ).resolves.toEqual([
+      expect.objectContaining({
+        artifact: expect.objectContaining({
+          id: "legacy-artifact",
+          bytes: 42,
+        }),
+        auditVisible: false,
+      }),
+    ]);
   });
 });

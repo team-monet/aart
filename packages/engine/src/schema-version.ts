@@ -14,14 +14,15 @@ import { AartError } from "@aart/types";
  * older-tagged record unsafe to resume naively (not on every unrelated code
  * change) — the same discipline a migration-version bump follows.
  */
-export const CURRENT_ENGINE_SCHEMA_VERSION = 1;
+export const CURRENT_ENGINE_SCHEMA_VERSION = 2;
 
 /**
  * The range of `schemaVersion` tags this engine build considers safe to
- * resume. `[DECISION]` v1 ships a single compatible version (no released
- * schema migrations yet to be backward-compatible with) — this is the seam
- * a future version-skew-tolerant release would widen, not a hardcoded "must
- * equal current" check that would need rewriting later.
+ * resume. Version 2 introduces security-significant StepTrace secret-taint
+ * semantics, so version 1 records are not safe to resume as version 2:
+ * their redacted values may already have lost provenance. This is the seam
+ * a future version-skew-tolerant release would widen after an explicit,
+ * safe migration rather than silently accepting older records.
  */
 export function isSchemaVersionCompatible(recordVersion: number, engineVersion: number = CURRENT_ENGINE_SCHEMA_VERSION): boolean {
   return recordVersion === engineVersion;

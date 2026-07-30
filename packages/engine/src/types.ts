@@ -67,8 +67,9 @@ export function createBlockRegistry(implementations: BlockImplementation[]): Blo
  *
  * `environment` is threaded through from `TriggerRunInput` (never persisted
  * as its own `RunRecord` field — see `run-lifecycle.ts`'s doc comment on
- * `params.environment` — but available live on every call since a resumed
- * run rehydrates it from `run.params.environment`).
+ * `params.environment`). Execution reads it from the sealed operational run,
+ * because the public audit value may be redacted after a matching secret is
+ * discovered.
  */
 export type GetGrantedCapabilities = (workflow: Workflow, environment: string | undefined) => string[] | Promise<string[]>;
 
@@ -107,6 +108,16 @@ export interface EngineConfig {
   /** Optional per-run resolver used to dispatch a Pack implementation pinned by the run snapshot instead of the process-global active version. */
   resolveBlockForRun?: (run: RunRecord, blockId: string) => BlockImplementation | undefined;
   /**
+   * Engine-owned trust decision for authentication-only secret use. A block
+   * cannot make itself trusted by passing `{ usage: "credential" }`; when
+   * this callback is absent or returns false, the request is conservatively
+   * treated as ordinary data use and the block's outputs are secret-tainted.
+   */
+  canUseCredentialSecrets?: (input: {
+    run: RunRecord;
+    block: BlockImplementation;
+  }) => boolean;
+  /**
    * Engine/deployment-level config, NOT a per-workflow declaration (architecture
    * §4.2) — this is what keeps a workflow author from raising their own bound.
    * Default: 10,000. Reuses `IterationLimitExceededError` (architecture §4.2/§8),
@@ -114,7 +125,7 @@ export interface EngineConfig {
    * (`detail.kind: "guardedBackEdge"`).
    */
   forEachArrayLimit?: number;
-  /** Engine-code schema-version tag stamped onto every persisted `WaitCondition`/`RunRecord` this engine instance writes, and checked for compatibility on every resume (architecture §4.7). Defaults to `CURRENT_ENGINE_SCHEMA_VERSION` (schema-version.ts, currently `1`) — override only to simulate a different engine version in tests (the rolling-upgrade/version-skew test fixture deliberately does this). */
+  /** Engine-code schema-version tag stamped onto every persisted `WaitCondition`/`RunRecord` this engine instance writes, and checked for compatibility on every resume (architecture §4.7). Defaults to `CURRENT_ENGINE_SCHEMA_VERSION` (schema-version.ts, currently `2`) — override only to simulate a different engine version in tests (the rolling-upgrade/version-skew test fixture deliberately does this). */
   schemaVersion?: number;
   /** Injectable clock, defaults to `() => new Date()`. */
   now?: () => Date;
@@ -124,8 +135,10 @@ export interface EngineConfig {
   computePackHashes?: import("./snapshot.js").ComputePackHashes;
   /**
    * S9 integration (reconciliation ledger item 10, SEAMS.md S3-E1): called
-   * once a run reaches a terminal status (`finalizeTerminal`/`cancelRun`,
-   * run-lifecycle.ts), AFTER the terminal `RunRecord` is durably persisted
+   * after every durable transition into a terminal status, including a
+   * previously completed run retrospectively invalidated when a replayed
+   * cache output is later proven secret-derived. The callback runs AFTER
+   * the terminal `RunRecord` is durably persisted
    * and any queued same-key run is released — the same per-run resource-
    * cleanup cadence `@aart/blocks-core`'s browser-session manager asked for
    * ("the engine... once a run reaches a terminal status... should call

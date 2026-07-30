@@ -4,6 +4,7 @@
 import { promises as fs } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { RunRecord } from "@aart/types";
 import { createAartContext, type AartContext, type CreateAartContextOptions } from "./context.js";
 
 export async function makeTempRoot(prefix = "aart-mcp-"): Promise<string> {
@@ -24,6 +25,54 @@ export async function createTestContext(options: Omit<CreateAartContextOptions, 
   const root = await makeTempRoot();
   const ctx = createAartContext({ ...options, root });
   return { ctx, root, cleanup: () => cleanupTempRoot(root) };
+}
+
+export async function putCorrectableRun(
+  ctx: AartContext,
+  runId: string,
+  stepId: string,
+): Promise<void> {
+  const now = "2026-01-01T00:00:00.000Z";
+  const run: RunRecord = {
+    runId,
+    workflowId: "correction-fixture",
+    workflowVersion: "0.1.0",
+    status: "completed",
+    approved: true,
+    approvalMode: "dev",
+    trigger: {
+      type: "manual",
+      id: `trigger-${runId}`,
+      source: "test",
+      payload: {},
+      receivedAt: now,
+    },
+    inputs: {},
+    trace: [
+      {
+        seq: 0,
+        stepId,
+        block: "test.block",
+        status: "completed",
+        inputs: {},
+        outputs: {},
+        startedAt: now,
+      },
+    ],
+    waits: [],
+    artifacts: [],
+    snapshot: {
+      definitions: {},
+      resolvedVersions: {},
+      packHashes: {},
+      capturedAt: now,
+    },
+    startedAt: now,
+    updatedAt: now,
+    endedAt: now,
+    schemaVersion: 1,
+  };
+  await ctx.store.runs.put(run);
 }
 
 /** A small, valid sugar-form workflow YAML fixture reused across handler tests — a 2-step workflow with no wait/fail blocks, so it always runs straight through to "completed" under StubEngine. */
