@@ -842,13 +842,20 @@ export function runAartStoreConformanceSuite(label: string, options: Conformance
           reviewer: "late-secret",
           createdAt: new Date().toISOString(),
         };
+        // A pre-migration row has no sealed target. Its first retrospective
+        // repair must capture the exact identity before moving the public
+        // audit to a redacted key.
         await store.corrections.put(correction);
-        await store.corrections.replaceAudit(correction, {
+        const replacement =
+          await store.corrections.replaceAudit(correction, {
+            fieldPath: "outputs.[REDACTED]",
+            observed: "[REDACTED]",
+            corrected: "[REDACTED]",
+            reason: "[REDACTED]",
+            reviewer: "[REDACTED]",
+          });
+        expect(replacement).toMatchObject({
           fieldPath: "outputs.[REDACTED]",
-          observed: "[REDACTED]",
-          corrected: "[REDACTED]",
-          reason: "[REDACTED]",
-          reviewer: "[REDACTED]",
         });
         await expect(
           store.corrections.list({ runId: correction.runId }),
@@ -862,6 +869,21 @@ export function runAartStoreConformanceSuite(label: string, options: Conformance
             reviewer: "[REDACTED]",
           },
         ]);
+        await expect(
+          store.corrections.getOperationalTarget(
+            replacement!,
+          ),
+        ).resolves.toEqual({
+          stepId: correction.stepId,
+          fieldPath: correction.fieldPath,
+        });
+        await expect(
+          store.corrections.findByOperationalTarget(
+            correction.runId,
+            correction.stepId,
+            correction.fieldPath,
+          ),
+        ).resolves.toEqual(replacement);
       });
 
       it("replaceAudit preserves colliding redacted corrections without deriving a suffix from the secret path", async () => {
@@ -902,6 +924,24 @@ export function runAartStoreConformanceSuite(label: string, options: Conformance
         ]);
         expect(JSON.stringify(repaired)).not.toContain("first-secret");
         expect(JSON.stringify(repaired)).not.toContain("second-secret");
+        await expect(
+          store.corrections.findByOperationalTarget(
+            runId,
+            first.stepId,
+            first.fieldPath,
+          ),
+        ).resolves.toMatchObject({
+          fieldPath: "outputs.[REDACTED]",
+        });
+        await expect(
+          store.corrections.findByOperationalTarget(
+            runId,
+            second.stepId,
+            second.fieldPath,
+          ),
+        ).resolves.toMatchObject({
+          fieldPath: "outputs.[REDACTED]#2",
+        });
       });
     });
 
@@ -911,6 +951,31 @@ export function runAartStoreConformanceSuite(label: string, options: Conformance
         await store.evals.putSuite(suite);
         await expect(store.evals.getSuite(suite.id)).resolves.toEqual(suite);
         await expect(store.evals.listSuites()).resolves.toEqual(expect.arrayContaining([suite]));
+      });
+
+      it("replaceExampleAudit atomically moves an example id", async () => {
+        const example: EvalExample = {
+          id: uniqueId("example"),
+          suiteId: uniqueId("suite"),
+          input: { value: "secret" },
+          expected: "secret",
+        };
+        await store.evals.putExample(example);
+        const repaired = {
+          ...example,
+          id: uniqueId("example-safe"),
+          input: { value: "[REDACTED]" },
+          expected: "[REDACTED]",
+        };
+
+        await store.evals.replaceExampleAudit(
+          example.id,
+          repaired,
+        );
+
+        await expect(
+          store.evals.listExamples(example.suiteId),
+        ).resolves.toEqual([repaired]);
       });
 
       it("putExample/listExamples filters by suiteId", async () => {

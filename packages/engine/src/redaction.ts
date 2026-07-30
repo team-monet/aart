@@ -4,6 +4,7 @@
 // run's currently-resolved secret-refs set fresh on every call. This module
 // is the one place that threading happens; every persist call site in this
 // package goes through `applyRedaction`, never `config.redact` directly.
+import { randomUUID } from "node:crypto";
 import type { SecretResolver } from "@aart/expr";
 import type {
   AartStore,
@@ -12,6 +13,8 @@ import type {
 import type {
   ApprovalTask,
   Artifact,
+  Correction,
+  EvalExample,
   RedactFn,
   RunRecord,
   Signal,
@@ -28,6 +31,15 @@ import { jsonValuesEqual } from "./output-validation.js";
 
 function escapeJsonPointerSegment(value: string): string {
   return value.replaceAll("~", "~0").replaceAll("/", "~1");
+}
+
+function correctionAuditKey(
+  correction: Pick<
+    Correction,
+    "runId" | "stepId" | "fieldPath"
+  >,
+): string {
+  return `${correction.runId}:${correction.stepId}:${correction.fieldPath}`;
 }
 
 export function changedJsonPointers(
@@ -594,6 +606,9 @@ export async function repairCustomerVisibleAudits(
     unattributedSignals,
     corrections,
     events,
+    evalSuites,
+    evalExamples,
+    evalRuns,
   ] = await Promise.all([
     options.includeRuns === false
       ? Promise.resolve([])
@@ -625,6 +640,9 @@ export async function repairCustomerVisibleAudits(
     store.events.list(
       runId === undefined ? undefined : { runId },
     ),
+    store.evals.listSuites(),
+    store.evals.listExamples(),
+    store.evals.listRuns(),
   ]);
 
   for (const run of runs) {
@@ -659,24 +677,27 @@ export async function repairCustomerVisibleAudits(
       });
     }
     if (
-      activeState !== undefined &&
-      (run.status === "completed" ||
-        run.status === "failed" ||
-        run.status === "cancelled")
+      run.status === "completed" ||
+      run.status === "failed" ||
+      run.status === "cancelled"
     ) {
+      const exactState = activeState ?? {
+        run,
+        resolvedSecretValues: [],
+      };
       const {
         pendingIdempotencyReplays: _pendingClaims,
         ...archiveBase
-      } = activeState;
+      } = exactState;
       await store.runs.putOperationalState(run.runId, {
         ...archiveBase,
         run: mergeOperationalRunTaint(
-          activeState.run,
+          exactState.run,
           repaired,
         ),
         resolvedSecretValues: [
           ...new Set([
-            ...activeState.resolvedSecretValues,
+            ...exactState.resolvedSecretValues,
             ...resolvedSecretRefs,
           ]),
         ],
@@ -769,6 +790,7 @@ export async function repairCustomerVisibleAudits(
       );
     }
   }
+  const correctionKeyRewrites = new Map<string, string>();
   for (const correction of corrections) {
     const audit = {
       fieldPath: applyRedaction(
@@ -807,10 +829,161 @@ export async function repairCustomerVisibleAudits(
         reviewer: correction.reviewer,
       })
     ) {
-      await store.corrections.replaceAudit(
+      const replaced = await store.corrections.replaceAudit(
         correction,
         audit,
       );
+      if (replaced !== undefined) {
+        correctionKeyRewrites.set(
+          correctionAuditKey(correction),
+          correctionAuditKey(replaced),
+        );
+      }
+    }
+  }
+  const evalExampleIdRewrites = new Map<string, string>();
+  const repairedByOriginalId = new Map<
+    string,
+    EvalExample
+  >();
+  const repairEvalExample = async (
+    example: EvalExample,
+  ): Promise<EvalExample> => {
+    const alreadyRepaired =
+      repairedByOriginalId.get(example.id);
+    if (alreadyRepaired !== undefined) {
+      return alreadyRepaired;
+    }
+    if (
+      runId !== undefined &&
+      example.sourceRunId !== runId
+    ) {
+      return example;
+    }
+    const redactedId = applyRedaction(
+      redact,
+      example.id,
+      resolvedSecretRefs,
+    ) as string;
+    const createdFromCorrection =
+      example.createdFromCorrection === undefined
+        ? undefined
+        : correctionKeyRewrites.get(
+            example.createdFromCorrection,
+          ) ??
+          (applyRedaction(
+            redact,
+            example.createdFromCorrection,
+            resolvedSecretRefs,
+          ) as string);
+    const repairedExample: EvalExample = {
+      ...example,
+      id:
+        redactedId === example.id
+          ? example.id
+          : `ex_redacted_${randomUUID()}`,
+      input: applyRedaction(
+        redact,
+        example.input,
+        resolvedSecretRefs,
+      ),
+      expected: applyRedaction(
+        redact,
+        example.expected,
+        resolvedSecretRefs,
+      ),
+      ...(example.scorerConfig === undefined
+        ? {}
+        : {
+            scorerConfig: applyRedaction(
+              redact,
+              example.scorerConfig,
+              resolvedSecretRefs,
+            ),
+          }),
+      ...(example.tags === undefined
+        ? {}
+        : {
+            tags: applyRedaction(
+              redact,
+              example.tags,
+              resolvedSecretRefs,
+            ) as string[],
+          }),
+      ...(createdFromCorrection === undefined
+        ? {}
+        : { createdFromCorrection }),
+    };
+    if (
+      JSON.stringify(repairedExample) !==
+      JSON.stringify(example)
+    ) {
+      await store.evals.replaceExampleAudit(
+        example.id,
+        repairedExample,
+      );
+      repairedByOriginalId.set(
+        example.id,
+        repairedExample,
+      );
+      if (repairedExample.id !== example.id) {
+        evalExampleIdRewrites.set(
+          example.id,
+          repairedExample.id,
+        );
+      }
+    }
+    return repairedExample;
+  };
+  for (const example of evalExamples) {
+    await repairEvalExample(example);
+  }
+  for (const suite of evalSuites) {
+    const repairedEmbedded = await Promise.all(
+      suite.examples.map((example) =>
+        repairEvalExample(example),
+      ),
+    );
+    if (
+      JSON.stringify(repairedEmbedded) !==
+      JSON.stringify(suite.examples)
+    ) {
+      await store.evals.putSuite({
+        ...suite,
+        examples: repairedEmbedded,
+      });
+    }
+  }
+  for (const evalRun of evalRuns) {
+    const regressions = evalRun.regressions.map(
+      (id) =>
+        evalExampleIdRewrites.get(id) ??
+        (applyRedaction(
+          redact,
+          id,
+          resolvedSecretRefs,
+        ) as string),
+    );
+    const improvements = evalRun.improvements.map(
+      (id) =>
+        evalExampleIdRewrites.get(id) ??
+        (applyRedaction(
+          redact,
+          id,
+          resolvedSecretRefs,
+        ) as string),
+    );
+    if (
+      JSON.stringify(regressions) !==
+        JSON.stringify(evalRun.regressions) ||
+      JSON.stringify(improvements) !==
+        JSON.stringify(evalRun.improvements)
+    ) {
+      await store.evals.putRun({
+        ...evalRun,
+        regressions,
+        improvements,
+      });
     }
   }
   for (const event of events) {

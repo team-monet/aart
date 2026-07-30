@@ -597,6 +597,42 @@ export function createSqliteAddArtifactBlobGenerationMigration(
   };
 }
 
+/** Seals the exact correction target separately from its redacted audit. */
+export function createSqliteAddCorrectionOperationalTargetMigration(
+  db: DatabaseSync,
+): Migration {
+  const addColumn = (definition: string): void => {
+    try {
+      db.exec(
+        `ALTER TABLE corrections ADD COLUMN ${definition}`,
+      );
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        error.message.includes("duplicate column name")
+      ) {
+        return;
+      }
+      throw error;
+    }
+  };
+  return {
+    id: "0013_correction_operational_target",
+    async up(): Promise<void> {
+      addColumn("operational_generation TEXT");
+      addColumn("operational_target_ciphertext TEXT");
+    },
+    async down(): Promise<void> {
+      db.exec(
+        "ALTER TABLE corrections DROP COLUMN operational_target_ciphertext",
+      );
+      db.exec(
+        "ALTER TABLE corrections DROP COLUMN operational_generation",
+      );
+    },
+  };
+}
+
 export const ALL_SQLITE_MIGRATIONS = (db: DatabaseSync): Migration[] => [
   createSqliteInitMigration(db),
   createSqliteAddDeploymentPromotedMigration(db),
@@ -610,4 +646,5 @@ export const ALL_SQLITE_MIGRATIONS = (db: DatabaseSync): Migration[] => [
   createSqliteAddProtectedContinuationStateMigration(db),
   createSqliteAddArtifactAuditVisibilityMigration(db),
   createSqliteAddArtifactBlobGenerationMigration(db),
+  createSqliteAddCorrectionOperationalTargetMigration(db),
 ];

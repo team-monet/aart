@@ -11,7 +11,7 @@ import { createFsStore } from "@aart/store";
 import { afterEach, describe, expect, it } from "vitest";
 import { run, USAGE, VERSION } from "./cli.js";
 import { createCliContext, type CliContext } from "./cli-context.js";
-import { approvalWaitWorkflowYaml, createTestCli, sampleWorkflowYaml, type TestCli } from "./test-utils.js";
+import { approvalWaitWorkflowYaml, createTestCli, putCorrectableRun, sampleWorkflowYaml, type TestCli } from "./test-utils.js";
 
 let tc: TestCli;
 let remoteServer: Server | undefined;
@@ -486,6 +486,7 @@ describe("aart pack", () => {
 describe("aart correction add / aart correction list", () => {
   it("records a correction then lists it back", async () => {
     tc = await createTestCli();
+    await putCorrectableRun(tc, "run_1", "extract");
     const addOutcome = await run(
       [
         "correction",

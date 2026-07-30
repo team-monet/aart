@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import type { TestContext } from "../test-utils.js";
-import { approvalWaitWorkflowYaml, createTestContext, sampleWorkflowYaml } from "../test-utils.js";
+import { approvalWaitWorkflowYaml, createTestContext, putCorrectableRun, sampleWorkflowYaml } from "../test-utils.js";
 import { registerWorkflowHandler } from "./authoring.js";
 import { runWorkflowHandler } from "./execution.js";
 import { approveHandler, diffWorkflowHandler, promoteWorkflowHandler, recordCorrectionHandler, requestApprovalHandler } from "./governance.js";
@@ -206,6 +206,7 @@ describe("requestApprovalHandler / approveHandler — the riskReview GATE writer
 describe("recordCorrectionHandler (aart_record_correction)", () => {
   it("persists a correction with the required reviewer field", async () => {
     tc = await createTestContext();
+    await putCorrectableRun(tc.ctx, "run_1", "extract");
     const result = await recordCorrectionHandler(tc.ctx, {
       runId: "run_1",
       stepId: "extract",
@@ -224,6 +225,11 @@ describe("recordCorrectionHandler (aart_record_correction)", () => {
   // V1 event log foundation (AMENDMENTS.md A61)
   it("emits a correction.recorded event carrying runId", async () => {
     tc = await createTestContext();
+    await putCorrectableRun(
+      tc.ctx,
+      "run_event_1",
+      "extract",
+    );
     await recordCorrectionHandler(tc.ctx, {
       runId: "run_event_1",
       stepId: "extract",

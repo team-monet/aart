@@ -283,11 +283,21 @@ export interface ApprovalStore {
   list(filter?: { runId?: string; status?: ApprovalTask["status"] }): Promise<ApprovalTask[]>;
 }
 
+/** Exact correction target retained outside the customer-visible audit. */
+export interface CorrectionOperationalTarget {
+  stepId: string;
+  fieldPath: string;
+}
+
 export interface CorrectionStore {
-  put(correction: Correction): Promise<void>;
+  put(
+    correction: Correction,
+    operationalTarget?: CorrectionOperationalTarget,
+  ): Promise<void>;
   /**
    * Replaces a correction audit even when redaction changes its fieldPath
-   * key. The old keyed row/file is removed in the same adapter operation.
+   * key. The old keyed row/file is removed in the same adapter operation,
+   * while its sealed exact target remains attached.
    */
   replaceAudit(
     original: Pick<Correction, "runId" | "stepId" | "fieldPath">,
@@ -295,7 +305,18 @@ export interface CorrectionStore {
       Correction,
       "fieldPath" | "observed" | "corrected" | "reason" | "reviewer"
     >,
-  ): Promise<void>;
+  ): Promise<Correction | undefined>;
+  getOperationalTarget(
+    correction: Pick<
+      Correction,
+      "runId" | "stepId" | "fieldPath"
+    >,
+  ): Promise<CorrectionOperationalTarget | undefined>;
+  findByOperationalTarget(
+    runId: string,
+    stepId: string,
+    fieldPath: string,
+  ): Promise<Correction | undefined>;
   list(filter?: { runId?: string; stepId?: string }): Promise<Correction[]>;
 }
 
@@ -304,7 +325,12 @@ export interface EvalStore {
   getSuite(id: string): Promise<EvalSuite | undefined>;
   listSuites(): Promise<EvalSuite[]>;
   putExample(example: EvalExample): Promise<void>;
-  listExamples(suiteId: string): Promise<EvalExample[]>;
+  /** Atomically replaces/moves a customer-visible example audit by id. */
+  replaceExampleAudit(
+    originalId: string,
+    example: EvalExample,
+  ): Promise<void>;
+  listExamples(suiteId?: string): Promise<EvalExample[]>;
   putRun(run: EvalRun): Promise<void>;
   listRuns(filter?: { suiteId?: string; workflowId?: string }): Promise<EvalRun[]>;
 }

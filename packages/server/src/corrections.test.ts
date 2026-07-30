@@ -55,6 +55,34 @@ describe("findCorrectionByKey", () => {
     });
   });
 
+  it("keeps a previously issued exact key resolvable after the public field path is redacted", async () => {
+    await withFixture(async (fx) => {
+      const correction = fixtureCorrection();
+      await fx.store.corrections.put(correction, {
+        stepId: correction.stepId,
+        fieldPath: correction.fieldPath,
+      });
+      await fx.store.corrections.replaceAudit(correction, {
+        fieldPath: "[REDACTED]",
+        observed: correction.observed,
+        corrected: correction.corrected,
+        reason: correction.reason,
+        reviewer: correction.reviewer,
+      });
+      const [publicCorrection] =
+        await fx.store.corrections.list({
+          runId: correction.runId,
+        });
+
+      await expect(
+        findCorrectionByKey(
+          fx.store,
+          "run-1:step1:outputs.total",
+        ),
+      ).resolves.toEqual(publicCorrection);
+    });
+  });
+
   it("returns undefined for a key that doesn't match any stored correction", async () => {
     await withFixture(async (fx) => {
       expect(await findCorrectionByKey(fx.store, "run-missing:step1:outputs.total")).toBeUndefined();

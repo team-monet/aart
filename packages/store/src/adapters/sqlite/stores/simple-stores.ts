@@ -4,6 +4,8 @@
 // exactly (same member list: Approval, Correction, Eval, Deployment,
 // Environment, Schedule, PromptRegistry, SchemaRegistry, PackManifest,
 // RejectedTrigger, StandingApproval, JobQueue, IdempotencyLedger).
+import { randomUUID } from "node:crypto";
+import { join } from "node:path";
 import type {
   ApprovalTask,
   Correction,
@@ -21,6 +23,7 @@ import type {
 } from "@aart/types";
 import type {
   ApprovalStore,
+  CorrectionOperationalTarget,
   CorrectionStore,
   DeploymentStore,
   EnvironmentStore,
@@ -36,6 +39,10 @@ import type {
   SchemaRegistryStore,
   StandingApprovalStore,
 } from "../../../types.js";
+import {
+  openOperationalState,
+  sealOperationalState,
+} from "../../operational-state-seal.js";
 import { dbAll, dbGet, dbRun, fromBool, fromBoolOrNull, fromJson, toBool, toBoolOrNull, toJson, type SqlExec } from "../db.js";
 
 // ---------------------------------------------------------------------------
@@ -127,6 +134,8 @@ interface CorrectionRow {
   reason: string;
   reviewer: string;
   created_at: string;
+  operational_generation: string | null;
+  operational_target_ciphertext: string | null;
 }
 
 function rowToCorrection(row: CorrectionRow): Correction {
@@ -143,18 +152,60 @@ function rowToCorrection(row: CorrectionRow): Correction {
 }
 
 export class SqliteCorrectionStore implements CorrectionStore {
-  constructor(private readonly exec: SqlExec) {}
+  private readonly operationKeyPath: string;
 
-  async put(correction: Correction): Promise<void> {
+  constructor(
+    private readonly exec: SqlExec,
+    operationalStateDir: string,
+  ) {
+    this.operationKeyPath = join(
+      operationalStateDir,
+      ".correction-operational-key",
+    );
+  }
+
+  async put(
+    correction: Correction,
+    operationalTarget?: CorrectionOperationalTarget,
+  ): Promise<void> {
+    const generation =
+      operationalTarget === undefined
+        ? undefined
+        : randomUUID();
+    const sealedTarget =
+      operationalTarget === undefined
+        ? undefined
+        : await sealOperationalState(
+            this.operationKeyPath,
+            [
+              correction.runId,
+              generation!,
+              "correction-target",
+            ],
+            operationalTarget,
+          );
     await this.exec((db) =>
       dbRun(
         db,
-        `INSERT INTO corrections (run_id, step_id, field_path, observed_json, corrected_json, reason, reviewer, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO corrections (run_id, step_id, field_path, observed_json, corrected_json, reason, reviewer, created_at, operational_generation, operational_target_ciphertext)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(run_id, step_id, field_path) DO UPDATE SET
            observed_json = excluded.observed_json, corrected_json = excluded.corrected_json,
-           reason = excluded.reason, reviewer = excluded.reviewer, created_at = excluded.created_at`,
-        [correction.runId, correction.stepId, correction.fieldPath, JSON.stringify(correction.observed), JSON.stringify(correction.corrected), correction.reason, correction.reviewer, correction.createdAt],
+           reason = excluded.reason, reviewer = excluded.reviewer, created_at = excluded.created_at,
+           operational_generation = COALESCE(excluded.operational_generation, corrections.operational_generation),
+           operational_target_ciphertext = COALESCE(excluded.operational_target_ciphertext, corrections.operational_target_ciphertext)`,
+        [
+          correction.runId,
+          correction.stepId,
+          correction.fieldPath,
+          JSON.stringify(correction.observed),
+          JSON.stringify(correction.corrected),
+          correction.reason,
+          correction.reviewer,
+          correction.createdAt,
+          generation ?? null,
+          sealedTarget ?? null,
+        ],
       ),
     );
   }
@@ -165,28 +216,49 @@ export class SqliteCorrectionStore implements CorrectionStore {
       Correction,
       "fieldPath" | "observed" | "corrected" | "reason" | "reviewer"
     >,
-  ): Promise<void> {
-    await this.exec((db) => {
+  ): Promise<Correction | undefined> {
+    const fallbackGeneration = randomUUID();
+    const fallbackCiphertext =
+      await sealOperationalState(
+        this.operationKeyPath,
+        [
+          original.runId,
+          fallbackGeneration,
+          "correction-target",
+        ],
+        {
+          stepId: original.stepId,
+          fieldPath: original.fieldPath,
+        },
+      );
+    return this.exec((db) => {
       const row = dbGet<CorrectionRow>(
         db,
         `SELECT * FROM corrections
          WHERE run_id = ? AND step_id = ? AND field_path = ?`,
         [original.runId, original.stepId, original.fieldPath],
       );
-      if (!row) return;
+      if (!row) return undefined;
+      const hasRetainedTarget =
+        row.operational_generation !== null &&
+        row.operational_target_ciphertext !== null;
+      const operationalGeneration = hasRetainedTarget
+        ? row.operational_generation
+        : fallbackGeneration;
+      const operationalTargetCiphertext =
+        hasRetainedTarget
+          ? row.operational_target_ciphertext
+          : fallbackCiphertext;
       const isOccupied = (fieldPath: string): boolean =>
+        !(
+          fieldPath === original.fieldPath
+        ) &&
         dbGet<{ found: number }>(
           db,
           `SELECT 1 AS found FROM corrections
            WHERE run_id = ? AND step_id = ? AND field_path = ?
-             AND field_path <> ?
            LIMIT 1`,
-          [
-            original.runId,
-            original.stepId,
-            fieldPath,
-            original.fieldPath,
-          ],
+          [original.runId, original.stepId, fieldPath],
         ) !== undefined;
       let collisionIndex = 1;
       let replacementFieldPath = audit.fieldPath;
@@ -203,8 +275,8 @@ export class SqliteCorrectionStore implements CorrectionStore {
       dbRun(
         db,
         `INSERT INTO corrections
-          (run_id, step_id, field_path, observed_json, corrected_json, reason, reviewer, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          (run_id, step_id, field_path, observed_json, corrected_json, reason, reviewer, created_at, operational_generation, operational_target_ciphertext)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           row.run_id,
           row.step_id,
@@ -214,9 +286,89 @@ export class SqliteCorrectionStore implements CorrectionStore {
           audit.reason,
           audit.reviewer,
           row.created_at,
+          operationalGeneration,
+          operationalTargetCiphertext,
         ],
       );
+      return rowToCorrection({
+        ...row,
+        field_path: replacementFieldPath,
+        observed_json: JSON.stringify(audit.observed),
+        corrected_json: JSON.stringify(audit.corrected),
+        reason: audit.reason,
+        reviewer: audit.reviewer,
+        operational_generation: operationalGeneration,
+        operational_target_ciphertext:
+          operationalTargetCiphertext,
+      });
     });
+  }
+
+  private async openTarget(
+    row: CorrectionRow,
+  ): Promise<CorrectionOperationalTarget | undefined> {
+    if (
+      row.operational_generation === null ||
+      row.operational_target_ciphertext === null
+    ) {
+      return undefined;
+    }
+    return openOperationalState<CorrectionOperationalTarget>(
+      this.operationKeyPath,
+      [
+        row.run_id,
+        row.operational_generation,
+        "correction-target",
+      ],
+      row.operational_target_ciphertext,
+    );
+  }
+
+  async getOperationalTarget(
+    correction: Pick<
+      Correction,
+      "runId" | "stepId" | "fieldPath"
+    >,
+  ): Promise<CorrectionOperationalTarget | undefined> {
+    const row = await this.exec((db) =>
+      dbGet<CorrectionRow>(
+        db,
+        `SELECT * FROM corrections
+         WHERE run_id = ? AND step_id = ? AND field_path = ?`,
+        [
+          correction.runId,
+          correction.stepId,
+          correction.fieldPath,
+        ],
+      ),
+    );
+    return row === undefined
+      ? undefined
+      : this.openTarget(row);
+  }
+
+  async findByOperationalTarget(
+    runId: string,
+    stepId: string,
+    fieldPath: string,
+  ): Promise<Correction | undefined> {
+    const rows = await this.exec((db) =>
+      dbAll<CorrectionRow>(
+        db,
+        "SELECT * FROM corrections WHERE run_id = ?",
+        [runId],
+      ),
+    );
+    for (const row of rows) {
+      const target = await this.openTarget(row);
+      if (
+        target?.stepId === stepId &&
+        target.fieldPath === fieldPath
+      ) {
+        return rowToCorrection(row);
+      }
+    }
+    return undefined;
   }
 
   async list(filter?: { runId?: string; stepId?: string }): Promise<Correction[]> {
@@ -374,8 +526,52 @@ export class SqliteEvalStore implements EvalStore {
     );
   }
 
-  async listExamples(suiteId: string): Promise<EvalExample[]> {
-    const rows = await this.exec((db) => dbAll<EvalExampleRow>(db, "SELECT * FROM eval_examples WHERE suite_id = ?", [suiteId]));
+  async replaceExampleAudit(
+    originalId: string,
+    example: EvalExample,
+  ): Promise<void> {
+    await this.exec((db) => {
+      dbRun(
+        db,
+        `DELETE FROM eval_examples WHERE id = ?`,
+        [originalId],
+      );
+      dbRun(
+        db,
+        `INSERT INTO eval_examples (id, suite_id, source_run_id, input_json, expected_json, scorer_config_json, tags_json, created_from_correction)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET
+           suite_id = excluded.suite_id, source_run_id = excluded.source_run_id,
+           input_json = excluded.input_json, expected_json = excluded.expected_json,
+           scorer_config_json = excluded.scorer_config_json, tags_json = excluded.tags_json,
+           created_from_correction = excluded.created_from_correction`,
+        [
+          example.id,
+          example.suiteId,
+          example.sourceRunId ?? null,
+          JSON.stringify(example.input),
+          JSON.stringify(example.expected),
+          toJson(example.scorerConfig),
+          toJson(example.tags),
+          example.createdFromCorrection ?? null,
+        ],
+      );
+    });
+  }
+
+  async listExamples(suiteId?: string): Promise<EvalExample[]> {
+    const rows = await this.exec((db) =>
+      suiteId === undefined
+        ? dbAll<EvalExampleRow>(
+            db,
+            "SELECT * FROM eval_examples",
+          )
+        : dbAll<EvalExampleRow>(
+            db,
+            "SELECT * FROM eval_examples WHERE suite_id = ?",
+            [suiteId],
+          ),
+    );
     return rows.map(rowToEvalExample);
   }
 

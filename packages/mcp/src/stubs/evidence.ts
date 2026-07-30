@@ -17,6 +17,7 @@
 // of S6's real 12-kind scorer registry (architecture §9.5).
 import type { AartStore } from "@aart/store";
 import {
+  createEvalExampleFromCorrection as evidenceCreateEvalExampleFromCorrection,
   recordCorrection as evidenceRecordCorrection,
 } from "@aart/evidence";
 import {
@@ -161,19 +162,16 @@ export function createStubEvidence(store: AartStore, engine: EnginePort): Eviden
     recordCorrection: (input) =>
       evidenceRecordCorrection(store, input),
 
-    async createEvalExampleFromCorrection(correction: Correction, suiteId: string): Promise<EvalExample> {
-      const example: EvalExample = {
-        id: newId("example"),
+    createEvalExampleFromCorrection: (
+      correction: Correction,
+      suiteId: string,
+    ): Promise<EvalExample> =>
+      evidenceCreateEvalExampleFromCorrection(
+        store,
+        correction,
         suiteId,
-        sourceRunId: correction.runId,
-        input: { stepId: correction.stepId, fieldPath: correction.fieldPath, observed: correction.observed },
-        expected: correction.corrected,
-        tags: ["from-correction"],
-        createdFromCorrection: `${correction.runId}:${correction.stepId}:${correction.fieldPath}`,
-      };
-      await store.evals.putExample(example);
-      return example;
-    },
+        { tags: ["from-correction"] },
+      ),
 
     async runEval(suite: EvalSuite, workflowId: string, workflowVersion: string): Promise<EvalRun> {
       const workflow = await store.workflows.get(workflowId, workflowVersion);

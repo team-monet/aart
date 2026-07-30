@@ -4,6 +4,7 @@
 // recording a correction), because the spec lists them as things a
 // correction *can* do, not things it *always* does." Recording a Correction
 // (correction.ts) never triggers any of these automatically.
+import { randomUUID } from "node:crypto";
 import type { AartStore } from "@aart/store";
 import type { Correction, EvalExample, ImprovementBrief, RunRecord, StepTrace, Workflow } from "@aart/types";
 import {
@@ -15,27 +16,8 @@ import { generateImprovementBrief } from "../improvement-brief.js";
 import {
   containsKnownSecret,
   correctionKey,
+  isWritableCorrectionOutputPath,
 } from "./correction.js";
-
-const UNSAFE_CORRECTION_PATH_SEGMENTS = new Set([
-  "__proto__",
-  "constructor",
-  "prototype",
-]);
-
-function isWritableOutputPath(path: string): boolean {
-  if (path === "outputs") return true;
-  if (!path.startsWith("outputs.")) return false;
-  const segments = path.split(".").slice(1);
-  return (
-    segments.length > 0 &&
-    segments.every(
-      (segment) =>
-        segment.length > 0 &&
-        !UNSAFE_CORRECTION_PATH_SEGMENTS.has(segment),
-    )
-  );
-}
 
 /** Sets a dot-path (e.g. "outputs.nmi") on a plain object, creating intermediate objects as needed. */
 function setByPath(target: Record<string, unknown>, path: string, value: unknown): void {
@@ -141,23 +123,34 @@ async function refreshCompletedCorrectionOutputs(
 }
 
 export async function updateRunOutput(store: AartStore, correction: Correction): Promise<RunRecord> {
-  if (!isWritableOutputPath(correction.fieldPath)) {
-    throw new Error(
-      `updateRunOutput: "${correction.fieldPath}" is not a writable step output path; corrections cannot change trace identity, lifecycle, inputs, engine security metadata, or object prototypes`,
-    );
-  }
-  if (
-    correction.fieldPath === "outputs" &&
-    (correction.corrected === null ||
-      typeof correction.corrected !== "object" ||
-      Array.isArray(correction.corrected))
-  ) {
-    throw new Error(
-      'updateRunOutput: replacing "outputs" requires an object value',
-    );
-  }
-
   return store.transact(async (tx) => {
+    const operationalTarget =
+      await tx.corrections.getOperationalTarget(
+        correction,
+      );
+    const targetedCorrection: Correction = {
+      ...correction,
+      ...(operationalTarget ?? {}),
+    };
+    if (
+      !isWritableCorrectionOutputPath(
+        targetedCorrection.fieldPath,
+      )
+    ) {
+      throw new Error(
+        `updateRunOutput: correction target is not a writable step output path; corrections cannot change trace identity, lifecycle, inputs, engine security metadata, or object prototypes`,
+      );
+    }
+    if (
+      targetedCorrection.fieldPath === "outputs" &&
+      (targetedCorrection.corrected === null ||
+        typeof targetedCorrection.corrected !== "object" ||
+        Array.isArray(targetedCorrection.corrected))
+    ) {
+      throw new Error(
+        'updateRunOutput: replacing "outputs" requires an object value',
+      );
+    }
     const publicRun = await tx.runs.get(correction.runId);
     if (!publicRun) {
       throw new Error(
@@ -221,7 +214,7 @@ export async function updateRunOutput(store: AartStore, correction: Correction):
     const updatedAt = new Date().toISOString();
     let updatedPublic = applyTraceCorrection(
       publicRun,
-      correction,
+      targetedCorrection,
       updatedAt,
     );
     updatedPublic = await refreshCompletedCorrectionOutputs(
@@ -237,7 +230,8 @@ export async function updateRunOutput(store: AartStore, correction: Correction):
       const protectedRun =
         effectiveProtectedState?.run ?? publicRun;
       const protectedTarget = protectedRun.trace.findLast(
-        (trace) => trace.stepId === correction.stepId,
+        (trace) =>
+          trace.stepId === targetedCorrection.stepId,
       );
       if (
         publicRun.status === "waiting" &&
@@ -249,7 +243,7 @@ export async function updateRunOutput(store: AartStore, correction: Correction):
       }
       updatedProtected = applyTraceCorrection(
         protectedRun,
-        correction,
+        targetedCorrection,
         updatedAt,
       );
       updatedProtected =
@@ -319,18 +313,40 @@ export async function createEvalExampleFromCorrection(
   suiteId: string,
   options: CreateEvalExampleOptions = {},
 ): Promise<EvalExample> {
-  const example: EvalExample = {
-    id: options.id ?? `ex_${correctionKey(correction).replace(/[^a-zA-Z0-9]/g, "_")}_${Date.now()}`,
-    suiteId,
-    sourceRunId: correction.runId,
-    input: { stepId: correction.stepId, fieldPath: correction.fieldPath, observed: correction.observed },
-    expected: correction.corrected,
-    scorerConfig: options.scorerConfig,
-    tags: options.tags ?? ["correction"],
-    createdFromCorrection: correctionKey(correction),
-  };
-  await store.evals.putExample(example);
-  return example;
+  return store.transact(async (tx) => {
+    const candidates = await tx.corrections.list({
+      runId: correction.runId,
+      stepId: correction.stepId,
+    });
+    const currentCorrection =
+      candidates.find(
+        (candidate) =>
+          candidate.fieldPath === correction.fieldPath,
+      ) ??
+      (await tx.corrections.findByOperationalTarget(
+        correction.runId,
+        correction.stepId,
+        correction.fieldPath,
+      )) ??
+      correction;
+    const example: EvalExample = {
+      id: options.id ?? `ex_${randomUUID()}`,
+      suiteId,
+      sourceRunId: currentCorrection.runId,
+      input: {
+        stepId: currentCorrection.stepId,
+        fieldPath: currentCorrection.fieldPath,
+        observed: currentCorrection.observed,
+      },
+      expected: currentCorrection.corrected,
+      scorerConfig: options.scorerConfig,
+      tags: options.tags ?? ["correction"],
+      createdFromCorrection:
+        correctionKey(currentCorrection),
+    };
+    await tx.evals.putExample(example);
+    return example;
+  });
 }
 
 /**

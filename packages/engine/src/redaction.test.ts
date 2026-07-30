@@ -308,6 +308,202 @@ describe("repairGlobalAuditsForNewSecrets", () => {
       await cleanup();
     }
   });
+
+  it("repairs correction-derived eval examples while retaining the exact correction target sealed", async () => {
+    const { store, cleanup } = await createTestStore();
+    try {
+      const secret = "late-secret";
+      const run = fixtureRun({
+        runId: "run-correction-eval",
+        status: "completed",
+        trace: [
+          {
+            seq: 0,
+            stepId: "extract",
+            block: "test.extract",
+            status: "completed",
+            inputs: {},
+            outputs: { [secret]: "wrong" },
+            startedAt: "t",
+          },
+        ],
+        endedAt: "t",
+      });
+      await store.runs.put(run);
+      const correction = {
+        runId: run.runId,
+        stepId: "extract",
+        fieldPath: `outputs.${secret}`,
+        observed: `wrong-${secret}`,
+        corrected: `right-${secret}`,
+        reason: `replace ${secret}`,
+        reviewer: "alice",
+        createdAt: "2026-07-30T00:00:00.000Z",
+      };
+      await store.corrections.put(correction, {
+        stepId: correction.stepId,
+        fieldPath: correction.fieldPath,
+      });
+      const example = {
+        id: `ex_${secret}`,
+        suiteId: "suite-correction",
+        sourceRunId: run.runId,
+        input: {
+          stepId: correction.stepId,
+          fieldPath: correction.fieldPath,
+          observed: correction.observed,
+        },
+        expected: correction.corrected,
+        createdFromCorrection: `${correction.runId}:${correction.stepId}:${correction.fieldPath}`,
+      };
+      const suite = {
+        id: example.suiteId,
+        name: "Correction regression",
+        examples: [example],
+        scorer: { id: "exact", kind: "exact_match" },
+        tags: [],
+      };
+      await store.evals.putSuite(suite);
+      await store.evals.putExample(example);
+      await store.evals.putExample({
+        ...example,
+        id: `orphan_${secret}`,
+        suiteId: "suite-not-yet-created",
+      });
+      await store.evals.putRun({
+        id: "eval-run",
+        suiteId: suite.id,
+        workflowId: run.workflowId,
+        workflowVersion: run.workflowVersion,
+        status: "failed",
+        total: 1,
+        passed: 0,
+        failed: 1,
+        score: 0,
+        regressions: [example.id],
+        improvements: [],
+        reportArtifact: "report",
+      });
+
+      await repairGlobalAuditsForNewSecrets(
+        store,
+        (record, refs) => {
+          let json = JSON.stringify(record);
+          for (const value of refs) {
+            json = json.replaceAll(value, "[REDACTED]");
+          }
+          return JSON.parse(json);
+        },
+        new Set([secret]),
+      );
+
+      const [publicCorrection] =
+        await store.corrections.list({
+          runId: run.runId,
+        });
+      expect(publicCorrection).toBeDefined();
+      expect(
+        JSON.stringify(publicCorrection),
+      ).not.toContain(secret);
+      await expect(
+        store.corrections.getOperationalTarget(
+          publicCorrection!,
+        ),
+      ).resolves.toEqual({
+        stepId: correction.stepId,
+        fieldPath: correction.fieldPath,
+      });
+      const publicEvalState = {
+        examples: await store.evals.listExamples(),
+        suites: await store.evals.listSuites(),
+        runs: await store.evals.listRuns(),
+      };
+      expect(
+        JSON.stringify(publicEvalState),
+      ).not.toContain(secret);
+      expect(
+        publicEvalState.runs[0]?.regressions,
+      ).toEqual([
+        publicEvalState.examples.find(
+          (candidate) =>
+            candidate.suiteId === suite.id,
+        )?.id,
+      ]);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it("archives a legacy terminal snapshot before its first late-secret public rewrite", async () => {
+    const { store, cleanup } = await createTestStore();
+    try {
+      const secret = "legacy-snapshot-secret";
+      const exactDefinitions = {
+        id: "legacy-workflow",
+        name: secret,
+        version: "1.0.0",
+        inputs: [],
+        outputs: [],
+        execution: {
+          type: "workflow",
+          steps: [],
+        },
+        approval: "approved",
+        gates: {
+          validate: "passed",
+          readiness: "passed",
+          evals: "passed",
+          riskReview: "passed",
+          humanReview: "passed",
+        },
+      };
+      const run = fixtureRun({
+        runId: "legacy-terminal-no-archive",
+        workflowId: exactDefinitions.id,
+        workflowVersion: exactDefinitions.version,
+        status: "completed",
+        snapshot: {
+          definitions: exactDefinitions,
+          resolvedVersions: {},
+          packHashes: {},
+          capturedAt: "2026-07-30T00:00:00.000Z",
+        },
+        endedAt: "2026-07-30T00:00:00.000Z",
+      });
+      await store.runs.put(run);
+      await expect(
+        store.runs.getOperationalState(run.runId),
+      ).resolves.toBeUndefined();
+
+      await repairGlobalAuditsForNewSecrets(
+        store,
+        (record, refs) => {
+          let json = JSON.stringify(record);
+          for (const value of refs) {
+            json = json.replaceAll(value, "[REDACTED]");
+          }
+          return JSON.parse(json);
+        },
+        new Set([secret]),
+      );
+
+      expect(
+        JSON.stringify(await store.runs.get(run.runId)),
+      ).not.toContain(secret);
+      await expect(
+        store.runs.getOperationalState(run.runId),
+      ).resolves.toMatchObject({
+        run: {
+          snapshot: {
+            definitions: exactDefinitions,
+          },
+        },
+        resolvedSecretValues: [secret],
+      });
+    } finally {
+      await cleanup();
+    }
+  });
 });
 
 describe("redactWaitAudit", () => {

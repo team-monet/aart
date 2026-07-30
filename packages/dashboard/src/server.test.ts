@@ -359,7 +359,30 @@ describe("dashboard HTTP server — JSON REST API & SPA fallback routing", () =>
       try {
         await real.store.workflows.put(makeWorkflow({ id: "wf-div2", version: "1.0.0", gates: { validate: "passed", readiness: "pending", evals: "pending", riskReview: "pending", humanReview: "passed" } }));
         await real.store.approvals.put({ id: "at-div", runId: "run-div", stepId: "step1", title: "Ship?", description: "d", status: "pending", createdAt: "2026-07-10T00:00:00.000Z" });
-        await real.store.runs.put(makeRun({ runId: "run-div", status: "waiting", waits: [{ type: "approval", taskId: "at-div", schemaVersion: 1 }] }));
+        await real.store.runs.put(
+          makeRun({
+            runId: "run-div",
+            status: "waiting",
+            waits: [
+              {
+                type: "approval",
+                taskId: "at-div",
+                schemaVersion: 1,
+              },
+            ],
+            trace: [
+              {
+                seq: 0,
+                stepId: "step1",
+                block: "test.block",
+                status: "completed",
+                inputs: {},
+                outputs: { y: 1 },
+                startedAt: "t",
+              },
+            ],
+          }),
+        );
         await real.store.waits.put("run-div", "step1", { type: "approval", taskId: "at-div", schemaVersion: 1 }, "2026-07-10T00:00:00.000Z");
         await real.store.corrections.put({ runId: "run-div", stepId: "step1", fieldPath: "outputs.x", observed: 1, corrected: 2, reason: "r", reviewer: "alice", createdAt: "2026-07-10T00:00:00.000Z" });
         await real.store.evals.putSuite({ id: "suite-div", name: "S", examples: [], scorer: { id: "s1", kind: "exact_match" }, tags: [] });
@@ -594,6 +617,22 @@ describe("dashboard HTTP server — JSON REST API & SPA fallback routing", () =>
     });
 
     it("record correction: POST /api/corrections persists Correction JSON", async () => {
+      await fixture.store.runs.put(
+        makeRun({
+          runId: "run-1",
+          trace: [
+            {
+              seq: 0,
+              stepId: "step1",
+              block: "test.block",
+              status: "completed",
+              inputs: {},
+              outputs: { total: 1 },
+              startedAt: "t",
+            },
+          ],
+        }),
+      );
       const res = await fetch(`${baseUrl}/api/corrections`, {
         method: "POST",
         headers: { "content-type": "application/json" },

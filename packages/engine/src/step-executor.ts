@@ -1375,8 +1375,31 @@ export async function prepareRevokedIdempotencyConsumer(
     // execution authority for this pass.
     workflow = currentWorkflow;
   } else {
-    const protectedState =
+    let protectedState =
       await store.runs.getOperationalState(run.runId);
+    if (
+      protectedState === undefined &&
+      run.status === "waiting"
+    ) {
+      const outstandingWaits = await store.waits.list({
+        runId: run.runId,
+      });
+      for (const wait of outstandingWaits) {
+        const waitingState =
+          await store.waits.getOperationalRunState(
+            wait.runId,
+            wait.stepId,
+          );
+        if (
+          waitingState !== undefined &&
+          (protectedState === undefined ||
+            waitingState.run.trace.length >=
+              protectedState.run.trace.length)
+        ) {
+          protectedState = waitingState;
+        }
+      }
+    }
     try {
       workflow = await resolveWorkflowForRun(
         store,

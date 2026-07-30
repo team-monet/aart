@@ -143,7 +143,7 @@ function buildStore(
       transactionScoped,
     ),
     approvals: new SqliteApprovalStore(exec),
-    corrections: new SqliteCorrectionStore(exec),
+    corrections: new SqliteCorrectionStore(exec, blobsDir),
     evals: new SqliteEvalStore(exec),
     deployments: new SqliteDeploymentStore(exec),
     environments: new SqliteEnvironmentStore(exec),

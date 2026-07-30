@@ -2520,3 +2520,61 @@ every public field, HTTP rejection with no audit row, dashboard canonical
 outcome routing, legacy terminal archive bootstrap, atomic cancellation with
 exact bracketed authored-step identity, delayed-journal generation retention,
 and the two-handle immutable-generation reader race.
+
+### A78 — A correction is a safe public audit plus a sealed executable target; every derived surface follows that split
+
+Six follow-up findings exposed one remaining product boundary: correction
+capture was safe only while its public identity, derived evals, and historical
+workflow snapshot all stayed unchanged. The durable contract is now:
+
+1. **Admit only a real, safe correction target.** The canonical correction
+   transaction reloads the run's latest sealed state, checks every
+   customer-supplied public field—including `stepId` and object keys—against
+   known secrets before revealing whether the target exists, requires the
+   supplied step to occur in that run, and accepts only writable `outputs`
+   paths. HTTP, MCP, CLI, and dashboard paths share this policy. Their tests
+   now create real run traces rather than relying on the former ability to
+   attach corrections to invented runs or steps.
+2. **Separate the audit identity from execution authority.** A correction's
+   customer-visible fields may be retrospectively redacted, while its exact
+   `(stepId, fieldPath)` target is AES-GCM sealed under adapter-owned key
+   material. The redacted record can still update the correct historical
+   output, and a previously issued exact correction key still resolves to the
+   current safe audit. The first repair of a pre-migration filesystem or
+   SQLite row captures its exact target before moving the public key, so
+   upgrades do not lose functionality. SQLite migration
+   `0013_correction_operational_target` adds the sealed generation and
+   ciphertext columns.
+3. **Repair the complete correction-derived graph.** Late-secret repair now
+   covers standalone and suite-embedded eval examples, including examples
+   whose suite metadata has not yet been created. It redacts input, expected
+   output, scorer configuration, tags, and correction references; replaces a
+   sensitive example ID with an opaque UUID; and rewrites eval-run
+   regression/improvement references. Eval creation re-reads the current
+   correction audit and persists the example in one transaction, so repair
+   and creation commute without recreating stale secret-bearing data. MCP and
+   dashboard compatibility paths delegate to this canonical implementation.
+4. **Resolve historical policy from sealed history in every lifecycle.**
+   Waiting cache repair loads the exact frozen snapshot retained by
+   `WaitStore` when `RunStore` active state has already been removed.
+   Completed, failed, and cancelled legacy runs bootstrap a terminal archive
+   before the first public rewrite, not only when a later correction happens.
+   Mutable workflow registry rows therefore cannot change retrospective taint
+   or cache-lineage decisions.
+5. **Preserve caller semantics at the adapters.** A dashboard-injected clock
+   is invoked through its receiver, so stateful clocks behave exactly like
+   the system clock contract instead of failing only on correction capture.
+
+The customer outcome is one coherent loop: a correction must point to evidence
+that actually exists, its public record remains safe as secret knowledge
+grows, its intended fix remains executable, and every eval or historical
+decision derived from it transitions with the same policy.
+
+**Verification.** `check:tsconfig-refs`, full build, production and test
+typechecks, and `lint:redaction` are clean (**294 reviewed suppressions**).
+The full workspace suite passes **247 files / 3,044 tests**, including both
+adapter conformance suites, legacy correction-target upgrade, exact-key
+resolution after redaction, correction-derived eval/orphan repair, waiting
+snapshot cache repair, ordinary legacy-terminal archive bootstrap, stateful
+clock forwarding, and real-run correction fixtures across HTTP, MCP, CLI, and
+dashboard surfaces.

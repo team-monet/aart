@@ -19,8 +19,31 @@ afterEach(async () => {
   await fs.rm(root, { recursive: true, force: true });
 });
 
+async function putCorrectableRun(
+  runId: string,
+  stepId: string,
+): Promise<void> {
+  await store.runs.put(
+    fixtureRunRecord({
+      runId,
+      trace: [
+        {
+          seq: 0,
+          stepId,
+          block: "test.block",
+          status: "completed",
+          inputs: {},
+          outputs: {},
+          startedAt: "t",
+        },
+      ],
+    }),
+  );
+}
+
 describe("recordCorrection", () => {
   it("persists a Correction via store.corrections.put and returns it", async () => {
+    await putCorrectableRun("run_1", "extract_bill");
     const correction = await recordCorrection(store, {
       runId: "run_1",
       stepId: "extract_bill",
@@ -33,9 +56,18 @@ describe("recordCorrection", () => {
     expect(correction.reviewer).toBe("jane@example.com");
     expect(correction.createdAt).toBeTruthy();
     await expect(store.corrections.list({ runId: "run_1" })).resolves.toEqual([correction]);
+    await expect(
+      store.corrections.getOperationalTarget(
+        correction,
+      ),
+    ).resolves.toEqual({
+      stepId: correction.stepId,
+      fieldPath: correction.fieldPath,
+    });
   });
 
   it("matches spec §23.3's literal correction primitive shape", async () => {
+    await putCorrectableRun("run_123", "extract_bill");
     const correction = await recordCorrection(store, {
       runId: "run_123",
       stepId: "extract_bill",
@@ -57,7 +89,20 @@ describe("recordCorrection", () => {
 
   it("rejects every public correction field against the sealed known-secret set before persisting", async () => {
     const secret = "known-correction-secret";
-    const run = fixtureRunRecord({ runId: "run_secret" });
+    const run = fixtureRunRecord({
+      runId: "run_secret",
+      trace: [
+        {
+          seq: 0,
+          stepId: "extract",
+          block: "test.block",
+          status: "completed",
+          inputs: {},
+          outputs: {},
+          startedAt: "t",
+        },
+      ],
+    });
     await store.runs.put(run);
     await store.runs.putOperationalState(run.runId, {
       run,
@@ -73,6 +118,7 @@ describe("recordCorrection", () => {
       reviewer: "alice",
     };
     const sensitiveInputs: RecordCorrectionInput[] = [
+      { ...base, stepId: `extract-${secret}` },
       { ...base, fieldPath: `outputs.${secret}` },
       {
         ...base,
@@ -90,6 +136,27 @@ describe("recordCorrection", () => {
     }
     await expect(
       store.corrections.list({ runId: run.runId }),
+    ).resolves.toEqual([]);
+  });
+
+  it("rejects a target step that does not exist before creating an audit row", async () => {
+    await putCorrectableRun("run_target", "extract");
+
+    await expect(
+      recordCorrection(store, {
+        runId: "run_target",
+        stepId: "invented-step",
+        fieldPath: "outputs.value",
+        observed: "old",
+        corrected: "new",
+        reason: "wrong target",
+        reviewer: "alice",
+      }),
+    ).rejects.toThrow(/target step does not exist/);
+    await expect(
+      store.corrections.list({
+        runId: "run_target",
+      }),
     ).resolves.toEqual([]);
   });
 });

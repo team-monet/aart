@@ -3,7 +3,8 @@
 // special scan/pairing behavior beyond the generic collection primitive
 // (contrast waits.ts/runs.ts/signals.ts/artifacts.ts/workflows.ts, which
 // each have a genuinely different on-disk shape).
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { join } from "node:path";
 import type {
   ApprovalTask,
   Correction,
@@ -21,6 +22,7 @@ import type {
 } from "@aart/types";
 import type {
   ApprovalStore,
+  CorrectionOperationalTarget,
   CorrectionStore,
   DeploymentStore,
   EnvironmentStore,
@@ -36,6 +38,10 @@ import type {
   SchemaRegistryStore,
   StandingApprovalStore,
 } from "../../types.js";
+import {
+  openOperationalState,
+  sealOperationalState,
+} from "../operational-state-seal.js";
 import { KeyedJsonCollection, type StagingBuffer } from "./json-file.js";
 
 function fieldPathHash(fieldPath: string): string {
@@ -65,13 +71,80 @@ export class FsApprovalStore implements ApprovalStore {
   }
 }
 
+interface StoredCorrectionEnvelope {
+  record: Correction;
+  _operationalGeneration?: string;
+  _operationalTarget?: string;
+}
+
+type StoredCorrection =
+  | Correction
+  | StoredCorrectionEnvelope;
+
+function correctionRecord(
+  stored: StoredCorrection,
+): Correction {
+  return "record" in stored ? stored.record : stored;
+}
+
+function correctionEnvelope(
+  stored: StoredCorrection,
+): StoredCorrectionEnvelope | undefined {
+  return "record" in stored ? stored : undefined;
+}
+
+function correctionStorageKey(
+  correction: Pick<
+    Correction,
+    "runId" | "stepId" | "fieldPath"
+  >,
+): string {
+  return `${correction.runId}__${correction.stepId}__${fieldPathHash(correction.fieldPath)}`;
+}
+
 export class FsCorrectionStore implements CorrectionStore {
-  private readonly collection: KeyedJsonCollection<Correction>;
+  private readonly collection: KeyedJsonCollection<StoredCorrection>;
+  private readonly operationKeyPath: string;
+
   constructor(dir: string, staging?: StagingBuffer) {
     this.collection = new KeyedJsonCollection(dir, staging);
+    this.operationKeyPath = join(dir, ".operational-key");
   }
-  put(correction: Correction) {
-    return this.collection.put(`${correction.runId}__${correction.stepId}__${fieldPathHash(correction.fieldPath)}`, correction);
+  async put(
+    correction: Correction,
+    operationalTarget?: CorrectionOperationalTarget,
+  ): Promise<void> {
+    const key = correctionStorageKey(correction);
+    const existing = await this.collection.get(key);
+    const existingEnvelope =
+      existing === undefined
+        ? undefined
+        : correctionEnvelope(existing);
+    const generation =
+      operationalTarget === undefined
+        ? existingEnvelope?._operationalGeneration
+        : randomUUID();
+    const sealedTarget =
+      operationalTarget === undefined
+        ? existingEnvelope?._operationalTarget
+        : await sealOperationalState(
+            this.operationKeyPath,
+            [
+              correction.runId,
+              generation!,
+              "correction-target",
+            ],
+            operationalTarget,
+          );
+    await this.collection.put(key, {
+      record: correction,
+      ...(generation === undefined
+        ? {}
+        : { _operationalGeneration: generation }),
+      ...(sealedTarget === undefined
+        ? {}
+        : { _operationalTarget: sealedTarget }),
+    });
   }
   async replaceAudit(
     original: Pick<Correction, "runId" | "stepId" | "fieldPath">,
@@ -79,20 +152,47 @@ export class FsCorrectionStore implements CorrectionStore {
       Correction,
       "fieldPath" | "observed" | "corrected" | "reason" | "reviewer"
     >,
-  ): Promise<void> {
-    const originalKey = `${original.runId}__${original.stepId}__${fieldPathHash(original.fieldPath)}`;
+  ): Promise<Correction | undefined> {
+    const originalKey = correctionStorageKey(original);
     const stored = await this.collection.get(originalKey);
-    if (!stored) return;
+    if (!stored) return undefined;
+    const envelope = correctionEnvelope(stored);
+    const record = correctionRecord(stored);
+    const retainedGeneration =
+      envelope?._operationalGeneration;
+    const retainedCiphertext =
+      envelope?._operationalTarget;
+    const operationalGeneration =
+      retainedGeneration !== undefined &&
+      retainedCiphertext !== undefined
+        ? retainedGeneration
+        : randomUUID();
+    const operationalTargetCiphertext =
+      retainedGeneration !== undefined &&
+      retainedCiphertext !== undefined
+        ? retainedCiphertext
+        : await sealOperationalState(
+            this.operationKeyPath,
+            [
+              record.runId,
+              operationalGeneration,
+              "correction-target",
+            ],
+            {
+              stepId: record.stepId,
+              fieldPath: record.fieldPath,
+            },
+          );
     let updated: Correction = {
-      ...stored,
+      ...record,
       ...audit,
-      runId: stored.runId,
-      stepId: stored.stepId,
-      createdAt: stored.createdAt,
+      runId: record.runId,
+      stepId: record.stepId,
+      createdAt: record.createdAt,
     };
     const redactedFieldPath = updated.fieldPath;
     let collisionIndex = 1;
-    let updatedKey = `${updated.runId}__${updated.stepId}__${fieldPathHash(updated.fieldPath)}`;
+    let updatedKey = correctionStorageKey(updated);
     while (
       updatedKey !== originalKey &&
       (await this.collection.get(updatedKey)) !== undefined
@@ -102,19 +202,90 @@ export class FsCorrectionStore implements CorrectionStore {
         ...updated,
         fieldPath: `${redactedFieldPath}#${collisionIndex}`,
       };
-      updatedKey = `${updated.runId}__${updated.stepId}__${fieldPathHash(updated.fieldPath)}`;
+      updatedKey = correctionStorageKey(updated);
     }
     // Rewrite the original keyed record with safe content first. If the
     // subsequent key move is interrupted, the old hash may remain but its
     // JSON no longer contains the secret field path or audit values.
-    await this.collection.put(originalKey, updated);
+    const updatedStored: StoredCorrectionEnvelope = {
+      record: updated,
+      _operationalGeneration: operationalGeneration,
+      _operationalTarget: operationalTargetCiphertext,
+    };
+    await this.collection.put(originalKey, updatedStored);
     if (updatedKey !== originalKey) {
-      await this.collection.put(updatedKey, updated);
+      await this.collection.put(updatedKey, updatedStored);
       await this.collection.delete(originalKey);
     }
+    return updated;
+  }
+  async getOperationalTarget(
+    correction: Pick<
+      Correction,
+      "runId" | "stepId" | "fieldPath"
+    >,
+  ): Promise<CorrectionOperationalTarget | undefined> {
+    const stored = await this.collection.get(
+      correctionStorageKey(correction),
+    );
+    const envelope =
+      stored === undefined
+        ? undefined
+        : correctionEnvelope(stored);
+    if (
+      envelope?._operationalGeneration === undefined ||
+      envelope._operationalTarget === undefined
+    ) {
+      return undefined;
+    }
+    return openOperationalState<CorrectionOperationalTarget>(
+      this.operationKeyPath,
+      [
+        correction.runId,
+        envelope._operationalGeneration,
+        "correction-target",
+      ],
+      envelope._operationalTarget,
+    );
+  }
+  async findByOperationalTarget(
+    runId: string,
+    stepId: string,
+    fieldPath: string,
+  ): Promise<Correction | undefined> {
+    for (const stored of await this.collection.list()) {
+      const record = correctionRecord(stored);
+      if (record.runId !== runId) continue;
+      const envelope = correctionEnvelope(stored);
+      if (
+        envelope?._operationalGeneration === undefined ||
+        envelope._operationalTarget === undefined
+      ) {
+        continue;
+      }
+      const target =
+        await openOperationalState<CorrectionOperationalTarget>(
+          this.operationKeyPath,
+          [
+            record.runId,
+            envelope._operationalGeneration,
+            "correction-target",
+          ],
+          envelope._operationalTarget,
+        );
+      if (
+        target.stepId === stepId &&
+        target.fieldPath === fieldPath
+      ) {
+        return record;
+      }
+    }
+    return undefined;
   }
   async list(filter?: { runId?: string; stepId?: string }): Promise<Correction[]> {
-    const all = await this.collection.list();
+    const all = (await this.collection.list()).map(
+      correctionRecord,
+    );
     return all
       .filter((c) => (filter?.runId ? c.runId === filter.runId : true))
       .filter((c) => (filter?.stepId ? c.stepId === filter.stepId : true));
@@ -142,8 +313,20 @@ export class FsEvalStore implements EvalStore {
   putExample(example: EvalExample) {
     return this.examples.put(example.id, example);
   }
-  async listExamples(suiteId: string): Promise<EvalExample[]> {
-    return (await this.examples.list()).filter((e) => e.suiteId === suiteId);
+  async replaceExampleAudit(
+    originalId: string,
+    example: EvalExample,
+  ): Promise<void> {
+    await this.examples.put(originalId, example);
+    if (example.id !== originalId) {
+      await this.examples.put(example.id, example);
+      await this.examples.delete(originalId);
+    }
+  }
+  async listExamples(suiteId?: string): Promise<EvalExample[]> {
+    return (await this.examples.list()).filter((e) =>
+      suiteId === undefined ? true : e.suiteId === suiteId,
+    );
   }
   putRun(run: EvalRun) {
     return this.runs.put(run.id, run);

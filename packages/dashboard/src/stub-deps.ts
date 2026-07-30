@@ -238,7 +238,7 @@ export function makeRecordCorrection(clock: Clock = systemClock) {
     return evidenceRecordCorrection(
       store,
       input,
-      clock.now,
+      () => clock.now(),
     );
   };
 }

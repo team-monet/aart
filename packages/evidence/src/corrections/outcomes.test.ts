@@ -135,6 +135,61 @@ describe("outcome 1/6 — updateRunOutput (spec §23.4 'update current run outpu
     });
   });
 
+  it("applies a correction through its sealed exact target after the public field path is redacted", async () => {
+    const run = fixtureRunRecord({
+      runId: "run_1",
+      trace: [
+        {
+          seq: 0,
+          stepId: "extract",
+          block: "llm.extract",
+          status: "completed",
+          inputs: {},
+          outputs: { amount: 10 },
+          startedAt: "t",
+        },
+      ],
+      outputs: undefined,
+    });
+    const correction = fixtureCorrection({
+      fieldPath: "outputs.amount",
+      corrected: 11,
+    });
+    await store.runs.put(run);
+    await store.corrections.put(correction, {
+      stepId: correction.stepId,
+      fieldPath: correction.fieldPath,
+    });
+    await store.corrections.replaceAudit(correction, {
+      fieldPath: "[REDACTED]",
+      observed: correction.observed,
+      corrected: correction.corrected,
+      reason: correction.reason,
+      reviewer: correction.reviewer,
+    });
+    const [publicCorrection] =
+      await store.corrections.list({
+        runId: correction.runId,
+      });
+
+    const updated = await updateRunOutput(
+      store,
+      publicCorrection!,
+    );
+
+    expect(updated.trace[0]?.outputs).toEqual({
+      amount: 11,
+    });
+    await expect(
+      store.corrections.getOperationalTarget(
+        publicCorrection!,
+      ),
+    ).resolves.toEqual({
+      stepId: correction.stepId,
+      fieldPath: correction.fieldPath,
+    });
+  });
+
   it("updates the sealed continuation when correcting a durably waiting run", async () => {
     const exactRun = fixtureRunRecord({
       runId: "run_1",

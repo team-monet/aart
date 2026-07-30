@@ -1,7 +1,7 @@
 import type { EvalSuite } from "@aart/types";
 import { afterEach, describe, expect, it } from "vitest";
 import type { TestContext } from "../test-utils.js";
-import { createTestContext, sampleWorkflowYaml } from "../test-utils.js";
+import { createTestContext, putCorrectableRun, sampleWorkflowYaml } from "../test-utils.js";
 import { registerWorkflowHandler } from "./authoring.js";
 import { createEvalFromCorrectionHandler, runEvalHandler } from "./evals.js";
 import { recordCorrectionHandler } from "./governance.js";
@@ -30,6 +30,7 @@ describe("createEvalFromCorrectionHandler (aart_create_eval_from_correction)", (
   it("creates an eval example from a recorded correction", async () => {
     tc = await createTestContext();
     await tc.ctx.store.evals.putSuite(emptySuite);
+    await putCorrectableRun(tc.ctx, "run_1", "extract");
     await recordCorrectionHandler(tc.ctx, {
       runId: "run_1",
       stepId: "extract",

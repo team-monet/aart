@@ -521,7 +521,7 @@ describe("0007_secret_audit_provenance", () => {
       new SqliteMigrationWatermarkStore(handle.db),
       handle.store,
     );
-    await expect(all.up()).resolves.toBe(12);
+    await expect(all.up()).resolves.toBe(13);
     await handle.store.waits.redactAudit("run-audit", "pause", {
       ...wait,
       correlationId: "[REDACTED]",
@@ -633,7 +633,7 @@ describe("0008/0009 sealed operational state", () => {
       new SqliteMigrationWatermarkStore(handle.db),
       handle.store,
     );
-    await expect(all.up()).resolves.toBe(12);
+    await expect(all.up()).resolves.toBe(13);
     await handle.store.waits.redactAudit(
       "run-sealed-upgrade",
       "pause",
@@ -705,7 +705,7 @@ describe("0010 protected continuation state", () => {
       new SqliteMigrationWatermarkStore(handle.db),
       handle.store,
     );
-    await expect(all.up()).resolves.toBe(12);
+    await expect(all.up()).resolves.toBe(13);
     const runColumns = handle.db
       .prepare("PRAGMA table_info(runs)")
       .all() as Array<{ name: string }>;
@@ -804,7 +804,7 @@ describe("0011 artifact audit visibility", () => {
       new SqliteMigrationWatermarkStore(handle.db),
       handle.store,
     );
-    await expect(all.up()).resolves.toBe(12);
+    await expect(all.up()).resolves.toBe(13);
     const migratedBlobGeneration = handle.db
       .prepare(
         "SELECT blob_generation FROM artifacts WHERE artifact_id = ?",

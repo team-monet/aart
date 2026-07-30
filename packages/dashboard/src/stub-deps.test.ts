@@ -388,10 +388,84 @@ describe("correction outcomes (S6 seam E4)", () => {
   it("recordCorrection persists a Correction with a createdAt timestamp", async () => {
     const { store, deps, cleanup } = await createTestFixture();
     try {
+      await store.runs.put(
+        makeRun({
+          runId: "run-1",
+          trace: [
+            {
+              seq: 0,
+              stepId: "step1",
+              block: "http.get",
+              status: "completed",
+              inputs: {},
+              outputs: { total: 1 },
+              startedAt:
+                "2026-07-10T00:00:00.000Z",
+            },
+          ],
+        }),
+      );
       const correction = await deps.recordCorrection(store, { runId: "run-1", stepId: "step1", fieldPath: "outputs.total", observed: 1, corrected: 2, reason: "off by one", reviewer: "alice" });
       expect(correction.createdAt).toEqual(expect.any(String));
       const listed = await store.corrections.list({ runId: "run-1" });
       expect(listed).toHaveLength(1);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it("preserves a Clock method receiver when stamping a correction", async () => {
+    const receiverClock = {
+      current: new Date(
+        "2026-07-30T12:34:56.000Z",
+      ),
+      now() {
+        return this.current;
+      },
+      nowIso() {
+        return this.current.toISOString();
+      },
+      set(iso: string) {
+        this.current = new Date(iso);
+      },
+    };
+    const { store, deps, cleanup } =
+      await createTestFixture(receiverClock);
+    try {
+      await store.runs.put(
+        makeRun({
+          runId: "run-clock",
+          trace: [
+            {
+              seq: 0,
+              stepId: "step1",
+              block: "http.get",
+              status: "completed",
+              inputs: {},
+              outputs: { total: 1 },
+              startedAt:
+                "2026-07-10T00:00:00.000Z",
+            },
+          ],
+        }),
+      );
+
+      const correction = await deps.recordCorrection(
+        store,
+        {
+          runId: "run-clock",
+          stepId: "step1",
+          fieldPath: "outputs.total",
+          observed: 1,
+          corrected: 2,
+          reason: "off by one",
+          reviewer: "alice",
+        },
+      );
+
+      expect(correction.createdAt).toBe(
+        receiverClock.current.toISOString(),
+      );
     } finally {
       await cleanup();
     }

@@ -1,6 +1,10 @@
 // correction.ts — correction capture (spec §23.3, architecture §9.4).
 import type { AartStore } from "@aart/store";
-import { CorrectionSchema, type Correction } from "@aart/types";
+import {
+  CorrectionSchema,
+  type Correction,
+  type RunRecord,
+} from "@aart/types";
 
 export interface RecordCorrectionInput {
   runId: string;
@@ -22,16 +26,45 @@ export interface RecordCorrectionInput {
   reviewer: string;
 }
 
-/** A public correction field matched a value already sealed for the run. */
-export class CorrectionContainsKnownSecretError extends Error {
-  readonly code = "CORRECTION_CONTAINS_KNOWN_SECRET";
+export class CorrectionInputError extends Error {
+  readonly code = "INVALID_CORRECTION_INPUT";
 
+  constructor(message: string) {
+    super(message);
+    this.name = "CorrectionInputError";
+  }
+}
+
+/** A public correction field matched a value already sealed for the run. */
+export class CorrectionContainsKnownSecretError extends CorrectionInputError {
   constructor(runId: string) {
     super(
       `recordCorrection: correction for run "${runId}" contains a secret already known to that run and cannot be published`,
     );
     this.name = "CorrectionContainsKnownSecretError";
   }
+}
+
+const UNSAFE_CORRECTION_PATH_SEGMENTS = new Set([
+  "__proto__",
+  "constructor",
+  "prototype",
+]);
+
+export function isWritableCorrectionOutputPath(
+  path: string,
+): boolean {
+  if (path === "outputs") return true;
+  if (!path.startsWith("outputs.")) return false;
+  const segments = path.split(".").slice(1);
+  return (
+    segments.length > 0 &&
+    segments.every(
+      (segment) =>
+        segment.length > 0 &&
+        !UNSAFE_CORRECTION_PATH_SEGMENTS.has(segment),
+    )
+  );
 }
 
 /**
@@ -79,15 +112,23 @@ export function containsKnownSecret(
   return false;
 }
 
-async function resolvedSecretsForCorrection(
+async function correctionRunContext(
   store: AartStore,
   runId: string,
-): Promise<readonly string[]> {
-  const run = await store.runs.get(runId);
-  if (run === undefined) return [];
-  if (run.status === "waiting") {
+): Promise<{
+  run: RunRecord;
+  resolvedSecretValues: readonly string[];
+}> {
+  const publicRun = await store.runs.get(runId);
+  if (publicRun === undefined) {
+    throw new CorrectionInputError(
+      `recordCorrection: no such run "${runId}"`,
+    );
+  }
+  if (publicRun.status === "waiting") {
     const waits = await store.waits.list({ runId });
     const resolved = new Set<string>();
+    let exactRun = publicRun;
     for (const wait of waits) {
       const state =
         await store.waits.getOperationalRunState(
@@ -95,16 +136,26 @@ async function resolvedSecretsForCorrection(
           wait.stepId,
         );
       if (state !== undefined) {
+        if (state.run.trace.length >= exactRun.trace.length) {
+          exactRun = state.run;
+        }
         for (const value of state.resolvedSecretValues) {
           resolved.add(value);
         }
       }
     }
-    return [...resolved];
+    return {
+      run: exactRun,
+      resolvedSecretValues: [...resolved],
+    };
   }
-  return (
-    await store.runs.getOperationalState(runId)
-  )?.resolvedSecretValues ?? [];
+  const protectedState =
+    await store.runs.getOperationalState(runId);
+  return {
+    run: protectedState?.run ?? publicRun,
+    resolvedSecretValues:
+      protectedState?.resolvedSecretValues ?? [],
+  };
 }
 
 /**
@@ -133,9 +184,12 @@ export async function recordCorrection(
   // bypasses TS entirely.
   const parsed = CorrectionSchema.parse(correction);
   return store.transact(async (tx) => {
-    const resolvedSecretValues =
-      await resolvedSecretsForCorrection(tx, parsed.runId);
+    const context = await correctionRunContext(
+      tx,
+      parsed.runId,
+    );
     const publicFields = {
+      stepId: parsed.stepId,
       fieldPath: parsed.fieldPath,
       observed: parsed.observed,
       corrected: parsed.corrected,
@@ -145,14 +199,31 @@ export async function recordCorrection(
     if (
       containsKnownSecret(
         publicFields,
-        resolvedSecretValues,
+        context.resolvedSecretValues,
       )
     ) {
       throw new CorrectionContainsKnownSecretError(
         parsed.runId,
       );
     }
-    await tx.corrections.put(parsed);
+    if (
+      !context.run.trace.some(
+        (trace) => trace.stepId === parsed.stepId,
+      )
+    ) {
+      throw new CorrectionInputError(
+        `recordCorrection: target step does not exist in run "${parsed.runId}"`,
+      );
+    }
+    if (!isWritableCorrectionOutputPath(parsed.fieldPath)) {
+      throw new CorrectionInputError(
+        "recordCorrection: target is not a writable step output path",
+      );
+    }
+    await tx.corrections.put(parsed, {
+      stepId: parsed.stepId,
+      fieldPath: parsed.fieldPath,
+    });
     return parsed;
   });
 }

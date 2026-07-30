@@ -168,6 +168,8 @@ export const SQLITE_SCHEMA_STATEMENTS: readonly string[] = [
     reason TEXT NOT NULL,
     reviewer TEXT NOT NULL,
     created_at TEXT NOT NULL,
+    operational_generation TEXT,
+    operational_target_ciphertext TEXT,
     PRIMARY KEY (run_id, step_id, field_path)
   )`,
 

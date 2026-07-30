@@ -2,7 +2,10 @@ import { CapabilityDeniedError, IterationLimitExceededError } from "@aart/types"
 import type { BlockImplementation } from "@aart/types";
 import type { AartStore } from "@aart/store";
 import { afterEach, describe, expect, it } from "vitest";
-import { executeStep } from "./step-executor.js";
+import {
+  executeStep,
+  prepareRevokedIdempotencyConsumer,
+} from "./step-executor.js";
 import { idempotencyStorageKey } from "./idempotency.js";
 import { repairGlobalAuditsForNewSecrets } from "./redaction.js";
 import {
@@ -23,6 +26,89 @@ import type { EngineConfig } from "./types.js";
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {
   await Promise.all(cleanups.splice(0).map((fn) => fn()));
+});
+
+describe("prepareRevokedIdempotencyConsumer — protected history", () => {
+  it("loads an exact waiting snapshot from WaitStore after active run protection has transferred", async () => {
+    const { store, config } = await setup();
+    const workflow = fixtureWorkflow({
+      id: "waiting-cache-history",
+      version: "1.0.0",
+      execution: {
+        type: "workflow",
+        steps: [
+          { id: "produce", uses: "test.echo" },
+          { id: "pause", uses: "wait.manual" },
+        ],
+      },
+    });
+    const exactRun = fixtureRun({
+      runId: "waiting-cache-run",
+      workflowId: workflow.id,
+      workflowVersion: workflow.version,
+      status: "waiting",
+      trace: [
+        {
+          seq: 0,
+          stepId: "produce",
+          block: "test.echo",
+          status: "completed",
+          inputs: {},
+          outputs: { value: "cached" },
+          startedAt: "t",
+        },
+        {
+          seq: 1,
+          stepId: "pause",
+          block: "wait.manual",
+          status: "waiting",
+          inputs: {},
+          startedAt: "t",
+        },
+      ],
+      waits: [{ type: "manual", schemaVersion: 2 }],
+      snapshot: {
+        definitions: workflow,
+        resolvedVersions: {},
+        packHashes: {},
+        capturedAt: "2026-07-30T00:00:00.000Z",
+      },
+    });
+    const publicRun = {
+      ...exactRun,
+      snapshot: {
+        ...exactRun.snapshot,
+        definitions: null,
+      },
+    };
+    await store.runs.put(publicRun);
+    await store.waits.put(
+      exactRun.runId,
+      "pause",
+      exactRun.waits[0]!,
+      "2026-07-30T00:00:00.000Z",
+      {
+        run: exactRun,
+        resolvedSecretValues: [],
+      },
+    );
+    await expect(
+      store.runs.getOperationalState(exactRun.runId),
+    ).resolves.toBeUndefined();
+
+    await expect(
+      prepareRevokedIdempotencyConsumer(
+        config,
+        store,
+        publicRun,
+        new Set(),
+        new Set(),
+      ),
+    ).resolves.toMatchObject({
+      runId: exactRun.runId,
+      status: "waiting",
+    });
+  });
 });
 
 async function setup(configOverrides: Partial<EngineConfig> = {}): Promise<{ store: AartStore; config: EngineConfig }> {

@@ -7,7 +7,7 @@ import { createServer, type Server, type ServerResponse } from "node:http";
 import type { AartStore } from "@aart/store";
 import type { ApprovalTask, Scorer, Signal, Trigger, TrustMode, Workflow } from "@aart/types";
 import { TrustModeSchema } from "@aart/types";
-import { blockPromotion, clearNeedsReview, CorrectionContainsKnownSecretError, createEvalExampleFromCorrection, createIssueForAgent, markNeedsReview, recordCorrection, triggerImprovementProposal, unblockPromotion, updateRunOutput, type RecordCorrectionInput } from "@aart/evidence";
+import { blockPromotion, clearNeedsReview, CorrectionInputError, createEvalExampleFromCorrection, createIssueForAgent, markNeedsReview, recordCorrection, triggerImprovementProposal, unblockPromotion, updateRunOutput, type RecordCorrectionInput } from "@aart/evidence";
 import { decideApprovalTask } from "../approvals.js";
 import { type Bundle } from "../bundle/bundle.js";
 import { hydrateBundle, readBundleFromEnvelope } from "../bundle/load.js";
@@ -645,7 +645,7 @@ export async function startServer(config: ServerConfig): Promise<ServerHandle> {
       } catch (error) {
         if (
           error instanceof
-          CorrectionContainsKnownSecretError
+          CorrectionInputError
         ) {
           return sendJson(ctx.res, 400, {
             error: error.message,
