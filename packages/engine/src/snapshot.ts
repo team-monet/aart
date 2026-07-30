@@ -103,7 +103,28 @@ export async function captureExecutionSnapshot(
  * the live `store.workflows` entry (a run that hasn't reached its first
  * wait yet has nothing frozen to diverge from).
  */
-export async function resolveWorkflowForRun(store: AartStore, run: { workflowId: string; workflowVersion: string; snapshot: ExecutionSnapshot }): Promise<Workflow> {
+export async function resolveWorkflowForRun(
+  store: AartStore,
+  run: {
+    runId?: string;
+    workflowId: string;
+    workflowVersion: string;
+    snapshot: ExecutionSnapshot;
+  },
+): Promise<Workflow> {
+  const protectedRun =
+    typeof run.runId === "string"
+      ? (await store.runs.getOperationalState(run.runId))?.run
+      : undefined;
+  if (
+    protectedRun !== undefined &&
+    isSnapshotCaptured(protectedRun.snapshot) &&
+    protectedRun.snapshot.definitions !== null
+  ) {
+    return WorkflowSchema.parse(
+      protectedRun.snapshot.definitions,
+    );
+  }
   if (isSnapshotCaptured(run.snapshot) && run.snapshot.definitions !== null) {
     return WorkflowSchema.parse(run.snapshot.definitions);
   }

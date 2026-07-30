@@ -9,11 +9,7 @@
 // audit rewrite writes safe content first, then renames to a collision-safe
 // `<redactedCorrelation>__<receivedAt>__<opaqueNonce>.json` path.
 //
-// Deliberately NOT staged by transact() — see the doc comment on
-// SignalStore.append/markConsumed in ../../types.ts and architecture §5.8's
-// documented non-atomic gap.
 import { createHash, randomUUID } from "node:crypto";
-import { promises as fs } from "node:fs";
 import { join } from "node:path";
 import type { Signal } from "@aart/types";
 import type { SignalStore } from "../../types.js";
@@ -21,7 +17,12 @@ import {
   openOperationalState,
   sealOperationalState,
 } from "../operational-state-seal.js";
-import { JsonFileHandle } from "./json-file.js";
+import {
+  JsonFileHandle,
+  listDirectoryEntries,
+  moveFile,
+  type StagingBuffer,
+} from "./json-file.js";
 
 interface StoredSignal extends Signal {
   consumed: boolean;
@@ -49,7 +50,10 @@ function sanitizeForFilename(value: string): string {
 export class FsSignalStore implements SignalStore {
   private readonly operationKeyPath: string;
 
-  constructor(private readonly dir: string) {
+  constructor(
+    private readonly dir: string,
+    private readonly staging?: StagingBuffer,
+  ) {
     this.operationKeyPath = join(dir, ".operational-key");
   }
 
@@ -91,7 +95,10 @@ export class FsSignalStore implements SignalStore {
       ),
       operationalGeneration,
     };
-    await new JsonFileHandle<StoredSignal>(this.pathFor(signal)).write(stored);
+    await new JsonFileHandle<StoredSignal>(
+      this.pathFor(signal),
+      this.staging,
+    ).write(stored);
   }
 
   private async readStoredRows(): Promise<
@@ -99,7 +106,11 @@ export class FsSignalStore implements SignalStore {
   > {
     let files: string[];
     try {
-      files = (await fs.readdir(this.dir)).filter((f) => f.endsWith(".json") && !f.startsWith(".tmp-"));
+      files = (
+        await listDirectoryEntries(this.dir, this.staging)
+      ).filter(
+        (f) => f.endsWith(".json") && !f.startsWith(".tmp-"),
+      );
     } catch (err) {
       if (typeof err === "object" && err !== null && "code" in err && (err as { code?: string }).code === "ENOENT") return [];
       throw err;
@@ -108,6 +119,7 @@ export class FsSignalStore implements SignalStore {
       files.map(async (file) => ({
         signal: await new JsonFileHandle<StoredSignal>(
           join(this.dir, file),
+          this.staging,
         ).read(),
         path: join(this.dir, file),
       })),
@@ -135,7 +147,11 @@ export class FsSignalStore implements SignalStore {
       });
       if (replacementPath === row.path) continue;
       try {
-        await fs.rename(row.path, replacementPath);
+        await moveFile(
+          row.path,
+          replacementPath,
+          this.staging,
+        );
       } catch (error) {
         if (
           typeof error === "object" &&
@@ -143,7 +159,12 @@ export class FsSignalStore implements SignalStore {
           "code" in error &&
           error.code === "ENOENT"
         ) {
-          await fs.access(replacementPath);
+          const replacement =
+            await new JsonFileHandle<StoredSignal>(
+              replacementPath,
+              this.staging,
+            ).read();
+          if (replacement === undefined) throw error;
           continue;
         }
         throw error;
@@ -202,7 +223,10 @@ export class FsSignalStore implements SignalStore {
       operationalGeneration: undefined,
       signalMatchFingerprint: undefined,
     };
-    await new JsonFileHandle<StoredSignal>(match.path).write(updated);
+    await new JsonFileHandle<StoredSignal>(
+      match.path,
+      this.staging,
+    ).write(updated);
   }
 
   async getOperationalSecretValues(
@@ -296,10 +320,17 @@ export class FsSignalStore implements SignalStore {
     // Persist the recovery nonce together with safe content first. If the
     // process exits before rename, the next store operation completes the
     // move before exposing any signal row.
-    await new JsonFileHandle<StoredSignal>(match.path).write(updated);
+    await new JsonFileHandle<StoredSignal>(
+      match.path,
+      this.staging,
+    ).write(updated);
     if (replacementPath !== match.path) {
       try {
-        await fs.rename(match.path, replacementPath);
+        await moveFile(
+          match.path,
+          replacementPath,
+          this.staging,
+        );
       } catch (error) {
         if (
           typeof error !== "object" ||
@@ -309,7 +340,12 @@ export class FsSignalStore implements SignalStore {
         ) {
           throw error;
         }
-        await fs.access(replacementPath);
+        const replacement =
+          await new JsonFileHandle<StoredSignal>(
+            replacementPath,
+            this.staging,
+          ).read();
+        if (replacement === undefined) throw error;
       }
     }
   }

@@ -67,8 +67,9 @@ export function createBlockRegistry(implementations: BlockImplementation[]): Blo
  *
  * `environment` is threaded through from `TriggerRunInput` (never persisted
  * as its own `RunRecord` field — see `run-lifecycle.ts`'s doc comment on
- * `params.environment` — but available live on every call since a resumed
- * run rehydrates it from `run.params.environment`).
+ * `params.environment`). Execution reads it from the sealed operational run,
+ * because the public audit value may be redacted after a matching secret is
+ * discovered.
  */
 export type GetGrantedCapabilities = (workflow: Workflow, environment: string | undefined) => string[] | Promise<string[]>;
 

@@ -1,12 +1,8 @@
 // EventLogStore — V1 event log foundation (AMENDMENTS.md A61), the `events`
-// table created by migration `0004_events_table` (../migrations.ts). Unlike
-// the fs adapter's FsEventLogStore (deliberately NOT staged by transact() —
-// see that class's own module comment and AartStore.transact's doc comment
-// in ../../../types.ts), this adapter's `events` writes DO participate in
-// the real SQLite transaction opened by transact() — mirrors
-// stores/signals.ts's own identical reasoning: SQLite gives a genuine
-// BEGIN/COMMIT here, so there is no fs-specific "no native cross-file
-// transaction" gap to preserve.
+// table created by migration `0004_events_table` (../migrations.ts). Writes
+// participate in SQLite's real transaction; the filesystem sibling now
+// provides equivalent logical atomicity through its durable redo journal
+// (A76).
 import type { EventLogEntry } from "@aart/types";
 import type { EventLogStore } from "../../../types.js";
 import { dbAll, dbRun, type SqlExec, type SqlParam } from "../db.js";

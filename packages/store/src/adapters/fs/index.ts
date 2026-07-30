@@ -1,9 +1,8 @@
 // The fs adapter (architecture §5.1 "Filesystem (.aart/) | Local dev (aart
 // dev)") — implements every AartStore member against the .aart/ layout
 // (architecture §5.2), including `transact()` via the staging-buffer
-// mechanism (json-file.ts) and its documented non-atomic gap (the global
-// signals audit copy — see types.ts's SignalStore doc comment and the note
-// on `withStaging` below).
+// mechanism (json-file.ts). Every member, including artifact blobs and the
+// append-oriented signal/event audits, shares the same durable redo journal.
 import type { AartStore } from "../../types.js";
 import { realpathSync } from "node:fs";
 import { dirname, basename, resolve } from "node:path";
@@ -113,10 +112,9 @@ function serializeMember<T extends object>(
  * project directory). `staging`, when supplied, routes every *staged*
  * member's writes through the shared in-memory buffer instead of disk —
  * this is exactly what `transact()` below uses to construct its `tx` view.
- * `signals` (architecture §5.8's documented gap) and `artifacts` (no
- * documented transactional requirement, and blobs are a poor fit for an
- * in-memory buffer) are deliberately excluded from staging: they always
- * write immediately, staged transaction or not.
+ * All members bind to the same staging buffer. This keeps late-secret audit
+ * repair, cache revocation, and protected run persistence in one recoverable
+ * transition instead of exposing a backend-specific partial-commit gap.
  */
 function buildStore(
   root: string,
@@ -137,11 +135,11 @@ function buildStore(
     ),
     runs: serialized(new FsRunStore(paths.runsDir(root), staging)),
     waits: serialized(new FsWaitStore(paths.waitsDir(root), staging)),
-    // Not staged — see doc comment above.
-    signals: serialized(new FsSignalStore(paths.signalsDir(root))),
-    // Not staged — see doc comment above.
+    signals: serialized(
+      new FsSignalStore(paths.signalsDir(root), staging),
+    ),
     artifacts: serialized(
-      new FsArtifactStore(paths.artifactsDir(root)),
+      new FsArtifactStore(paths.artifactsDir(root), staging),
     ),
     approvals: serialized(
       new FsApprovalStore(paths.approvalsDir(root), staging),
@@ -193,8 +191,9 @@ function buildStore(
         staging,
       ),
     ),
-    // Not staged — see doc comment above (mirrors signals/artifacts).
-    events: serialized(new FsEventLogStore(paths.eventsDir(root))),
+    events: serialized(
+      new FsEventLogStore(paths.eventsDir(root), staging),
+    ),
     jobQueue: serialized(
       new FsJobQueueStore(paths.jobQueueDir(root), staging),
     ),

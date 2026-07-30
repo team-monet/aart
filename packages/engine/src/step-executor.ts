@@ -240,10 +240,21 @@ function buildBlockContext(
         input.mime,
         resolvedSecretRefs,
       );
+      const publicByteCount = applyConservativeRedaction(
+        config.redact,
+        bytes.byteLength,
+        resolvedSecretRefs,
+      );
+      const auditVisible =
+        typeof publicByteCount === "number" &&
+        Object.is(publicByteCount, bytes.byteLength);
       await config.store.artifacts.put(
         { id, runId, stepId, name, kind, mime, path, bytes: bytes.byteLength, createdAt: (config.now?.() ?? new Date()).toISOString() },
         bytes,
-        { redactionTextEligible: isTextMime(input.mime) },
+        {
+          redactionTextEligible: isTextMime(input.mime),
+          ...(auditVisible ? {} : { auditVisible: false }),
+        },
       );
       return { id, path };
     },
@@ -773,7 +784,12 @@ async function appendTracesAndPersist(
         activeState,
         repaired,
       );
+    const {
+      pendingIdempotencyReplays: _priorPendingClaims,
+      ...retainedActiveState
+    } = activeState ?? {};
     await tx.runs.putOperationalState(repaired.runId, {
+      ...retainedActiveState,
       run: repaired,
       resolvedSecretValues: [...resolvedSecretRefs],
       ...(pendingIdempotencyReplays !== undefined
@@ -1345,13 +1361,17 @@ export async function prepareRevokedIdempotencyConsumer(
     // execution authority for this pass.
     workflow = currentWorkflow;
   } else {
+    const protectedState =
+      await store.runs.getOperationalState(run.runId);
     try {
-      workflow = await resolveWorkflowForRun(store, run);
+      workflow = await resolveWorkflowForRun(
+        store,
+        protectedState?.run ?? run,
+      );
     } catch (snapshotError) {
-      // A newly known secret can coincide with a scalar inside the captured
-      // definition and make that redacted snapshot fail schema parsing. The
-      // exact persisted workflow version is still an immutable authority for
-      // historical provenance reconstruction.
+      // Legacy terminal rows may predate the sealed archive. Retain their
+      // historical fallback, but never prefer the mutable registry when an
+      // exact protected snapshot exists.
       const storedWorkflow = await store.workflows.get(
         run.workflowId,
         run.workflowVersion,
@@ -1523,7 +1543,12 @@ export async function refreshTaintAfterControlResolution(
         activeState,
         repaired,
       );
+    const {
+      pendingIdempotencyReplays: _priorPendingClaims,
+      ...retainedActiveState
+    } = activeState ?? {};
     await tx.runs.putOperationalState(repaired.runId, {
+      ...retainedActiveState,
       run: repaired,
       resolvedSecretValues: [...resolvedSecretRefs],
       ...(pendingIdempotencyReplays !== undefined

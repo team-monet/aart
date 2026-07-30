@@ -658,6 +658,30 @@ export async function repairCustomerVisibleAudits(
           : {}),
       });
     }
+    if (
+      activeState !== undefined &&
+      (run.status === "completed" ||
+        run.status === "failed" ||
+        run.status === "cancelled")
+    ) {
+      const {
+        pendingIdempotencyReplays: _pendingClaims,
+        ...archiveBase
+      } = activeState;
+      await store.runs.putOperationalState(run.runId, {
+        ...archiveBase,
+        run: mergeOperationalRunTaint(
+          activeState.run,
+          repaired,
+        ),
+        resolvedSecretValues: [
+          ...new Set([
+            ...activeState.resolvedSecretValues,
+            ...resolvedSecretRefs,
+          ]),
+        ],
+      });
+    }
     if (run.status === "waiting") {
       const outstanding = waits.filter(
         (entry) => entry.runId === run.runId,
@@ -1012,14 +1036,14 @@ export function applyRunRedaction(redact: RedactFn, run: RunRecord, resolvedSecr
             resolvedSecretRefs,
           ) as Record<string, unknown>),
           // These keys are execution control state, not workflow data.
-          // Reclaiming a redacted running run must not turn dry-run off,
-          // lose its capability environment, or strand a queued run when
+          // Reclaiming a redacted running run must not turn dry-run off or
+          // strand a queued run when
           // a resolved boolean/string happens to equal one of these values.
+          // The exact capability environment remains only in sealed
+          // operational state; restoring it here would publish a secret
+          // whenever an environment name equals a resolved literal.
           ...(typeof run.params.dryRun === "boolean"
             ? { dryRun: run.params.dryRun }
-            : {}),
-          ...(typeof run.params.environment === "string"
-            ? { environment: run.params.environment }
             : {}),
           ...(typeof run.params.waitingOnConcurrency === "boolean"
             ? {

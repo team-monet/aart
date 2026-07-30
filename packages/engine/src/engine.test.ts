@@ -2174,7 +2174,17 @@ describe("createEngine — THE durable-execution proof: a real process restart, 
     ).toMatchObject({ outputs: { restored: true } });
     await expect(
       reclaimStore.runs.getOperationalState(triggered.runId),
-    ).resolves.toBeUndefined();
+    ).resolves.toMatchObject({
+      run: {
+        status: "completed",
+        trace: expect.arrayContaining([
+          expect.objectContaining({
+            stepId: "after",
+            outputs: { restored: true },
+          }),
+        ]),
+      },
+    });
   });
 
   it("reclaim-safety: a DIFFERENT engine instance (a different worker) resumes a run the original claimant never released cleanly — a different code path than a clean same-worker restart", async () => {

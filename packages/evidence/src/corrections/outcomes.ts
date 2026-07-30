@@ -49,6 +49,39 @@ function setByPath(target: Record<string, unknown>, path: string, value: unknown
   cursor[segments[segments.length - 1]!] = value;
 }
 
+function containsKnownSecret(
+  value: unknown,
+  resolvedSecretValues: readonly string[],
+): boolean {
+  const secrets = resolvedSecretValues.filter(
+    (secret) => secret.length > 0,
+  );
+  if (secrets.length === 0) return false;
+  if (typeof value === "string") {
+    return secrets.some((secret) => value.includes(secret));
+  }
+  if (
+    typeof value === "number" ||
+    typeof value === "boolean" ||
+    typeof value === "bigint"
+  ) {
+    return secrets.includes(String(value));
+  }
+  if (Array.isArray(value)) {
+    return value.some((item) =>
+      containsKnownSecret(item, secrets),
+    );
+  }
+  if (value !== null && typeof value === "object") {
+    return Object.entries(value).some(
+      ([key, child]) =>
+        containsKnownSecret(key, secrets) ||
+        containsKnownSecret(child, secrets),
+    );
+  }
+  return false;
+}
+
 /**
  * Outcome 1/6 — "update current run output" (spec §23.4). Writes
  * `correction.corrected` into the target StepTrace at `correction.fieldPath`
@@ -170,6 +203,41 @@ export async function updateRunOutput(store: AartStore, correction: Correction):
       );
     }
 
+    const waits =
+      publicRun.status === "waiting"
+        ? await tx.waits.list({
+            runId: correction.runId,
+          })
+        : [];
+    const firstWait = waits[0];
+    if (
+      publicRun.status === "waiting" &&
+      firstWait === undefined
+    ) {
+      throw new Error(
+        `updateRunOutput: waiting run "${correction.runId}" has no durable wait boundary`,
+      );
+    }
+    const protectedState =
+      publicRun.status === "waiting"
+        ? await tx.waits.getOperationalRunState(
+            firstWait!.runId,
+            firstWait!.stepId,
+          )
+        : await tx.runs.getOperationalState(
+            correction.runId,
+          );
+    if (
+      containsKnownSecret(
+        correction.corrected,
+        protectedState?.resolvedSecretValues ?? [],
+      )
+    ) {
+      throw new Error(
+        `updateRunOutput: corrected value contains a secret already known to run "${correction.runId}" and cannot be published`,
+      );
+    }
+
     const updatedAt = new Date().toISOString();
     let updatedPublic = applyTraceCorrection(
       publicRun,
@@ -181,41 +249,64 @@ export async function updateRunOutput(store: AartStore, correction: Correction):
       updatedPublic,
     );
 
-    if (publicRun.status === "waiting") {
-      const waits = await tx.waits.list({
-        runId: correction.runId,
-      });
-      const firstWait = waits[0];
-      if (firstWait === undefined) {
-        throw new Error(
-          `updateRunOutput: waiting run "${correction.runId}" has no durable wait boundary`,
-        );
-      }
-      const protectedState =
-        await tx.waits.getOperationalRunState(
-          firstWait.runId,
-          firstWait.stepId,
-        );
-      const protectedRun = protectedState?.run ?? publicRun;
+    let updatedProtected: RunRecord | undefined;
+    if (
+      protectedState !== undefined ||
+      publicRun.status === "waiting"
+    ) {
+      const protectedRun =
+        protectedState?.run ?? publicRun;
       const protectedTarget = protectedRun.trace.findLast(
         (trace) => trace.stepId === correction.stepId,
       );
-      if (protectedTarget?.status !== "completed") {
+      if (
+        publicRun.status === "waiting" &&
+        protectedTarget?.status !== "completed"
+      ) {
         throw new Error(
           `updateRunOutput: waiting run "${correction.runId}" can correct only an already-completed trace; the unresolved wait result is owned by its eventual resume payload`,
         );
       }
-      const updatedProtected = applyTraceCorrection(
+      updatedProtected = applyTraceCorrection(
         protectedRun,
         correction,
         updatedAt,
       );
-      // The exact continuation lands first for the filesystem adapter's
-      // cross-file flush order. A crash can leave a temporarily stale
-      // public audit, but never an accepted correction that execution loses.
+      updatedProtected =
+        await refreshCompletedCorrectionOutputs(
+          tx,
+          updatedProtected,
+        );
+    }
+
+    if (
+      publicRun.status === "waiting" &&
+      firstWait !== undefined
+    ) {
       await tx.waits.replaceOperationalRunState(
         correction.runId,
         {
+          run: updatedProtected ?? updatedPublic,
+          resolvedSecretValues:
+            protectedState?.resolvedSecretValues ?? [],
+          ...(protectedState?.pendingIdempotencyReplays !==
+          undefined
+            ? {
+                pendingIdempotencyReplays:
+                  protectedState.pendingIdempotencyReplays,
+              }
+            : {}),
+        },
+      );
+    } else if (updatedProtected !== undefined) {
+      const {
+        pendingIdempotencyReplays: _settledClaims,
+        ...archiveBase
+      } = protectedState ?? {};
+      await tx.runs.putOperationalState(
+        correction.runId,
+        {
+          ...archiveBase,
           run: updatedProtected,
           resolvedSecretValues:
             protectedState?.resolvedSecretValues ?? [],
@@ -224,7 +315,6 @@ export async function updateRunOutput(store: AartStore, correction: Correction):
     }
 
     await tx.runs.put(updatedPublic);
-    await tx.runs.deleteOperationalState(correction.runId);
     return updatedPublic;
   });
 }

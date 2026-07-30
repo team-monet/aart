@@ -1,7 +1,7 @@
 // fs-adapter-specific behaviors not covered by the adapter-agnostic
-// conformance suite: the documented non-atomic signals-audit-copy gap
-// (architecture §5.8), atomic write-temp-then-rename hygiene, and the
-// concrete .aart/ directory layout (architecture §5.2).
+// conformance suite: durable cross-file transaction recovery, atomic
+// write-temp-then-rename hygiene, and the concrete .aart/ directory layout
+// (architecture §5.2).
 import { createCipheriv, randomBytes } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { tmpdir } from "node:os";
@@ -542,27 +542,24 @@ describe("fs adapter — .aart/ layout (architecture §5.2)", () => {
   });
 });
 
-describe("fs adapter — documented non-atomic gap: the global signals audit copy (architecture §5.8)", () => {
-  it("marks the signals audit copy consumed even when the surrounding transact() callback later throws — signals writes are NOT staged/rolled-back", async () => {
+describe("fs adapter — signal audits share the transaction journal", () => {
+  it("rolls signal consumption back when the surrounding callback throws", async () => {
     const signal = { id: "sig_gap_1", name: "quote.received", correlationId: "corr_gap_1", payload: {}, receivedAt: new Date().toISOString() };
     await store.signals.append(signal);
 
     await expect(
       store.transact(async (tx) => {
-        // A real caller would also update run state here; this test isolates
-        // the documented gap by having the transaction touch `signals`
-        // (not staged) and then fail before anything staged would commit.
         await tx.signals.markConsumed(signal.id);
-        throw new Error("simulated crash after the (unstaged) signals write, before the transaction would otherwise commit");
+        throw new Error("simulated callback failure");
       }),
     ).rejects.toThrow();
 
-    // The signals audit copy's consumed flag is NOT rolled back — this is
-    // the accepted, documented gap (architecture §5.8): "under fs, a crash
-    // between the two could leave a consumed signal's audit copy showing
-    // consumed:false even though the run already advanced (or, much less
-    // likely, vice versa)."
-    await expect(store.signals.findUnconsumedMatch("quote.received", "corr_gap_1")).resolves.toBeUndefined();
+    await expect(
+      store.signals.findUnconsumedMatch(
+        "quote.received",
+        "corr_gap_1",
+      ),
+    ).resolves.toEqual(signal);
   });
 });
 

@@ -10,29 +10,34 @@
 // (`<correlationId>__<receivedAt>.json`) — the two fields that matter most
 // for a human skimming the directory.
 //
-// Deliberately NOT staged by transact() — see the doc comment on
-// AartStore.transact in ../../types.ts (the `tx.events` paragraph) for why
-// this mirrors SignalStore's own non-atomic-gap precedent rather than the
-// staged default every other "simple" fs store (simple-stores.ts) uses.
-import { promises as fs } from "node:fs";
 import { join } from "node:path";
 import type { EventLogEntry } from "@aart/types";
 import type { EventLogStore } from "../../types.js";
-import { JsonFileHandle } from "./json-file.js";
+import {
+  JsonFileHandle,
+  listDirectoryEntries,
+  type StagingBuffer,
+} from "./json-file.js";
 
 function sanitizeForFilename(value: string): string {
   return value.replace(/[/\\:*?"<>|]/g, "_");
 }
 
 export class FsEventLogStore implements EventLogStore {
-  constructor(private readonly dir: string) {}
+  constructor(
+    private readonly dir: string,
+    private readonly staging?: StagingBuffer,
+  ) {}
 
   private pathFor(entry: Pick<EventLogEntry, "id" | "occurredAt">): string {
     return join(this.dir, `${sanitizeForFilename(entry.occurredAt)}__${sanitizeForFilename(entry.id)}.json`);
   }
 
   async append(entry: EventLogEntry): Promise<void> {
-    await new JsonFileHandle<EventLogEntry>(this.pathFor(entry)).write(entry);
+    await new JsonFileHandle<EventLogEntry>(
+      this.pathFor(entry),
+      this.staging,
+    ).write(entry);
   }
 
   async replaceAudit(
@@ -44,7 +49,10 @@ export class FsEventLogStore implements EventLogStore {
     );
     if (!entry) return;
     const { actor: _actor, ...withoutActor } = entry;
-    await new JsonFileHandle<EventLogEntry>(this.pathFor(entry)).write({
+    await new JsonFileHandle<EventLogEntry>(
+      this.pathFor(entry),
+      this.staging,
+    ).write({
       ...withoutActor,
       summary: audit.summary,
       ...("actor" in audit ? { actor: audit.actor } : {}),
@@ -54,12 +62,23 @@ export class FsEventLogStore implements EventLogStore {
   private async listStored(): Promise<EventLogEntry[]> {
     let files: string[];
     try {
-      files = (await fs.readdir(this.dir)).filter((f) => f.endsWith(".json") && !f.startsWith(".tmp-"));
+      files = (
+        await listDirectoryEntries(this.dir, this.staging)
+      ).filter(
+        (f) => f.endsWith(".json") && !f.startsWith(".tmp-"),
+      );
     } catch (err) {
       if (typeof err === "object" && err !== null && "code" in err && (err as { code?: string }).code === "ENOENT") return [];
       throw err;
     }
-    const values = await Promise.all(files.map((f) => new JsonFileHandle<EventLogEntry>(join(this.dir, f)).read()));
+    const values = await Promise.all(
+      files.map((f) =>
+        new JsonFileHandle<EventLogEntry>(
+          join(this.dir, f),
+          this.staging,
+        ).read(),
+      ),
+    );
     return values.filter((v): v is EventLogEntry => v !== undefined);
   }
 

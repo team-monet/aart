@@ -839,7 +839,7 @@ describe("applyRunRedaction", () => {
     expect(redacted.params).toMatchObject({
       dryRun: true,
       waitingOnConcurrency: true,
-      environment: "true",
+      environment: "[REDACTED]",
       concurrencyKeyFormat: "2",
     });
     expect(redacted.snapshot.definitions).toBeNull();

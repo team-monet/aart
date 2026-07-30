@@ -563,6 +563,40 @@ export function createSqliteAddArtifactAuditVisibilityMigration(
   };
 }
 
+/**
+ * Makes the SQLite metadata row the atomic pointer to immutable artifact
+ * bytes. A transaction writes a fresh generation file, then commits this
+ * pointer with the audit metadata; rollback leaves the prior pointer intact.
+ * Legacy rows keep NULL and continue reading `<artifactId>.blob`.
+ */
+export function createSqliteAddArtifactBlobGenerationMigration(
+  db: DatabaseSync,
+): Migration {
+  return {
+    id: "0012_artifact_blob_generation",
+    async up(): Promise<void> {
+      try {
+        db.exec(
+          "ALTER TABLE artifacts ADD COLUMN blob_generation TEXT",
+        );
+      } catch (error) {
+        if (
+          error instanceof Error &&
+          error.message.includes("duplicate column name")
+        ) {
+          return;
+        }
+        throw error;
+      }
+    },
+    async down(): Promise<void> {
+      db.exec(
+        "ALTER TABLE artifacts DROP COLUMN blob_generation",
+      );
+    },
+  };
+}
+
 export const ALL_SQLITE_MIGRATIONS = (db: DatabaseSync): Migration[] => [
   createSqliteInitMigration(db),
   createSqliteAddDeploymentPromotedMigration(db),
@@ -575,4 +609,5 @@ export const ALL_SQLITE_MIGRATIONS = (db: DatabaseSync): Migration[] => [
   createSqliteAddWaitOperationGenerationMigration(db),
   createSqliteAddProtectedContinuationStateMigration(db),
   createSqliteAddArtifactAuditVisibilityMigration(db),
+  createSqliteAddArtifactBlobGenerationMigration(db),
 ];

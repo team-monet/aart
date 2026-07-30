@@ -263,7 +263,22 @@ export async function finalizeTerminal(
       resolvedSecretRefs,
     );
     await tx.runs.put(persistenceSafeRun);
-    await tx.runs.deleteOperationalState(repaired.runId);
+    const protectedState =
+      await tx.runs.getOperationalState(repaired.runId);
+    const {
+      pendingIdempotencyReplays: _pendingClaims,
+      ...archiveBase
+    } = protectedState ?? {};
+    await tx.runs.putOperationalState(repaired.runId, {
+      ...archiveBase,
+      run: repaired,
+      resolvedSecretValues: [
+        ...new Set([
+          ...(protectedState?.resolvedSecretValues ?? []),
+          ...resolvedSecretRefs,
+        ]),
+      ],
+    });
     return persistenceSafeRun;
   };
   const redacted = await transactWithGlobalSecretRepair(
@@ -528,11 +543,15 @@ export async function executeRun(config: EngineConfig, runId: string): Promise<R
       publicRun.status !== "pending" &&
       publicRun.status !== "running"
     ) {
+      const protectedState =
+        await tx.runs.getOperationalState(runId);
       if (
-        publicRun.status === "completed" ||
-        publicRun.status === "failed" ||
-        publicRun.status === "cancelled"
+        protectedState !== undefined &&
+        protectedState.run.status !== publicRun.status
       ) {
+        // Public terminal state wins over a stale active continuation left
+        // by an interrupted or out-of-band legacy transition. Valid terminal
+        // archives carry the same terminal status and remain retained.
         await tx.runs.deleteOperationalState(runId);
       }
       return {
@@ -720,7 +739,22 @@ export async function cancelRun(config: EngineConfig, runId: string): Promise<Ru
       resolvedSecretRefs,
     );
     await tx.runs.put(persistenceSafeRun);
-    await tx.runs.deleteOperationalState(runId);
+    const protectedState =
+      await tx.runs.getOperationalState(runId);
+    const {
+      pendingIdempotencyReplays: _pendingClaims,
+      ...archiveBase
+    } = protectedState ?? {};
+    await tx.runs.putOperationalState(runId, {
+      ...archiveBase,
+      run: persistenceAwareUpdated,
+      resolvedSecretValues: [
+        ...new Set([
+          ...(protectedState?.resolvedSecretValues ?? []),
+          ...resolvedSecretRefs,
+        ]),
+      ],
+    });
     for (const wait of outstandingWaits) {
       await tx.waits.delete(wait.runId, wait.stepId);
     }

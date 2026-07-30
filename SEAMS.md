@@ -69,7 +69,17 @@ each newly resolved value in an execution segment. That pass covers unrelated
 non-cached runs and their customer-visible audits but never reconstructs their
 workflow provenance; expensive reconstruction remains producer/reachable-
 consumer-only. Artifact byte/metadata rewrites are recovery-journaled by both
-local adapters, including SQLite rollback and startup recovery.
+local adapters. SQLite writes immutable blob generations and commits their
+internal pointer with the metadata row; rollback keeps the prior pointer, and
+startup removes only unreferenced generations while holding the database
+writer lock.
+`RunStore.getOperationalState(runId)` is also the engine-only exact authority
+for active and terminal runs. A terminal entry is a sealed historical archive,
+not an executable continuation: settled replay claims are removed, workflow
+resolution prefers its frozen definition over a redacted public snapshot or
+mutable registry row, and governed corrections update it alongside the public
+audit. Waiting exact state remains owned by
+`WaitStore.getOperationalRunState(runId, stepId)`.
 
 `WaitStore.list()` returns the redacted audit condition.
 `WaitStore.listOperational()` is the engine-only view that opens the complete
@@ -103,11 +113,12 @@ correlation ID, and payload before `markConsumed` clears that protected copy.
 already-consumed rows written before migration `0007`.
 
 The filesystem store serializes top-level operations and transactions under a
-process-local mutex shared by every handle to the same normalized root. Engine
-run writes merge the latest persisted taint metadata after entering that
-critical section, so retrospective repair and forward execution cannot
-overwrite one another. Database adapters remain the authority for
-multi-process server workers.
+process-local mutex shared by every handle to the same normalized root. Every
+JSON audit row and artifact blob written through a transaction shares one
+durable redo journal, including signals and events. Engine run writes merge
+the latest persisted taint metadata after entering that critical section, so
+retrospective repair and forward execution cannot overwrite one another.
+Database adapters remain the authority for multi-process server workers.
 
 **Wait-TIMEOUT-expiry sibling seam (architecture §4.4.1's "Expiry note") — a DIFFERENT terminal outcome from resume, S2's ticker should sweep this too, on the same interval:**
 ```ts
@@ -200,7 +211,7 @@ This session stashes 3 keys into the existing free-form `RunRecord.params` bag r
 
 - `params.concurrencyKey: string` — the resolved `workflow.concurrency.key` value for this run, set by `triggerRun` whenever the workflow declares a `concurrency` block.
 - `params.waitingOnConcurrency: boolean` — `true` while a `queue`-policy run is held behind another non-terminal run of the same key (not yet enqueued to `job_queue`); flipped to `false` by `releaseQueuedRuns` when released.
-- `params.environment: string` — threaded through from `TriggerRunInput.environment` (architecture ADR-06: environment context is resolved per claimed run, never a process-start global) — read back on every subsequent step dispatch (including after a resume) to resolve `getGrantedCapabilities(workflow, environment)`.
+- `params.environment: string` — threaded through from `TriggerRunInput.environment` (architecture ADR-06: environment context is resolved per claimed run, never a process-start global). Execution reads the exact value from the sealed operational continuation/archive on every subsequent dispatch, including after resume. If later secret discovery matches the environment name, the public `RunRecord.params.environment` is redacted and is never restored merely because the field also controls capability selection.
 
 **Anyone reading `RunRecord.params` for other purposes (dashboard, reports, evidence renderers) should treat these 3 keys as engine-internal** — not part of any user-facing "run parameters" surface, even though they share the same bag as whatever operational params a trigger caller supplies.
 

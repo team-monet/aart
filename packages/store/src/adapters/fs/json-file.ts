@@ -273,13 +273,106 @@ export class JsonFileHandle<T> {
   }
 }
 
-async function listDirEntries(dir: string): Promise<string[]> {
-  try {
-    return await fs.readdir(dir);
-  } catch (err) {
-    if (isEnoent(err)) return [];
-    throw err;
+/**
+ * Raw-byte sibling of JsonFileHandle. Artifact blobs use the same transaction
+ * buffer as JSON audit rows so a redo journal covers the complete public
+ * repair, not only its metadata half.
+ */
+export class BinaryFileHandle {
+  constructor(
+    private readonly path: string,
+    private readonly staging?: StagingBuffer,
+  ) {}
+
+  async read(): Promise<Buffer | undefined> {
+    if (this.staging?.pending.has(this.path)) {
+      const staged = this.staging.pending.get(this.path);
+      return staged === null ? undefined : Buffer.from(staged!);
+    }
+    try {
+      return await fs.readFile(this.path);
+    } catch (err) {
+      if (isEnoent(err)) return undefined;
+      throw err;
+    }
   }
+
+  async write(value: Uint8Array): Promise<void> {
+    const content = Buffer.from(value);
+    if (this.staging) {
+      this.staging.pending.set(this.path, content);
+      return;
+    }
+    await atomicWriteFile(this.path, content);
+  }
+
+  async delete(): Promise<void> {
+    if (this.staging) {
+      this.staging.pending.set(this.path, null);
+      return;
+    }
+    await removeFileIfExists(this.path);
+  }
+}
+
+/**
+ * Lists a directory through the transaction's read-your-writes view. Nested
+ * pending paths contribute their first path segment so callers such as the
+ * artifact store can discover a run directory created inside this callback.
+ */
+export async function listDirectoryEntries(
+  dir: string,
+  staging?: StagingBuffer,
+): Promise<string[]> {
+  const entries = new Set<string>();
+  try {
+    for (const entry of await fs.readdir(dir)) entries.add(entry);
+  } catch (err) {
+    if (!isEnoent(err)) throw err;
+  }
+  if (staging) {
+    const normalizedDir = resolve(dir);
+    const prefix = normalizedDir.endsWith(sep)
+      ? normalizedDir
+      : `${normalizedDir}${sep}`;
+    for (const [path, content] of staging.pending) {
+      const normalizedPath = resolve(path);
+      if (!normalizedPath.startsWith(prefix)) continue;
+      const remainder = normalizedPath.slice(prefix.length);
+      const [entry, ...nested] = remainder.split(sep);
+      if (!entry) continue;
+      if (nested.length > 0 || content !== null) entries.add(entry);
+      else entries.delete(entry);
+    }
+  }
+  return [...entries].sort();
+}
+
+/**
+ * Rename with transaction-buffer semantics. A staged move becomes one target
+ * write plus one source delete in the shared durable redo journal.
+ */
+export async function moveFile(
+  source: string,
+  target: string,
+  staging?: StagingBuffer,
+): Promise<void> {
+  if (!staging) {
+    await fs.rename(source, target);
+    return;
+  }
+  const sourceHandle = new BinaryFileHandle(source, staging);
+  const content = await sourceHandle.read();
+  if (content === undefined) {
+    if ((await new BinaryFileHandle(target, staging).read()) !== undefined) {
+      return;
+    }
+    const error = new Error(`No such staged file: ${source}`);
+    Object.assign(error, { code: "ENOENT" });
+    throw error;
+  }
+  await new BinaryFileHandle(target, staging).write(content);
+  await sourceHandle.delete();
 }
 
 /**
@@ -314,7 +407,7 @@ export class KeyedJsonCollection<T> {
   }
 
   async listKeys(): Promise<string[]> {
-    const onDisk = (await listDirEntries(this.dir)).filter((f) => f.endsWith(".json") && !f.startsWith(".tmp-")).map((f) => f.slice(0, -".json".length));
+    const onDisk = (await listDirectoryEntries(this.dir, this.staging)).filter((f) => f.endsWith(".json") && !f.startsWith(".tmp-")).map((f) => f.slice(0, -".json".length));
     const keys = new Set(onDisk);
     if (this.staging) {
       const prefix = this.dir.endsWith(sep) ? this.dir : this.dir + sep;

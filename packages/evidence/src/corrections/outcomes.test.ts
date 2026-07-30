@@ -51,6 +51,17 @@ describe("outcome 1/6 — updateRunOutput (spec §23.4 'update current run outpu
       snapshot: { definitions: workflow, resolvedVersions: {}, packHashes: {}, capturedAt: "2026-01-01T00:00:00.000Z" },
     });
     await store.runs.put(run);
+    await store.runs.putOperationalState(run.runId, {
+      run,
+      resolvedSecretValues: ["known-secret"],
+      pendingIdempotencyReplays: [
+        {
+          ledgerKey: "settled-ledger-key",
+          stepId: "extract",
+          traceSeq: 0,
+        },
+      ],
+    });
 
     const updated = await updateRunOutput(store, fixtureCorrection());
 
@@ -58,6 +69,19 @@ describe("outcome 1/6 — updateRunOutput (spec §23.4 'update current run outpu
     expect(trace.outputs?.nmi).toBe("6401234568");
     expect(trace.postHocCorrected).toBe(true);
     await expect(store.runs.get("run_1")).resolves.toMatchObject({ trace: [{ outputs: { nmi: "6401234568" }, postHocCorrected: true }] });
+    await expect(
+      store.runs.getOperationalState(run.runId),
+    ).resolves.toEqual({
+      run: expect.objectContaining({
+        trace: [
+          expect.objectContaining({
+            outputs: { nmi: "6401234568" },
+            postHocCorrected: true,
+          }),
+        ],
+      }),
+      resolvedSecretValues: ["known-secret"],
+    });
   });
 
   it("updates the sealed continuation when correcting a durably waiting run", async () => {
@@ -128,6 +152,117 @@ describe("outcome 1/6 — updateRunOutput (spec §23.4 'update current run outpu
     ).toMatchObject({
       outputs: { nmi: "6401234568" },
       postHocCorrected: true,
+    });
+  });
+
+  it("rejects a waiting-run correction that contains an already known secret", async () => {
+    const secret = "known-correction-secret";
+    const exactRun = fixtureRunRecord({
+      runId: "run_1",
+      status: "waiting",
+      endedAt: undefined,
+      trace: [
+        {
+          seq: 0,
+          stepId: "extract",
+          block: "llm.extract",
+          status: "completed",
+          inputs: {},
+          outputs: { nmi: "original" },
+          startedAt: "t",
+        },
+        {
+          seq: 1,
+          stepId: "pause",
+          block: "wait.manual",
+          status: "waiting",
+          inputs: {},
+          startedAt: "t",
+        },
+      ],
+    });
+    await store.runs.put(exactRun);
+    await store.waits.put(
+      exactRun.runId,
+      "pause",
+      { type: "manual", schemaVersion: 1 },
+      "2026-01-01T00:00:00.000Z",
+      {
+        run: exactRun,
+        resolvedSecretValues: [secret],
+      },
+    );
+
+    await expect(
+      updateRunOutput(
+        store,
+        fixtureCorrection({
+          corrected: `prefix-${secret}-suffix`,
+        }),
+      ),
+    ).rejects.toThrow(/contains a secret already known/);
+    await expect(
+      store.runs.get(exactRun.runId),
+    ).resolves.toEqual(exactRun);
+    await expect(
+      store.waits.getOperationalRunState(
+        exactRun.runId,
+        "pause",
+      ),
+    ).resolves.toMatchObject({
+      run: {
+        trace: expect.arrayContaining([
+          expect.objectContaining({
+            outputs: { nmi: "original" },
+          }),
+        ]),
+      },
+      resolvedSecretValues: [secret],
+    });
+  });
+
+  it("rejects a terminal correction against its retained sealed secret set", async () => {
+    const secret = "terminal-correction-secret";
+    const run = fixtureRunRecord({
+      runId: "run_1",
+      trace: [
+        {
+          seq: 0,
+          stepId: "extract",
+          block: "llm.extract",
+          status: "completed",
+          inputs: {},
+          outputs: { nmi: "original" },
+          startedAt: "t",
+        },
+      ],
+    });
+    await store.runs.put(run);
+    await store.runs.putOperationalState(run.runId, {
+      run,
+      resolvedSecretValues: [secret],
+    });
+
+    await expect(
+      updateRunOutput(
+        store,
+        fixtureCorrection({ corrected: secret }),
+      ),
+    ).rejects.toThrow(/contains a secret already known/);
+    await expect(store.runs.get(run.runId)).resolves.toEqual(
+      run,
+    );
+    await expect(
+      store.runs.getOperationalState(run.runId),
+    ).resolves.toMatchObject({
+      run: {
+        trace: [
+          expect.objectContaining({
+            outputs: { nmi: "original" },
+          }),
+        ],
+      },
+      resolvedSecretValues: [secret],
     });
   });
 

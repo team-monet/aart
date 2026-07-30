@@ -127,7 +127,13 @@ describe("triggerRun — run intake (architecture §4.3)", () => {
     });
     await expect(
       store.runs.getOperationalState(run.runId),
-    ).resolves.toBeUndefined();
+    ).resolves.toMatchObject({
+      run: {
+        status: "completed",
+        inputs: { token: secret },
+      },
+      resolvedSecretValues: [secret],
+    });
   });
 
   it("captures approved/approvalMode from the input, defaulting to approved:true/dev", async () => {
@@ -139,6 +145,51 @@ describe("triggerRun — run intake (architecture §4.3)", () => {
     const runProd = await triggerRun(config, { workflow: fixtureWorkflow(), trigger: fixtureTrigger(), inputs: {}, approved: false, approvalMode: "production" });
     expect(runProd.approved).toBe(false);
     expect(runProd.approvalMode).toBe("production");
+  });
+
+  it("keeps a secret-valued capability environment only in sealed state", async () => {
+    const secretEnvironment = "customer-secret-env";
+    const { store, config } = await setup({
+      redact: redactResolvedValues,
+      resolveSecret: () => secretEnvironment,
+    });
+    const workflow = fixtureWorkflow({
+      execution: {
+        type: "workflow",
+        steps: [
+          {
+            id: "discover",
+            uses: "test.echo",
+            with: { secret: "{{ secrets.ENVIRONMENT }}" },
+          },
+        ],
+      },
+    });
+    await store.workflows.put(workflow);
+    const triggered = await triggerRun(config, {
+      workflow,
+      trigger: fixtureTrigger(),
+      inputs: {},
+      environment: secretEnvironment,
+    });
+
+    const finished = await executeRun(
+      config,
+      triggered.runId,
+    );
+
+    expect(finished.params?.environment).toBe(
+      "[REDACTED]",
+    );
+    await expect(
+      store.runs.getOperationalState(triggered.runId),
+    ).resolves.toMatchObject({
+      run: {
+        status: "completed",
+        params: { environment: secretEnvironment },
+      },
+      resolvedSecretValues: [secretEnvironment],
+    });
   });
 
   it("stamps this engine's schemaVersion on the created RunRecord", async () => {
@@ -2057,6 +2108,82 @@ describe("executeRun — fresh execution", () => {
     const metadata = await store.artifacts.getMetadata(artifactId!);
     expect(metadata?.bytes).toBe(bytes?.byteLength);
     expect(finished.artifacts).toContainEqual(metadata);
+  });
+
+  it("withholds a secret-sized artifact before block execution can expose it", async () => {
+    let artifactId: string | undefined;
+    let visibleDuringExecution = true;
+    let storeForBlock: AartStore | undefined;
+    const artifactBlock: BlockImplementation = {
+      manifest: {
+        id: "test.secret-sized-artifact",
+        version: "1.0.0",
+        capabilities: [],
+        inputSchema: {},
+        outputSchema: {},
+        description:
+          "Resolves a numeric secret before writing an equal-sized blob.",
+      },
+      execute: async (_inputs, ctx) => {
+        await ctx.resolveSecret("BYTE_COUNT");
+        artifactId = (
+          await ctx.writeArtifact({
+            name: "opaque.bin",
+            kind: "file",
+            mime: "application/octet-stream",
+            bytes: new Uint8Array([1, 2, 3, 4]),
+          })
+        ).id;
+        visibleDuringExecution =
+          (await storeForBlock!.artifacts.getMetadata(
+            artifactId,
+          )) !== undefined;
+        return { written: true };
+      },
+    };
+    const { store, config } = await setup({
+      blocks: {
+        [artifactBlock.manifest.id]: artifactBlock,
+      },
+      redact: redactResolvedValues,
+      resolveSecret: () => 4,
+    });
+    storeForBlock = store;
+    const workflow = fixtureWorkflow({
+      execution: {
+        type: "workflow",
+        steps: [
+          {
+            id: "write",
+            uses: artifactBlock.manifest.id,
+          },
+        ],
+      },
+    });
+    await store.workflows.put(workflow);
+    const run = await triggerRun(config, {
+      workflow,
+      trigger: fixtureTrigger(),
+      inputs: {},
+    });
+
+    const finished = await executeRun(config, run.runId);
+
+    expect(finished.status).toBe("completed");
+    expect(visibleDuringExecution).toBe(false);
+    expect(artifactId).toBeDefined();
+    await expect(
+      store.artifacts.getMetadata(artifactId!),
+    ).resolves.toBeUndefined();
+    await expect(
+      store.artifacts.getBytes(artifactId!),
+    ).resolves.toBeUndefined();
+    await expect(
+      store.artifacts.listByRun(run.runId),
+    ).resolves.toEqual([]);
+    await expect(
+      store.artifacts.getBytesForRedaction(artifactId!),
+    ).resolves.toEqual(new Uint8Array([1, 2, 3, 4]));
   });
 
   it("keeps original text eligibility when a known secret redacts the public MIME before a later secret is discovered", async () => {

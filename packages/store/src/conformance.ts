@@ -734,6 +734,44 @@ export function runAartStoreConformanceSuite(label: string, options: Conformance
           auditVisible: false,
         });
       });
+
+      it("can withhold an artifact atomically on its initial write", async () => {
+        const runId = uniqueId("run");
+        const artifact: Artifact = {
+          id: uniqueId("art"),
+          runId,
+          name: "withheld-at-source.bin",
+          kind: "file",
+          mime: "application/octet-stream",
+          path: `artifacts/${runId}/withheld-at-source.bin`,
+          bytes: 3,
+          createdAt: new Date().toISOString(),
+        };
+        const bytes = new Uint8Array([7, 8, 9]);
+
+        await store.artifacts.put(artifact, bytes, {
+          auditVisible: false,
+        });
+
+        await expect(
+          store.artifacts.getMetadata(artifact.id),
+        ).resolves.toBeUndefined();
+        await expect(
+          store.artifacts.getBytes(artifact.id),
+        ).resolves.toBeUndefined();
+        await expect(
+          store.artifacts.listByRun(runId),
+        ).resolves.toEqual([]);
+        await expect(
+          store.artifacts.listForRedaction(runId),
+        ).resolves.toContainEqual({
+          artifact,
+          auditVisible: false,
+        });
+        await expect(
+          store.artifacts.getBytesForRedaction(artifact.id),
+        ).resolves.toEqual(bytes);
+      });
     });
 
     describe("approvals", () => {
@@ -1316,6 +1354,184 @@ export function runAartStoreConformanceSuite(label: string, options: Conformance
 
         await expect(store.runs.get(run.runId)).resolves.toBeUndefined();
         await expect(store.waits.get(run.runId, "step1")).resolves.toBeUndefined();
+      });
+
+      it("stages artifact blobs plus signal and event audits with read-your-writes and rollback", async () => {
+        const runId = uniqueId("run");
+        const artifact: Artifact = {
+          id: uniqueId("art"),
+          runId,
+          name: "transaction.txt",
+          kind: "file",
+          mime: "text/plain",
+          path: `artifacts/${runId}/transaction.txt`,
+          bytes: 4,
+          createdAt: new Date().toISOString(),
+        };
+        const artifactBytes =
+          new TextEncoder().encode("safe");
+        const signal: Signal = {
+          id: uniqueId("sig"),
+          name: "transaction.signal",
+          correlationId: uniqueId("corr"),
+          payload: { safe: true },
+          receivedAt: new Date().toISOString(),
+        };
+        const event: EventLogEntry = {
+          id: uniqueId("evt"),
+          type: "run.started",
+          occurredAt: new Date().toISOString(),
+          summary: "transaction event",
+          runId,
+        };
+
+        await expect(
+          store.transact(async (tx) => {
+            await tx.artifacts.put(artifact, artifactBytes);
+            await tx.signals.append(signal);
+            await tx.events.append(event);
+
+            await expect(
+              tx.artifacts.getMetadata(artifact.id),
+            ).resolves.toEqual(artifact);
+            await expect(
+              tx.artifacts.getBytes(artifact.id),
+            ).resolves.toEqual(artifactBytes);
+            await expect(
+              tx.signals.list(),
+            ).resolves.toContainEqual(signal);
+            await expect(
+              tx.events.list(),
+            ).resolves.toContainEqual(event);
+            throw new Error("rollback all audit members");
+          }),
+        ).rejects.toThrow(/rollback all audit members/);
+
+        await expect(
+          store.artifacts.getMetadata(artifact.id),
+        ).resolves.toBeUndefined();
+        await expect(
+          store.artifacts.getBytesForRedaction(artifact.id),
+        ).resolves.toBeUndefined();
+        await expect(
+          store.signals.list(),
+        ).resolves.not.toContainEqual(
+          expect.objectContaining({ id: signal.id }),
+        );
+        await expect(
+          store.events.list(),
+        ).resolves.not.toContainEqual(
+          expect.objectContaining({ id: event.id }),
+        );
+      });
+
+      it("rolls an existing artifact audit and blob back together", async () => {
+        const runId = uniqueId("run");
+        const artifact: Artifact = {
+          id: uniqueId("art"),
+          runId,
+          name: "original.txt",
+          kind: "file",
+          mime: "text/plain",
+          path: `artifacts/${runId}/original.txt`,
+          bytes: 8,
+          createdAt: new Date().toISOString(),
+        };
+        const originalBytes =
+          new TextEncoder().encode("original");
+        const repairedBytes =
+          new TextEncoder().encode("[REDACTED]");
+        await store.artifacts.put(
+          artifact,
+          originalBytes,
+        );
+
+        await expect(
+          store.transact(async (tx) => {
+            await tx.artifacts.replaceAudit(
+              artifact.id,
+              {
+                name: "[REDACTED]",
+                kind: artifact.kind,
+                mime: artifact.mime,
+                path: artifact.path,
+              },
+              repairedBytes,
+            );
+            await expect(
+              tx.artifacts.getMetadata(artifact.id),
+            ).resolves.toMatchObject({
+              name: "[REDACTED]",
+              bytes: repairedBytes.byteLength,
+            });
+            await expect(
+              tx.artifacts.getBytes(artifact.id),
+            ).resolves.toEqual(repairedBytes);
+            throw new Error("rollback artifact repair");
+          }),
+        ).rejects.toThrow(/rollback artifact repair/);
+
+        await expect(
+          store.artifacts.getMetadata(artifact.id),
+        ).resolves.toEqual(artifact);
+        await expect(
+          store.artifacts.getBytes(artifact.id),
+        ).resolves.toEqual(originalBytes);
+      });
+
+      it("keeps a staged artifact blob when a later write in the same transaction changes only metadata", async () => {
+        const runId = uniqueId("run");
+        const artifact: Artifact = {
+          id: uniqueId("art"),
+          runId,
+          name: "original.txt",
+          kind: "file",
+          mime: "text/plain",
+          path: `artifacts/${runId}/original.txt`,
+          bytes: 8,
+          createdAt: new Date().toISOString(),
+        };
+        const originalBytes =
+          new TextEncoder().encode("original");
+        const repairedBytes =
+          new TextEncoder().encode("[REDACTED]");
+        await store.artifacts.put(artifact, originalBytes);
+
+        await store.transact(async (tx) => {
+          await tx.artifacts.replaceAudit(
+            artifact.id,
+            {
+              name: "first-safe-name.txt",
+              kind: artifact.kind,
+              mime: artifact.mime,
+              path: artifact.path,
+            },
+            repairedBytes,
+          );
+          await tx.artifacts.replaceAudit(
+            artifact.id,
+            {
+              name: "final-safe-name.txt",
+              kind: artifact.kind,
+              mime: artifact.mime,
+              path: `artifacts/${runId}/final-safe-name.txt`,
+            },
+          );
+          await expect(
+            tx.artifacts.getBytes(artifact.id),
+          ).resolves.toEqual(repairedBytes);
+        });
+
+        await expect(
+          store.artifacts.getMetadata(artifact.id),
+        ).resolves.toMatchObject({
+          name: "final-safe-name.txt",
+          path: `artifacts/${runId}/final-safe-name.txt`,
+          bytes: repairedBytes.byteLength,
+        });
+        await expect(
+          store.artifacts.getBytes(artifact.id),
+        ).resolves.toEqual(repairedBytes);
       });
 
       it("exercises the real §4.4.2 dedupe-check-and-transition pattern end-to-end: duplicate delivery is a no-op", async () => {

@@ -58,15 +58,16 @@ export interface RunStore {
   put(run: RunRecord): Promise<void>;
   list(filter?: { status?: RunStatus; workflowId?: string }): Promise<RunRecord[]>;
   /**
-   * Engine-only exact state for a pending or currently-running
-   * continuation whose public RunRecord may contain redaction markers.
-   * This state is sealed at rest from intake onward and updated atomically
-   * with every public progress write.
+   * Engine-only exact state whose public RunRecord may contain redaction
+   * markers. It is sealed at rest from intake onward. Active runs use it for
+   * continuation; terminal runs retain it as the canonical historical
+   * definition/provenance authority for future secret repair and governed
+   * correction.
    */
   getOperationalState(
     runId: string,
   ): Promise<RunOperationalState | undefined>;
-  /** Creates or replaces the protected active continuation. */
+  /** Creates or replaces the protected continuation/archive. */
   putOperationalState(
     runId: string,
     state: RunOperationalState,
@@ -76,7 +77,7 @@ export interface RunStore {
     runId: string,
     state: RunOperationalState,
   ): Promise<void>;
-  /** Removes it at the next terminal or durably-suspended boundary. */
+  /** Removes it after transfer to another sealed boundary or when proven stale. */
   deleteOperationalState(runId: string): Promise<void>;
   /**
    * The exactly-once resume dedupe ledger (architecture §4.4.2): has this
@@ -165,10 +166,9 @@ export interface WaitStore {
 export interface SignalStore {
   /**
    * Appends the durable, append-only audit record (architecture §5.2:
-   * `signals/<correlationId>__<receivedAt>.json`). Deliberately NOT staged
-   * by `transact()` (see AartStore.transact's own doc comment) — this
-   * write always lands immediately, matching the fs adapter's documented
-   * non-atomic gap (architecture §5.8).
+   * `signals/<correlationId>__<receivedAt>.json`). When called through a
+   * transaction view, both the audit row and its sealed operational copy
+   * participate in that transaction.
    */
   append(signal: Signal): Promise<void>;
   /** The check-at-creation lookup architecture §4.4/§5.6 requires: an unconsumed Signal matching (name, correlationId), if one already arrived before its wait was created. */
@@ -234,6 +234,8 @@ export interface ArtifactStore {
        * audit value is redacted. Once stored, adapters keep the first value.
        */
       redactionTextEligible?: boolean;
+      /** Withhold every customer-visible artifact surface from first write. */
+      auditVisible?: false;
     },
   ): Promise<void>;
   getMetadata(artifactId: string): Promise<Artifact | undefined>;
@@ -371,9 +373,7 @@ export interface StandingApprovalStore {
 // to. Facts are append-only: `replaceAudit` may rewrite only data-bearing
 // presentation fields after a value is learned to be secret; it cannot
 // change event identity, type, ordering, or correlation fields.
-// Deliberately NOT staged by the fs adapter's `transact()` — see that
-// method's own doc comment below and adapters/fs/events.ts's module
-// comment; every real write site goes through packages/store/src/
+// Every real write site goes through packages/store/src/
 // event-log.ts's `recordEvent`, never `store.events.append` directly, so
 // the "a failed event-log write must never fail the primary operation it's
 // observing" contract is enforced in one place.
@@ -509,22 +509,10 @@ export interface AartStore {
    * SQLite/Postgres adapters implement this with a real BEGIN/COMMIT/
    * ROLLBACK. The fs adapter has no native cross-file transaction
    * primitive (architecture §5.8) — see adapters/fs/index.ts for its
-   * concrete mechanism (buffer every write issued through `tx` in memory;
-   * flush each touched file atomically via write-temp-then-rename only if
-   * `fn` resolves; discard everything if `fn` throws) and, critically, its
-   * documented non-atomic gap: `tx.signals` writes are NOT staged — they
-   * always land immediately, independent of whether the rest of the
-   * transaction ultimately commits. This is a deliberate, accepted gap for
-   * local dev (fs adapter only), not an oversight — see the comment on
-   * SignalStore.append/markConsumed above and adapters/fs/index.ts.
-   *
-   * `tx.events` (AMENDMENTS.md A61) follows the identical non-staged
-   * pattern, for an analogous reason: every real write site appends its
-   * event OUTSIDE of any `store.transact()` call (a best-effort, fire-
-   * and-forget audit line via event-log.ts's `recordEvent`, never
-   * expected to participate in the primary write's own atomicity), so
-   * there is no caller today relying on an event append rolling back
-   * alongside a failed transaction — see adapters/fs/events.ts.
+   * concrete mechanism: buffer every JSON and binary write issued through
+   * `tx`, persist one redo journal, then apply its entries. A callback error
+   * discards the buffer; a process exit during flush is completed from the
+   * journal before the next top-level operation.
    */
   transact<T>(fn: (tx: AartStore) => Promise<T>): Promise<T>;
 }

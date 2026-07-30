@@ -1,14 +1,7 @@
-// SignalStore — architecture §5.3 `signals` table. Unlike the fs adapter's
-// SignalStore (deliberately excluded from `transact()` staging per
-// architecture §5.8's documented non-atomic gap), THIS adapter's
-// `signals` writes DO participate in the real SQLite transaction opened by
-// `transact()` — see adapters/sqlite/index.ts's doc comment: SQLite gives a
-// genuine BEGIN/COMMIT, so there is no equivalent "fs has no native
-// cross-file transaction" gap to preserve here. This is a real, positive
-// capability difference between the two adapters, not an inconsistency —
-// architecture §5.8 states the fs gap is fs-specific ("SQLite/Postgres have
-// no equivalent gap — both `signals.consumed_at` and the `runs`/
-// `step_traces` update happen inside the same native transaction").
+// SignalStore — architecture §5.3 `signals` table. Writes participate in the
+// real SQLite transaction opened by `transact()`. The filesystem adapter now
+// provides the same logical atomicity through its durable redo journal (A76);
+// SQLite's native BEGIN/COMMIT remains the multi-process authority.
 import { createHash, randomUUID } from "node:crypto";
 import { join } from "node:path";
 import type { Signal } from "@aart/types";

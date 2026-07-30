@@ -312,11 +312,16 @@ async function redactAndPersistRun(
     }
   }
   await store.runs.put(redacted);
+  const {
+    pendingIdempotencyReplays: _priorPendingClaims,
+    ...retainedActiveState
+  } = activeState ?? {};
   if (
     operationalRun.status === "pending" ||
     operationalRun.status === "running"
   ) {
     await store.runs.putOperationalState(run.runId, {
+      ...retainedActiveState,
       run: operationalRun,
       resolvedSecretValues: [...effectiveSecretRefs],
       ...(pendingIdempotencyReplays !== undefined
@@ -330,8 +335,27 @@ async function redactAndPersistRun(
           }
         : {}),
     });
-  } else {
-    await store.runs.deleteOperationalState(run.runId);
+  } else if (
+    operationalRun.status === "completed" ||
+    operationalRun.status === "failed" ||
+    operationalRun.status === "cancelled"
+  ) {
+    await store.runs.putOperationalState(run.runId, {
+      ...retainedActiveState,
+      run:
+        activeState === undefined
+          ? operationalRun
+          : mergeOperationalRunTaint(
+              activeState.run,
+              operationalRun,
+            ),
+      resolvedSecretValues: [
+        ...new Set([
+          ...(activeState?.resolvedSecretValues ?? []),
+          ...effectiveSecretRefs,
+        ]),
+      ],
+    });
   }
   return redacted;
 }

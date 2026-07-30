@@ -79,9 +79,9 @@ describe("SQLite adapter — connection setup (architecture §5.1)", () => {
     expect(row.journal_mode).toBe("wal");
   });
 
-  it("auto-runs migrations by default, advancing the watermark to the latest ordinal (11, including artifact audit visibility)", async () => {
+  it("auto-runs migrations by default, advancing the watermark to the latest ordinal (12, including immutable artifact blob generations)", async () => {
     const watermark = new SqliteMigrationWatermarkStore(handle.db);
-    await expect(watermark.read()).resolves.toBe(11);
+    await expect(watermark.read()).resolves.toBe(12);
   });
 
   it("runMigrations: false skips DDL — store calls fail against the not-yet-created schema", async () => {
@@ -112,13 +112,14 @@ describe("SQLite adapter — connection setup (architecture §5.1)", () => {
       // 0008_sealed_operational_state +
       // 0009_wait_operation_generation +
       // 0010_protected_continuation_state +
-      // 0011_artifact_audit_visibility) — up() from
-      // watermark 0 applies all eleven in one
+      // 0011_artifact_audit_visibility +
+      // 0012_artifact_blob_generation) — up() from
+      // watermark 0 applies all twelve in one
       // call, landing on the latest ordinal.
-      await expect(runner.up()).resolves.toBe(11);
+      await expect(runner.up()).resolves.toBe(12);
       await expect(handle3.store.workflows.listWorkflowIds()).resolves.toEqual([]);
       // Idempotent re-run.
-      await expect(runner.up()).resolves.toBe(11);
+      await expect(runner.up()).resolves.toBe(12);
     } finally {
       handle3.close();
       await fs.rm(dir3, { recursive: true, force: true });
@@ -318,7 +319,7 @@ describe("SQLite adapter — artifact redaction recovery", () => {
   };
   const safeBytes = new TextEncoder().encode("[REDACTED]");
 
-  it("finishes metadata repair even when the enclosing transaction rolls back", async () => {
+  it("rolls metadata and blob repair back with the enclosing transaction", async () => {
     await store.artifacts.put(
       artifact,
       new TextEncoder().encode("late-secret"),
@@ -336,16 +337,15 @@ describe("SQLite adapter — artifact redaction recovery", () => {
 
     await expect(
       store.artifacts.getMetadata(artifact.id),
-    ).resolves.toMatchObject({
-      ...safeAudit,
-      bytes: safeBytes.byteLength,
-    });
+    ).resolves.toEqual(artifact);
     await expect(
       store.artifacts.getBytes(artifact.id),
-    ).resolves.toEqual(safeBytes);
+    ).resolves.toEqual(
+      new TextEncoder().encode("late-secret"),
+    );
   });
 
-  it("replays a durable redaction journal before a restarted store becomes available", async () => {
+  it("publishes a committed immutable blob generation immediately and reconciles its journal on restart", async () => {
     const dbPath = join(dir, "aart.db");
     const blobsDir = `${dbPath}.blobs`;
     await store.artifacts.put(
@@ -363,6 +363,13 @@ describe("SQLite adapter — artifact redaction recovery", () => {
       safeAudit,
       safeBytes,
     );
+    handle.db.exec("COMMIT");
+    // This scoped reader deliberately skips recovery. The committed SQLite
+    // pointer already selects matching bytes, so there is no post-COMMIT
+    // finalize window in which another process can observe a mixed pair.
+    await expect(
+      crashScopedArtifacts.getBytes(artifact.id),
+    ).resolves.toEqual(safeBytes);
     handle.close();
 
     handle = await openSqliteStore(dbPath);

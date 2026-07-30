@@ -1129,7 +1129,7 @@ John-ratified, 2026-07-12, on the D2+V1 wave and the "build the real event log" 
 
 `packages/store/src/types.ts`: new `EventLogStore { append(entry): Promise<void>; list(filter?: {since?, limit?}): Promise<EventLogEntry[]> }`, added as `events` on `AartStore` — the header's own "16 members" counted-fact comment (and its two sibling references to the same count, on the `job_queue`/`idempotencyLedger` "not one of the 16" notes and the interface's own closing comment) updated to 17 throughout; `conformance.ts`'s `jobQueue` describe label and `adapters/sqlite/schema.ts` + `stores/simple-stores.ts`'s own identical "not one of AartStore's 16 members" comments swept to 17 too, for internal consistency (a small superset of what the brief asked for verbatim — trivial, zero-risk comment edits, flagged here rather than silently done).
 
-fs adapter (`adapters/fs/events.ts`, new `FsEventLogStore`): mirrors `signals.ts`'s pattern exactly — one file per entry (`<occurredAt>__<id>.json`), scan-based `list()` with newest-first sort + `since`/`limit` applied on top, and — the load-bearing part of "mirror signals.ts" — **deliberately NOT staged by `transact()`**, the same non-atomic-gap precedent `SignalStore` established (constructor takes only `dir`, no `staging` param). `AartStore.transact()`'s own doc comment (types.ts) extended with a new paragraph naming `tx.events` as a second non-staged member, alongside the existing `tx.signals` one, with the reasoning: every real write site in this session appends its event OUTSIDE any `store.transact()` call, so there is no caller today relying on an event append rolling back with a failed transaction.
+fs adapter (`adapters/fs/events.ts`, new `FsEventLogStore`): mirrors `signals.ts`'s pattern exactly — one file per entry (`<occurredAt>__<id>.json`), scan-based `list()` with newest-first sort + `since`/`limit` applied on top. This entry originally excluded both members from `transact()` staging; A76 supersedes that local-development gap and places their writes in the shared durable redo journal.
 
 sqlite adapter: new migration `0004_events_table` (`adapters/sqlite/migrations.ts`) — this adapter's FIRST migration that adds a whole TABLE rather than a column on an existing one. `CREATE TABLE IF NOT EXISTS`/`CREATE INDEX IF NOT EXISTS` are naturally idempotent (unlike `ALTER TABLE ADD COLUMN`, which SQLite gives no `IF NOT EXISTS` for — 0002/0003's own reason for their try/catch "duplicate column name" tolerance), so 0004 does NOT need that dance. `down()` mirrors `0001_init`'s own `DROP TABLE IF EXISTS` idiom, not 0002/0003's `DROP COLUMN`. `events` is NOT added to `SQLITE_SCHEMA_STATEMENTS` (schema.ts) — same "0001's baseline DDL stays exactly as it always was" precedent 0002/0003 established, so a fresh 0001→0004 sequence and an upgraded pre-existing database converge on one identical shape. `stores/events.ts` (new `SqliteEventLogStore`): unlike the fs adapter, this member IS staged/transactional (mirrors `SqliteSignalStore`'s own documented reasoning — sqlite has a REAL `BEGIN`/`COMMIT`, so there's no fs-specific gap to preserve here; only the fs side needed the SignalStore-style carve-out). Optional-field row mapping uses this codebase's own established `row.field ?? undefined` idiom (verified directly against `ApprovalTaskRow.authenticated_as` -> `authenticatedAs`, not invented), so an omitted correlation field round-trips as genuinely absent under `toEqual`, never a stray populated value.
 
@@ -1182,7 +1182,7 @@ Coverage proof, mirroring A48's own four-entry-point discipline, one test each (
 **Deviations flagged, not silent:**
 1. The two self-caught `workflow.approved`/`approval.decided` gaps above (`applyGateResult`, `decideApprovalTask`, `approveHandler`) — additions beyond the brief's own write-site list, kept in scope since leaving them out would have shipped a known, test-demonstrated silent gap in the exact bug class this session's own standing imperative names.
 2. The "16 members" -> "17 members" comment sweep touched two files beyond `packages/store/src/types.ts` (`conformance.ts`'s `jobQueue` describe label, `schema.ts`/`stores/simple-stores.ts`'s own duplicate "not one of the 16" comments) — trivial, zero-behavior-change text edits for internal consistency within a package this session already owns; `packages/server/src/triggers/intake.ts`'s own unrelated "16 members" mention (about a completely different concern, the trigger dedupe-key ledger) was deliberately left untouched — out of scope, not silently missed.
-3. `EventLogStore`'s fs-adapter staging behavior (NOT staged, mirroring `SignalStore`) was a genuine design choice, not dictated unambiguously by the brief's "mirror signals.ts" instruction alone — reasoning recorded in `AartStore.transact()`'s own extended doc comment (types.ts) and above.
+3. `EventLogStore`'s original fs-adapter staging behavior (not staged, mirroring `SignalStore`) was a genuine design choice, not dictated unambiguously by the brief's "mirror signals.ts" instruction alone. A76 later removes that gap because secret repair now requires the complete public transition to commit atomically.
 
 **Commits (local only, none pushed), six, all on `v1/event-log` on top of `main`@`3f62a73`:** `52eb114` (PART 1 — types + store foundation), `defef86` (migration-count ripple + the down()-reverts-last-migration trap fix), `0a7cad6` (PART 2 — mcp handler instrumentation), `f3caf87` (RISK 1 — both engine composition roots + mandatory 4-entry-point tests), `a707fb4` (PART 2 — server instrumentation + reclaim, RISK 1's 3rd site), `86d02f8` (PART 3 — `GET /events`).
 
@@ -2031,8 +2031,8 @@ public running-progress write. A late global audit repair initializes the
 same protection for legacy pending/running rows before it rewrites their
 public values, and each worker rejoins newly protected secret literals before
 its next effect or persistence boundary. At a durable wait boundary that
-state transfers to the sealed wait continuation; at every terminal boundary,
-including reclaim exhaustion outside the engine, it is deleted. A worker
+state transfers to the sealed wait continuation; at a terminal boundary it
+becomes a sealed historical archive with settled replay claims removed. A worker
 crashing immediately after wait resumption, or between later steps, can
 therefore continue with the values and frozen workflow it actually had
 without exposing either through `RunStore.get()`/`list()`.
@@ -2099,12 +2099,14 @@ recoverable-source alternative for overlapping discoveries: if `abc` is
 learned before `abcdef`, the first rewrite cannot permanently expose `def`
 after the exact public source is gone. Late-repaired text artifacts use the
 same whole-content rule; active executable values remain exact only in their
-sealed continuation. The scan never resolves or reconstructs a historical
-workflow, and its successful transaction is remembered only for the lifetime
-of the current execution segment. Thus an unrelated, non-cached historical
-record cannot retain a newly classified secret, while an ordinary multi-step
-secret-using workflow does not rescan all history at every persistence
-boundary.
+sealed continuation, and terminal definition/provenance authority remains
+exact only in its sealed historical archive. The literal-only scan does not
+reconstruct unrelated historical workflows, and its successful transaction is
+remembered only for the lifetime of the current execution segment. Thus an
+ordinary multi-step secret-using workflow does not rescan all history at every
+persistence boundary, while a lineage or correction path that must
+re-materialize a terminal result uses the exact frozen definition rather than
+a mutable registry row.
 `IdempotencyLedgerStore.list()` exposes the current ledger closure whenever a
 segment learns a secret. Before concluding that no key changed under literal
 redaction, the engine reconstructs the active run and the persisted producer
@@ -2288,12 +2290,14 @@ every later MIME audit rewrite, so a
 second, later secret discovery still scans the bytes. Binary artifacts retain
 the existing pre-capture masking/explicit-read boundary because arbitrary
 encoded bytes cannot be safely search-and-replaced.
-Both filesystem and SQLite artifact adapters durably journal the safe metadata
-and staged byte generation before replacing either customer-visible copy.
-Filesystem access completes an interrupted journal before returning data;
-SQLite replays journals at startup and after both transaction commit and
-rollback. A process exit or a later failing repair therefore cannot leave raw
-metadata beside safe bytes, or safe metadata beside raw bytes.
+Both filesystem and SQLite artifact adapters durably journal their complete
+safe transition. Filesystem access completes an interrupted metadata/blob redo
+journal before returning data. SQLite writes bytes to an immutable generation
+and commits that generation's internal pointer with the metadata row; rollback
+keeps the prior pointer, and startup removes only unreferenced generations
+while holding the database writer lock. A process exit or a later failing
+repair therefore cannot make a rolled-back blob replacement visible or leave a
+committed safe metadata/blob pair permanently split.
 The individually exported low-level resume mechanisms require this preparation
 callback and reject a missing callback before touching the transaction; callers
 that do not own the full preparation pipeline use `createEngine`'s bound resume
@@ -2380,6 +2384,8 @@ is one-way. `ArtifactStore.listForRedaction()` and
 methods, and `replaceAudit(..., { auditVisible: false })` records the one-way
 transition. SQLite migration `0011_artifact_audit_visibility` preserves legacy
 rows as visible by default and persists that boundary across restarts.
+Migration `0012_artifact_blob_generation` adds the internal immutable byte
+pointer; NULL rows continue reading the legacy `<artifactId>.blob` path.
 
 Secret audit repair, cache revocation, and the run/wait transition that learned
 the secret now share one store transaction on normal dispatch, control refresh,
@@ -2402,3 +2408,55 @@ RunRecords, the engine record schema version is bumped from 1 to 2. Version 2
 does not claim v1 resume compatibility: an older record may already contain a
 redaction marker without provenance, so the v2 engine refuses it loudly
 rather than guessing.
+
+### A76 — Public visibility is decided before write; every repair is one atomic policy transition over a sealed exact authority
+
+Five review findings exposed one product-level gap rather than five unrelated
+bugs: a customer-facing audit could briefly or permanently disagree with the
+engine's own secret knowledge. The fix is organized around four invariants.
+
+1. **Decide visibility before the first public write.** Artifact byte count is
+   evaluated against the run's known secret set before `ArtifactStore.put`.
+   When that required numeric observation is sensitive, the initial metadata
+   and byte-read surfaces are withheld in the same write; no later repair is
+   responsible for closing an exposure window. Text bytes and metadata still
+   receive their normal pre-write conservative redaction.
+2. **Commit the complete public transition or none of it.** Filesystem
+   transactions now stage signal rows, event rows, artifact metadata, and
+   artifact blobs in the same durable redo journal as run/cache/wait state.
+   SQLite writes transaction-scoped bytes as immutable generations and commits
+   the selected generation pointer in the same row as the audit metadata.
+   Rollback therefore continues to select the prior bytes without a
+   post-commit lock-reacquisition window; recovery only removes generations no
+   committed row references. Read-your-writes and rollback conformance cover
+   all three formerly separate filesystem members plus artifact metadata/bytes
+   on both adapters.
+3. **Keep exact execution/history separate from the public audit.** A public
+   `params.environment` is never restored merely because it is also used for
+   capability selection. The exact value stays in the sealed operational run.
+   At completion, failure, or cancellation, that protected state becomes a
+   sealed terminal archive with settled idempotency claims removed. Historical
+   workflow resolution prefers this archive's frozen snapshot, so a redacted
+   public definition cannot cause retrospective repair or correction to use a
+   later mutable registry row.
+4. **Corrections cross the same publication boundary as execution.** A
+   corrected value is checked recursively, including object keys and canonical
+   scalar forms, against the run's sealed known-secret set before either the
+   public run or exact continuation/archive changes. Waiting corrections update
+   the sealed wait continuation; terminal corrections update the sealed
+   historical archive. Rejected corrections leave both views unchanged.
+
+The customer outcome is deliberately simple: once AART knows a value is
+secret, no artifact listing/read, run parameter, retrospective recomputation,
+or human correction can publish it; a crash or rollback cannot split that
+decision across backends; and historical results are recomputed from the
+workflow that actually ran rather than whatever definition happens to occupy
+the registry later.
+
+**Verification.** `check:tsconfig-refs`, full build, production and test
+typechecks, and `lint:redaction` are clean (300 reviewed suppressions). The
+full workspace suite passes **247 files / 3,028 tests**, including both adapter
+conformance suites, SQLite migration/restart and two-process migration-race
+coverage, terminal/wait correction rejection, sealed historical snapshot
+resolution, initial artifact withholding, and read-your-writes/rollback for
+artifact, signal, and event state.
