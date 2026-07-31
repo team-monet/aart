@@ -216,7 +216,7 @@ describe("versioned registration and discovery", () => {
     expect(check.executable?.contentHash).not.toBe(registered.ownedExecutable?.contentHash);
     expect(check.executable?.interpreter).toMatchObject({
       contentHash: expect.stringMatching(/^sha256:/),
-      mode: "protected_original",
+      mode: process.platform === "darwin" ? "protected_original" : "snapshot",
     });
   });
 
