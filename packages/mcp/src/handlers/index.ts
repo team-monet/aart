@@ -1,4 +1,4 @@
-// The 38-tool handler registry, including reuse-first local command,
+// The 39-tool handler registry, including reuse-first local command,
 // local/public Pack,
 // workflow, and block discovery plus remote deploy/observation/governance —
 // one real function per MCP tool
@@ -16,7 +16,7 @@ import { approveHandler, diffWorkflowHandler, promoteWorkflowHandler, recordCorr
 import { remoteRunHandler, remoteRunsHandler, remoteStatusHandler, remoteWhyHandler } from "./remote-observability.js";
 import { remoteApproveHandler } from "./remote-governance.js";
 import { approvePackHandler, findPacksHandler, installPackHandler, listPacksHandler, preparePackHandler } from "./packs.js";
-import { checkToolHandler, findToolsHandler, getToolRunHandler, registerToolHandler, runToolHandler } from "./local-tools.js";
+import { checkToolHandler, findToolsHandler, getToolRunHandler, listToolRunsHandler, registerToolHandler, runToolHandler } from "./local-tools.js";
 
 export * from "./authoring.js";
 export * from "./deployment.js";
@@ -39,6 +39,7 @@ export const HANDLERS: Readonly<Record<ToolName, ToolHandler>> = {
   aart_check_tool: checkToolHandler,
   aart_run_tool: runToolHandler,
   aart_get_tool_run: getToolRunHandler,
+  aart_list_tool_runs: listToolRunsHandler,
   aart_find_blocks: findBlocksHandler,
   aart_find_workflows: findWorkflowsHandler,
   aart_find_packs: findPacksHandler,

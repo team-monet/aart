@@ -4,6 +4,7 @@ import {
   checkToolHandler,
   findToolsHandler,
   getToolRunHandler,
+  listToolRunsHandler,
   registerToolHandler,
   runToolHandler,
   wrapResult,
@@ -112,5 +113,18 @@ export async function localToolCommand(tokens: Tokenized, cli: CliContext): Prom
     const runId = requirePositional(tokens.positionals, 1, "local tool run id");
     return wrapResult("aart_get_tool_run", await getToolRunHandler(cli.aart, { runId }));
   }
-  return { ok: false, error: `Unknown tool action "${action}". Use register, check, run, or report.` };
+  if (action === "runs") {
+    const status = flagString(tokens.flags, "status");
+    if (status !== undefined && status !== "running" && status !== "terminal") {
+      throw new Error('--status must be "running" or "terminal"');
+    }
+    return wrapResult(
+      "aart_list_tool_runs",
+      await listToolRunsHandler(cli.aart, {
+        toolId: flagString(tokens.flags, "tool-id"),
+        status: status as "running" | "terminal" | undefined,
+      }),
+    );
+  }
+  return { ok: false, error: `Unknown tool action "${action}". Use register, check, run, report, or runs.` };
 }

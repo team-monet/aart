@@ -14,9 +14,10 @@ see [`AMENDMENTS.md`](./AMENDMENTS.md).
   version, platform, probes, authority, effects, and content seals, then run
   it no-shell only with the reviewed asset, executable, rendered-argv, and
   prerequisite-executable seals. Structured JSON/JSONL/text output carries
-  redacted provenance evidence, stored for fresh-session retrieval after
-  every actual spawn. Approved Packs may publish portable external-tool
-  declarations without weakening Pack Block isolation.
+  redacted provenance evidence: a recoverable record is written on spawn,
+  terminal completion updates it atomically, and timeout kills the subprocess
+  tree. Approved Packs may publish portable external-tool declarations
+  without weakening Pack Block isolation.
 
 ### Removed
 

@@ -1,6 +1,6 @@
 // Result-affordance envelope tests — architecture §10.2/§32.2c. DoD: "every
 // tool's result includes a correct next field for both success AND failure
-// paths" — tested here as a completeness sweep over all 38 tools (the
+// paths" — tested here as a completeness sweep over all 39 tools (the
 // original 21 + D1's aart_deploy, AMENDMENTS.md A56 + D2b's four
 // aart_remote_* read tools, AMENDMENTS.md A62 + Wave 2C's aart_remote_approve,
 // AMENDMENTS.md A65) x 2 outcomes (54 checks), plus the exact worked example
@@ -9,14 +9,14 @@ import { describe, expect, it } from "vitest";
 import { computeNext, TOOL_NAMES, TOOL_TIERS, wrapResult } from "./response.js";
 
 describe("TOOL_NAMES / TOOL_TIERS — architecture catalog plus reuse-first workflow discovery and remote/deploy additions", () => {
-  it("has exactly 38 tools", () => {
-    expect(TOOL_NAMES).toHaveLength(38);
+  it("has exactly 39 tools", () => {
+    expect(TOOL_NAMES).toHaveLength(39);
   });
 
-  it("has exactly 19 core and 19 extended tools", () => {
+  it("has exactly 20 core and 19 extended tools", () => {
     const core = TOOL_NAMES.filter((t) => TOOL_TIERS[t] === "core");
     const extended = TOOL_NAMES.filter((t) => TOOL_TIERS[t] === "extended");
-    expect(core).toHaveLength(19);
+    expect(core).toHaveLength(20);
     expect(extended).toHaveLength(19);
   });
 
@@ -31,6 +31,7 @@ describe("TOOL_NAMES / TOOL_TIERS — architecture catalog plus reuse-first work
       "aart_check_tool",
       "aart_run_tool",
       "aart_get_tool_run",
+      "aart_list_tool_runs",
       "aart_find_blocks",
       "aart_find_workflows",
       "aart_find_packs",

@@ -24,6 +24,7 @@ export const TOOL_NAMES = [
   "aart_check_tool",
   "aart_run_tool",
   "aart_get_tool_run",
+  "aart_list_tool_runs",
   "aart_find_blocks",
   "aart_find_workflows",
   "aart_find_packs",
@@ -78,6 +79,7 @@ export const TOOL_TIERS: Readonly<Record<ToolName, ToolTier>> = {
   aart_check_tool: "core",
   aart_run_tool: "core",
   aart_get_tool_run: "core",
+  aart_list_tool_runs: "core",
   aart_find_blocks: "core",
   aart_find_workflows: "core",
   aart_find_packs: "core",
@@ -153,6 +155,10 @@ const NEXT_TABLE: Readonly<Record<ToolName, Readonly<Record<ToolOutcome, string>
   aart_get_tool_run: {
     success: "Use this durable, redacted record as the source of truth for the executable, argv, terminal status, structured output, and mapped evidence.",
     failure: "No durable local-tool run matched that runId — use the runId returned by an execution where `ran` was true.",
+  },
+  aart_list_tool_runs: {
+    success: "Inspect running records after a caller disconnect/restart, and call `aart_get_tool_run` for the exact runId you need.",
+    failure: "Could not list durable local-tool runs — check the configured AART root and evidence files.",
   },
   aart_find_blocks: {
     success: "Review the matching blocks, then check `aart_find_workflows` once more before drafting new workflow logic.",

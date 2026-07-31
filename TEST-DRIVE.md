@@ -34,7 +34,10 @@ Only pass that complete reviewed seal set to `aart tool run`. The run uses
 secret values, parses JSON/JSONL/text terminal output, and records executable
 identity/version, argv, exit status, and evidence mappings. It returns a
 `toolrun_<uuid>` only when a process actually started; retrieve that durable,
-redacted record later with `aart tool report <toolrun_id>`. See
+redacted record later with `aart tool report <toolrun_id>`. A `running` record
+is written on spawn, so after a caller disconnect/restart use `aart tool runs`
+to recover its id. Terminal completion is atomic, and timeouts terminate the
+whole subprocess tree. See
 [`AUTHORING.md`](./AUTHORING.md#reusing-an-existing-local-command) for a
 complete `watch-codex-review` example.
 

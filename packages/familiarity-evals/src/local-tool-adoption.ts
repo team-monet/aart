@@ -46,6 +46,31 @@ function includesAny(rawOutput: string, markers: readonly string[]): boolean {
   return markers.some((marker) => normalized.includes(marker.toLowerCase()));
 }
 
+function proposesAdHocReplacement(rawOutput: string, markers: readonly string[]): boolean {
+  const normalized = rawOutput.toLowerCase();
+  return markers.some((marker) => {
+    const needle = marker.toLowerCase();
+    let offset = normalized.indexOf(needle);
+    while (offset >= 0) {
+      const clauseStart = Math.max(
+        normalized.lastIndexOf(".", offset),
+        normalized.lastIndexOf("!", offset),
+        normalized.lastIndexOf("?", offset),
+        normalized.lastIndexOf(";", offset),
+        normalized.lastIndexOf("\n", offset),
+      );
+      const prefix = normalized.slice(clauseStart + 1, offset);
+      const negated =
+        /\b(?:instead of|rather than|avoid(?:ing)?|without|never|not|don't|do not|won't|will not)\b[^.!?;\n]{0,80}$/.test(
+          prefix,
+        );
+      if (!negated) return true;
+      offset = normalized.indexOf(needle, offset + needle.length);
+    }
+    return false;
+  });
+}
+
 export function scoreReuseDiscovery(
   task: ReuseDiscoveryTask,
   surface: "aart" | "skill",
@@ -56,7 +81,7 @@ export function scoreReuseDiscovery(
     taskId: task.id,
     surface,
     reusedExistingTool: includesAny(rawOutput, surfaceMarkers),
-    builtAdHocReplacement: includesAny(rawOutput, task.adHocMarkers),
+    builtAdHocReplacement: proposesAdHocReplacement(rawOutput, task.adHocMarkers),
   };
 }
 

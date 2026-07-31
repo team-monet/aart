@@ -287,6 +287,9 @@ aart tool run codex-review.wait \
 
 # The run returns toolrun_<uuid>; retrieve the durable, redacted record later:
 aart tool report <toolrun_id>
+
+# If the original caller disconnected after spawn, recover the run id:
+aart tool runs --tool-id codex-review.wait
 ```
 
 `resolution: path` does not silently trust whatever is on `PATH`: discovery
@@ -306,10 +309,13 @@ command capability.
 `GITHUB_TOKEN`. `aart_secrets` is the separate mode for explicit
 `AART_SECRET_<NAME>`/`secrets.json` injection. The check summary names which
 mode applies before anything runs.
-Every process that actually starts gets a durable evidence record, including
-non-zero exits, timeouts, and invalid structured output. Preflight and spawn
-failures remain explicit `ran: false` results and do not fabricate a run
-record.
+Every process that actually starts gets a durable `running` evidence record
+on its spawn event, including the reviewed argv/prerequisite seals. Terminal
+completion atomically adds output and exit evidence; non-zero exits and
+timeouts remain the primary failure even if their partial output cannot be
+parsed. A timeout terminates the subprocess tree, not only the direct child.
+Preflight and spawn failures remain explicit `ran: false` results and do not
+fabricate a run record.
 
 ## (d) The authoring lifecycle
 

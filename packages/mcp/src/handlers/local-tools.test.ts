@@ -4,7 +4,14 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { LocalToolManifest } from "@aart/registry";
 import { createTestContext, type TestContext } from "../test-utils.js";
 import { approvePackHandler, installPackHandler, listPacksHandler, preparePackHandler } from "./packs.js";
-import { checkToolHandler, findToolsHandler, getToolRunHandler, registerToolHandler, runToolHandler } from "./local-tools.js";
+import {
+  checkToolHandler,
+  findToolsHandler,
+  getToolRunHandler,
+  listToolRunsHandler,
+  registerToolHandler,
+  runToolHandler,
+} from "./local-tools.js";
 
 let tc: TestContext;
 
@@ -98,6 +105,11 @@ describe("local tool MCP handlers", () => {
         toolId: "codex-review.wait",
         result: { ok: true, ran: true, evidence: { mapped: { outcome: "approved" } } },
       },
+    });
+    await expect(listToolRunsHandler(tc.ctx, { toolId: "codex-review.wait" })).resolves.toMatchObject({
+      ok: true,
+      count: 1,
+      runs: [{ runId: ran.runId, status: "terminal", argvHash: check.argvHash }],
     });
     await expect(getToolRunHandler(tc.ctx, { runId: "../escape" })).resolves.toEqual({
       ok: false,

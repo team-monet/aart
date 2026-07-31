@@ -65,6 +65,7 @@ aart tool register <manifest.yaml>
 aart tool check <id> [--version <v>] [--input <json>]
 aart tool run <id> [--version <v>] [--input <json>] --content-hash <sha256:...> --executable-hash <sha256:...> --argv-hash <sha256:...> [--prerequisite-hashes <json>]
 aart tool report <toolrun_id>
+aart tool runs [--tool-id <id>] [--status running|terminal]
 aart find-blocks [query] [--category <category>] [--scope local|remote|all] [--index-url <url>]
 aart find-workflows [query] [--category <category>] [--scope local|remote|all] [--index-url <url>]
 aart pack search [query] [--index-url <url>]
@@ -105,8 +106,9 @@ aart mcp [--store fs|sqlite] [--root <dir>]
   `tool check` resolves versions, probes, authority, effects, and exact
   asset/executable/rendered-argv/prerequisite seals; `tool run` requires that
   complete reviewed seal set, uses fixed argv with no shell, and persists a
-  redacted record for every actual spawn;
-  `tool report` retrieves that record in a fresh process. Inherited
+  redacted `running` record on the process spawn event before atomically
+  completing its terminal evidence; `tool runs` recovers records after a
+  caller restart and `tool report` retrieves one exact record. Inherited
   authentication (for example the user's existing `gh` session) and
   explicit AART-secret injection are separate manifest modes.
 - `aart init-agent` scaffolds the agent-facing instructions AART ships for coding assistants working against a repo that uses it, plus a ready-to-use `.mcp.json`. By default the generated config invokes this exact `aart` binary directly (`{"command": "node", "args": ["<path to this install's bin.js>", "mcp"]}`) rather than `npx` — correct regardless of exactly which install (npm or from-source) generated it, and avoids a fresh `npx` resolve on every MCP client launch. Pass `--npx` to opt into the registry-resolved `npx -y <package> mcp` form instead, safe as of `0.10.0` (see the install note above). See [`AUTHORING.md`](../../AUTHORING.md) for the full authoring-machine walkthrough.

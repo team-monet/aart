@@ -27,6 +27,8 @@ const DESCRIPTIONS: Record<ToolName, string> = {
     "Run a checked local tool only when the caller supplies the exact reviewed asset, executable, rendered-argv, and prerequisite-executable seals. Execution is fixed-binary argv with no shell, and returns structured terminal output plus redacted provenance evidence; never call it without explicit approval of the check summary.",
   aart_get_tool_run:
     "Fetch one durable local-tool execution record by runId after aart_run_tool actually spawned a process. Use it in a fresh session to verify the sealed executable, redacted argv/output, exit status, and mapped evidence instead of relying on chat memory.",
+  aart_list_tool_runs:
+    "List durable local-tool run records, including a process still marked running after the original caller disconnected. Use this to recover the runId and reviewed seals in a fresh session instead of losing evidence for a command that already started.",
   aart_find_blocks:
     "After checking aart_find_workflows, search the block catalog by keyword or category before you compose a new step. Reusing an existing block is always preferable to authoring new logic, and a block you didn't know existed is a block you'll otherwise reinvent badly.",
   aart_find_workflows:
@@ -128,6 +130,10 @@ const inputSchemas: Record<ToolName, z.ZodType> = {
     prerequisiteHashes: z.record(z.string(), z.string().regex(/^sha256:[a-f0-9]{64}$/)).optional(),
   }),
   aart_get_tool_run: z.object({ runId: z.string().regex(/^toolrun_[0-9a-f-]{36}$/) }),
+  aart_list_tool_runs: z.object({
+    toolId: z.string().optional(),
+    status: z.enum(["running", "terminal"]).optional(),
+  }),
   aart_find_blocks: z.object({
     query: z.string(),
     category: z.string().optional(),

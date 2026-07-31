@@ -1,4 +1,12 @@
-import { constants, promises as fs } from "node:fs";
+import {
+  constants,
+  linkSync,
+  mkdirSync,
+  promises as fs,
+  renameSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import { delimiter, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { spawn } from "node:child_process";
@@ -270,6 +278,30 @@ async function writeOnce(path: string, bytes: string | Buffer, mode: number): Pr
   }
 }
 
+function writeOnceSync(path: string, bytes: string | Buffer, mode: number): void {
+  mkdirSync(dirname(path), { recursive: true });
+  const temporary = `${path}.${randomUUID()}.tmp`;
+  writeFileSync(temporary, bytes, { flag: "wx", mode });
+  try {
+    linkSync(temporary, path);
+  } finally {
+    try {
+      unlinkSync(temporary);
+    } catch {}
+  }
+}
+
+async function replaceFile(path: string, bytes: string | Buffer, mode: number): Promise<void> {
+  await fs.mkdir(dirname(path), { recursive: true });
+  const temporary = `${path}.${randomUUID()}.tmp`;
+  await fs.writeFile(temporary, bytes, { flag: "wx", mode });
+  try {
+    renameSync(temporary, path);
+  } finally {
+    await fs.unlink(temporary).catch(() => undefined);
+  }
+}
+
 function isWithin(parent: string, child: string): boolean {
   const rel = relative(parent, child);
   return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
@@ -287,6 +319,9 @@ export async function registerLocalTool(
   options: RegisterLocalToolOptions = {},
 ): Promise<RegisteredLocalTool> {
   const manifest = parseLocalToolManifest(input);
+  if (manifest.cwd.mode === "asset" && !options.sourcePath) {
+    throw new LocalToolManifestError("asset working directories require sourcePath provenance");
+  }
   const toolHash = computeLocalToolHash(manifest);
   let ownedExecutable: RegisteredLocalTool["ownedExecutable"];
   let ownedBytes: Buffer | undefined;
@@ -493,14 +528,37 @@ interface SpawnResult {
   timedOut: boolean;
 }
 
+function terminateProcessTree(child: ReturnType<typeof spawn>): void {
+  if (child.pid === undefined) return;
+  if (process.platform === "win32") {
+    try {
+      const killer = spawn("taskkill.exe", ["/pid", String(child.pid), "/T", "/F"], {
+        shell: false,
+        stdio: "ignore",
+        windowsHide: true,
+      });
+      killer.unref();
+    } catch {
+      child.kill("SIGKILL");
+    }
+    return;
+  }
+  try {
+    process.kill(-child.pid, "SIGKILL");
+  } catch {
+    child.kill("SIGKILL");
+  }
+}
+
 function spawnNoShell(
   executable: string,
   args: readonly string[],
-  options: { cwd?: string; env?: NodeJS.ProcessEnv; timeoutMs?: number } = {},
+  options: { cwd?: string; env?: NodeJS.ProcessEnv; timeoutMs?: number; onSpawn?: (pid: number) => void } = {},
 ): Promise<SpawnResult> {
   return new Promise((resolvePromise, reject) => {
     const child = spawn(executable, [...args], {
       cwd: options.cwd,
+      detached: process.platform !== "win32",
       env: options.env,
       shell: false,
       windowsHide: true,
@@ -509,11 +567,12 @@ function spawnNoShell(
     let stderr = "";
     let timedOut = false;
     let settled = false;
+    let lifecycleError: Error | undefined;
     let timer: NodeJS.Timeout | undefined;
     if (options.timeoutMs !== undefined) {
       timer = setTimeout(() => {
         timedOut = true;
-        child.kill("SIGKILL");
+        terminateProcessTree(child);
       }, options.timeoutMs);
     }
     child.stdout?.setEncoding("utf8");
@@ -523,6 +582,15 @@ function spawnNoShell(
     });
     child.stderr?.on("data", (chunk: string) => {
       stderr += chunk;
+    });
+    child.on("spawn", () => {
+      if (!options.onSpawn || child.pid === undefined) return;
+      try {
+        options.onSpawn(child.pid);
+      } catch (cause) {
+        lifecycleError = cause as Error;
+        terminateProcessTree(child);
+      }
     });
     child.on("error", (error) => {
       if (settled) return;
@@ -534,17 +602,38 @@ function spawnNoShell(
       if (settled) return;
       settled = true;
       if (timer) clearTimeout(timer);
+      if (lifecycleError) {
+        reject(lifecycleError);
+        return;
+      }
       resolvePromise({ exitCode, signal, stdout, stderr, timedOut });
     });
   });
 }
 
+export function pathExecutableCandidates(
+  command: string,
+  platform: NodeJS.Platform,
+  pathExt: string,
+): string[] {
+  if (platform !== "win32") return [command];
+  const extensions = pathExt
+    .split(";")
+    .map((extension) => extension.trim())
+    .filter(Boolean);
+  const commandLower = command.toLowerCase();
+  if (extensions.some((extension) => commandLower.endsWith(extension.toLowerCase()))) {
+    return [command];
+  }
+  return [command, ...extensions.map((extension) => `${command}${extension}`)];
+}
+
 async function pathExecutable(command: string, env: NodeJS.ProcessEnv): Promise<string | undefined> {
   const pathValue = env.PATH ?? "";
-  const extensions = process.platform === "win32" ? (env.PATHEXT ?? ".EXE;.CMD;.BAT").split(";") : [""];
+  const candidates = pathExecutableCandidates(command, process.platform, env.PATHEXT ?? ".EXE;.CMD;.BAT");
   for (const directory of pathValue.split(delimiter).filter(Boolean)) {
-    for (const extension of extensions) {
-      const candidate = join(directory, `${command}${extension}`);
+    for (const executable of candidates) {
+      const candidate = join(directory, executable);
       try {
         await fs.access(candidate, constants.X_OK);
         return await fs.realpath(candidate);
@@ -703,6 +792,7 @@ export interface ToolCheckResult {
   argv?: string[];
   argvHash?: string;
   prerequisiteHashes?: Record<string, string>;
+  resolvedCwd?: string;
   reason?: string;
   approvalSummary: {
     asset: string;
@@ -842,6 +932,16 @@ export async function checkLocalTool(
     };
   }
 
+  const cwd = await availableToolCwd(record);
+  if (!cwd.ready) {
+    return {
+      ...base,
+      status: "missing_prerequisite",
+      ready: false,
+      reason: cwd.reason,
+    };
+  }
+
   const main = await executableIdentity(record, record.manifest.command, env, options.expectedExecutableHash);
   if (!main.ready) {
     return {
@@ -964,6 +1064,7 @@ export async function checkLocalTool(
     prerequisiteHashes: Object.fromEntries(
       base.prerequisites.map((prerequisite) => [prerequisite.name, prerequisite.contentHash!]),
     ),
+    ...(cwd.path ? { resolvedCwd: cwd.path } : {}),
     status: "ready",
     ready: true,
   };
@@ -1001,6 +1102,27 @@ function toolCwd(record: RegisteredLocalTool): string | undefined {
   if (cwd.mode === "fixed") return cwd.path;
   if (record.provenance.kind === "inline") throw new Error("cwd mode asset requires file or Pack provenance");
   return record.provenance.kind === "local_file" ? dirname(record.provenance.source) : record.provenance.source;
+}
+
+async function availableToolCwd(
+  record: RegisteredLocalTool,
+): Promise<{ ready: true; path?: string } | { ready: false; reason: string }> {
+  let path: string | undefined;
+  try {
+    path = toolCwd(record);
+  } catch (cause) {
+    return { ready: false, reason: (cause as Error).message };
+  }
+  if (!path) return { ready: true };
+  try {
+    const resolved = await fs.realpath(path);
+    const stat = await fs.stat(resolved);
+    if (!stat.isDirectory()) return { ready: false, reason: `working directory "${path}" is not a directory` };
+    await fs.access(resolved, constants.R_OK | constants.X_OK);
+    return { ready: true, path: resolved };
+  } catch {
+    return { ready: false, reason: `working directory "${path}" does not exist or cannot be entered` };
+  }
 }
 
 function redactText(text: string, literals: readonly string[]): string {
@@ -1066,8 +1188,11 @@ export interface LocalToolRunRecord {
   toolVersion: string;
   contentHash: string;
   executableHash: string;
+  argvHash: string;
+  prerequisiteHashes: Record<string, string>;
   startedAt: string;
-  endedAt: string;
+  endedAt?: string;
+  status: "running" | "terminal";
   result: Record<string, unknown> & { ok: boolean; ran: true };
 }
 
@@ -1076,26 +1201,45 @@ function localToolRunPath(root: string, runId: string): string {
   return join(root, "tools", "runs", `${runId}.json`);
 }
 
-async function persistLocalToolRun(
+function beginLocalToolRun(
   root: string,
   record: RegisteredLocalTool,
   executableHash: string,
+  argvHash: string,
+  prerequisiteHashes: Readonly<Record<string, string>>,
+  runId: string,
   startedAt: string,
   result: Record<string, unknown> & { ok: boolean; ran: true },
-): Promise<(typeof result) & { runId: string; evidenceStored: true }> {
-  const runId = `toolrun_${randomUUID()}`;
+): LocalToolRunRecord {
   const durable: LocalToolRunRecord = {
     runId,
     toolId: record.manifest.id,
     toolVersion: record.manifest.version,
     contentHash: record.contentHash,
     executableHash,
+    argvHash,
+    prerequisiteHashes: { ...prerequisiteHashes },
     startedAt,
-    endedAt: new Date().toISOString(),
+    status: "running",
     result,
   };
-  await writeOnce(localToolRunPath(root, runId), `${JSON.stringify(durable, null, 2)}\n`, 0o600);
-  return { ...result, runId, evidenceStored: true };
+  writeOnceSync(localToolRunPath(root, runId), `${JSON.stringify(durable, null, 2)}\n`, 0o600);
+  return durable;
+}
+
+async function completeLocalToolRun(
+  root: string,
+  running: LocalToolRunRecord,
+  result: Record<string, unknown> & { ok: boolean; ran: true },
+): Promise<(typeof result) & { runId: string; evidenceStored: true }> {
+  const durable: LocalToolRunRecord = {
+    ...running,
+    endedAt: new Date().toISOString(),
+    status: "terminal",
+    result,
+  };
+  await replaceFile(localToolRunPath(root, running.runId), `${JSON.stringify(durable, null, 2)}\n`, 0o600);
+  return { ...result, runId: running.runId, evidenceStored: true };
 }
 
 export async function readLocalToolRun(root: string, runId: string): Promise<LocalToolRunRecord | undefined> {
@@ -1105,7 +1249,11 @@ export async function readLocalToolRun(root: string, runId: string): Promise<Loc
       parsed.runId !== runId ||
       parsed.result?.ran !== true ||
       typeof parsed.toolId !== "string" ||
-      typeof parsed.toolVersion !== "string"
+      typeof parsed.toolVersion !== "string" ||
+      !["running", "terminal"].includes(parsed.status) ||
+      typeof parsed.argvHash !== "string" ||
+      !parsed.prerequisiteHashes ||
+      typeof parsed.prerequisiteHashes !== "object"
     ) {
       throw new Error(`local tool run record "${runId}" failed validation`);
     }
@@ -1114,6 +1262,29 @@ export async function readLocalToolRun(root: string, runId: string): Promise<Loc
     if ((cause as NodeJS.ErrnoException).code === "ENOENT") return undefined;
     throw cause;
   }
+}
+
+export async function listLocalToolRuns(
+  root: string,
+  filter: { toolId?: string; status?: LocalToolRunRecord["status"] } = {},
+): Promise<LocalToolRunRecord[]> {
+  const directory = join(root, "tools", "runs");
+  let files: string[];
+  try {
+    files = await fs.readdir(directory);
+  } catch (cause) {
+    if ((cause as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw cause;
+  }
+  const records: LocalToolRunRecord[] = [];
+  for (const file of files.filter((name) => /^toolrun_[0-9a-f-]{36}\.json$/.test(name)).sort()) {
+    const run = await readLocalToolRun(root, file.slice(0, -".json".length));
+    if (!run) continue;
+    if (filter.toolId !== undefined && run.toolId !== filter.toolId) continue;
+    if (filter.status !== undefined && run.status !== filter.status) continue;
+    records.push(run);
+  }
+  return records.sort((a, b) => b.startedAt.localeCompare(a.startedAt) || b.runId.localeCompare(a.runId));
 }
 
 export async function runLocalTool(
@@ -1187,50 +1358,9 @@ export async function runLocalTool(
     }
   }
   const startedAt = new Date().toISOString();
-  let result: SpawnResult;
-  try {
-    result = await spawnNoShell(rechecked.path, executionArgv, {
-      cwd: toolCwd(record),
-      env: selected.env,
-      timeoutMs: record.manifest.command.timeoutMs,
-    });
-  } catch (cause) {
-    return {
-      ok: false,
-      ran: false,
-      kind: "spawn_failed",
-      error: `local tool failed to spawn after preflight: ${(cause as Error).message}`,
-    };
-  }
-  const stdout = redactText(result.stdout, redactions);
-  const stderr = redactText(result.stderr, redactions);
-  const outputText = record.manifest.output.source === "stdout" ? stdout : stderr;
-  let structuredOutput: unknown;
-  try {
-    structuredOutput = redactStructured(parseStructuredOutput(record.manifest.output.format, outputText), redactions);
-  } catch (cause) {
-    return persistLocalToolRun(root, record, rechecked.contentHash, startedAt, {
-      ok: false,
-      ran: true,
-      kind: "invalid_structured_output",
-      error: `tool ran but ${record.manifest.output.source} was not valid ${record.manifest.output.format}: ${(cause as Error).message}`,
-      evidence: {
-        asset: `${record.manifest.id}@${record.manifest.version}`,
-        contentHash: record.contentHash,
-        executable: rechecked,
-        argv: executionArgv.map((arg) => redactText(arg, redactions)),
-        exitCode: result.exitCode,
-        signal: result.signal,
-        timedOut: result.timedOut,
-        stdout,
-        stderr,
-      },
-    });
-  }
-  const mappedEvidence = Object.fromEntries(
-    Object.entries(record.manifest.output.evidence).map(([name, path]) => [name, evidenceAtPath(structuredOutput, path)]),
-  );
-  const evidence = {
+  const runId = `toolrun_${randomUUID()}`;
+  const prerequisiteHashes = { ...(input.prerequisiteHashes ?? {}) };
+  const executionContext = {
     asset: `${record.manifest.id}@${record.manifest.version}`,
     source: record.provenance,
     contentHash: record.contentHash,
@@ -1238,26 +1368,114 @@ export async function runLocalTool(
     executable: rechecked,
     prerequisites: check.prerequisites,
     argv: executionArgv.map((arg) => redactText(arg, redactions)),
-    cwd: toolCwd(record) ?? process.cwd(),
+    argvHash: input.argvHash,
+    prerequisiteHashes,
+    cwd: check.resolvedCwd ?? process.cwd(),
     authentication: check.approvalSummary.authentication,
+  };
+  let processStarted = false;
+  let running: LocalToolRunRecord | undefined;
+  let result: SpawnResult;
+  try {
+    result = await spawnNoShell(rechecked.path, executionArgv, {
+      cwd: check.resolvedCwd,
+      env: selected.env,
+      timeoutMs: record.manifest.command.timeoutMs,
+      onSpawn: (pid) => {
+        processStarted = true;
+        running = beginLocalToolRun(
+          root,
+          record,
+          rechecked.contentHash,
+          input.argvHash,
+          prerequisiteHashes,
+          runId,
+          startedAt,
+          {
+            ok: false,
+            ran: true,
+            kind: "running",
+            evidence: { ...executionContext, pid },
+          },
+        );
+      },
+    });
+  } catch (cause) {
+    if (running) {
+      return completeLocalToolRun(root, running, {
+        ok: false,
+        ran: true,
+        kind: "execution_monitor_failed",
+        error: `local tool process started but monitoring failed: ${(cause as Error).message}`,
+        evidence: running.result.evidence,
+      });
+    }
+    return {
+      ok: false,
+      ran: processStarted,
+      kind: processStarted ? "evidence_persistence_failed" : "spawn_failed",
+      error: processStarted
+        ? `local tool process started but its running record could not be persisted: ${(cause as Error).message}`
+        : `local tool failed to spawn after preflight: ${(cause as Error).message}`,
+    };
+  }
+  if (!running) {
+    return {
+      ok: false,
+      ran: false,
+      kind: "spawn_failed",
+      error: "local tool closed without emitting a successful spawn event",
+    };
+  }
+  const stdout = redactText(result.stdout, redactions);
+  const stderr = redactText(result.stderr, redactions);
+  const outputText = record.manifest.output.source === "stdout" ? stdout : stderr;
+  let structuredOutput: unknown;
+  let outputParseError: string | undefined;
+  try {
+    structuredOutput = redactStructured(parseStructuredOutput(record.manifest.output.format, outputText), redactions);
+  } catch (cause) {
+    outputParseError = `${record.manifest.output.source} was not valid ${record.manifest.output.format}: ${(cause as Error).message}`;
+  }
+  const mappedEvidence =
+    outputParseError === undefined
+      ? Object.fromEntries(
+          Object.entries(record.manifest.output.evidence).map(([name, path]) => [
+            name,
+            evidenceAtPath(structuredOutput, path),
+          ]),
+        )
+      : {};
+  const evidence = {
+    ...executionContext,
     exitCode: result.exitCode,
     signal: result.signal,
     timedOut: result.timedOut,
     stdout,
     stderr,
     mapped: mappedEvidence,
+    ...(outputParseError ? { outputParseError } : {}),
   };
   if (result.exitCode !== 0 || result.timedOut) {
-    return persistLocalToolRun(root, record, rechecked.contentHash, startedAt, {
+    return completeLocalToolRun(root, running, {
       ok: false,
       ran: true,
       kind: result.timedOut ? "timed_out" : "command_failed",
       error: result.timedOut ? "local tool timed out" : `local tool exited with code ${String(result.exitCode)}`,
-      structuredOutput,
+      ...(outputParseError === undefined ? { structuredOutput } : {}),
       evidence,
     });
   }
-  return persistLocalToolRun(root, record, rechecked.contentHash, startedAt, {
+  if (outputParseError !== undefined) {
+    return completeLocalToolRun(root, running, {
+      ok: false,
+      ran: true,
+      kind: "invalid_structured_output",
+      error: `tool ran but ${outputParseError}`,
+      evidence,
+    });
+  }
+  return completeLocalToolRun(root, running, {
     ok: true,
     ran: true,
     structuredOutput,

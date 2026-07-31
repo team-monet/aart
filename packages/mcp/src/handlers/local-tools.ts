@@ -6,6 +6,7 @@ import {
   latestToolVersions,
   listActiveApprovedPackStatesSync,
   listLocalTools,
+  listLocalToolRuns,
   packToolRecord,
   parsePackManifestYaml,
   readInstalledPackSync,
@@ -68,7 +69,7 @@ function selectTool(
   const top = candidates.filter((candidate) => candidate.manifest.version === topVersion);
   const hashes = new Set(top.map((candidate) => candidate.contentHash));
   if (hashes.size > 1) {
-    return {
+    const ambiguousToolResult: HandlerResult = {
       ok: false,
       error: `Local tool "${id}" is ambiguous at version ${topVersion}; multiple sources expose different sealed content.`,
       candidates: top.map((candidate) => ({
@@ -76,6 +77,7 @@ function selectTool(
         provenance: candidate.provenance,
       })),
     };
+    return ambiguousToolResult;
   }
   return top[0]!;
 }
@@ -95,7 +97,7 @@ export async function registerToolHandler(ctx: AartContext, input: RegisterToolI
     sourceLabel: "aart_register_tool",
     now: ctx.now(),
   });
-  return {
+  const registeredToolResult: HandlerResult = {
     ok: true,
     tool: {
       id: record.manifest.id,
@@ -107,6 +109,7 @@ export async function registerToolHandler(ctx: AartContext, input: RegisterToolI
       ownedExecutable: record.ownedExecutable,
     },
   };
+  return registeredToolResult;
 }
 
 export interface FindToolsInput {
@@ -122,7 +125,7 @@ export async function findToolsHandler(ctx: AartContext, input: FindToolsInput):
     searchLocalTools(localRecords, input.query).map(async ({ record, score }) => {
       const check = await checkLocalTool(ctx.root, record);
       const manifest = record.manifest;
-      return {
+      const localToolSearchResult = {
         id: manifest.id,
         name: manifest.name,
         version: manifest.version,
@@ -155,6 +158,7 @@ export async function findToolsHandler(ctx: AartContext, input: FindToolsInput):
         source: record.provenance.kind === "pack" ? "pack" : "local",
         score,
       };
+      return localToolSearchResult;
     }),
   );
 
@@ -209,7 +213,7 @@ export async function findToolsHandler(ctx: AartContext, input: FindToolsInput):
       String(a.id).localeCompare(String(b.id)) ||
       String(a.source).localeCompare(String(b.source)),
   );
-  return {
+  const toolDiscoveryResult: HandlerResult = {
     ok: true,
     matched: tools.length > 0,
     query: input.query,
@@ -217,6 +221,7 @@ export async function findToolsHandler(ctx: AartContext, input: FindToolsInput):
     ...(indexMode ? { indexMode } : {}),
     tools,
   };
+  return toolDiscoveryResult;
 }
 
 export interface CheckToolInput {
@@ -229,11 +234,12 @@ export async function checkToolHandler(ctx: AartContext, input: CheckToolInput):
   const selected = selectTool(await runnableTools(ctx), input.id, input.version);
   if (isHandlerResult(selected)) return selected;
   const check = await checkLocalTool(ctx.root, selected, { inputs: input.inputs, requireInputs: true });
-  return {
+  const toolCheckResult: HandlerResult = {
     ok: check.ready,
     tool: { id: selected.manifest.id, version: selected.manifest.version },
     check,
   };
+  return toolCheckResult;
 }
 
 export interface RunToolInput extends CheckToolInput {
@@ -266,4 +272,15 @@ export async function getToolRunHandler(ctx: AartContext, input: GetToolRunInput
   const run = await readLocalToolRun(ctx.root, input.runId);
   if (!run) return { ok: false, error: `Unknown local tool run "${input.runId}".` };
   return { ok: true, run };
+}
+
+export interface ListToolRunsInput {
+  toolId?: string;
+  status?: "running" | "terminal";
+}
+
+export async function listToolRunsHandler(ctx: AartContext, input: ListToolRunsInput): Promise<HandlerResult> {
+  const runs = await listLocalToolRuns(ctx.root, input);
+  const toolRunsResult: HandlerResult = { ok: true, runs, count: runs.length };
+  return toolRunsResult;
 }

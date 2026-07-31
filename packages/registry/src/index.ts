@@ -8,6 +8,7 @@ export {
   computeLocalToolHash,
   latestToolVersions,
   listLocalTools,
+  listLocalToolRuns,
   LocalToolManifestError,
   LocalToolManifestSchema,
   LocalToolVersionConflictError,

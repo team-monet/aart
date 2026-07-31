@@ -1741,6 +1741,12 @@ describe("aart local tool lifecycle", () => {
         },
       },
     });
+    await expect(
+      run(["tool", "runs", "--tool-id", "review.wait", "--status", "terminal"], { cliContext: tc.cli }),
+    ).resolves.toMatchObject({
+      ok: true,
+      result: { count: 1, runs: [{ runId: toolRunId, status: "terminal" }] },
+    });
   });
 });
 

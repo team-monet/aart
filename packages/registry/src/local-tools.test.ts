@@ -4,10 +4,12 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   checkLocalTool,
+  listLocalToolRuns,
   listLocalTools,
   LocalToolManifestError,
   LocalToolVersionConflictError,
   parseLocalToolManifest,
+  pathExecutableCandidates,
   readLocalToolRun,
   registerLocalTool,
   runLocalTool,
@@ -73,6 +75,15 @@ describe("local tool manifest", () => {
     ).toThrow(/whole/);
   });
 
+  it("keeps an already-suffixed Windows PATH command unchanged before trying PATHEXT variants", () => {
+    expect(pathExecutableCandidates("node.exe", "win32", ".EXE;.CMD;.BAT")).toEqual(["node.exe"]);
+    expect(pathExecutableCandidates("node", "win32", ".EXE;.CMD")).toEqual([
+      "node",
+      "node.EXE",
+      "node.CMD",
+    ]);
+  });
+
   it("allows a Pack-portable external prerequisite but rejects ambiguous executable resolution", () => {
     expect(parseLocalToolManifest(manifest()).command.resolution).toBe("absolute");
     expect(() =>
@@ -104,6 +115,13 @@ describe("versioned registration and discovery", () => {
     await expect(
       registerLocalTool(storeRoot, manifest({ description: "Different bytes at the same version" })),
     ).rejects.toThrow(LocalToolVersionConflictError);
+  });
+
+  it("rejects inline registration whose asset working directory cannot exist durably", async () => {
+    const storeRoot = await root();
+    await expect(
+      registerLocalTool(storeRoot, manifest({ cwd: { mode: "asset" } })),
+    ).rejects.toThrow(/working directories require sourcePath provenance/);
   });
 
   it("copies asset-owned executable bytes inertly and seals the stored copy", async () => {
@@ -243,6 +261,21 @@ describe("preflight and execution", () => {
     const check = await checkLocalTool(storeRoot, registered, { inputs: { target: "secret-target" } });
     expect(check.argv).toEqual(["-e", expect.any(String), "[REDACTED]"]);
     expect(JSON.stringify(check)).not.toContain("secret-target");
+  });
+
+  it("reports a missing fixed working directory during check, before approval or spawn", async () => {
+    const storeRoot = await root();
+    const registered = await registerLocalTool(
+      storeRoot,
+      manifest({ cwd: { mode: "fixed", path: join(storeRoot, "missing-cwd") } }),
+    );
+    await expect(
+      checkLocalTool(storeRoot, registered, { inputs: { target: "owner/repo#1" } }),
+    ).resolves.toMatchObject({
+      ready: false,
+      status: "missing_prerequisite",
+      reason: expect.stringContaining("does not exist or cannot be entered"),
+    });
   });
 
   it("returns an actionable missing-prerequisite result and never claims the asset ran", async () => {
@@ -391,6 +424,114 @@ describe("preflight and execution", () => {
     });
   });
 
+  it("persists a recoverable running record on spawn and atomically completes the same run", async () => {
+    const storeRoot = await root();
+    const registered = await registerLocalTool(
+      storeRoot,
+      manifest({
+        command: {
+          executable: process.execPath,
+          resolution: "absolute",
+          args: ["-e", "setTimeout(()=>console.log(JSON.stringify({done:true})),150)"],
+        },
+        inputs: [],
+        output: { source: "stdout", format: "json", evidence: { done: "$.done" } },
+      }),
+    );
+    const check = await checkLocalTool(storeRoot, registered);
+    const completion = runLocalTool(storeRoot, registered, {
+      contentHash: registered.contentHash,
+      executableHash: check.executable!.contentHash,
+      argvHash: check.argvHash!,
+      prerequisiteHashes: check.prerequisiteHashes,
+    });
+
+    await expect
+      .poll(async () => (await listLocalToolRuns(storeRoot, { status: "running" }))[0])
+      .toMatchObject({
+        toolId: "review.wait",
+        status: "running",
+        argvHash: check.argvHash,
+        result: { ran: true, kind: "running" },
+      });
+    const result = await completion;
+    const records = await listLocalToolRuns(storeRoot);
+    expect(records).toHaveLength(1);
+    expect(records[0]).toMatchObject({
+      runId: result.runId,
+      status: "terminal",
+      argvHash: check.argvHash,
+      prerequisiteHashes: {},
+      result: { ok: true, ran: true, structuredOutput: { done: true } },
+    });
+  });
+
+  it("kills the subprocess group on timeout and keeps timed_out primary when output is invalid", async () => {
+    if (process.platform === "win32") return;
+    const storeRoot = await root();
+    const marker = join(storeRoot, "grandchild-survived");
+    const childScript = `setTimeout(()=>require('node:fs').writeFileSync(${JSON.stringify(marker)},'bad'),300)`;
+    const registered = await registerLocalTool(
+      storeRoot,
+      manifest({
+        command: {
+          executable: process.execPath,
+          resolution: "absolute",
+          args: [
+            "-e",
+            `require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(childScript)}],{stdio:'inherit'}); process.stdout.write('{'); setInterval(()=>{},1000)`,
+          ],
+          timeoutMs: 60,
+        },
+        inputs: [],
+        output: { source: "stdout", format: "json", evidence: {} },
+      }),
+    );
+    const check = await checkLocalTool(storeRoot, registered);
+    const result = await runLocalTool(storeRoot, registered, {
+      contentHash: registered.contentHash,
+      executableHash: check.executable!.contentHash,
+      argvHash: check.argvHash!,
+      prerequisiteHashes: check.prerequisiteHashes,
+    });
+    expect(result).toMatchObject({
+      ok: false,
+      ran: true,
+      kind: "timed_out",
+      evidence: { timedOut: true, outputParseError: expect.any(String) },
+    });
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 350));
+    await expect(fs.access(marker)).rejects.toThrow();
+  });
+
+  it("keeps command_failed primary when nonzero output is not valid structured data", async () => {
+    const storeRoot = await root();
+    const registered = await registerLocalTool(
+      storeRoot,
+      manifest({
+        command: {
+          executable: process.execPath,
+          resolution: "absolute",
+          args: ["-e", "process.stdout.write('not-json'); process.exit(3)"],
+        },
+        inputs: [],
+      }),
+    );
+    const check = await checkLocalTool(storeRoot, registered);
+    const result = await runLocalTool(storeRoot, registered, {
+      contentHash: registered.contentHash,
+      executableHash: check.executable!.contentHash,
+      argvHash: check.argvHash!,
+      prerequisiteHashes: check.prerequisiteHashes,
+    });
+    expect(result).toMatchObject({
+      ok: false,
+      ran: true,
+      kind: "command_failed",
+      evidence: { exitCode: 3, outputParseError: expect.any(String) },
+    });
+  });
+
   it("requires the complete reviewed seal set, runs without a shell, redacts secrets, and maps structured evidence", async () => {
     const storeRoot = await root();
     const sentinel = join(storeRoot, "must-not-exist");
@@ -469,6 +610,8 @@ describe("preflight and execution", () => {
     expect(durable).toMatchObject({
       runId: result.runId,
       toolId: "review.wait",
+      status: "terminal",
+      argvHash: check.argvHash,
       result: {
         ok: true,
         ran: true,

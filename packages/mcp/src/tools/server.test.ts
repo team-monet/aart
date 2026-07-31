@@ -160,7 +160,7 @@ describe("progressive disclosure — environment/eval extended tools gate on rea
     const core = defs.filter((d) => d.tier === "core");
     expect(core.map((d) => d.name)).toContain("aart_find_workflows");
     expect(core.map((d) => d.name)).toContain("aart_find_packs");
-    expect(core).toHaveLength(19);
+    expect(core).toHaveLength(20);
   });
 });
 

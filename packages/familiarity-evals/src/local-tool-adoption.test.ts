@@ -21,6 +21,12 @@ describe("local tool reuse discovery A/B scoring", () => {
       reusedExistingTool: false,
       builtAdHocReplacement: true,
     });
+    expect(
+      scoreReuseDiscovery(task, "aart", "Use aart_find_tools instead of writing a polling script."),
+    ).toMatchObject({
+      reusedExistingTool: true,
+      builtAdHocReplacement: false,
+    });
   });
 
   it("refuses to call AART parity when the equivalent skill wins the measured fresh-session trials", () => {

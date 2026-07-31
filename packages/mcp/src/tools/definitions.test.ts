@@ -4,7 +4,7 @@ import { getToolDefinition, TOOL_DEFINITIONS } from "./definitions.js";
 
 describe("TOOL_DEFINITIONS", () => {
   it("has exactly one definition per tool name, no more no less", () => {
-    expect(TOOL_DEFINITIONS).toHaveLength(38);
+    expect(TOOL_DEFINITIONS).toHaveLength(39);
     expect([...TOOL_DEFINITIONS.map((d) => d.name)].sort()).toEqual([...TOOL_NAMES].sort());
   });
 
