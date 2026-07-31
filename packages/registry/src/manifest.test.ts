@@ -109,7 +109,7 @@ describe("parsePackManifestYaml — architecture §11.1's literal example", () =
           tools: [{ ...tool, cwd: { mode: "asset" } }],
         }),
       ),
-    ).toThrow(/cannot use an asset working directory/);
+    ).toThrow(/asset working directories are not supported/);
   });
 
   it("rejects duplicate Block or Workflow declarations before preparation can certify the Pack", () => {

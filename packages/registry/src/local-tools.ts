@@ -152,6 +152,13 @@ export const LocalToolManifestSchema = z
     }),
   })
   .superRefine((manifest, ctx) => {
+    if (manifest.cwd.mode === "asset") {
+      ctx.addIssue({
+        code: "custom",
+        path: ["cwd", "mode"],
+        message: "asset working directories are not supported until their complete file set can be snapshotted and sealed",
+      });
+    }
     if (!manifest.capabilities.includes("command")) {
       ctx.addIssue({ code: "custom", path: ["capabilities"], message: 'local tools must declare the "command" capability' });
     }
@@ -187,6 +194,12 @@ export const LocalToolManifestSchema = z
           code: "custom",
           path: ["command", "args", index],
           message: `argv placeholder "${match[1]}" has no declared input`,
+        });
+      } else if (manifest.inputs.find((input) => input.name === match[1])?.required === false) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["command", "args", index],
+          message: `optional input "${match[1]}" cannot be an argv placeholder; omit optionality or encode the optional behavior in the fixed command`,
         });
       }
     }
@@ -319,8 +332,23 @@ export async function registerLocalTool(
   options: RegisterLocalToolOptions = {},
 ): Promise<RegisteredLocalTool> {
   const manifest = parseLocalToolManifest(input);
-  if (manifest.cwd.mode === "asset" && !options.sourcePath) {
-    throw new LocalToolManifestError("asset working directories require sourcePath provenance");
+  let resolvedSourcePath: string | undefined;
+  if (options.sourcePath) {
+    try {
+      resolvedSourcePath = await fs.realpath(resolve(options.sourcePath));
+      const sourceManifest = parseLocalToolManifest(await fs.readFile(resolvedSourcePath, "utf8"));
+      if (canonicalize(sourceManifest) !== canonicalize(manifest)) {
+        throw new LocalToolManifestError(
+          `sourcePath manifest "${resolvedSourcePath}" does not match the supplied local tool contract`,
+        );
+      }
+    } catch (cause) {
+      if (cause instanceof LocalToolManifestError) throw cause;
+      throw new LocalToolManifestError(
+        `sourcePath does not identify a readable local tool manifest: ${(cause as Error).message}`,
+        { cause },
+      );
+    }
   }
   const toolHash = computeLocalToolHash(manifest);
   let ownedExecutable: RegisteredLocalTool["ownedExecutable"];
@@ -328,10 +356,10 @@ export async function registerLocalTool(
   let ownedMode = 0o700;
 
   if (manifest.command.resolution === "asset") {
-    if (!options.sourcePath) {
+    if (!resolvedSourcePath) {
       throw new LocalToolManifestError("asset-owned executables require sourcePath so registration can seal their bytes");
     }
-    const sourceDirectory = await fs.realpath(dirname(resolve(options.sourcePath)));
+    const sourceDirectory = dirname(resolvedSourcePath);
     const requestedExecutable = resolve(sourceDirectory, manifest.command.executable);
     if (!isWithin(sourceDirectory, requestedExecutable)) {
       throw new LocalToolManifestError("asset-owned executable escapes the manifest directory");
@@ -353,8 +381,8 @@ export async function registerLocalTool(
   }
 
   const contentHash = sha256(canonicalize({ manifest, ownedExecutableHash: ownedExecutable?.contentHash }));
-  const provenance: ToolProvenance = options.sourcePath
-    ? { kind: "local_file", source: resolve(options.sourcePath) }
+  const provenance: ToolProvenance = resolvedSourcePath
+    ? { kind: "local_file", source: resolvedSourcePath }
     : { kind: "inline", source: options.sourceLabel ?? "aart_register_tool" };
   const record: RegisteredLocalTool = {
     manifest,
@@ -707,8 +735,14 @@ type ExecutableIdentity = {
 type UnavailableExecutableIdentity = {
   ready: false;
   reason: string;
-  sealMismatch?: true;
+  failureKind: "missing" | "incompatible" | "seal_mismatch";
 };
+
+function availabilityStatus(identity: UnavailableExecutableIdentity): ToolAvailabilityStatus {
+  if (identity.failureKind === "seal_mismatch") return "seal_mismatch";
+  if (identity.failureKind === "incompatible") return "incompatible";
+  return "missing_prerequisite";
+}
 
 async function executableBytesIdentity(
   record: RegisteredLocalTool,
@@ -716,16 +750,30 @@ async function executableBytesIdentity(
   env: NodeJS.ProcessEnv,
 ): Promise<ExecutableIdentity | UnavailableExecutableIdentity> {
   const path = await resolvedExecutable(record, spec, env);
-  if (!path) return { ready: false, reason: `executable "${spec.executable}" was not found or is not executable` };
+  if (!path) {
+    return {
+      ready: false,
+      failureKind: "missing",
+      reason: `executable "${spec.executable}" was not found or is not executable`,
+    };
+  }
   let bytes: Buffer;
   try {
     bytes = await fs.readFile(path);
   } catch (cause) {
-    return { ready: false, reason: `could not read resolved executable "${path}": ${(cause as Error).message}` };
+    return {
+      ready: false,
+      failureKind: "missing",
+      reason: `could not read resolved executable "${path}": ${(cause as Error).message}`,
+    };
   }
   const contentHash = sha256(bytes);
   if (spec.resolution === "asset" && record.ownedExecutable?.contentHash !== contentHash) {
-    return { ready: false, reason: `asset-owned executable seal is broken (expected ${record.ownedExecutable?.contentHash}, got ${contentHash})` };
+    return {
+      ready: false,
+      failureKind: "seal_mismatch",
+      reason: `asset-owned executable seal is broken (expected ${record.ownedExecutable?.contentHash}, got ${contentHash})`,
+    };
   }
   return { ready: true, path, contentHash };
 }
@@ -741,12 +789,18 @@ async function executableIdentity(
   if (expectedHash !== undefined && identity.contentHash !== expectedHash) {
     return {
       ready: false,
-      sealMismatch: true,
+      failureKind: "seal_mismatch",
       reason: `reviewed executable hash ${expectedHash} does not match resolved hash ${identity.contentHash}`,
     };
   }
   const version = await inspectVersion(identity.path, spec.versionCheck);
-  if (!version.compatible) return { ready: false, reason: version.reason ?? "incompatible executable version" };
+  if (!version.compatible) {
+    return {
+      ready: false,
+      failureKind: "incompatible",
+      reason: version.reason ?? "incompatible executable version",
+    };
+  }
   return {
     ...identity,
     ...(version.version ? { version: version.version } : {}),
@@ -946,7 +1000,7 @@ export async function checkLocalTool(
   if (!main.ready) {
     return {
       ...base,
-      status: main.sealMismatch ? "seal_mismatch" : main.reason.includes("version") ? "incompatible" : "missing_prerequisite",
+      status: availabilityStatus(main),
       ready: false,
       reason: main.reason,
     };
@@ -999,7 +1053,7 @@ export async function checkLocalTool(
       return {
         ...base,
         executable: main,
-        status: identity.sealMismatch ? "seal_mismatch" : identity.reason.includes("version") ? "incompatible" : "missing_prerequisite",
+        status: availabilityStatus(identity),
         ready: false,
         reason: `${prerequisite.name}: ${identity.reason}`,
       };
@@ -1074,16 +1128,16 @@ function selectEnvironment(
   root: string,
   manifest: LocalToolManifest,
   hostEnv: NodeJS.ProcessEnv,
-): Promise<{ env: NodeJS.ProcessEnv | undefined; secrets: string[] }> {
+): Promise<{ env: NodeJS.ProcessEnv; secrets: string[] }> {
   return (async () => {
     const inherited = manifest.authentication.inheritEnvironment;
-    const env: NodeJS.ProcessEnv | undefined =
+    const env: NodeJS.ProcessEnv =
       inherited === "all"
-        ? undefined
+        ? { ...hostEnv }
         : Object.fromEntries(inherited.flatMap((name) => (hostEnv[name] === undefined ? [] : [[name, hostEnv[name]]])));
     const secretValues: string[] = [];
     if (manifest.authentication.mode === "aart_secrets") {
-      const target = env ?? { ...hostEnv };
+      const target = env;
       for (const secret of manifest.authentication.secrets) {
         const value = await resolveAartSecret(root, secret.ref, hostEnv);
         if (!value) throw new Error(`AART secret "${secret.ref}" is not configured`);

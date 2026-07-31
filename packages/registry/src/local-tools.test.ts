@@ -75,6 +75,18 @@ describe("local tool manifest", () => {
     ).toThrow(/whole/);
   });
 
+  it("rejects optional argv placeholders and unsealed asset working directories", () => {
+    expect(() =>
+      parseLocalToolManifest({
+        ...manifest(),
+        inputs: [{ name: "target", description: "Optional target", required: false, sensitive: false }],
+      }),
+    ).toThrow(/optional input.*target.*cannot be an argv placeholder/);
+    expect(() => parseLocalToolManifest({ ...manifest(), cwd: { mode: "asset" } })).toThrow(
+      /asset working directories are not supported/,
+    );
+  });
+
   it("keeps an already-suffixed Windows PATH command unchanged before trying PATHEXT variants", () => {
     expect(pathExecutableCandidates("node.exe", "win32", ".EXE;.CMD;.BAT")).toEqual(["node.exe"]);
     expect(pathExecutableCandidates("node", "win32", ".EXE;.CMD")).toEqual([
@@ -99,8 +111,9 @@ describe("versioned registration and discovery", () => {
   it("survives a fresh read and matches task wording, not only the id", async () => {
     const storeRoot = await root();
     const source = join(storeRoot, "review-tool.yaml");
-    await fs.writeFile(source, "fixture", "utf8");
-    const registered = await registerLocalTool(storeRoot, manifest(), { sourcePath: source });
+    const sourceTool = manifest();
+    await fs.writeFile(source, JSON.stringify(sourceTool), "utf8");
+    const registered = await registerLocalTool(storeRoot, sourceTool, { sourcePath: source });
 
     const freshRecords = await listLocalTools(storeRoot);
     expect(freshRecords).toHaveLength(1);
@@ -117,11 +130,21 @@ describe("versioned registration and discovery", () => {
     ).rejects.toThrow(LocalToolVersionConflictError);
   });
 
-  it("rejects inline registration whose asset working directory cannot exist durably", async () => {
+  it("rejects asset working directories until their complete contents can be sealed", async () => {
     const storeRoot = await root();
     await expect(
-      registerLocalTool(storeRoot, manifest({ cwd: { mode: "asset" } })),
-    ).rejects.toThrow(/working directories require sourcePath provenance/);
+      registerLocalTool(storeRoot, { ...manifest(), cwd: { mode: "asset" } }),
+    ).rejects.toThrow(/asset working directories are not supported/);
+  });
+
+  it("rejects source provenance that does not contain the supplied manifest contract", async () => {
+    const storeRoot = await root();
+    const source = join(storeRoot, "review-tool.json");
+    await fs.writeFile(source, JSON.stringify(manifest({ description: "Different source contract" })), "utf8");
+
+    await expect(registerLocalTool(storeRoot, manifest(), { sourcePath: source })).rejects.toThrow(
+      /does not match the supplied local tool contract/,
+    );
   });
 
   it("copies asset-owned executable bytes inertly and seals the stored copy", async () => {
@@ -130,18 +153,19 @@ describe("versioned registration and discovery", () => {
     await fs.mkdir(sourceDir);
     const sourceManifest = join(sourceDir, "tool.yaml");
     const executable = join(sourceDir, "owned-tool");
-    await fs.writeFile(sourceManifest, "fixture", "utf8");
+    const ownedManifest = manifest({
+      command: {
+        executable: "owned-tool",
+        resolution: "asset",
+        args: [],
+      },
+      inputs: [],
+    });
+    await fs.writeFile(sourceManifest, JSON.stringify(ownedManifest), "utf8");
     await fs.writeFile(executable, "#!/bin/sh\nprintf '{\"ok\":true}\\n'\n", { mode: 0o755 });
     const registered = await registerLocalTool(
       storeRoot,
-      manifest({
-        command: {
-          executable: "owned-tool",
-          resolution: "asset",
-          args: [],
-        },
-        inputs: [],
-      }),
+      ownedManifest,
       { sourcePath: sourceManifest },
     );
     expect(registered.ownedExecutable?.path).toContain(join("tools", "owned", "review.wait", "1.0.0"));
@@ -150,14 +174,7 @@ describe("versioned registration and discovery", () => {
     await expect(
       registerLocalTool(
         storeRoot,
-        manifest({
-          command: {
-            executable: "owned-tool",
-            resolution: "asset",
-            args: [],
-          },
-          inputs: [],
-        }),
+        ownedManifest,
         { sourcePath: sourceManifest },
       ),
     ).resolves.toEqual(registered);
@@ -176,17 +193,18 @@ describe("versioned registration and discovery", () => {
     const outsideDir = join(storeRoot, "outside");
     await fs.mkdir(sourceDir);
     await fs.mkdir(outsideDir);
-    await fs.writeFile(join(sourceDir, "tool.yaml"), "fixture", "utf8");
+    const symlinkManifest = manifest({
+      command: { executable: "bin/tool", resolution: "asset", args: [] },
+      inputs: [],
+    });
+    await fs.writeFile(join(sourceDir, "tool.yaml"), JSON.stringify(symlinkManifest), "utf8");
     await fs.writeFile(join(outsideDir, "tool"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
     await fs.symlink(outsideDir, join(sourceDir, "bin"));
 
     await expect(
       registerLocalTool(
         storeRoot,
-        manifest({
-          command: { executable: "bin/tool", resolution: "asset", args: [] },
-          inputs: [],
-        }),
+        symlinkManifest,
         { sourcePath: join(sourceDir, "tool.yaml") },
       ),
     ).rejects.toThrow(/resolves outside/);
@@ -197,14 +215,15 @@ describe("versioned registration and discovery", () => {
     const sourceDir = join(storeRoot, "source");
     await fs.mkdir(sourceDir);
     const sourceManifest = join(sourceDir, "tool.yaml");
-    await fs.writeFile(sourceManifest, "fixture", "utf8");
+    const nonExecutableManifest = manifest({
+      command: { executable: "owned-tool", resolution: "asset", args: [] },
+      inputs: [],
+    });
+    await fs.writeFile(sourceManifest, JSON.stringify(nonExecutableManifest), "utf8");
     await fs.writeFile(join(sourceDir, "owned-tool"), "#!/bin/sh\nexit 0\n", { mode: 0o644 });
     const registered = await registerLocalTool(
       storeRoot,
-      manifest({
-        command: { executable: "owned-tool", resolution: "asset", args: [] },
-        inputs: [],
-      }),
+      nonExecutableManifest,
       { sourcePath: sourceManifest },
     );
 
@@ -330,6 +349,29 @@ describe("preflight and execution", () => {
       ready: false,
       status: "incompatible",
       reason: expect.stringContaining("does not satisfy"),
+    });
+  });
+
+  it("does not classify a missing executable as incompatible just because its name contains version", async () => {
+    const storeRoot = await root();
+    const registered = await registerLocalTool(
+      storeRoot,
+      manifest({
+        command: {
+          executable: "version-checker-that-is-not-installed",
+          resolution: "path",
+          args: ["{{target}}"],
+        },
+      }),
+    );
+    const check = await checkLocalTool(storeRoot, registered, {
+      inputs: { target: "owner/repo#1" },
+      env: { PATH: "" },
+    });
+    expect(check).toMatchObject({
+      ready: false,
+      status: "missing_prerequisite",
+      reason: expect.stringContaining("version-checker-that-is-not-installed"),
     });
   });
 
@@ -621,5 +663,49 @@ describe("preflight and execution", () => {
     await expect(fs.access(sentinel)).rejects.toThrow();
     expect(JSON.stringify(result)).not.toContain(secret);
     expect(JSON.stringify(durable)).not.toContain(secret);
+  });
+
+  it("uses the supplied environment for inherit-all execution and redacts its secret-like values", async () => {
+    const storeRoot = await root();
+    const registered = await registerLocalTool(
+      storeRoot,
+      manifest({
+        command: {
+          executable: process.execPath,
+          resolution: "absolute",
+          args: [
+            "-e",
+            "console.log(JSON.stringify({provided:process.env.AART_TEST_SUPPLIED,token:process.env.API_TOKEN}))",
+          ],
+        },
+        inputs: [],
+        output: {
+          source: "stdout",
+          format: "json",
+          evidence: { provided: "$.provided", token: "$.token" },
+        },
+      }),
+    );
+    const secret = "secret-from-supplied-env";
+    const env = {
+      PATH: process.env.PATH,
+      AART_TEST_SUPPLIED: "from-run-input",
+      API_TOKEN: secret,
+    };
+    const check = await checkLocalTool(storeRoot, registered, { env });
+    const result = await runLocalTool(storeRoot, registered, {
+      contentHash: registered.contentHash,
+      executableHash: check.executable!.contentHash,
+      argvHash: check.argvHash!,
+      prerequisiteHashes: check.prerequisiteHashes,
+      env,
+    });
+
+    expect(result).toMatchObject({
+      ok: true,
+      structuredOutput: { provided: "from-run-input", token: "[REDACTED]" },
+      evidence: { mapped: { provided: "from-run-input", token: "[REDACTED]" } },
+    });
+    expect(JSON.stringify(result)).not.toContain(secret);
   });
 });
