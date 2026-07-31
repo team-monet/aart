@@ -66,10 +66,22 @@ export const RawPackManifestSchema = z
     workflows: z.array(safeAssetSegment("workflow id")).default([]),
     tools: z
       .array(
-        LocalToolManifestSchema.refine(
-          (tool) => tool.command.resolution !== "asset",
-          "Pack tools must declare a portable external executable; asset-owned bytes are only supported by local tool registration",
-        ),
+        LocalToolManifestSchema.superRefine((tool, ctx) => {
+          if (tool.command.resolution === "asset") {
+            ctx.addIssue({
+              code: "custom",
+              path: ["command", "resolution"],
+              message: "Pack tools must declare a portable external executable; asset-owned bytes are only supported by local tool registration",
+            });
+          }
+          if (tool.cwd.mode === "asset") {
+            ctx.addIssue({
+              code: "custom",
+              path: ["cwd", "mode"],
+              message: "Pack tools cannot use an asset working directory because Pack support carries only portable external prerequisites",
+            });
+          }
+        }),
       )
       .default([]),
   })

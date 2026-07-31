@@ -185,7 +185,17 @@ export async function findToolsHandler(ctx: AartContext, input: FindToolsInput):
       authentication: record.manifest.authentication,
       output: record.manifest.output,
       contentHash: pack.contentHash,
-      provenance: { kind: "public_pack", packName: pack.packName, npmPackageName: pack.npmPackageName },
+      provenance: {
+        kind: "public_pack",
+        packName: pack.packName,
+        packVersion: pack.version,
+        npmPackageName: pack.npmPackageName,
+      },
+      installation: {
+        name: pack.packName,
+        version: pack.version,
+        contentHash: pack.contentHash,
+      },
       source: "public",
       catalogMode: index.mode,
       installable: index.mode === "production",
@@ -218,7 +228,7 @@ export interface CheckToolInput {
 export async function checkToolHandler(ctx: AartContext, input: CheckToolInput): Promise<HandlerResult> {
   const selected = selectTool(await runnableTools(ctx), input.id, input.version);
   if (isHandlerResult(selected)) return selected;
-  const check = await checkLocalTool(ctx.root, selected, { inputs: input.inputs });
+  const check = await checkLocalTool(ctx.root, selected, { inputs: input.inputs, requireInputs: true });
   return {
     ok: check.ready,
     tool: { id: selected.manifest.id, version: selected.manifest.version },
@@ -229,6 +239,8 @@ export async function checkToolHandler(ctx: AartContext, input: CheckToolInput):
 export interface RunToolInput extends CheckToolInput {
   contentHash: string;
   executableHash: string;
+  argvHash: string;
+  prerequisiteHashes?: Record<string, string>;
 }
 
 export async function runToolHandler(ctx: AartContext, input: RunToolInput): Promise<HandlerResult> {
@@ -238,6 +250,8 @@ export async function runToolHandler(ctx: AartContext, input: RunToolInput): Pro
     inputs: input.inputs,
     contentHash: input.contentHash,
     executableHash: input.executableHash,
+    argvHash: input.argvHash,
+    prerequisiteHashes: input.prerequisiteHashes,
   });
 }
 

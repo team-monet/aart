@@ -22,13 +22,14 @@ filesystem path.
 
 `aart tool check <id> --input '<json>'` resolves the fixed binary and argv,
 checks platform/version/additional prerequisites, and returns the exact asset
-and executable hashes plus reads, writes, network effects, cwd, command
-capability, and authentication source. It distinguishes reuse of the current
-user's authenticated tool session from AART-secret injection. A missing or
+and executable hashes, rendered-argv hash, and prerequisite-executable hash
+map plus reads, writes, network effects, cwd, command capability, and
+authentication source. It distinguishes reuse of the current user's
+authenticated tool session from AART-secret injection. A missing or
 incompatible executable is an actionable prerequisite result, not a catalog
 miss or a late spawn failure.
 
-Only pass the reviewed hashes to `aart tool run`. The run uses
+Only pass that complete reviewed seal set to `aart tool run`. The run uses
 `spawn(binary, argv, {shell:false})`, rechecks the seals, redacts declared
 secret values, parses JSON/JSONL/text terminal output, and records executable
 identity/version, argv, exit status, and evidence mappings. It returns a

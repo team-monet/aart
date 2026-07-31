@@ -143,7 +143,7 @@ const NEXT_TABLE: Readonly<Record<ToolName, Readonly<Record<ToolOutcome, string>
     failure: "Registration failed — fix the manifest, executable provenance, or immutable-version conflict, then register again.",
   },
   aart_check_tool: {
-    success: "Show the exact command, authority, effects, asset hash, and executable hash to the user. After explicit approval, pass those same hashes to `aart_run_tool`.",
+    success: "Show the exact command, authority, effects, asset hash, executable hash, argv hash, and prerequisite hashes to the user. After explicit approval, pass those same seals to `aart_run_tool`.",
     failure: "The tool is not ready — fix the reported executable, version, platform, authentication, or input prerequisite and check again.",
   },
   aart_run_tool: {

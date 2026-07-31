@@ -22,9 +22,9 @@ const DESCRIPTIONS: Record<ToolName, string> = {
   aart_register_tool:
     "Register a local command manifest as an immutable, versioned, searchable asset. Asset-owned executable bytes are copied inertly and sealed; external executables remain explicit prerequisites whose resolved hashes must be reviewed before execution.",
   aart_check_tool:
-    "Resolve one local tool's exact executable, argv, versions, platform, authentication source, effects, and prerequisites without running the task itself. Use the returned asset and executable hashes as the review boundary before execution.",
+    "Resolve one local tool's exact executable, argv, versions, platform, authentication source, effects, and prerequisites without running the task itself. Use the returned asset, executable, rendered-argv, and prerequisite-executable seals as one review boundary before execution.",
   aart_run_tool:
-    "Run a checked local tool only when the caller supplies the exact reviewed asset and executable hashes. Execution is fixed-binary argv with no shell, and returns structured terminal output plus redacted provenance evidence; never call it without explicit approval of the check summary.",
+    "Run a checked local tool only when the caller supplies the exact reviewed asset, executable, rendered-argv, and prerequisite-executable seals. Execution is fixed-binary argv with no shell, and returns structured terminal output plus redacted provenance evidence; never call it without explicit approval of the check summary.",
   aart_get_tool_run:
     "Fetch one durable local-tool execution record by runId after aart_run_tool actually spawned a process. Use it in a fresh session to verify the sealed executable, redacted argv/output, exit status, and mapped evidence instead of relying on chat memory.",
   aart_find_blocks:
@@ -124,6 +124,8 @@ const inputSchemas: Record<ToolName, z.ZodType> = {
     inputs: z.record(z.string(), z.string()).optional(),
     contentHash: z.string().regex(/^sha256:[a-f0-9]{64}$/),
     executableHash: z.string().regex(/^sha256:[a-f0-9]{64}$/),
+    argvHash: z.string().regex(/^sha256:[a-f0-9]{64}$/),
+    prerequisiteHashes: z.record(z.string(), z.string().regex(/^sha256:[a-f0-9]{64}$/)).optional(),
   }),
   aart_get_tool_run: z.object({ runId: z.string().regex(/^toolrun_[0-9a-f-]{36}$/) }),
   aart_find_blocks: z.object({

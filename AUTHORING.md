@@ -277,11 +277,13 @@ aart tool check codex-review.wait \
   --input '{"target":"team-monet/aart#11","head":"<full-sha>"}'
 
 # Only after reviewing the returned command, authority, effects, contentHash,
-# and executable.contentHash:
+# executable.contentHash, argvHash, and prerequisiteHashes:
 aart tool run codex-review.wait \
   --input '{"target":"team-monet/aart#11","head":"<full-sha>"}' \
   --content-hash <reviewed-asset-hash> \
-  --executable-hash <reviewed-executable-hash>
+  --executable-hash <reviewed-executable-hash> \
+  --argv-hash <reviewed-argv-hash> \
+  --prerequisite-hashes '{"authenticated-gh":"<reviewed-gh-hash>"}'
 
 # The run returns toolrun_<uuid>; retrieve the durable, redacted record later:
 aart tool report <toolrun_id>
@@ -289,7 +291,10 @@ aart tool report <toolrun_id>
 
 `resolution: path` does not silently trust whatever is on `PATH`: discovery
 resolves it to an absolute path, hashes its bytes, checks the declared version
-and probes, and execution requires that exact reviewed hash. Use
+and probes, and execution requires that exact reviewed hash. The rendered
+argv and every executable used by a prerequisite version check or probe are
+bound into the same review; changing the inputs or a helper binary requires a
+new check. Use
 `resolution: asset` for bytes owned by a local asset; registration copies them
 inertly into the AART root and includes their hash in the immutable version
 seal. Pack tool declarations intentionally support portable external

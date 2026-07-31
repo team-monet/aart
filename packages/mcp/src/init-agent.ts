@@ -172,7 +172,7 @@ You're about to do something by hand, or via a throwaway script. Pause: will thi
 - **Governed** — the workflow's approval state and gates are explicit and enforced by trust mode, not implicit in whether a human happened to glance at a diff.
 - **Evidence** — every run writes an ordered per-step trace, pass/fail, and artifacts. \`aart_get_report\` proves it, it doesn't just claim it.
 
-A truly one-off probe is still fine as a raw command. When a reliable local CLI already performs the job, register and reuse it as a local tool: \`aart_find_tools\` exposes its prerequisites and authority, \`aart_check_tool\` seals the exact executable and argv for review, \`aart_run_tool\` executes without a shell and stores redacted evidence, and \`aart_get_tool_run\` retrieves that record in a fresh session. Use a workflow when several reusable steps or durable server execution are the actual outcome.
+A truly one-off probe is still fine as a raw command. When a reliable local CLI already performs the job, register and reuse it as a local tool: \`aart_find_tools\` exposes its prerequisites and authority, \`aart_check_tool\` seals the exact executable, rendered argv, and prerequisite executables for one review, \`aart_run_tool\` requires those same seals before executing without a shell and stores redacted evidence, and \`aart_get_tool_run\` retrieves that record in a fresh session. Use a workflow when several reusable steps or durable server execution are the actual outcome.
 
 ## The authoring loop
 

@@ -63,7 +63,7 @@ aart list
 aart find-tools [query] [--scope local|remote|all] [--index-url <url>]
 aart tool register <manifest.yaml>
 aart tool check <id> [--version <v>] [--input <json>]
-aart tool run <id> [--version <v>] [--input <json>] --content-hash <sha256:...> --executable-hash <sha256:...>
+aart tool run <id> [--version <v>] [--input <json>] --content-hash <sha256:...> --executable-hash <sha256:...> --argv-hash <sha256:...> [--prerequisite-hashes <json>]
 aart tool report <toolrun_id>
 aart find-blocks [query] [--category <category>] [--scope local|remote|all] [--index-url <url>]
 aart find-workflows [query] [--category <category>] [--scope local|remote|all] [--index-url <url>]
@@ -103,8 +103,9 @@ aart mcp [--store fs|sqlite] [--root <dir>]
   execution semantics or duplicating credentials. `tool register` records an
   immutable version; `find-tools` searches outcome/trigger/examples;
   `tool check` resolves versions, probes, authority, effects, and exact
-  hashes; `tool run` requires those reviewed hashes, uses fixed argv with
-  no shell, and persists a redacted record for every actual spawn;
+  asset/executable/rendered-argv/prerequisite seals; `tool run` requires that
+  complete reviewed seal set, uses fixed argv with no shell, and persists a
+  redacted record for every actual spawn;
   `tool report` retrieves that record in a fresh process. Inherited
   authentication (for example the user's existing `gh` session) and
   explicit AART-secret injection are separate manifest modes.

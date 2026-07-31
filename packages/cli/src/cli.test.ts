@@ -1693,7 +1693,13 @@ describe("aart local tool lifecycle", () => {
       { cliContext: tc.cli },
     );
     expect(checked.ok).toBe(true);
-    const executableHash = (checked.result as { check: { executable: { contentHash: string } } }).check.executable.contentHash;
+    const toolCheck = (checked.result as {
+      check: {
+        executable: { contentHash: string };
+        argvHash: string;
+        prerequisiteHashes: Record<string, string>;
+      };
+    }).check;
 
     const executed = await run(
       [
@@ -1705,7 +1711,11 @@ describe("aart local tool lifecycle", () => {
         "--content-hash",
         contentHash,
         "--executable-hash",
-        executableHash,
+        toolCheck.executable.contentHash,
+        "--argv-hash",
+        toolCheck.argvHash,
+        "--prerequisite-hashes",
+        JSON.stringify(toolCheck.prerequisiteHashes),
       ],
       { cliContext: tc.cli },
     );

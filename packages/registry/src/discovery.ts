@@ -303,10 +303,22 @@ const RemoteRegistryIndexEntrySchema = z
     workflows: z.array(WorkflowSchema).optional(),
     tools: z
       .array(
-        LocalToolManifestSchema.refine(
-          (tool) => tool.command.resolution !== "asset",
-          "public Pack tools must declare portable external executables",
-        ),
+        LocalToolManifestSchema.superRefine((tool, ctx) => {
+          if (tool.command.resolution === "asset") {
+            ctx.addIssue({
+              code: "custom",
+              path: ["command", "resolution"],
+              message: "public Pack tools must declare portable external executables",
+            });
+          }
+          if (tool.cwd.mode === "asset") {
+            ctx.addIssue({
+              code: "custom",
+              path: ["cwd", "mode"],
+              message: "public Pack tools cannot use an asset working directory",
+            });
+          }
+        }),
       )
       .optional(),
   })

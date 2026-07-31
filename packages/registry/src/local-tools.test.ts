@@ -150,6 +150,52 @@ describe("versioned registration and discovery", () => {
     expect(check.ready).toBe(true);
     expect(check.executable?.contentHash).toBe(registered.ownedExecutable?.contentHash);
   });
+
+  it("rejects an asset executable reached through an intermediate symlink outside the manifest directory", async () => {
+    if (process.platform === "win32") return;
+    const storeRoot = await root();
+    const sourceDir = join(storeRoot, "source");
+    const outsideDir = join(storeRoot, "outside");
+    await fs.mkdir(sourceDir);
+    await fs.mkdir(outsideDir);
+    await fs.writeFile(join(sourceDir, "tool.yaml"), "fixture", "utf8");
+    await fs.writeFile(join(outsideDir, "tool"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    await fs.symlink(outsideDir, join(sourceDir, "bin"));
+
+    await expect(
+      registerLocalTool(
+        storeRoot,
+        manifest({
+          command: { executable: "bin/tool", resolution: "asset", args: [] },
+          inputs: [],
+        }),
+        { sourcePath: join(sourceDir, "tool.yaml") },
+      ),
+    ).rejects.toThrow(/resolves outside/);
+  });
+
+  it("reports copied asset bytes without execute permission as unavailable", async () => {
+    const storeRoot = await root();
+    const sourceDir = join(storeRoot, "source");
+    await fs.mkdir(sourceDir);
+    const sourceManifest = join(sourceDir, "tool.yaml");
+    await fs.writeFile(sourceManifest, "fixture", "utf8");
+    await fs.writeFile(join(sourceDir, "owned-tool"), "#!/bin/sh\nexit 0\n", { mode: 0o644 });
+    const registered = await registerLocalTool(
+      storeRoot,
+      manifest({
+        command: { executable: "owned-tool", resolution: "asset", args: [] },
+        inputs: [],
+      }),
+      { sourcePath: sourceManifest },
+    );
+
+    await expect(checkLocalTool(storeRoot, registered)).resolves.toMatchObject({
+      ready: false,
+      status: "missing_prerequisite",
+      reason: expect.stringContaining("not found or is not executable"),
+    });
+  });
 });
 
 describe("preflight and execution", () => {
@@ -224,7 +270,9 @@ describe("preflight and execution", () => {
     const result = await runLocalTool(storeRoot, registered, {
       inputs: { target: "owner/repo#1" },
       contentHash: registered.contentHash,
-      executableHash: "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      executableHash: check.executable!.contentHash,
+      argvHash: check.argvHash!,
+      prerequisiteHashes: {},
     });
     expect(result).toMatchObject({ ok: false, ran: false, kind: "missing_prerequisite" });
   });
@@ -252,7 +300,98 @@ describe("preflight and execution", () => {
     });
   });
 
-  it("requires both reviewed seals, runs without a shell, redacts secrets, and maps structured evidence", async () => {
+  it("binds task inputs to the reviewed rendered argv hash", async () => {
+    const storeRoot = await root();
+    const registered = await registerLocalTool(storeRoot, manifest());
+    const check = await checkLocalTool(storeRoot, registered, { inputs: { target: "reviewed/target#1" } });
+    expect(check.ready).toBe(true);
+
+    const result = await runLocalTool(storeRoot, registered, {
+      inputs: { target: "different/target#2" },
+      contentHash: registered.contentHash,
+      executableHash: check.executable!.contentHash,
+      argvHash: check.argvHash!,
+      prerequisiteHashes: check.prerequisiteHashes,
+    });
+    expect(result).toMatchObject({
+      ok: false,
+      ran: false,
+      kind: "review_seal_mismatch",
+      error: expect.stringContaining("argv hash"),
+    });
+  });
+
+  it("refuses a changed prerequisite before executing its version check or probe", async () => {
+    if (process.platform === "win32") return;
+    const storeRoot = await root();
+    const prerequisite = join(storeRoot, "prerequisite");
+    const marker = join(storeRoot, "changed-prerequisite-ran");
+    await fs.writeFile(prerequisite, "#!/bin/sh\nprintf 'tool 1.0.0\\n'\n", { mode: 0o755 });
+    const registered = await registerLocalTool(
+      storeRoot,
+      manifest({
+        prerequisites: [
+          {
+            name: "review-helper",
+            executable: prerequisite,
+            resolution: "absolute",
+            versionCheck: { args: ["--version"], semverRange: ">=1", match: "tool (\\d+\\.\\d+\\.\\d+)" },
+            probe: { args: ["probe"], expectedExitCode: 0 },
+          },
+        ],
+      }),
+    );
+    const check = await checkLocalTool(storeRoot, registered, { inputs: { target: "owner/repo#1" } });
+    expect(check.ready).toBe(true);
+    await fs.writeFile(
+      prerequisite,
+      `#!/bin/sh\ntouch ${JSON.stringify(marker)}\nprintf 'tool 2.0.0\\n'\n`,
+      { mode: 0o755 },
+    );
+
+    const result = await runLocalTool(storeRoot, registered, {
+      inputs: { target: "owner/repo#1" },
+      contentHash: registered.contentHash,
+      executableHash: check.executable!.contentHash,
+      argvHash: check.argvHash!,
+      prerequisiteHashes: check.prerequisiteHashes,
+    });
+    expect(result).toMatchObject({ ok: false, ran: false, kind: "review_seal_mismatch" });
+    await expect(fs.access(marker)).rejects.toThrow();
+  });
+
+  it("preserves UTF-8 characters split across stdout chunks", async () => {
+    const storeRoot = await root();
+    const registered = await registerLocalTool(
+      storeRoot,
+      manifest({
+        command: {
+          executable: process.execPath,
+          resolution: "absolute",
+          args: [
+            "-e",
+            "const b=Buffer.from(JSON.stringify({value:'€'})); const i=b.indexOf(Buffer.from('€')); process.stdout.write(b.subarray(0,i+1)); setTimeout(()=>process.stdout.end(b.subarray(i+1)),20)",
+          ],
+        },
+        inputs: [],
+        output: { source: "stdout", format: "json", evidence: { value: "$.value" } },
+      }),
+    );
+    const check = await checkLocalTool(storeRoot, registered);
+    const result = await runLocalTool(storeRoot, registered, {
+      contentHash: registered.contentHash,
+      executableHash: check.executable!.contentHash,
+      argvHash: check.argvHash!,
+      prerequisiteHashes: check.prerequisiteHashes,
+    });
+    expect(result).toMatchObject({
+      ok: true,
+      structuredOutput: { value: "€" },
+      evidence: { mapped: { value: "€" } },
+    });
+  });
+
+  it("requires the complete reviewed seal set, runs without a shell, redacts secrets, and maps structured evidence", async () => {
     const storeRoot = await root();
     const sentinel = join(storeRoot, "must-not-exist");
     const target = `owner/repo#1; touch ${sentinel}`;
@@ -299,14 +438,18 @@ describe("preflight and execution", () => {
       inputs: { target },
       contentHash: registered.contentHash,
       executableHash: "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      argvHash: check.argvHash!,
+      prerequisiteHashes: check.prerequisiteHashes,
       env,
     });
-    expect(wrongSeal).toMatchObject({ ok: false, ran: false, kind: "executable_seal_mismatch" });
+    expect(wrongSeal).toMatchObject({ ok: false, ran: false, kind: "review_seal_mismatch" });
 
     const result = await runLocalTool(storeRoot, registered, {
       inputs: { target },
       contentHash: registered.contentHash,
       executableHash: check.executable!.contentHash,
+      argvHash: check.argvHash!,
+      prerequisiteHashes: check.prerequisiteHashes,
       env,
     });
     expect(result).toMatchObject({

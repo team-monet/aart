@@ -101,6 +101,15 @@ describe("parsePackManifestYaml — architecture §11.1's literal example", () =
         }),
       ),
     ).toThrow(/portable external executable/);
+    expect(() =>
+      parsePackManifestYaml(
+        JSON.stringify({
+          name: "review-tools",
+          version: "1.0.0",
+          tools: [{ ...tool, cwd: { mode: "asset" } }],
+        }),
+      ),
+    ).toThrow(/cannot use an asset working directory/);
   });
 
   it("rejects duplicate Block or Workflow declarations before preparation can certify the Pack", () => {

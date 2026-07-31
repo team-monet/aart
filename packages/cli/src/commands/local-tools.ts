@@ -25,6 +25,21 @@ function parseInputs(tokens: Tokenized): Record<string, string> | undefined {
   return parsed as Record<string, string>;
 }
 
+function parsePrerequisiteHashes(tokens: Tokenized): Record<string, string> {
+  const raw = flagString(tokens.flags, "prerequisite-hashes");
+  if (!raw) return {};
+  const parsed = JSON.parse(raw) as unknown;
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("--prerequisite-hashes must be a JSON object mapping prerequisite names to sha256 hashes");
+  }
+  for (const [name, value] of Object.entries(parsed)) {
+    if (typeof value !== "string" || !/^sha256:[a-f0-9]{64}$/.test(value)) {
+      throw new Error(`prerequisite hash "${name}" must be a sha256:<64 lowercase hex> string`);
+    }
+  }
+  return parsed as Record<string, string>;
+}
+
 export async function findToolsCommand(tokens: Tokenized, cli: CliContext): Promise<HandlerResult & { next: string }> {
   const scope = flagString(tokens.flags, "scope");
   if (scope && scope !== "local" && scope !== "remote" && scope !== "all") {
@@ -76,8 +91,11 @@ export async function localToolCommand(tokens: Tokenized, cli: CliContext): Prom
     const id = requirePositional(tokens.positionals, 1, "tool id");
     const contentHash = flagString(tokens.flags, "content-hash");
     const executableHash = flagString(tokens.flags, "executable-hash");
-    if (!contentHash || !executableHash) {
-      throw new Error("tool run requires --content-hash and --executable-hash from a reviewed `aart tool check` result");
+    const argvHash = flagString(tokens.flags, "argv-hash");
+    if (!contentHash || !executableHash || !argvHash) {
+      throw new Error(
+        "tool run requires --content-hash, --executable-hash, and --argv-hash from one reviewed `aart tool check` result",
+      );
     }
     const result = await runToolHandler(cli.aart, {
       id,
@@ -85,6 +103,8 @@ export async function localToolCommand(tokens: Tokenized, cli: CliContext): Prom
       inputs: parseInputs(tokens),
       contentHash,
       executableHash,
+      argvHash,
+      prerequisiteHashes: parsePrerequisiteHashes(tokens),
     });
     return wrapResult("aart_run_tool", result);
   }

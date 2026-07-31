@@ -69,12 +69,18 @@ describe("local tool MCP handlers", () => {
       inputs: { target: "team-monet/aart#11" },
     });
     expect(checked.ok).toBe(true);
-    const executableHash = (checked.check as { executable: { contentHash: string } }).executable.contentHash;
+    const check = checked.check as {
+      executable: { contentHash: string };
+      argvHash: string;
+      prerequisiteHashes: Record<string, string>;
+    };
     const ran = await runToolHandler(tc.ctx, {
       id: "codex-review.wait",
       inputs: { target: "team-monet/aart#11" },
       contentHash: sealed.contentHash,
-      executableHash,
+      executableHash: check.executable.contentHash,
+      argvHash: check.argvHash,
+      prerequisiteHashes: check.prerequisiteHashes,
     });
     expect(ran).toMatchObject({
       ok: true,
@@ -119,6 +125,19 @@ describe("local tool MCP handlers", () => {
       inputs: { target: "team-monet/aart#11" },
     });
     expect(checked).toMatchObject({ ok: false, check: { ready: false, status: "missing_prerequisite" } });
+  });
+
+  it("requires concrete required inputs on the explicit review check path", async () => {
+    tc = await createTestContext();
+    await registerToolHandler(tc.ctx, { tool: toolManifest() });
+    await expect(checkToolHandler(tc.ctx, { id: "codex-review.wait" })).resolves.toMatchObject({
+      ok: false,
+      check: {
+        ready: false,
+        status: "invalid_input",
+        reason: 'missing required tool input "target"',
+      },
+    });
   });
 });
 
@@ -209,6 +228,7 @@ describe("Pack tool declarations", () => {
     );
     const prepared = await preparePackHandler(tc.ctx, { sourcePath: packageRoot });
     expect(prepared).toMatchObject({ ok: true, entry: { tools: [{ id: "public-review.wait" }] } });
+    const preparedEntry = prepared.entry as { contentHash: string };
     const indexUrl = `data:application/json,${encodeURIComponent(
       JSON.stringify({ schemaVersion: 1, mode: "production", packs: [prepared.entry] }),
     )}`;
@@ -225,7 +245,12 @@ describe("Pack tool declarations", () => {
           id: "public-review.wait",
           source: "public",
           installable: true,
-          provenance: { packName: "review-tools" },
+          provenance: { packName: "review-tools", packVersion: "1.0.0" },
+          installation: {
+            name: "review-tools",
+            version: "1.0.0",
+            contentHash: preparedEntry.contentHash,
+          },
         },
       ],
     });

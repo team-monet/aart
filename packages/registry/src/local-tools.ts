@@ -296,12 +296,16 @@ export async function registerLocalTool(
     if (!options.sourcePath) {
       throw new LocalToolManifestError("asset-owned executables require sourcePath so registration can seal their bytes");
     }
-    const sourceDirectory = dirname(resolve(options.sourcePath));
-    const executableSource = resolve(sourceDirectory, manifest.command.executable);
-    if (!isWithin(sourceDirectory, executableSource)) {
+    const sourceDirectory = await fs.realpath(dirname(resolve(options.sourcePath)));
+    const requestedExecutable = resolve(sourceDirectory, manifest.command.executable);
+    if (!isWithin(sourceDirectory, requestedExecutable)) {
       throw new LocalToolManifestError("asset-owned executable escapes the manifest directory");
     }
-    const stat = await fs.lstat(executableSource);
+    const executableSource = await fs.realpath(requestedExecutable);
+    if (!isWithin(sourceDirectory, executableSource)) {
+      throw new LocalToolManifestError("asset-owned executable resolves outside the manifest directory");
+    }
+    const stat = await fs.lstat(requestedExecutable);
     if (!stat.isFile() || stat.isSymbolicLink()) {
       throw new LocalToolManifestError("asset-owned executable must be a regular, non-symlink file");
     }
@@ -417,9 +421,9 @@ export function packToolRecord(
   manifest: LocalToolManifest,
   input: { packName: string; packVersion: string; contentHash: string; source: string; registeredAt?: string },
 ): RegisteredLocalTool {
-  if (manifest.command.resolution === "asset") {
+  if (manifest.command.resolution === "asset" || manifest.cwd.mode === "asset") {
     throw new LocalToolManifestError(
-      `Pack tool ${manifest.id} uses asset-owned executable bytes; v1 Pack tools must declare a portable external executable prerequisite`,
+      `Pack tool ${manifest.id} uses an asset-owned executable or working directory; v1 Pack tools support portable external prerequisites only`,
     );
   }
   return {
@@ -512,11 +516,13 @@ function spawnNoShell(
         child.kill("SIGKILL");
       }, options.timeoutMs);
     }
-    child.stdout?.on("data", (chunk: Buffer) => {
-      stdout += chunk.toString("utf8");
+    child.stdout?.setEncoding("utf8");
+    child.stderr?.setEncoding("utf8");
+    child.stdout?.on("data", (chunk: string) => {
+      stdout += chunk;
     });
-    child.stderr?.on("data", (chunk: Buffer) => {
-      stderr += chunk.toString("utf8");
+    child.stderr?.on("data", (chunk: string) => {
+      stderr += chunk;
     });
     child.on("error", (error) => {
       if (settled) return;
@@ -554,7 +560,15 @@ async function resolvedExecutable(
   env: NodeJS.ProcessEnv,
 ): Promise<string | undefined> {
   if (spec.resolution === "path") return pathExecutable(spec.executable, env);
-  if (spec.resolution === "asset") return record.ownedExecutable?.path;
+  if (spec.resolution === "asset") {
+    if (!record.ownedExecutable) return undefined;
+    try {
+      await fs.access(record.ownedExecutable.path, constants.X_OK);
+      return await fs.realpath(record.ownedExecutable.path);
+    } catch {
+      return undefined;
+    }
+  }
   try {
     await fs.access(spec.executable, constants.X_OK);
     return await fs.realpath(spec.executable);
@@ -593,14 +607,25 @@ async function inspectVersion(
   return { raw, version, compatible: true };
 }
 
-async function executableIdentity(
+type ExecutableIdentity = {
+  ready: true;
+  path: string;
+  contentHash: string;
+  version?: string;
+  versionOutput?: string;
+};
+
+type UnavailableExecutableIdentity = {
+  ready: false;
+  reason: string;
+  sealMismatch?: true;
+};
+
+async function executableBytesIdentity(
   record: RegisteredLocalTool,
-  spec: Pick<LocalToolManifest["command"], "executable" | "resolution" | "versionCheck">,
+  spec: Pick<LocalToolManifest["command"], "executable" | "resolution">,
   env: NodeJS.ProcessEnv,
-): Promise<
-  | { ready: true; path: string; contentHash: string; version?: string; versionOutput?: string }
-  | { ready: false; reason: string }
-> {
+): Promise<ExecutableIdentity | UnavailableExecutableIdentity> {
   const path = await resolvedExecutable(record, spec, env);
   if (!path) return { ready: false, reason: `executable "${spec.executable}" was not found or is not executable` };
   let bytes: Buffer;
@@ -613,12 +638,28 @@ async function executableIdentity(
   if (spec.resolution === "asset" && record.ownedExecutable?.contentHash !== contentHash) {
     return { ready: false, reason: `asset-owned executable seal is broken (expected ${record.ownedExecutable?.contentHash}, got ${contentHash})` };
   }
-  const version = await inspectVersion(path, spec.versionCheck);
+  return { ready: true, path, contentHash };
+}
+
+async function executableIdentity(
+  record: RegisteredLocalTool,
+  spec: Pick<LocalToolManifest["command"], "executable" | "resolution" | "versionCheck">,
+  env: NodeJS.ProcessEnv,
+  expectedHash?: string,
+): Promise<ExecutableIdentity | UnavailableExecutableIdentity> {
+  const identity = await executableBytesIdentity(record, spec, env);
+  if (!identity.ready) return identity;
+  if (expectedHash !== undefined && identity.contentHash !== expectedHash) {
+    return {
+      ready: false,
+      sealMismatch: true,
+      reason: `reviewed executable hash ${expectedHash} does not match resolved hash ${identity.contentHash}`,
+    };
+  }
+  const version = await inspectVersion(identity.path, spec.versionCheck);
   if (!version.compatible) return { ready: false, reason: version.reason ?? "incompatible executable version" };
   return {
-    ready: true,
-    path,
-    contentHash,
+    ...identity,
     ...(version.version ? { version: version.version } : {}),
     ...(version.raw ? { versionOutput: version.raw } : {}),
   };
@@ -636,7 +677,13 @@ async function resolveAartSecret(root: string, ref: string, env: NodeJS.ProcessE
   }
 }
 
-export type ToolAvailabilityStatus = "ready" | "missing_prerequisite" | "incompatible" | "unsupported_platform" | "invalid_input";
+export type ToolAvailabilityStatus =
+  | "ready"
+  | "missing_prerequisite"
+  | "incompatible"
+  | "unsupported_platform"
+  | "invalid_input"
+  | "seal_mismatch";
 
 export interface ToolCheckResult {
   status: ToolAvailabilityStatus;
@@ -654,6 +701,8 @@ export interface ToolCheckResult {
     installHint?: string;
   }>;
   argv?: string[];
+  argvHash?: string;
+  prerequisiteHashes?: Record<string, string>;
   reason?: string;
   approvalSummary: {
     asset: string;
@@ -724,13 +773,22 @@ function approvalSummary(
 export async function checkLocalTool(
   root: string,
   record: RegisteredLocalTool,
-  options: { inputs?: Readonly<Record<string, string>>; env?: NodeJS.ProcessEnv } = {},
+  options: {
+    inputs?: Readonly<Record<string, string>>;
+    env?: NodeJS.ProcessEnv;
+    requireInputs?: boolean;
+    expectedArgvHash?: string;
+    expectedExecutableHash?: string;
+    expectedPrerequisiteHashes?: Readonly<Record<string, string>>;
+  } = {},
 ): Promise<ToolCheckResult> {
   const env = options.env ?? process.env;
   let argv: string[] | undefined;
+  let argvHash: string | undefined;
   try {
-    if (options.inputs || record.manifest.inputs.length === 0) {
+    if (options.requireInputs === true || options.inputs !== undefined || record.manifest.inputs.length === 0) {
       const rendered = renderArgs(record.manifest, options.inputs);
+      argvHash = sha256(canonicalize(rendered));
       argv = reviewArgs(record.manifest, options.inputs, rendered);
     }
   } catch (cause) {
@@ -750,7 +808,30 @@ export async function checkLocalTool(
     prerequisites: [] as ToolCheckResult["prerequisites"],
     approvalSummary: approvalSummary(record, argv),
     ...(argv ? { argv } : {}),
+    ...(argvHash ? { argvHash } : {}),
   };
+
+  if (options.expectedArgvHash !== undefined && argvHash !== options.expectedArgvHash) {
+    return {
+      ...base,
+      status: "seal_mismatch",
+      ready: false,
+      reason: `reviewed argv hash ${options.expectedArgvHash} does not match rendered hash ${String(argvHash)}`,
+    };
+  }
+  if (options.expectedPrerequisiteHashes !== undefined) {
+    const declared = new Set(record.manifest.prerequisites.map((prerequisite) => prerequisite.name));
+    const supplied = Object.keys(options.expectedPrerequisiteHashes);
+    const extra = supplied.filter((name) => !declared.has(name));
+    if (extra.length > 0) {
+      return {
+        ...base,
+        status: "seal_mismatch",
+        ready: false,
+        reason: `reviewed prerequisite hashes include undeclared entries: ${extra.join(", ")}`,
+      };
+    }
+  }
 
   if (record.manifest.platforms.length > 0 && !record.manifest.platforms.includes(process.platform)) {
     return {
@@ -761,17 +842,43 @@ export async function checkLocalTool(
     };
   }
 
-  const main = await executableIdentity(record, record.manifest.command, env);
+  const main = await executableIdentity(record, record.manifest.command, env, options.expectedExecutableHash);
   if (!main.ready) {
     return {
       ...base,
-      status: main.reason.includes("version") ? "incompatible" : "missing_prerequisite",
+      status: main.sealMismatch ? "seal_mismatch" : main.reason.includes("version") ? "incompatible" : "missing_prerequisite",
       ready: false,
       reason: main.reason,
     };
   }
 
   for (const prerequisite of record.manifest.prerequisites) {
+    const expectedPrerequisiteHash = options.expectedPrerequisiteHashes?.[prerequisite.name];
+    if (options.expectedPrerequisiteHashes !== undefined && expectedPrerequisiteHash === undefined) {
+      const unresolved = await executableBytesIdentity(record, prerequisite, env);
+      if (!unresolved.ready) {
+        base.prerequisites.push({
+          name: prerequisite.name,
+          ready: false,
+          reason: unresolved.reason,
+          installHint: prerequisite.installHint,
+        });
+        return {
+          ...base,
+          executable: main,
+          status: "missing_prerequisite",
+          ready: false,
+          reason: `${prerequisite.name}: ${unresolved.reason}`,
+        };
+      }
+      return {
+        ...base,
+        executable: main,
+        status: "seal_mismatch",
+        ready: false,
+        reason: `${prerequisite.name}: no reviewed executable hash was supplied`,
+      };
+    }
     const identity = await executableIdentity(
       record,
       {
@@ -780,6 +887,7 @@ export async function checkLocalTool(
         versionCheck: prerequisite.versionCheck,
       },
       env,
+      expectedPrerequisiteHash,
     );
     if (!identity.ready) {
       base.prerequisites.push({
@@ -791,12 +899,22 @@ export async function checkLocalTool(
       return {
         ...base,
         executable: main,
-        status: identity.reason.includes("version") ? "incompatible" : "missing_prerequisite",
+        status: identity.sealMismatch ? "seal_mismatch" : identity.reason.includes("version") ? "incompatible" : "missing_prerequisite",
         ready: false,
         reason: `${prerequisite.name}: ${identity.reason}`,
       };
     }
     if (prerequisite.probe) {
+      const beforeProbe = await executableBytesIdentity(record, prerequisite, env);
+      if (!beforeProbe.ready || beforeProbe.contentHash !== identity.contentHash) {
+        return {
+          ...base,
+          executable: main,
+          status: "seal_mismatch",
+          ready: false,
+          reason: `${prerequisite.name}: prerequisite executable changed before its probe`,
+        };
+      }
       const probe = await spawnNoShell(identity.path, prerequisite.probe.args, { timeoutMs: 10_000 });
       if (probe.exitCode !== prerequisite.probe.expectedExitCode || probe.timedOut) {
         base.prerequisites.push({
@@ -840,7 +958,15 @@ export async function checkLocalTool(
     }
   }
 
-  return { ...base, executable: main, status: "ready", ready: true };
+  return {
+    ...base,
+    executable: main,
+    prerequisiteHashes: Object.fromEntries(
+      base.prerequisites.map((prerequisite) => [prerequisite.name, prerequisite.contentHash!]),
+    ),
+    status: "ready",
+    ready: true,
+  };
 }
 
 function selectEnvironment(
@@ -929,6 +1055,8 @@ export interface RunLocalToolInput {
   inputs?: Readonly<Record<string, string>>;
   contentHash: string;
   executableHash: string;
+  argvHash: string;
+  prerequisiteHashes?: Readonly<Record<string, string>>;
   env?: NodeJS.ProcessEnv;
 }
 
@@ -1001,22 +1129,20 @@ export async function runLocalTool(
       error: `reviewed asset hash ${input.contentHash} does not match current hash ${record.contentHash}`,
     };
   }
-  const check = await checkLocalTool(root, record, { inputs: input.inputs, env: input.env });
+  const check = await checkLocalTool(root, record, {
+    inputs: input.inputs,
+    env: input.env,
+    requireInputs: true,
+    expectedArgvHash: input.argvHash,
+    expectedExecutableHash: input.executableHash,
+    expectedPrerequisiteHashes: input.prerequisiteHashes ?? {},
+  });
   if (!check.ready || !check.executable || !check.argv) {
     return {
       ok: false,
       ran: false,
-      kind: check.status,
+      kind: check.status === "seal_mismatch" ? "review_seal_mismatch" : check.status,
       error: check.reason ?? "local tool prerequisites are not ready",
-      check,
-    };
-  }
-  if (input.executableHash !== check.executable.contentHash) {
-    return {
-      ok: false,
-      ran: false,
-      kind: "executable_seal_mismatch",
-      error: `reviewed executable hash ${input.executableHash} does not match resolved hash ${check.executable.contentHash}`,
       check,
     };
   }
@@ -1047,6 +1173,18 @@ export async function runLocalTool(
         ? `resolved executable changed before spawn (expected ${input.executableHash}, got ${rechecked.contentHash})`
         : rechecked.reason,
     };
+  }
+  for (const prerequisite of record.manifest.prerequisites) {
+    const identity = await executableBytesIdentity(record, prerequisite, hostEnv);
+    const expectedHash = (input.prerequisiteHashes ?? {})[prerequisite.name];
+    if (!identity.ready || identity.contentHash !== expectedHash) {
+      return {
+        ok: false,
+        ran: false,
+        kind: "review_seal_mismatch",
+        error: `${prerequisite.name}: prerequisite executable changed before task spawn`,
+      };
+    }
   }
   const startedAt = new Date().toISOString();
   let result: SpawnResult;
