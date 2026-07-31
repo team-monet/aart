@@ -10,6 +10,7 @@ import {
 import { createHash, randomUUID } from "node:crypto";
 import { delimiter, dirname, extname, isAbsolute, join, relative, resolve } from "node:path";
 import { spawn } from "node:child_process";
+import { Worker } from "node:worker_threads";
 import { coerce, rcompare, satisfies, valid as validSemver, validRange } from "semver";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
@@ -22,6 +23,8 @@ const SECRET_ENV_PATTERN =
 const PLACEHOLDER_PATTERN = /^\{\{([A-Za-z][A-Za-z0-9_-]*)\}\}$/;
 const EVIDENCE_PATH_PATTERN = /^\$(?:\.[A-Za-z_][A-Za-z0-9_-]*|\[\d+\])*$/;
 const MAX_CAPTURE_BYTES = 1_048_576;
+const MAX_TIMEOUT_MS = 2_147_483_647;
+const REGEX_EXECUTION_TIMEOUT_MS = 1_000;
 
 function isAnyPlatformAbsolute(value: string): boolean {
   return isAbsolute(value) || /^[A-Za-z]:[\\/]/.test(value) || /^\\\\[^\\]+\\[^\\]+/.test(value);
@@ -51,6 +54,7 @@ const executableSchema = z
   .object({
     executable: z.string().min(1),
     resolution: z.enum(["path", "absolute", "asset"]),
+    snapshotMode: z.literal("standalone").optional(),
     versionCheck: versionCheckSchema,
   })
   .superRefine((value, ctx) => {
@@ -77,6 +81,7 @@ const prerequisiteSchema = z
     name: z.string().min(1),
     executable: z.string().min(1),
     resolution: z.enum(["path", "absolute"]),
+    snapshotMode: z.literal("standalone").optional(),
     versionCheck: versionCheckSchema,
     probe: z
       .object({
@@ -125,7 +130,7 @@ export const LocalToolManifestSchema = z
       .default([]),
     command: executableSchema.extend({
       args: z.array(z.string()),
-      timeoutMs: z.number().int().positive().optional(),
+      timeoutMs: z.number().int().positive().max(MAX_TIMEOUT_MS).optional(),
     }),
     prerequisites: z.array(prerequisiteSchema).default([]),
     platforms: z.array(z.string().min(1)).default([]),
@@ -615,6 +620,7 @@ function spawnNoShell(
       detached: process.platform !== "win32",
       env: options.env,
       shell: false,
+      stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,
     });
     let stdout = "";
@@ -779,6 +785,45 @@ async function sealExecutableSnapshot(
   return verifyTarget();
 }
 
+function boundedRegexExec(pattern: string, input: string): Promise<Array<string | null> | undefined> {
+  return new Promise((resolvePromise, reject) => {
+    const worker = new Worker(
+      [
+        'const { parentPort, workerData } = require("node:worker_threads");',
+        "const match = new RegExp(workerData.pattern).exec(workerData.input);",
+        "parentPort.postMessage(match ? Array.from(match, (value) => value ?? null) : null);",
+      ].join("\n"),
+      { eval: true, workerData: { pattern, input } },
+    );
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      void worker.terminate();
+      reject(new Error(`version match exceeded the ${REGEX_EXECUTION_TIMEOUT_MS}ms regex time budget`));
+    }, REGEX_EXECUTION_TIMEOUT_MS);
+    worker.once("message", (captures: Array<string | null> | null) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      void worker.terminate();
+      resolvePromise(captures ?? undefined);
+    });
+    worker.once("error", (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      reject(error);
+    });
+    worker.once("exit", (code) => {
+      if (settled || code === 0) return;
+      settled = true;
+      clearTimeout(timer);
+      reject(new Error(`version-match worker exited with code ${code}`));
+    });
+  });
+}
+
 async function inspectVersion(
   executable: string,
   check: NonNullable<LocalToolManifest["command"]["versionCheck"]> | undefined,
@@ -795,9 +840,14 @@ async function inspectVersion(
   const raw = `${result.stdout}\n${result.stderr}`.trim();
   let matched = raw;
   if (check.match) {
-    const capture = new RegExp(check.match).exec(raw);
+    let capture: Array<string | null> | undefined;
+    try {
+      capture = await boundedRegexExec(check.match, raw);
+    } catch (cause) {
+      return { raw, compatible: false, reason: (cause as Error).message };
+    }
     if (!capture) return { raw, compatible: false, reason: "version output did not match the declared pattern" };
-    matched = capture[1] ?? capture[0];
+    matched = capture[1] ?? capture[0] ?? "";
   }
   const version = coerce(matched)?.version;
   if (check.semverRange && (!version || !satisfies(version, check.semverRange))) {
@@ -836,7 +886,10 @@ function availabilityStatus(identity: UnavailableExecutableIdentity): ToolAvaila
 async function executableBytesIdentity(
   root: string,
   record: RegisteredLocalTool,
-  spec: Pick<LocalToolManifest["command"], "executable" | "resolution">,
+  spec: Pick<
+    LocalToolManifest["command"],
+    "executable" | "resolution" | "snapshotMode" | "versionCheck"
+  >,
   env: NodeJS.ProcessEnv,
 ): Promise<ExecutableIdentity | UnavailableExecutableIdentity> {
   const path = await resolvedExecutable(record, spec, env);
@@ -858,6 +911,22 @@ async function executableBytesIdentity(
     };
   }
   const contentHash = sha256(bytes);
+  if (bytes.subarray(0, 2).toString("utf8") === "#!" && spec.snapshotMode !== "standalone") {
+    return {
+      ready: false,
+      failureKind: "incompatible",
+      reason:
+        "interpreter executables must declare snapshotMode \"standalone\"; package-relative entrypoints cannot be sealed as one executable file",
+    };
+  }
+  if (bytes.subarray(0, 2).toString("utf8") === "#!" && !spec.versionCheck) {
+    return {
+      ready: false,
+      failureKind: "incompatible",
+      reason:
+        "standalone interpreter executables must declare a versionCheck that runs against the snapshot to verify it does not need package-relative context",
+    };
+  }
   if (spec.resolution === "asset" && record.ownedExecutable?.contentHash !== contentHash) {
     return {
       ready: false,
@@ -866,7 +935,7 @@ async function executableBytesIdentity(
     };
   }
   try {
-    const sealedPath = await sealExecutableSnapshot(root, path, contentHash, extname(spec.executable));
+    const sealedPath = await sealExecutableSnapshot(root, path, contentHash, extname(path));
     return { ready: true, path, sealedPath, contentHash };
   } catch (cause) {
     return {
@@ -880,7 +949,7 @@ async function executableBytesIdentity(
 async function executableIdentity(
   root: string,
   record: RegisteredLocalTool,
-  spec: Pick<LocalToolManifest["command"], "executable" | "resolution" | "versionCheck">,
+  spec: Pick<LocalToolManifest["command"], "executable" | "resolution" | "snapshotMode" | "versionCheck">,
   env: NodeJS.ProcessEnv,
   expectedHash?: string,
   executionEnv: NodeJS.ProcessEnv = env,
@@ -953,7 +1022,7 @@ export interface ToolCheckResult {
   approvalSummary: {
     asset: string;
     source: ToolProvenance;
-    command: { executable: string; argsTemplate: string[]; argv?: string[] };
+    command: { executable: string; snapshotMode?: "standalone"; argsTemplate: string[]; argv?: string[] };
     capability: "command";
     authentication: {
       mode: "inherited" | "aart_secrets";
@@ -1006,6 +1075,7 @@ function approvalSummary(
     source: record.provenance,
     command: {
       executable: manifest.command.executable,
+      ...(manifest.command.snapshotMode ? { snapshotMode: manifest.command.snapshotMode } : {}),
       argsTemplate: manifest.command.args,
       ...(argv ? { argv } : {}),
     },
@@ -1194,6 +1264,7 @@ export async function checkLocalTool(
       {
         executable: prerequisite.executable,
         resolution: prerequisite.resolution,
+        snapshotMode: prerequisite.snapshotMode,
         versionCheck: prerequisite.versionCheck,
       },
       env,
@@ -1341,6 +1412,12 @@ function redactText(text: string, literals: readonly string[]): string {
 
 function redactStructured(value: unknown, literals: readonly string[]): unknown {
   if (typeof value === "string") return redactText(value, literals);
+  if (
+    (typeof value === "number" || typeof value === "boolean" || value === null) &&
+    literals.includes(String(value))
+  ) {
+    return "[REDACTED]";
+  }
   if (Array.isArray(value)) return value.map((item) => redactStructured(item, literals));
   if (value && typeof value === "object") {
     return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([key, item]) => [key, redactStructured(item, literals)]));
@@ -1633,8 +1710,8 @@ export async function runLocalTool(
   let outputParseError: string | undefined;
   try {
     structuredOutput = redactStructured(parseStructuredOutput(record.manifest.output.format, outputText), redactions);
-  } catch (cause) {
-    outputParseError = `${record.manifest.output.source} was not valid ${record.manifest.output.format}: ${(cause as Error).message}`;
+  } catch {
+    outputParseError = `${record.manifest.output.source} was not valid ${record.manifest.output.format}`;
   }
   const mappedEvidence =
     outputParseError === undefined

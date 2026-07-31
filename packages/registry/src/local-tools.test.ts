@@ -85,6 +85,12 @@ describe("local tool manifest", () => {
     expect(() => parseLocalToolManifest({ ...manifest(), cwd: { mode: "asset" } })).toThrow(
       /asset working directories are not supported/,
     );
+    expect(() =>
+      parseLocalToolManifest({
+        ...manifest(),
+        command: { ...manifest().command, timeoutMs: 2_147_483_648 },
+      }),
+    ).toThrow(/2147483647/);
   });
 
   it("keeps an already-suffixed Windows PATH command unchanged before trying PATHEXT variants", () => {
@@ -180,7 +186,9 @@ describe("versioned registration and discovery", () => {
       command: {
         executable: "owned-tool",
         resolution: "asset",
+        snapshotMode: "standalone",
         args: [],
+        versionCheck: { args: ["--version"] },
       },
       inputs: [],
     });
@@ -399,6 +407,71 @@ describe("preflight and execution", () => {
     });
   });
 
+  it("rejects interpreter entrypoints that do not declare standalone snapshot compatibility", async () => {
+    if (process.platform === "win32") return;
+    const storeRoot = await root();
+    const packageCli = join(storeRoot, "package-cli");
+    await fs.writeFile(packageCli, "#!/usr/bin/env node\nrequire('../lib/runtime.js')\n", { mode: 0o755 });
+    const registered = await registerLocalTool(
+      storeRoot,
+      manifest({
+        command: {
+          executable: packageCli,
+          resolution: "absolute",
+          args: [],
+        },
+        inputs: [],
+      }),
+    );
+    await expect(checkLocalTool(storeRoot, registered)).resolves.toMatchObject({
+      ready: false,
+      status: "incompatible",
+      reason: expect.stringContaining('snapshotMode "standalone"'),
+    });
+    const declaredWithoutProbe = await registerLocalTool(
+      storeRoot,
+      manifest({
+        version: "2.0.0",
+        command: {
+          executable: packageCli,
+          resolution: "absolute",
+          snapshotMode: "standalone",
+          args: [],
+        },
+        inputs: [],
+      }),
+    );
+    await expect(checkLocalTool(storeRoot, declaredWithoutProbe)).resolves.toMatchObject({
+      ready: false,
+      status: "incompatible",
+      reason: expect.stringContaining("must declare a versionCheck"),
+    });
+  });
+
+  it("bounds catastrophic version-match expressions outside the MCP event loop", async () => {
+    const storeRoot = await root();
+    const registered = await registerLocalTool(
+      storeRoot,
+      manifest({
+        command: {
+          executable: process.execPath,
+          resolution: "absolute",
+          args: [],
+          versionCheck: {
+            args: ["-e", "process.stdout.write('a'.repeat(30_000)+'!')"],
+            match: "(a+)+$",
+          },
+        },
+        inputs: [],
+      }),
+    );
+    await expect(checkLocalTool(storeRoot, registered)).resolves.toMatchObject({
+      ready: false,
+      status: "incompatible",
+      reason: expect.stringContaining("regex time budget"),
+    });
+  });
+
   it("binds task inputs to the reviewed rendered argv hash", async () => {
     const storeRoot = await root();
     const registered = await registerLocalTool(storeRoot, manifest());
@@ -469,6 +542,7 @@ describe("preflight and execution", () => {
             name: "review-helper",
             executable: prerequisite,
             resolution: "absolute",
+            snapshotMode: "standalone",
             versionCheck: { args: ["--version"], semverRange: ">=1", match: "tool (\\d+\\.\\d+\\.\\d+)" },
             probe: { args: ["probe"], expectedExitCode: 0 },
           },
@@ -520,6 +594,7 @@ describe("preflight and execution", () => {
         command: {
           executable,
           resolution: "absolute",
+          snapshotMode: "standalone",
           args: [],
           versionCheck: {
             args: ["--version", replacement, executable],
@@ -745,6 +820,39 @@ describe("preflight and execution", () => {
       ran: true,
       kind: "command_failed",
       evidence: { exitCode: 3, outputParseError: expect.any(String) },
+    });
+  });
+
+  it("closes stdin so non-interactive commands waiting for EOF can finish", async () => {
+    const storeRoot = await root();
+    const registered = await registerLocalTool(
+      storeRoot,
+      manifest({
+        command: {
+          executable: process.execPath,
+          resolution: "absolute",
+          args: [
+            "-e",
+            "process.stdin.resume(); process.stdin.on('end',()=>console.log(JSON.stringify({eof:true})))",
+          ],
+          timeoutMs: 1_000,
+        },
+        inputs: [],
+        output: { source: "stdout", format: "json", evidence: { eof: "$.eof" } },
+      }),
+    );
+    const check = await checkLocalTool(storeRoot, registered);
+    const result = await runLocalTool(storeRoot, registered, {
+      contentHash: registered.contentHash,
+      executableHash: check.executable!.contentHash,
+      argvHash: check.argvHash!,
+      cwdHash: check.cwdHash!,
+      prerequisiteHashes: check.prerequisiteHashes,
+    });
+    expect(result).toMatchObject({
+      ok: true,
+      structuredOutput: { eof: true },
+      evidence: { mapped: { eof: true } },
     });
   });
 
@@ -1000,9 +1108,91 @@ describe("preflight and execution", () => {
     });
     expect(result).toMatchObject({
       ok: true,
-      structuredOutput: { flag: true, credential: "[REDACTED]" },
-      evidence: { mapped: { flag: true, credential: "[REDACTED]" } },
+      structuredOutput: { flag: "[REDACTED]", credential: "[REDACTED]" },
+      evidence: { mapped: { flag: "[REDACTED]", credential: "[REDACTED]" } },
     });
+  });
+
+  it("redacts secrets emitted as non-string JSON scalars", async () => {
+    const storeRoot = await root();
+    const registered = await registerLocalTool(
+      storeRoot,
+      manifest({
+        command: {
+          executable: process.execPath,
+          resolution: "absolute",
+          args: [
+            "-e",
+            "console.log(JSON.stringify({credential:Number(process.env.LOCAL_TOOL_TOKEN)}))",
+          ],
+        },
+        inputs: [],
+        authentication: {
+          mode: "aart_secrets",
+          description: "Inject a numeric-looking secret",
+          inheritEnvironment: [],
+          secrets: [{ ref: "TOOL_TOKEN", env: "LOCAL_TOOL_TOKEN" }],
+        },
+        output: { source: "stdout", format: "json", evidence: { credential: "$.credential" } },
+      }),
+    );
+    const secret = "1234";
+    const env = { AART_SECRET_TOOL_TOKEN: secret };
+    const check = await checkLocalTool(storeRoot, registered, { env });
+    const result = await runLocalTool(storeRoot, registered, {
+      contentHash: registered.contentHash,
+      executableHash: check.executable!.contentHash,
+      argvHash: check.argvHash!,
+      cwdHash: check.cwdHash!,
+      prerequisiteHashes: check.prerequisiteHashes,
+      env,
+    });
+    expect(result).toMatchObject({
+      ok: true,
+      structuredOutput: { credential: "[REDACTED]" },
+      evidence: { mapped: { credential: "[REDACTED]" } },
+    });
+    expect(JSON.stringify(result)).not.toContain(secret);
+  });
+
+  it("redacts secret literals from structured-output parse diagnostics", async () => {
+    const storeRoot = await root();
+    const registered = await registerLocalTool(
+      storeRoot,
+      manifest({
+        command: {
+          executable: process.execPath,
+          resolution: "absolute",
+          args: ["-e", "process.stdout.write(process.env.LOCAL_TOOL_TOKEN)"],
+        },
+        inputs: [],
+        authentication: {
+          mode: "aart_secrets",
+          description: "Inject a secret into malformed output",
+          inheritEnvironment: [],
+          secrets: [{ ref: "TOOL_TOKEN", env: "LOCAL_TOOL_TOKEN" }],
+        },
+        output: { source: "stdout", format: "json", evidence: {} },
+      }),
+    );
+    const secret = "secret-diagnostic-value";
+    const env = { AART_SECRET_TOOL_TOKEN: secret };
+    const check = await checkLocalTool(storeRoot, registered, { env });
+    const result = await runLocalTool(storeRoot, registered, {
+      contentHash: registered.contentHash,
+      executableHash: check.executable!.contentHash,
+      argvHash: check.argvHash!,
+      cwdHash: check.cwdHash!,
+      prerequisiteHashes: check.prerequisiteHashes,
+      env,
+    });
+    expect(result).toMatchObject({
+      ok: false,
+      ran: true,
+      kind: "invalid_structured_output",
+      evidence: { outputParseError: "stdout was not valid json" },
+    });
+    expect(JSON.stringify(result)).not.toContain(secret);
   });
 
   it("records a terminal output-contract failure when declared evidence is missing", async () => {

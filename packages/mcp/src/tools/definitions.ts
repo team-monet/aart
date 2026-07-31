@@ -20,7 +20,7 @@ const DESCRIPTIONS: Record<ToolName, string> = {
   aart_find_tools:
     "Search registered local command tools and approved Pack tool declarations inertly, without running their version commands or probes, BEFORE workflows or blocks. Use this when the machine may already have a reliable authenticated CLI; skipping it causes agents to rebuild weaker scripts and duplicate credentials.",
   aart_register_tool:
-    "Register a local command manifest as an immutable, versioned, searchable asset. Asset-owned executable bytes are copied inertly and sealed; external executables remain explicit prerequisites whose resolved hashes must be reviewed before execution.",
+    "Register a local command manifest as an immutable, versioned, searchable asset. Asset-owned executable bytes are copied inertly and sealed; external executables remain explicit prerequisites whose resolved hashes must be reviewed before execution. Interpreter entrypoints must explicitly declare standalone snapshot compatibility and a snapshot version check because package-relative context is not copied implicitly.",
   aart_check_tool:
     "Resolve one local tool's exact executable snapshot, argv, working directory, versions, platform, authentication source, effects, and prerequisites without running the task itself. Use the returned asset, executable, rendered-argv, cwd, and prerequisite-executable seals as one review boundary before execution.",
   aart_run_tool:

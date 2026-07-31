@@ -93,12 +93,18 @@ export function compareReuseDiscovery(
     results.length === 0 ? 0 : results.filter((result) => result.reusedExistingTool && !result.builtAdHocReplacement).length / results.length;
   const aartReuseRate = reuseRate(aart);
   const skillReuseRate = reuseRate(skill);
+  const aartTaskIds = [...aart.map((result) => result.taskId)].sort();
+  const skillTaskIds = [...skill.map((result) => result.taskId)].sort();
+  const hasCorrespondingTrials =
+    aartTaskIds.length > 0 &&
+    aartTaskIds.length === skillTaskIds.length &&
+    aartTaskIds.every((taskId, index) => taskId === skillTaskIds[index]);
   return {
     aartReuseRate,
     skillReuseRate,
     delta: aartReuseRate - skillReuseRate,
     // AART may claim parity only when the measured rate actually reaches
     // the equivalent skill. A tool existing in listTools is not evidence.
-    aartDoesNotOverclaimParity: aartReuseRate >= skillReuseRate,
+    aartDoesNotOverclaimParity: hasCorrespondingTrials && aartReuseRate >= skillReuseRate,
   };
 }

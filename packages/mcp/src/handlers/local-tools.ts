@@ -148,6 +148,7 @@ export async function findToolsHandler(ctx: AartContext, input: FindToolsInput):
       command: {
         executable: manifest.command.executable,
         resolution: manifest.command.resolution,
+        snapshotMode: manifest.command.snapshotMode,
         args: manifest.command.args,
       },
       prerequisites: manifest.prerequisites,
@@ -209,6 +210,7 @@ export async function findToolsHandler(ctx: AartContext, input: FindToolsInput):
       command: {
         executable: record.manifest.command.executable,
         resolution: record.manifest.command.resolution,
+        snapshotMode: record.manifest.command.snapshotMode,
         args: record.manifest.command.args,
       },
       prerequisites: record.manifest.prerequisites,

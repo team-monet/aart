@@ -239,7 +239,10 @@ inputs:
 command:
   executable: watch-codex-review
   resolution: path
+  snapshotMode: standalone
   args: ["{{target}}", "--head", "{{head}}"]
+  versionCheck:
+    args: [--help]
 prerequisites:
   - name: authenticated-gh
     executable: gh
@@ -277,12 +280,13 @@ aart tool check codex-review.wait \
   --input '{"target":"team-monet/aart#11","head":"<full-sha>"}'
 
 # Only after reviewing the returned command, authority, effects, contentHash,
-# executable.contentHash, argvHash, and prerequisiteHashes:
+# executable.contentHash, argvHash, cwdHash, and prerequisiteHashes:
 aart tool run codex-review.wait \
   --input '{"target":"team-monet/aart#11","head":"<full-sha>"}' \
   --content-hash <reviewed-asset-hash> \
   --executable-hash <reviewed-executable-hash> \
   --argv-hash <reviewed-argv-hash> \
+  --cwd-hash <reviewed-cwd-hash> \
   --prerequisite-hashes '{"authenticated-gh":"<reviewed-gh-hash>"}'
 
 # The run returns toolrun_<uuid>; retrieve the durable, redacted record later:
@@ -292,12 +296,16 @@ aart tool report <toolrun_id>
 aart tool runs --tool-id codex-review.wait
 ```
 
-`resolution: path` does not silently trust whatever is on `PATH`: discovery
-resolves it to an absolute path, hashes its bytes, checks the declared version
-and probes, and execution requires that exact reviewed hash. The rendered
-argv and every executable used by a prerequisite version check or probe are
-bound into the same review; changing the inputs or a helper binary requires a
-new check. Use
+`resolution: path` does not silently trust whatever is on `PATH`: inert
+discovery reports the manifest without running it, and the explicit check
+resolves the command to an absolute path, snapshots and hashes its bytes, and
+runs declared version checks and probes against those snapshots. Execution
+requires the exact reviewed executable, argv, cwd, and prerequisite hashes.
+Changing the inputs, working directory, or a helper binary requires a new
+check. Interpreter entrypoints must declare `snapshotMode: standalone`; AART
+also requires their declared `versionCheck` to succeed against the snapshot,
+and rejects undeclared package-relative scripts because copying one entry file
+cannot seal its unlisted package context. Use
 `resolution: asset` for bytes owned by a local asset; registration copies them
 inertly into the AART root and includes their hash in the immutable version
 seal. Pack tool declarations intentionally support portable external

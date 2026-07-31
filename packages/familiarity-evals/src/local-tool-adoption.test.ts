@@ -45,4 +45,15 @@ describe("local tool reuse discovery A/B scoring", () => {
       aartDoesNotOverclaimParity: false,
     });
   });
+
+  it("refuses to report parity when either arm has no corresponding trials", () => {
+    expect(compareReuseDiscovery([], [])).toMatchObject({
+      aartDoesNotOverclaimParity: false,
+    });
+    expect(
+      compareReuseDiscovery([scoreReuseDiscovery(task, "aart", "aart_find_tools")], []),
+    ).toMatchObject({
+      aartDoesNotOverclaimParity: false,
+    });
+  });
 });
