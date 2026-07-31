@@ -20,6 +20,7 @@ import { remoteCommand } from "./commands/remote.js";
 import { remoteRunCommand, remoteRunsCommand, remoteStatusCommand, remoteWhyCommand } from "./commands/remote-observability.js";
 import { watchCommand } from "./commands/watch.js";
 import { packCommand } from "./commands/packs.js";
+import { findToolsCommand, localToolCommand } from "./commands/local-tools.js";
 
 export const USAGE = `AART CLI — usage:
   aart run <workflowId> --input <json> [--version <v>]
@@ -27,6 +28,11 @@ export const USAGE = `AART CLI — usage:
   aart validate <path>
   aart validate <workflowId> --registered [--version <v>]
   aart list
+  aart find-tools [query] [--scope local|remote|all] [--index-url <url>]
+  aart tool register <manifest.yaml>
+  aart tool check <id> [--version <v>] [--input <json>]
+  aart tool run <id> [--version <v>] [--input <json>] --content-hash <sha256:...> --executable-hash <sha256:...>
+  aart tool report <toolrun_id>
   aart find-blocks [query] [--category <category>] [--scope local|remote|all] [--index-url <url>]
   aart find-workflows [query] [--category <category>] [--scope local|remote|all] [--index-url <url>]
   aart pack search [query] [--index-url <url>]
@@ -241,6 +247,10 @@ export async function run(argv: readonly string[], options: RunOptions = {}): Pr
         return asOutcome(await validateCommand(tokens, cli));
       case "list":
         return asOutcome(await listCommand(tokens, cli));
+      case "find-tools":
+        return asOutcome(await findToolsCommand(tokens, cli));
+      case "tool":
+        return asOutcome(await localToolCommand(tokens, cli));
       case "find-blocks":
         return asOutcome(await findBlocksCommand(tokens, cli));
       case "find-workflows":

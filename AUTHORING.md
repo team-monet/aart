@@ -183,8 +183,9 @@ reasoning above lives in `with-aart`'s playbook, not in this command itself.
 It writes two files here:
 
 - **`AGENTS.md`** — instructions for the coding agent: the verify reflex,
-  the reuse-first authoring loop (search workflows → search blocks → adapt
-  or draft → register → validate → run → report), `{{ }}` expression wiring,
+  the reuse-first authoring loop (search local tools → search workflows →
+  search blocks → adapt or draft → register → validate → run → report),
+  `{{ }}` expression wiring,
   and how approval works for this
   project's trust mode. Agents that read `AGENTS.md` (e.g. opencode) pick
   this up automatically; Claude Code reads `CLAUDE.md`, not `AGENTS.md` —
@@ -209,19 +210,101 @@ It writes two files here:
   reported as an error rather than silently replaced.
 
 Open (or restart) Claude Code with `~/aart-workflows` as its working
-directory / project root — it auto-detects `.mcp.json`. Once connected, you
-should see **17 `aart_*` tools** (verified this session on a brand-new
-project with no `Environment`/`EvalSuite` yet registered — 5 more unlock
-once you have at least one of each, e.g. `aart_deploy_workflow`; see
-`TEST-DRIVE.md` part (d) for the full list): `aart_find_blocks`,
-`aart_get_block`, `aart_validate`, `aart_register_block`,
-`aart_run_workflow`, `aart_get_report`, `aart_verify`, `aart_approve`,
-`aart_request_approval`, `aart_record_correction`, `aart_list_blocks`,
-`aart_get_schema`, `aart_propose_workflow`, `aart_diff_workflow`,
-`aart_deploy`, `aart_list_waiting_runs`, `aart_resume_run`. If your MCP client shows zero
+directory / project root — it auto-detects `.mcp.json`. Once connected,
+the core reuse front door includes `aart_find_tools`, `aart_check_tool`,
+`aart_run_tool`, `aart_find_workflows`, and `aart_find_blocks`; additional
+deployment/eval/remote tools unlock when their backing data exists. If your MCP client shows zero
 tools or an error, check what's actually on the other end of the `command`/
 `args` in `.mcp.json` before assuming AART itself is broken — a stale
 absolute path (see part (f)) fails exactly this way.
+
+### Reusing an existing local command
+
+When a trusted local command already does the job, register its contract
+instead of wrapping it in a server workflow or rebuilding it as a polling
+script. A local tool manifest is inert metadata until a hash-bound run:
+
+```yaml
+id: codex-review.wait
+name: Wait for Codex review
+version: 1.0.0
+description: Wait for one terminal Codex pull-request review outcome
+keywords: [codex, review, pull-request]
+triggers: [wait for Codex review, watch this PR review]
+inputs:
+  - name: target
+    description: PR URL or OWNER/REPO#NUMBER
+  - name: head
+    description: Expected full head SHA
+command:
+  executable: watch-codex-review
+  resolution: path
+  args: ["{{target}}", "--head", "{{head}}"]
+prerequisites:
+  - name: authenticated-gh
+    executable: gh
+    resolution: path
+    versionCheck:
+      args: [--version]
+      semverRange: ">=2.0.0"
+      match: "gh version ([0-9]+\\.[0-9]+\\.[0-9]+)"
+    probe:
+      args: [auth, status]
+      expectedExitCode: 0
+    installHint: Install gh and run gh auth login
+platforms: [darwin, linux]
+capabilities: [command]
+effects:
+  reads: [GitHub pull-request and review metadata]
+  writes: []
+  network: [github.com]
+cwd: { mode: inherit }
+authentication:
+  mode: inherited
+  description: Reuse the current user's authenticated gh session
+  inheritEnvironment: all
+output:
+  source: stdout
+  format: json
+  evidence:
+    outcome: $.outcome
+```
+
+```bash
+aart tool register codex-review.wait.yaml
+aart find-tools "wait for Codex review"
+aart tool check codex-review.wait \
+  --input '{"target":"team-monet/aart#11","head":"<full-sha>"}'
+
+# Only after reviewing the returned command, authority, effects, contentHash,
+# and executable.contentHash:
+aart tool run codex-review.wait \
+  --input '{"target":"team-monet/aart#11","head":"<full-sha>"}' \
+  --content-hash <reviewed-asset-hash> \
+  --executable-hash <reviewed-executable-hash>
+
+# The run returns toolrun_<uuid>; retrieve the durable, redacted record later:
+aart tool report <toolrun_id>
+```
+
+`resolution: path` does not silently trust whatever is on `PATH`: discovery
+resolves it to an absolute path, hashes its bytes, checks the declared version
+and probes, and execution requires that exact reviewed hash. Use
+`resolution: asset` for bytes owned by a local asset; registration copies them
+inertly into the AART root and includes their hash in the immutable version
+seal. Pack tool declarations intentionally support portable external
+prerequisites only; public Pack Blocks remain isolated and gain no ambient
+command capability.
+
+`authentication.mode: inherited` deliberately reuses existing tool authority
+(for example the user's `gh` session) and requests no duplicate
+`GITHUB_TOKEN`. `aart_secrets` is the separate mode for explicit
+`AART_SECRET_<NAME>`/`secrets.json` injection. The check summary names which
+mode applies before anything runs.
+Every process that actually starts gets a durable evidence record, including
+non-zero exits, timeouts, and invalid structured output. Preflight and spawn
+failures remain explicit `ran: false` results and do not fabricate a run
+record.
 
 ## (d) The authoring lifecycle
 

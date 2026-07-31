@@ -1,4 +1,4 @@
-// @aart/mcp — the 33-tool MCP surface, core/extended mode/data-gated
+// @aart/mcp — the 38-tool MCP surface, core/extended mode/data-gated
 // registration, result-affordance pattern, YAML uses/with compiler,
 // init-agent, recipes (architecture §10, spec §32-34). Package root export.
 // @aart/cli imports directly from here so CLI and MCP never diverge into

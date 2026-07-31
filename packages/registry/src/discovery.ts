@@ -14,6 +14,14 @@ import { BlockManifestSchema, ExampleSchema, WorkflowSchema, type BlockManifest,
 import { z } from "zod";
 import { valid as validSemver } from "semver";
 import { npmPackageNameFor } from "./manifest.js";
+import {
+  LocalToolManifestSchema,
+  computeLocalToolHash,
+  packToolRecord,
+  searchLocalTools,
+  type LocalToolManifest,
+  type LocalToolSearchResult,
+} from "./local-tools.js";
 
 /**
  * A block as it appears in a search result. `BlockManifest` (frozen,
@@ -92,6 +100,7 @@ export interface RemoteRegistryIndexEntry {
   readonly stats?: PackStats;
   readonly blocks: readonly BlockCatalogEntry[];
   readonly workflows?: readonly Workflow[];
+  readonly tools?: readonly LocalToolManifest[];
 }
 
 export interface RemoteRegistryIndexDocument {
@@ -105,6 +114,10 @@ export interface RemoteRegistryIndexDocument {
 export interface PackSearchResult {
   readonly pack: RemoteRegistryIndexEntry;
   readonly score: number;
+}
+
+export interface RemoteToolSearchResult extends LocalToolSearchResult {
+  readonly pack: RemoteRegistryIndexEntry;
 }
 
 const SEARCH_STOP_WORDS = new Set([
@@ -193,6 +206,7 @@ export function searchRemotePacks(index: readonly RemoteRegistryIndexEntry[], qu
         pack.author?.name ?? "",
         ...pack.blocks.flatMap((block) => [block.manifest.id, block.manifest.description]),
         ...(pack.workflows ?? []).flatMap((workflow) => [workflow.id, workflow.name, ...(workflow.keywords ?? [])]),
+        ...(pack.tools ?? []).flatMap((tool) => [tool.id, tool.name, tool.description, ...tool.keywords, ...tool.triggers]),
       ]
         .join(" ")
         .toLowerCase();
@@ -206,6 +220,29 @@ export function searchRemotePacks(index: readonly RemoteRegistryIndexEntry[], qu
     })
     .filter((result) => result.score >= minimumScore)
     .sort((a, b) => b.score - a.score || a.pack.packName.localeCompare(b.pack.packName));
+}
+
+export function searchRemoteTools(index: readonly RemoteRegistryIndexEntry[], query: string): RemoteToolSearchResult[] {
+  return index
+    .flatMap((pack) =>
+      searchLocalTools(
+        (pack.tools ?? []).map((tool) =>
+          packToolRecord(tool, {
+            packName: pack.packName,
+            packVersion: pack.version,
+            contentHash: pack.contentHash ?? computeLocalToolHash(tool),
+            source: pack.npmPackageName,
+          }),
+        ),
+        query,
+      ).map((result) => ({ ...result, pack })),
+    )
+    .sort(
+      (a, b) =>
+        b.score - a.score ||
+        a.record.manifest.id.localeCompare(b.record.manifest.id) ||
+        a.pack.packName.localeCompare(b.pack.packName),
+    );
 }
 
 export class RemoteRegistryIndexError extends Error {}
@@ -264,6 +301,14 @@ const RemoteRegistryIndexEntrySchema = z
         .passthrough(),
     ),
     workflows: z.array(WorkflowSchema).optional(),
+    tools: z
+      .array(
+        LocalToolManifestSchema.refine(
+          (tool) => tool.command.resolution !== "asset",
+          "public Pack tools must declare portable external executables",
+        ),
+      )
+      .optional(),
   })
   .passthrough()
   .superRefine((entry, ctx) => {

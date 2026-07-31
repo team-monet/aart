@@ -1644,6 +1644,96 @@ describe("unknown / missing command", () => {
   });
 });
 
+describe("aart local tool lifecycle", () => {
+  it("registers, finds, checks, and runs the same shared MCP-backed asset", async () => {
+    tc = await createTestCli();
+    const manifestPath = join(tc.cwd, "review-tool.json");
+    await writeFile(
+      manifestPath,
+      JSON.stringify({
+        id: "review.wait",
+        name: "Wait for review",
+        version: "1.0.0",
+        description: "Wait for one terminal Codex review result",
+        keywords: ["codex", "review"],
+        triggers: ["wait for Codex review"],
+        inputs: [{ name: "target", description: "PR target" }],
+        command: {
+          executable: process.execPath,
+          resolution: "absolute",
+          args: ["-e", "console.log(JSON.stringify({target:process.argv[1]}))", "{{target}}"],
+        },
+        prerequisites: [],
+        platforms: [process.platform],
+        capabilities: ["command"],
+        effects: { reads: ["review metadata"], writes: [], network: ["github.com"] },
+        cwd: { mode: "inherit" },
+        authentication: {
+          mode: "inherited",
+          description: "Reuse current authenticated CLI state",
+          inheritEnvironment: "all",
+        },
+        output: { source: "stdout", format: "json", evidence: { target: "$.target" } },
+      }),
+      "utf8",
+    );
+
+    const registered = await run(["tool", "register", manifestPath], { cliContext: tc.cli });
+    expect(registered.ok).toBe(true);
+    const contentHash = (registered.result as { tool: { contentHash: string } }).tool.contentHash;
+
+    const found = await run(["find-tools", "wait", "for", "Codex", "review"], { cliContext: tc.cli });
+    expect(found).toMatchObject({
+      ok: true,
+      result: { matched: true, tools: [{ id: "review.wait", availability: { ready: true } }] },
+    });
+
+    const checked = await run(
+      ["tool", "check", "review.wait", "--input", '{"target":"team-monet/aart#11"}'],
+      { cliContext: tc.cli },
+    );
+    expect(checked.ok).toBe(true);
+    const executableHash = (checked.result as { check: { executable: { contentHash: string } } }).check.executable.contentHash;
+
+    const executed = await run(
+      [
+        "tool",
+        "run",
+        "review.wait",
+        "--input",
+        '{"target":"team-monet/aart#11"}',
+        "--content-hash",
+        contentHash,
+        "--executable-hash",
+        executableHash,
+      ],
+      { cliContext: tc.cli },
+    );
+    expect(executed).toMatchObject({
+      ok: true,
+      result: {
+        ran: true,
+        runId: expect.stringMatching(/^toolrun_/),
+        evidenceStored: true,
+        structuredOutput: { target: "team-monet/aart#11" },
+        evidence: { mapped: { target: "team-monet/aart#11" } },
+      },
+    });
+    const toolRunId = (executed.result as { runId: string }).runId;
+    const reported = await run(["tool", "report", toolRunId], { cliContext: tc.cli });
+    expect(reported).toMatchObject({
+      ok: true,
+      result: {
+        run: {
+          runId: toolRunId,
+          toolId: "review.wait",
+          result: { ran: true, structuredOutput: { target: "team-monet/aart#11" } },
+        },
+      },
+    });
+  });
+});
+
 // AMENDMENTS.md A63 FIX 7 (optional/low-priority, tester UX) — pre-fix,
 // "--help"/"-h"/"help" fell through to the exact same `default:` case as a
 // genuinely unknown command ("frobnicate", above): ok:false, exitCode 1,

@@ -1,7 +1,8 @@
 # @team-monet/aart
 
-AART turns one successful agent task into a reusable block or workflow that
-the same or another agent can discover before rebuilding it. Humans co-author
+AART turns one successful agent task or existing reliable local command into
+a reusable tool, block, or workflow that the same or another agent can
+discover before rebuilding it. Humans co-author
 and govern the asset; an AART server runs the approved version deterministically
 without an agent in the execution loop. `@team-monet/aart` is the CLI over
 that registry, engine, governance, and MCP surface.
@@ -59,6 +60,11 @@ aart report <runId> [--format model|markdown]
 aart validate <path>
 aart validate <workflowId> --registered [--version <v>]
 aart list
+aart find-tools [query] [--scope local|remote|all] [--index-url <url>]
+aart tool register <manifest.yaml>
+aart tool check <id> [--version <v>] [--input <json>]
+aart tool run <id> [--version <v>] [--input <json>] --content-hash <sha256:...> --executable-hash <sha256:...>
+aart tool report <toolrun_id>
 aart find-blocks [query] [--category <category>] [--scope local|remote|all] [--index-url <url>]
 aart find-workflows [query] [--category <category>] [--scope local|remote|all] [--index-url <url>]
 aart pack search [query] [--index-url <url>]
@@ -93,9 +99,19 @@ aart mcp [--store fs|sqlite] [--root <dir>]
 
 - `aart server` / `aart worker` run AART's own HTTP control plane and durable worker process — see the architecture doc's §13/§14 for local vs. production topology, or [`DEPLOY.md`](../../DEPLOY.md) for the operational version of that story.
 - `aart mcp` starts AART as an MCP (Model Context Protocol) server, exposing the same tool surface the CLI wraps directly to an MCP-speaking agent.
+- Local tools make an existing command reuse-first without changing its
+  execution semantics or duplicating credentials. `tool register` records an
+  immutable version; `find-tools` searches outcome/trigger/examples;
+  `tool check` resolves versions, probes, authority, effects, and exact
+  hashes; `tool run` requires those reviewed hashes, uses fixed argv with
+  no shell, and persists a redacted record for every actual spawn;
+  `tool report` retrieves that record in a fresh process. Inherited
+  authentication (for example the user's existing `gh` session) and
+  explicit AART-secret injection are separate manifest modes.
 - `aart init-agent` scaffolds the agent-facing instructions AART ships for coding assistants working against a repo that uses it, plus a ready-to-use `.mcp.json`. By default the generated config invokes this exact `aart` binary directly (`{"command": "node", "args": ["<path to this install's bin.js>", "mcp"]}`) rather than `npx` — correct regardless of exactly which install (npm or from-source) generated it, and avoids a fresh `npx` resolve on every MCP client launch. Pass `--npx` to opt into the registry-resolved `npx -y <package> mcp` form instead, safe as of `0.10.0` (see the install note above). See [`AUTHORING.md`](../../AUTHORING.md) for the full authoring-machine walkthrough.
 - `aart request-approval` creates a human-approval request — for a workflow VERSION (the promotion gate) or, automatically, whenever a running workflow hits a `human.approval` step. `aart approve` records the decision either way.
-- Packs distribute reusable blocks and workflows through ordinary
+- Packs distribute reusable blocks, workflows, and portable external-tool
+  declarations through ordinary
   `aart-pack-<name>` npm packages plus a configured static JSON index
   (`AART_PACK_INDEX_URL`). `pack add` is intentionally inert and records the
   Pack as unapproved; the separate human `pack approve` step verifies its

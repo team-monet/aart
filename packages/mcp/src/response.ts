@@ -19,6 +19,11 @@
 // branching off wherever a run fails.
 
 export const TOOL_NAMES = [
+  "aart_find_tools",
+  "aart_register_tool",
+  "aart_check_tool",
+  "aart_run_tool",
+  "aart_get_tool_run",
   "aart_find_blocks",
   "aart_find_workflows",
   "aart_find_packs",
@@ -68,6 +73,11 @@ export type ToolTier = "core" | "extended";
 
 // architecture §10.1's verbatim core/extended split (spec Fix C).
 export const TOOL_TIERS: Readonly<Record<ToolName, ToolTier>> = {
+  aart_find_tools: "core",
+  aart_register_tool: "core",
+  aart_check_tool: "core",
+  aart_run_tool: "core",
+  aart_get_tool_run: "core",
   aart_find_blocks: "core",
   aart_find_workflows: "core",
   aart_find_packs: "core",
@@ -124,6 +134,26 @@ export const TOOL_TIERS: Readonly<Record<ToolName, ToolTier>> = {
 export type ToolOutcome = "success" | "failure";
 
 const NEXT_TABLE: Readonly<Record<ToolName, Readonly<Record<ToolOutcome, string>>>> = {
+  aart_find_tools: {
+    success: "Reuse the closest ready local tool. Call `aart_check_tool` with concrete inputs, show its exact hashes and authority summary to the user, then call `aart_run_tool` only after explicit approval.",
+    failure: "No reusable local tool matched — check `aart_find_workflows`, then Blocks and public Packs before authoring new logic.",
+  },
+  aart_register_tool: {
+    success: "Local tool registered as a sealed, versioned asset. Call `aart_find_tools` with the task wording to verify it is discoverable in a fresh session.",
+    failure: "Registration failed — fix the manifest, executable provenance, or immutable-version conflict, then register again.",
+  },
+  aart_check_tool: {
+    success: "Show the exact command, authority, effects, asset hash, and executable hash to the user. After explicit approval, pass those same hashes to `aart_run_tool`.",
+    failure: "The tool is not ready — fix the reported executable, version, platform, authentication, or input prerequisite and check again.",
+  },
+  aart_run_tool: {
+    success: "Tool completed and its evidence was stored. Call `aart_get_tool_run` with the returned runId to prove the record survives a fresh session.",
+    failure: "The tool did not run or did not complete successfully — inspect `ran`, `kind`, prerequisite details, and evidence before retrying.",
+  },
+  aart_get_tool_run: {
+    success: "Use this durable, redacted record as the source of truth for the executable, argv, terminal status, structured output, and mapped evidence.",
+    failure: "No durable local-tool run matched that runId — use the runId returned by an execution where `ran` was true.",
+  },
   aart_find_blocks: {
     success: "Review the matching blocks, then check `aart_find_workflows` once more before drafting new workflow logic.",
     failure: "No matching blocks found — broaden the query, call `aart_list_blocks`, and check `aart_find_workflows` before building from scratch.",

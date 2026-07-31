@@ -1,5 +1,15 @@
 # @team-monet/aart
 
+## Unreleased
+
+### Minor Changes
+
+- Add reuse-first local command assets: `aart find-tools`, `aart tool
+  register/check/run/report`, matching MCP tools,
+  executable/prerequisite checks, inherited-vs-AART-secret authority
+  summaries, hash-bound no-shell execution, durable structured evidence,
+  and portable Pack tool declarations.
+
 ## 0.10.0
 
 ### Minor Changes

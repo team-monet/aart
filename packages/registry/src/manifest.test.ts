@@ -71,6 +71,38 @@ describe("parsePackManifestYaml — architecture §11.1's literal example", () =
     expect(raw.workflows).toEqual(["release-proof"]);
   });
 
+  it("accepts a portable tool-only Pack and rejects Pack-owned executable bytes", () => {
+    const tool = {
+      id: "review.wait",
+      name: "Wait for review",
+      version: "1.0.0",
+      description: "Wait for one terminal review result",
+      triggers: ["wait for review"],
+      command: { executable: "watch-review", resolution: "path", args: [] },
+      effects: { reads: ["review metadata"], writes: [], network: ["github.com"] },
+      cwd: { mode: "inherit" },
+      authentication: {
+        mode: "inherited",
+        description: "Reuse current CLI authentication",
+        inheritEnvironment: "all",
+      },
+      output: { format: "json" },
+    };
+    const raw = parsePackManifestYaml(JSON.stringify({ name: "review-tools", version: "1.0.0", tools: [tool] }));
+    expect(raw.blocks).toEqual([]);
+    expect(raw.workflows).toEqual([]);
+    expect(raw.tools[0]?.id).toBe("review.wait");
+    expect(() =>
+      parsePackManifestYaml(
+        JSON.stringify({
+          name: "review-tools",
+          version: "1.0.0",
+          tools: [{ ...tool, command: { ...tool.command, executable: "bin/watch-review", resolution: "asset" } }],
+        }),
+      ),
+    ).toThrow(/portable external executable/);
+  });
+
   it("rejects duplicate Block or Workflow declarations before preparation can certify the Pack", () => {
     expect(() =>
       parsePackManifestYaml("name: duplicate\nversion: 1.0.0\nblocks: [demo.echo, demo.echo]\n"),

@@ -17,6 +17,16 @@ export interface ToolDefinition {
 const signalSchema = z.object({ name: z.string(), correlationId: z.string(), payload: z.unknown().optional() });
 
 const DESCRIPTIONS: Record<ToolName, string> = {
+  aart_find_tools:
+    "Search registered local command tools and approved Pack tool declarations BEFORE workflows or blocks. Use this when the machine may already have a reliable authenticated CLI; skipping it causes agents to rebuild weaker scripts and duplicate credentials.",
+  aart_register_tool:
+    "Register a local command manifest as an immutable, versioned, searchable asset. Asset-owned executable bytes are copied inertly and sealed; external executables remain explicit prerequisites whose resolved hashes must be reviewed before execution.",
+  aart_check_tool:
+    "Resolve one local tool's exact executable, argv, versions, platform, authentication source, effects, and prerequisites without running the task itself. Use the returned asset and executable hashes as the review boundary before execution.",
+  aart_run_tool:
+    "Run a checked local tool only when the caller supplies the exact reviewed asset and executable hashes. Execution is fixed-binary argv with no shell, and returns structured terminal output plus redacted provenance evidence; never call it without explicit approval of the check summary.",
+  aart_get_tool_run:
+    "Fetch one durable local-tool execution record by runId after aart_run_tool actually spawned a process. Use it in a fresh session to verify the sealed executable, redacted argv/output, exit status, and mapped evidence instead of relying on chat memory.",
   aart_find_blocks:
     "After checking aart_find_workflows, search the block catalog by keyword or category before you compose a new step. Reusing an existing block is always preferable to authoring new logic, and a block you didn't know existed is a block you'll otherwise reinvent badly.",
   aart_find_workflows:
@@ -97,6 +107,25 @@ const DESCRIPTIONS: Record<ToolName, string> = {
 };
 
 const inputSchemas: Record<ToolName, z.ZodType> = {
+  aart_find_tools: z.object({
+    query: z.string(),
+    scope: z.enum(["local", "remote", "all"]).optional(),
+    indexUrl: z.string().url().optional(),
+  }),
+  aart_register_tool: z.object({ tool: z.unknown(), sourcePath: z.string().optional() }),
+  aart_check_tool: z.object({
+    id: z.string(),
+    version: z.string().optional(),
+    inputs: z.record(z.string(), z.string()).optional(),
+  }),
+  aart_run_tool: z.object({
+    id: z.string(),
+    version: z.string().optional(),
+    inputs: z.record(z.string(), z.string()).optional(),
+    contentHash: z.string().regex(/^sha256:[a-f0-9]{64}$/),
+    executableHash: z.string().regex(/^sha256:[a-f0-9]{64}$/),
+  }),
+  aart_get_tool_run: z.object({ runId: z.string().regex(/^toolrun_[0-9a-f-]{36}$/) }),
   aart_find_blocks: z.object({
     query: z.string(),
     category: z.string().optional(),

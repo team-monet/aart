@@ -70,7 +70,7 @@ describe("generateInitAgentOutputs", () => {
 
   it("instructions describe the authoring loop using real aart_* tool names", () => {
     const { instructions } = generateInitAgentOutputs();
-    for (const tool of ["aart_find_workflows", "aart_find_blocks", "aart_register_block", "aart_validate", "aart_run_workflow", "aart_get_report", "aart_verify"]) {
+    for (const tool of ["aart_find_tools", "aart_check_tool", "aart_run_tool", "aart_get_tool_run", "aart_find_workflows", "aart_find_blocks", "aart_register_block", "aart_validate", "aart_run_workflow", "aart_get_report", "aart_verify"]) {
       expect(instructions).toContain(tool);
     }
   });
@@ -78,7 +78,7 @@ describe("generateInitAgentOutputs", () => {
   it("instructions make reuse-first co-authoring and unattended server execution one lifecycle", () => {
     const { instructions } = generateInitAgentOutputs();
     expect(instructions).toContain("Search before you build");
-    expect(instructions).toContain("Creating a different workflow every session is a product failure");
+    expect(instructions).toContain("Creating a different implementation every session is a product failure");
     expect(instructions).toContain("deterministic and unattended");
   });
 

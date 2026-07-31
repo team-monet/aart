@@ -1,0 +1,233 @@
+import { promises as fs } from "node:fs";
+import { join } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
+import type { LocalToolManifest } from "@aart/registry";
+import { createTestContext, type TestContext } from "../test-utils.js";
+import { approvePackHandler, installPackHandler, listPacksHandler, preparePackHandler } from "./packs.js";
+import { checkToolHandler, findToolsHandler, getToolRunHandler, registerToolHandler, runToolHandler } from "./local-tools.js";
+
+let tc: TestContext;
+
+afterEach(async () => {
+  await tc?.cleanup();
+});
+
+function toolManifest(overrides: Partial<LocalToolManifest> = {}): LocalToolManifest {
+  return {
+    id: "codex-review.wait",
+    name: "Wait for Codex review",
+    version: "1.0.0",
+    description: "Wait for one terminal Codex pull-request review outcome",
+    keywords: ["codex", "review", "pull request"],
+    triggers: ["wait for Codex review", "watch this PR review"],
+    examples: [{ description: "Watch one review round", inputs: { target: "owner/repo#1" } }],
+    inputs: [{ name: "target", description: "PR target", required: true, sensitive: false }],
+    command: {
+      executable: process.execPath,
+      resolution: "absolute",
+      args: ["-e", "console.log(JSON.stringify({outcome:'approved', target:process.argv[1]}))", "{{target}}"],
+      versionCheck: { args: ["--version"], semverRange: ">=20", match: "v?(\\d+\\.\\d+\\.\\d+)" },
+    },
+    prerequisites: [],
+    platforms: [process.platform],
+    capabilities: ["command"],
+    effects: { reads: ["GitHub PR review metadata"], writes: [], network: ["github.com"] },
+    cwd: { mode: "inherit" },
+    authentication: {
+      mode: "inherited",
+      description: "Reuse the current user's authenticated gh session",
+      inheritEnvironment: "all",
+    },
+    output: { source: "stdout", format: "json", evidence: { outcome: "$.outcome" } },
+    ...overrides,
+  };
+}
+
+describe("local tool MCP handlers", () => {
+  it("registers, rediscovers by customer task wording, checks, and executes one sealed command", async () => {
+    tc = await createTestContext();
+    const registered = await registerToolHandler(tc.ctx, { tool: toolManifest() });
+    expect(registered.ok).toBe(true);
+    const sealed = registered.tool as { contentHash: string };
+
+    const found = await findToolsHandler(tc.ctx, { query: "wait for Codex review" });
+    expect(found).toMatchObject({
+      ok: true,
+      matched: true,
+      tools: [
+        {
+          id: "codex-review.wait",
+          authentication: { mode: "inherited" },
+          availability: { status: "ready", ready: true },
+          effects: { reads: ["GitHub PR review metadata"], writes: [], network: ["github.com"] },
+        },
+      ],
+    });
+
+    const checked = await checkToolHandler(tc.ctx, {
+      id: "codex-review.wait",
+      inputs: { target: "team-monet/aart#11" },
+    });
+    expect(checked.ok).toBe(true);
+    const executableHash = (checked.check as { executable: { contentHash: string } }).executable.contentHash;
+    const ran = await runToolHandler(tc.ctx, {
+      id: "codex-review.wait",
+      inputs: { target: "team-monet/aart#11" },
+      contentHash: sealed.contentHash,
+      executableHash,
+    });
+    expect(ran).toMatchObject({
+      ok: true,
+      ran: true,
+      runId: expect.stringMatching(/^toolrun_/),
+      evidenceStored: true,
+      structuredOutput: { outcome: "approved", target: "team-monet/aart#11" },
+      evidence: { mapped: { outcome: "approved" } },
+    });
+    const fetched = await getToolRunHandler(tc.ctx, { runId: ran.runId as string });
+    expect(fetched).toMatchObject({
+      ok: true,
+      run: {
+        runId: ran.runId,
+        toolId: "codex-review.wait",
+        result: { ok: true, ran: true, evidence: { mapped: { outcome: "approved" } } },
+      },
+    });
+    await expect(getToolRunHandler(tc.ctx, { runId: "../escape" })).resolves.toEqual({
+      ok: false,
+      error: 'Unknown local tool run "../escape".',
+    });
+  });
+
+  it("returns a missing prerequisite as an honest non-run result", async () => {
+    tc = await createTestContext();
+    await registerToolHandler(tc.ctx, {
+      tool: toolManifest({
+        command: {
+          executable: "missing-aart-test-review-watcher",
+          resolution: "path",
+          args: ["{{target}}"],
+        },
+      }),
+    });
+    const found = await findToolsHandler(tc.ctx, { query: "Codex review" });
+    expect(found).toMatchObject({
+      tools: [{ availability: { ready: false, status: "missing_prerequisite" } }],
+    });
+    const checked = await checkToolHandler(tc.ctx, {
+      id: "codex-review.wait",
+      inputs: { target: "team-monet/aart#11" },
+    });
+    expect(checked).toMatchObject({ ok: false, check: { ready: false, status: "missing_prerequisite" } });
+  });
+});
+
+describe("Pack tool declarations", () => {
+  it("remain inert until Pack approval, then join the same reuse-first discovery path", async () => {
+    tc = await createTestContext();
+    const packageRoot = join(tc.root, "tool-pack-source");
+    await fs.mkdir(packageRoot, { recursive: true });
+    await fs.writeFile(
+      join(packageRoot, "package.json"),
+      JSON.stringify({ name: "aart-pack-review-tools", version: "1.0.0" }),
+      "utf8",
+    );
+    const manifest = toolManifest({
+      id: "pack-review.wait",
+      command: {
+        executable: process.execPath,
+        resolution: "absolute",
+        args: ["-e", "console.log(JSON.stringify({outcome:'approved'}))"],
+      },
+      inputs: [],
+    });
+    await fs.writeFile(
+      join(packageRoot, "aart-pack.yaml"),
+      [
+        "name: review-tools",
+        "version: 1.0.0",
+        "description: Portable local review tool declarations",
+        "tools:",
+        ...JSON.stringify(manifest, null, 2)
+          .split("\n")
+          .map((line, index) => `${index === 0 ? "  - " : "    "}${line}`),
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+
+    const installed = await installPackHandler(tc.ctx, { name: "review-tools", sourcePath: packageRoot });
+    expect(installed).toMatchObject({
+      ok: true,
+      approvalStatus: "unapproved",
+      assets: { blocks: [], workflows: [], tools: ["pack-review.wait"] },
+    });
+    expect(await findToolsHandler(tc.ctx, { query: "Portable local review" })).toMatchObject({
+      matched: false,
+      tools: [],
+    });
+
+    const listed = await listPacksHandler(tc.ctx, { status: "unapproved" });
+    expect(listed).toMatchObject({
+      packs: [{ assets: { tools: ["pack-review.wait"] }, sealStatus: "verified" }],
+    });
+    await approvePackHandler(tc.ctx, {
+      name: "review-tools",
+      version: "1.0.0",
+      contentHash: installed.contentHash as string,
+      reviewer: "reviewer",
+    });
+    const found = await findToolsHandler(tc.ctx, { query: "Portable local review" });
+    expect(found).toMatchObject({
+      matched: true,
+      tools: [{ id: "pack-review.wait", source: "pack", provenance: { packName: "review-tools" } }],
+    });
+  });
+
+  it("publishes portable tool metadata into the static index and supports remote search", async () => {
+    tc = await createTestContext();
+    const packageRoot = join(tc.root, "prepared-tool-pack");
+    await fs.mkdir(packageRoot, { recursive: true });
+    await fs.writeFile(
+      join(packageRoot, "package.json"),
+      JSON.stringify({ name: "aart-pack-review-tools", version: "1.0.0" }),
+      "utf8",
+    );
+    const manifest = toolManifest({ id: "public-review.wait" });
+    await fs.writeFile(
+      join(packageRoot, "aart-pack.yaml"),
+      [
+        "name: review-tools",
+        "version: 1.0.0",
+        "tools:",
+        ...JSON.stringify(manifest, null, 2)
+          .split("\n")
+          .map((line, index) => `${index === 0 ? "  - " : "    "}${line}`),
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    const prepared = await preparePackHandler(tc.ctx, { sourcePath: packageRoot });
+    expect(prepared).toMatchObject({ ok: true, entry: { tools: [{ id: "public-review.wait" }] } });
+    const indexUrl = `data:application/json,${encodeURIComponent(
+      JSON.stringify({ schemaVersion: 1, mode: "production", packs: [prepared.entry] }),
+    )}`;
+    const found = await findToolsHandler(tc.ctx, {
+      query: "wait for Codex review",
+      scope: "remote",
+      indexUrl,
+    });
+    expect(found).toMatchObject({
+      matched: true,
+      indexMode: "production",
+      tools: [
+        {
+          id: "public-review.wait",
+          source: "public",
+          installable: true,
+          provenance: { packName: "review-tools" },
+        },
+      ],
+    });
+  });
+});

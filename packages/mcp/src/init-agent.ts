@@ -148,7 +148,7 @@ AART does not call an LLM on your behalf. **You** (the calling agent) author the
 The user should not have to design YAML or know AART's internals. Co-author the automation in conversation:
 
 1. Understand the repeatable outcome and the evidence that would prove it worked.
-2. **Search before you build:** call \`aart_find_workflows\` for a reusable workflow, then \`aart_find_blocks\` and \`aart_propose_workflow\`. If the local catalog has no close match, search the configured public Pack index with \`aart_find_packs\` or the discovery tools' remote scope. Creating a different workflow every session is a product failure when a reusable asset already exists.
+2. **Search before you build:** call \`aart_find_tools\` first in case the machine already has a reliable authenticated command, then \`aart_find_workflows\`, \`aart_find_blocks\`, and \`aart_propose_workflow\`. If the local catalog has no close match, search the configured public Pack index with \`aart_find_packs\` or the discovery tools' remote scope. Creating a different implementation every session is a product failure when a reusable asset already exists.
 3. If something close exists, adapt or version it. If nothing exists, propose the smallest reusable workflow and show the user its inputs, effects, capabilities, and approval points before registering it.
 4. Validate, run, and read the evidence report with the user. Corrections become evals; successful drafts become approved reusable assets.
 5. Once approved, the same pinned workflow version can be bundled or pushed to an AART server and attached to a trigger. Server execution is deterministic and unattended: no agent or person remains in the execution loop unless the workflow explicitly contains a human wait.
@@ -172,11 +172,11 @@ You're about to do something by hand, or via a throwaway script. Pause: will thi
 - **Governed** — the workflow's approval state and gates are explicit and enforced by trust mode, not implicit in whether a human happened to glance at a diff.
 - **Evidence** — every run writes an ordered per-step trace, pass/fail, and artifacts. \`aart_get_report\` proves it, it doesn't just claim it.
 
-A truly one-off probe is still fine as a raw command. But anything you or the user will run again belongs in a workflow, or — for a single repeatable CLI operation — a \`command\` block, so every execution is captured in run history instead of vanishing shell output.
+A truly one-off probe is still fine as a raw command. When a reliable local CLI already performs the job, register and reuse it as a local tool: \`aart_find_tools\` exposes its prerequisites and authority, \`aart_check_tool\` seals the exact executable and argv for review, \`aart_run_tool\` executes without a shell and stores redacted evidence, and \`aart_get_tool_run\` retrieves that record in a fresh session. Use a workflow when several reusable steps or durable server execution are the actual outcome.
 
 ## The authoring loop
 
-1. **Discover reusable assets.** Call \`aart_find_workflows\` first. Then use \`aart_find_blocks\` (by query) or \`aart_list_blocks\` (the full catalog) to see what you can compose. If local search misses, call \`aart_find_packs\`; \`aart_install_pack\` downloads a match inertly as **unapproved**, and \`aart_list_packs\` shows its exact provenance/hash before you ask the user to approve it. Never call \`aart_approve_pack\` without explicit human approval, and pass the exact \`contentHash\` the human reviewed so approval cannot drift to replaced bytes. \`aart_propose_workflow\` returns a ready-made recipe skeleton if your request matches one of the built-in patterns (verify a page, check API health, wait for approval, ...) — check these before composing from scratch.
+1. **Discover reusable assets.** Call \`aart_find_tools\` first for an existing local command, then \`aart_find_workflows\`. Use \`aart_find_blocks\` (by query) or \`aart_list_blocks\` (the full catalog) only when composition is needed. If local search misses, call \`aart_find_packs\`; \`aart_install_pack\` downloads a match inertly as **unapproved**, and \`aart_list_packs\` shows its exact provenance/hash before you ask the user to approve it. Never call \`aart_approve_pack\` without explicit human approval, and pass the exact \`contentHash\` the human reviewed so approval cannot drift to replaced bytes. \`aart_propose_workflow\` returns a ready-made recipe skeleton if your request matches one of the built-in patterns (verify a page, check API health, wait for approval, ...) — check these before composing from scratch.
 2. **Draft.** Compose blocks into steps using the \`uses\`/\`with\` shape (the same shape as GitHub Actions — if you know \`steps: - uses: ... with: ...\`, you already know this). \`aart_get_schema\` gives the exact input/output shape for a block or for the \`Workflow\` type itself.
 3. **Register.** Call \`aart_register_block\` with your draft. It saves as a **draft** version. *Next: \`aart_validate\`.*
 4. **Validate.** Call \`aart_validate\`. Fix every reported finding — errors block, warnings don't; a finding may include a \`didYouMean\`/\`correctedSnippet\` you can apply directly and re-validate.
@@ -199,11 +199,12 @@ ${APPROVAL_SECTION_BY_MODE[trustMode]}
 
 ## When a block doesn't exist yet
 
-Climb the ladder, stopping at the first rung that works: reuse a registered workflow (\`aart_find_workflows\`) -> compose existing blocks (\`aart_find_blocks\`) -> a \`node\`/\`command\` block for custom logic or a host CLI you'd otherwise shell out to -> a workspace pack for a reusable family of blocks. Don't fake a missing capability with a brittle workaround.
+Climb the ladder, stopping at the first rung that works: reuse an existing local tool (\`aart_find_tools\`) -> reuse a registered workflow (\`aart_find_workflows\`) -> compose existing blocks (\`aart_find_blocks\`) -> a \`node\`/\`command\` block for custom logic -> a workspace Pack for a reusable family of assets. Don't fake a missing capability with a brittle workaround.
 
 ## Rules
 
 - Reference only block ids that actually exist (\`aart_find_blocks\`/\`aart_get_block\` first).
+- Never call \`aart_run_tool\` until the user has reviewed the exact \`aart_check_tool\` command, authority, effects, asset hash, and executable hash.
 - Treat the run report as the source of truth for whether something worked — never claim success without one.
 - Every tool result names the next step of this loop in its \`next\` field — follow it rather than re-deriving the loop from scratch each time.
 `;

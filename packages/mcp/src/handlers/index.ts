@@ -1,4 +1,5 @@
-// The 33-tool handler registry, including reuse-first local/public Pack,
+// The 38-tool handler registry, including reuse-first local command,
+// local/public Pack,
 // workflow, and block discovery plus remote deploy/observation/governance —
 // one real function per MCP tool
 // name, shared verbatim with @aart/cli's commands (architecture's
@@ -15,6 +16,7 @@ import { approveHandler, diffWorkflowHandler, promoteWorkflowHandler, recordCorr
 import { remoteRunHandler, remoteRunsHandler, remoteStatusHandler, remoteWhyHandler } from "./remote-observability.js";
 import { remoteApproveHandler } from "./remote-governance.js";
 import { approvePackHandler, findPacksHandler, installPackHandler, listPacksHandler, preparePackHandler } from "./packs.js";
+import { checkToolHandler, findToolsHandler, getToolRunHandler, registerToolHandler, runToolHandler } from "./local-tools.js";
 
 export * from "./authoring.js";
 export * from "./deployment.js";
@@ -25,12 +27,18 @@ export * from "./governance.js";
 export * from "./remote-observability.js";
 export * from "./remote-governance.js";
 export * from "./packs.js";
+export * from "./local-tools.js";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export type ToolHandler = (ctx: AartContext, input: any) => Promise<HandlerResult>;
 
 /** Every current tool, including A71's reuse-first workflow search, mapped to one real handler function. Both `tools/server.ts` (MCP dispatch) and `@aart/cli`'s commands call through THIS map, never a re-derived one. */
 export const HANDLERS: Readonly<Record<ToolName, ToolHandler>> = {
+  aart_find_tools: findToolsHandler,
+  aart_register_tool: registerToolHandler,
+  aart_check_tool: checkToolHandler,
+  aart_run_tool: runToolHandler,
+  aart_get_tool_run: getToolRunHandler,
   aart_find_blocks: findBlocksHandler,
   aart_find_workflows: findWorkflowsHandler,
   aart_find_packs: findPacksHandler,
