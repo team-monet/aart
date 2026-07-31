@@ -53,6 +53,13 @@ async function runnableTools(ctx: AartContext): Promise<RegisteredLocalTool[]> {
   return [...(await listLocalTools(ctx.root)), ...approvedPackTools(ctx)];
 }
 
+function latestToolCandidates(records: readonly RegisteredLocalTool[]): RegisteredLocalTool[] {
+  const latestVersions = new Map(
+    latestToolVersions(records).map((record) => [record.manifest.id, record.manifest.version]),
+  );
+  return records.filter((record) => latestVersions.get(record.manifest.id) === record.manifest.version);
+}
+
 function selectTool(
   records: readonly RegisteredLocalTool[],
   id: string,
@@ -120,47 +127,68 @@ export interface FindToolsInput {
 
 export async function findToolsHandler(ctx: AartContext, input: FindToolsInput): Promise<HandlerResult> {
   const scope = input.scope ?? "local";
-  const localRecords = scope === "remote" ? [] : latestToolVersions(await runnableTools(ctx));
-  const localResults = await Promise.all(
-    searchLocalTools(localRecords, input.query).map(async ({ record, score }) => {
-      const check = await checkLocalTool(ctx.root, record);
-      const manifest = record.manifest;
-      const localToolSearchResult = {
-        id: manifest.id,
-        name: manifest.name,
-        version: manifest.version,
-        description: manifest.description,
-        keywords: manifest.keywords,
-        triggers: manifest.triggers,
-        examples: manifest.examples,
-        inputs: manifest.inputs,
-        command: {
-          executable: manifest.command.executable,
-          resolution: manifest.command.resolution,
-          args: manifest.command.args,
-        },
-        prerequisites: manifest.prerequisites,
-        capabilities: manifest.capabilities,
-        effects: manifest.effects,
-        cwd: manifest.cwd,
-        authentication: check.approvalSummary.authentication,
-        output: manifest.output,
-        availability: {
-          status: check.status,
-          ready: check.ready,
-          reason: check.reason,
-          executable: check.executable,
-          prerequisites: check.prerequisites,
-        },
-        contentHash: record.contentHash,
-        toolHash: record.toolHash,
-        provenance: record.provenance,
-        source: record.provenance.kind === "pack" ? "pack" : "local",
-        score,
-      };
-      return localToolSearchResult;
-    }),
-  );
+  const localRecords = scope === "remote" ? [] : latestToolCandidates(await runnableTools(ctx));
+  const localResults = searchLocalTools(localRecords, input.query).map(({ record, score }) => {
+    const manifest = record.manifest;
+    const conflicting = localRecords.filter(
+      (candidate) =>
+        candidate.manifest.id === manifest.id &&
+        candidate.manifest.version === manifest.version &&
+        candidate.contentHash !== record.contentHash,
+    );
+    const localToolSearchResult = {
+      id: manifest.id,
+      name: manifest.name,
+      version: manifest.version,
+      description: manifest.description,
+      keywords: manifest.keywords,
+      triggers: manifest.triggers,
+      examples: manifest.examples,
+      inputs: manifest.inputs,
+      command: {
+        executable: manifest.command.executable,
+        resolution: manifest.command.resolution,
+        args: manifest.command.args,
+      },
+      prerequisites: manifest.prerequisites,
+      capabilities: manifest.capabilities,
+      effects: manifest.effects,
+      cwd: manifest.cwd,
+      authentication: {
+        mode: manifest.authentication.mode,
+        description: manifest.authentication.description,
+        inheritedEnvironment: manifest.authentication.inheritEnvironment,
+        secretRefs:
+          manifest.authentication.mode === "aart_secrets"
+            ? manifest.authentication.secrets.map((secret) => secret.ref)
+            : [],
+        secretMappings: manifest.authentication.mode === "aart_secrets" ? manifest.authentication.secrets : [],
+      },
+      output: manifest.output,
+      availability:
+        conflicting.length > 0
+          ? {
+              status: "ambiguous",
+              ready: false,
+              reason: "Multiple sources expose different sealed content at this id and version.",
+              candidates: [record, ...conflicting].map((candidate) => ({
+                contentHash: candidate.contentHash,
+                provenance: candidate.provenance,
+              })),
+            }
+          : {
+              status: "requires_explicit_check",
+              ready: false,
+              reason: "Discovery is inert; call aart_check_tool with concrete inputs to run version checks and probes.",
+            },
+      contentHash: record.contentHash,
+      toolHash: record.toolHash,
+      provenance: record.provenance,
+      source: record.provenance.kind === "pack" ? "pack" : "local",
+      score,
+    };
+    return localToolSearchResult;
+  });
 
   let remoteResults: Array<Record<string, unknown>> = [];
   let indexMode: "preview" | "production" | undefined;
@@ -177,6 +205,7 @@ export async function findToolsHandler(ctx: AartContext, input: FindToolsInput):
       keywords: record.manifest.keywords,
       triggers: record.manifest.triggers,
       examples: record.manifest.examples,
+      inputs: record.manifest.inputs,
       command: {
         executable: record.manifest.command.executable,
         resolution: record.manifest.command.resolution,
@@ -246,6 +275,7 @@ export interface RunToolInput extends CheckToolInput {
   contentHash: string;
   executableHash: string;
   argvHash: string;
+  cwdHash: string;
   prerequisiteHashes?: Record<string, string>;
 }
 
@@ -257,6 +287,7 @@ export async function runToolHandler(ctx: AartContext, input: RunToolInput): Pro
     contentHash: input.contentHash,
     executableHash: input.executableHash,
     argvHash: input.argvHash,
+    cwdHash: input.cwdHash,
     prerequisiteHashes: input.prerequisiteHashes,
   });
 }

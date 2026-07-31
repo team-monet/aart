@@ -8,7 +8,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
-import { delimiter, dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { delimiter, dirname, extname, isAbsolute, join, relative, resolve } from "node:path";
 import { spawn } from "node:child_process";
 import { coerce, rcompare, satisfies, valid as validSemver, validRange } from "semver";
 import { parse as parseYaml } from "yaml";
@@ -17,9 +17,24 @@ import { canonicalize } from "./hash.js";
 
 const TOOL_ID_PATTERN = /^[a-z0-9][a-z0-9._-]*$/;
 const INPUT_NAME_PATTERN = /^[A-Za-z][A-Za-z0-9_-]*$/;
-const SECRET_ENV_PATTERN = /(?:TOKEN|SECRET|PASSWORD|PASSCODE|API_KEY|PRIVATE_KEY|CREDENTIAL)/i;
+const SECRET_ENV_PATTERN =
+  /(?:TOKEN|SECRET|PASSWORD|PASSCODE|API_KEY|PRIVATE_KEY|CREDENTIAL|AUTH|COOKIE|SESSION|DATABASE_URL)/i;
 const PLACEHOLDER_PATTERN = /^\{\{([A-Za-z][A-Za-z0-9_-]*)\}\}$/;
 const EVIDENCE_PATH_PATTERN = /^\$(?:\.[A-Za-z_][A-Za-z0-9_-]*|\[\d+\])*$/;
+const MAX_CAPTURE_BYTES = 1_048_576;
+
+function isAnyPlatformAbsolute(value: string): boolean {
+  return isAbsolute(value) || /^[A-Za-z]:[\\/]/.test(value) || /^\\\\[^\\]+\\[^\\]+/.test(value);
+}
+
+function isValidRegex(value: string): boolean {
+  try {
+    new RegExp(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 const versionCheckSchema = z
   .object({
@@ -28,7 +43,7 @@ const versionCheckSchema = z
       .string()
       .refine((value) => validRange(value) !== null, "semverRange must be a valid SemVer range")
       .optional(),
-    match: z.string().min(1).optional(),
+    match: z.string().min(1).refine(isValidRegex, "match must be a valid regular expression").optional(),
   })
   .optional();
 
@@ -42,12 +57,12 @@ const executableSchema = z
     if (value.resolution === "path" && (value.executable.includes("/") || value.executable.includes("\\"))) {
       ctx.addIssue({ code: "custom", path: ["executable"], message: "PATH-resolved executables must be a bare command name" });
     }
-    if (value.resolution === "absolute" && !isAbsolute(value.executable)) {
+    if (value.resolution === "absolute" && !isAnyPlatformAbsolute(value.executable)) {
       ctx.addIssue({ code: "custom", path: ["executable"], message: "absolute executable resolution requires an absolute path" });
     }
     if (value.resolution === "asset") {
       const segments = value.executable.split(/[\\/]+/);
-      if (isAbsolute(value.executable) || segments.includes("..") || segments.includes(".")) {
+      if (isAnyPlatformAbsolute(value.executable) || segments.includes("..") || segments.includes(".")) {
         ctx.addIssue({
           code: "custom",
           path: ["executable"],
@@ -75,7 +90,7 @@ const prerequisiteSchema = z
     if (value.resolution === "path" && (value.executable.includes("/") || value.executable.includes("\\"))) {
       ctx.addIssue({ code: "custom", path: ["executable"], message: "PATH-resolved prerequisites must be a bare command name" });
     }
-    if (value.resolution === "absolute" && !isAbsolute(value.executable)) {
+    if (value.resolution === "absolute" && !isAnyPlatformAbsolute(value.executable)) {
       ctx.addIssue({ code: "custom", path: ["executable"], message: "absolute prerequisite resolution requires an absolute path" });
     }
   });
@@ -261,6 +276,16 @@ function sha256(value: string | Buffer): string {
 
 export function computeLocalToolHash(manifest: LocalToolManifest): string {
   return sha256(canonicalize(manifest));
+}
+
+function computeRegisteredLocalToolContentHash(record: RegisteredLocalTool): string {
+  if (record.provenance.kind === "pack") return record.contentHash;
+  return sha256(
+    canonicalize({
+      manifest: record.manifest,
+      ownedExecutableHash: record.ownedExecutable?.contentHash,
+    }),
+  );
 }
 
 function localToolRecordPath(root: string, id: string, version: string): string {
@@ -554,6 +579,7 @@ interface SpawnResult {
   stdout: string;
   stderr: string;
   timedOut: boolean;
+  outputLimitExceeded: boolean;
 }
 
 function terminateProcessTree(child: ReturnType<typeof spawn>): void {
@@ -594,6 +620,7 @@ function spawnNoShell(
     let stdout = "";
     let stderr = "";
     let timedOut = false;
+    let outputLimitExceeded = false;
     let settled = false;
     let lifecycleError: Error | undefined;
     let timer: NodeJS.Timeout | undefined;
@@ -606,10 +633,22 @@ function spawnNoShell(
     child.stdout?.setEncoding("utf8");
     child.stderr?.setEncoding("utf8");
     child.stdout?.on("data", (chunk: string) => {
+      if (outputLimitExceeded) return;
       stdout += chunk;
+      if (Buffer.byteLength(stdout, "utf8") > MAX_CAPTURE_BYTES) {
+        stdout = Buffer.from(stdout, "utf8").subarray(0, MAX_CAPTURE_BYTES).toString("utf8");
+        outputLimitExceeded = true;
+        terminateProcessTree(child);
+      }
     });
     child.stderr?.on("data", (chunk: string) => {
+      if (outputLimitExceeded) return;
       stderr += chunk;
+      if (Buffer.byteLength(stderr, "utf8") > MAX_CAPTURE_BYTES) {
+        stderr = Buffer.from(stderr, "utf8").subarray(0, MAX_CAPTURE_BYTES).toString("utf8");
+        outputLimitExceeded = true;
+        terminateProcessTree(child);
+      }
     });
     child.on("spawn", () => {
       if (!options.onSpawn || child.pid === undefined) return;
@@ -634,7 +673,7 @@ function spawnNoShell(
         reject(lifecycleError);
         return;
       }
-      resolvePromise({ exitCode, signal, stdout, stderr, timedOut });
+      resolvePromise({ exitCode, signal, stdout, stderr, timedOut, outputLimitExceeded });
     });
   });
 }
@@ -694,13 +733,63 @@ async function resolvedExecutable(
   }
 }
 
+async function sealExecutableSnapshot(
+  root: string,
+  sourcePath: string,
+  expectedHash: string,
+  requestedExtension: string,
+): Promise<string> {
+  const digest = /^sha256:([a-f0-9]{64})$/.exec(expectedHash)?.[1];
+  if (!digest) throw new Error(`invalid executable hash "${expectedHash}"`);
+  const extension = /^\.[A-Za-z0-9]+$/.test(requestedExtension) ? requestedExtension.toLowerCase() : "";
+  const target = join(root, "tools", "execution-snapshots", `${digest}${extension}`);
+
+  async function verifyTarget(): Promise<string> {
+    const storedHash = sha256(await fs.readFile(target));
+    if (storedHash !== expectedHash) {
+      throw new Error(`execution snapshot seal is broken (expected ${expectedHash}, got ${storedHash})`);
+    }
+    await fs.access(target, constants.X_OK);
+    return fs.realpath(target);
+  }
+
+  try {
+    return await verifyTarget();
+  } catch (cause) {
+    if ((cause as NodeJS.ErrnoException).code !== "ENOENT") throw cause;
+  }
+
+  await fs.mkdir(dirname(target), { recursive: true });
+  const temporary = `${target}.${randomUUID()}.tmp`;
+  try {
+    await fs.copyFile(sourcePath, temporary, constants.COPYFILE_FICLONE);
+    await fs.chmod(temporary, 0o500);
+    const copiedHash = sha256(await fs.readFile(temporary));
+    if (copiedHash !== expectedHash) {
+      throw new Error(`executable changed while it was snapshotted (expected ${expectedHash}, got ${copiedHash})`);
+    }
+    try {
+      await fs.link(temporary, target);
+    } catch (cause) {
+      if ((cause as NodeJS.ErrnoException).code !== "EEXIST") throw cause;
+    }
+  } finally {
+    await fs.unlink(temporary).catch(() => undefined);
+  }
+  return verifyTarget();
+}
+
 async function inspectVersion(
   executable: string,
   check: NonNullable<LocalToolManifest["command"]["versionCheck"]> | undefined,
+  env: NodeJS.ProcessEnv,
 ): Promise<{ raw?: string; version?: string; compatible: boolean; reason?: string }> {
   if (!check) return { compatible: true };
-  const result = await spawnNoShell(executable, check.args, { timeoutMs: 5_000 });
-  if (result.exitCode !== 0 || result.timedOut) {
+  const result = await spawnNoShell(executable, check.args, { env, timeoutMs: 5_000 });
+  if (result.exitCode !== 0 || result.timedOut || result.outputLimitExceeded) {
+    if (result.outputLimitExceeded) {
+      return { compatible: false, reason: `version check exceeded the ${MAX_CAPTURE_BYTES}-byte output limit` };
+    }
     return { compatible: false, reason: `version check failed with exit ${String(result.exitCode)}` };
   }
   const raw = `${result.stdout}\n${result.stderr}`.trim();
@@ -727,9 +816,9 @@ async function inspectVersion(
 type ExecutableIdentity = {
   ready: true;
   path: string;
+  sealedPath: string;
   contentHash: string;
   version?: string;
-  versionOutput?: string;
 };
 
 type UnavailableExecutableIdentity = {
@@ -745,6 +834,7 @@ function availabilityStatus(identity: UnavailableExecutableIdentity): ToolAvaila
 }
 
 async function executableBytesIdentity(
+  root: string,
   record: RegisteredLocalTool,
   spec: Pick<LocalToolManifest["command"], "executable" | "resolution">,
   env: NodeJS.ProcessEnv,
@@ -775,16 +865,27 @@ async function executableBytesIdentity(
       reason: `asset-owned executable seal is broken (expected ${record.ownedExecutable?.contentHash}, got ${contentHash})`,
     };
   }
-  return { ready: true, path, contentHash };
+  try {
+    const sealedPath = await sealExecutableSnapshot(root, path, contentHash, extname(spec.executable));
+    return { ready: true, path, sealedPath, contentHash };
+  } catch (cause) {
+    return {
+      ready: false,
+      failureKind: "seal_mismatch",
+      reason: `could not seal executable bytes for execution: ${(cause as Error).message}`,
+    };
+  }
 }
 
 async function executableIdentity(
+  root: string,
   record: RegisteredLocalTool,
   spec: Pick<LocalToolManifest["command"], "executable" | "resolution" | "versionCheck">,
   env: NodeJS.ProcessEnv,
   expectedHash?: string,
+  executionEnv: NodeJS.ProcessEnv = env,
 ): Promise<ExecutableIdentity | UnavailableExecutableIdentity> {
-  const identity = await executableBytesIdentity(record, spec, env);
+  const identity = await executableBytesIdentity(root, record, spec, env);
   if (!identity.ready) return identity;
   if (expectedHash !== undefined && identity.contentHash !== expectedHash) {
     return {
@@ -793,7 +894,7 @@ async function executableIdentity(
       reason: `reviewed executable hash ${expectedHash} does not match resolved hash ${identity.contentHash}`,
     };
   }
-  const version = await inspectVersion(identity.path, spec.versionCheck);
+  const version = await inspectVersion(identity.sealedPath, spec.versionCheck, executionEnv);
   if (!version.compatible) {
     return {
       ready: false,
@@ -804,7 +905,6 @@ async function executableIdentity(
   return {
     ...identity,
     ...(version.version ? { version: version.version } : {}),
-    ...(version.raw ? { versionOutput: version.raw } : {}),
   };
 }
 
@@ -833,11 +933,12 @@ export interface ToolCheckResult {
   ready: boolean;
   contentHash: string;
   toolHash: string;
-  executable?: { path: string; contentHash: string; version?: string; versionOutput?: string };
+  executable?: { path: string; sealedPath: string; contentHash: string; version?: string };
   prerequisites: Array<{
     name: string;
     ready: boolean;
     path?: string;
+    sealedPath?: string;
     contentHash?: string;
     version?: string;
     reason?: string;
@@ -847,13 +948,20 @@ export interface ToolCheckResult {
   argvHash?: string;
   prerequisiteHashes?: Record<string, string>;
   resolvedCwd?: string;
+  cwdHash?: string;
   reason?: string;
   approvalSummary: {
     asset: string;
     source: ToolProvenance;
     command: { executable: string; argsTemplate: string[]; argv?: string[] };
     capability: "command";
-    authentication: { mode: "inherited" | "aart_secrets"; description: string; inheritedEnvironment: "all" | string[]; secretRefs: string[] };
+    authentication: {
+      mode: "inherited" | "aart_secrets";
+      description: string;
+      inheritedEnvironment: "all" | string[];
+      secretRefs: string[];
+      secretMappings: Array<{ ref: string; env: string }>;
+    };
     effects: LocalToolManifest["effects"];
     cwd: LocalToolManifest["cwd"];
     output: LocalToolManifest["output"];
@@ -907,6 +1015,7 @@ function approvalSummary(
       description: manifest.authentication.description,
       inheritedEnvironment: manifest.authentication.inheritEnvironment,
       secretRefs: manifest.authentication.mode === "aart_secrets" ? manifest.authentication.secrets.map((secret) => secret.ref) : [],
+      secretMappings: manifest.authentication.mode === "aart_secrets" ? manifest.authentication.secrets : [],
     },
     effects: manifest.effects,
     cwd: manifest.cwd,
@@ -924,9 +1033,26 @@ export async function checkLocalTool(
     expectedArgvHash?: string;
     expectedExecutableHash?: string;
     expectedPrerequisiteHashes?: Readonly<Record<string, string>>;
+    expectedCwdHash?: string;
   } = {},
 ): Promise<ToolCheckResult> {
   const env = options.env ?? process.env;
+  const recomputedContentHash = computeRegisteredLocalToolContentHash(record);
+  const recomputedToolHash = computeLocalToolHash(record.manifest);
+  if (recomputedContentHash !== record.contentHash || recomputedToolHash !== record.toolHash) {
+    return {
+      status: "seal_mismatch",
+      ready: false,
+      contentHash: record.contentHash,
+      toolHash: record.toolHash,
+      prerequisites: [],
+      reason:
+        recomputedContentHash !== record.contentHash
+          ? `stored local tool content hash ${record.contentHash} does not match recomputed hash ${recomputedContentHash}`
+          : `stored local tool hash ${record.toolHash} does not match recomputed hash ${recomputedToolHash}`,
+      approvalSummary: approvalSummary(record),
+    };
+  }
   let argv: string[] | undefined;
   let argvHash: string | undefined;
   try {
@@ -995,11 +1121,40 @@ export async function checkLocalTool(
       reason: cwd.reason,
     };
   }
+  const cwdHash = sha256(canonicalize(cwd.path));
+  const sealedBase = { ...base, resolvedCwd: cwd.path, cwdHash };
+  if (options.expectedCwdHash !== undefined && cwdHash !== options.expectedCwdHash) {
+    return {
+      ...sealedBase,
+      status: "seal_mismatch",
+      ready: false,
+      reason: `reviewed working-directory hash ${options.expectedCwdHash} does not match resolved hash ${cwdHash}`,
+    };
+  }
 
-  const main = await executableIdentity(record, record.manifest.command, env, options.expectedExecutableHash);
+  let executionEnv: NodeJS.ProcessEnv;
+  try {
+    executionEnv = (await selectEnvironment(root, record.manifest, env)).env;
+  } catch (cause) {
+    return {
+      ...sealedBase,
+      status: "missing_prerequisite",
+      ready: false,
+      reason: (cause as Error).message,
+    };
+  }
+
+  const main = await executableIdentity(
+    root,
+    record,
+    record.manifest.command,
+    env,
+    options.expectedExecutableHash,
+    executionEnv,
+  );
   if (!main.ready) {
     return {
-      ...base,
+      ...sealedBase,
       status: availabilityStatus(main),
       ready: false,
       reason: main.reason,
@@ -1009,7 +1164,7 @@ export async function checkLocalTool(
   for (const prerequisite of record.manifest.prerequisites) {
     const expectedPrerequisiteHash = options.expectedPrerequisiteHashes?.[prerequisite.name];
     if (options.expectedPrerequisiteHashes !== undefined && expectedPrerequisiteHash === undefined) {
-      const unresolved = await executableBytesIdentity(record, prerequisite, env);
+      const unresolved = await executableBytesIdentity(root, record, prerequisite, env);
       if (!unresolved.ready) {
         base.prerequisites.push({
           name: prerequisite.name,
@@ -1018,7 +1173,7 @@ export async function checkLocalTool(
           installHint: prerequisite.installHint,
         });
         return {
-          ...base,
+          ...sealedBase,
           executable: main,
           status: "missing_prerequisite",
           ready: false,
@@ -1026,7 +1181,7 @@ export async function checkLocalTool(
         };
       }
       return {
-        ...base,
+        ...sealedBase,
         executable: main,
         status: "seal_mismatch",
         ready: false,
@@ -1034,6 +1189,7 @@ export async function checkLocalTool(
       };
     }
     const identity = await executableIdentity(
+      root,
       record,
       {
         executable: prerequisite.executable,
@@ -1042,6 +1198,7 @@ export async function checkLocalTool(
       },
       env,
       expectedPrerequisiteHash,
+      executionEnv,
     );
     if (!identity.ready) {
       base.prerequisites.push({
@@ -1051,7 +1208,7 @@ export async function checkLocalTool(
         installHint: prerequisite.installHint,
       });
       return {
-        ...base,
+        ...sealedBase,
         executable: main,
         status: availabilityStatus(identity),
         ready: false,
@@ -1059,29 +1216,35 @@ export async function checkLocalTool(
       };
     }
     if (prerequisite.probe) {
-      const beforeProbe = await executableBytesIdentity(record, prerequisite, env);
+      const beforeProbe = await executableBytesIdentity(root, record, prerequisite, env);
       if (!beforeProbe.ready || beforeProbe.contentHash !== identity.contentHash) {
         return {
-          ...base,
+          ...sealedBase,
           executable: main,
           status: "seal_mismatch",
           ready: false,
           reason: `${prerequisite.name}: prerequisite executable changed before its probe`,
         };
       }
-      const probe = await spawnNoShell(identity.path, prerequisite.probe.args, { timeoutMs: 10_000 });
-      if (probe.exitCode !== prerequisite.probe.expectedExitCode || probe.timedOut) {
+      const probe = await spawnNoShell(identity.sealedPath, prerequisite.probe.args, {
+        env: executionEnv,
+        timeoutMs: 10_000,
+      });
+      if (probe.exitCode !== prerequisite.probe.expectedExitCode || probe.timedOut || probe.outputLimitExceeded) {
         base.prerequisites.push({
           name: prerequisite.name,
           ready: false,
           path: identity.path,
+          sealedPath: identity.sealedPath,
           contentHash: identity.contentHash,
           version: identity.version,
-          reason: `probe failed with exit ${String(probe.exitCode)}`,
+          reason: probe.outputLimitExceeded
+            ? `probe exceeded the ${MAX_CAPTURE_BYTES}-byte output limit`
+            : `probe failed with exit ${String(probe.exitCode)}`,
           installHint: prerequisite.installHint,
         });
         return {
-          ...base,
+          ...sealedBase,
           executable: main,
           status: "missing_prerequisite",
           ready: false,
@@ -1093,32 +1256,18 @@ export async function checkLocalTool(
       name: prerequisite.name,
       ready: true,
       path: identity.path,
+      sealedPath: identity.sealedPath,
       contentHash: identity.contentHash,
       version: identity.version,
     });
   }
 
-  if (record.manifest.authentication.mode === "aart_secrets") {
-    for (const secret of record.manifest.authentication.secrets) {
-      if (!(await resolveAartSecret(root, secret.ref, env))) {
-        return {
-          ...base,
-          executable: main,
-          status: "missing_prerequisite",
-          ready: false,
-          reason: `AART secret "${secret.ref}" is not configured`,
-        };
-      }
-    }
-  }
-
   return {
-    ...base,
+    ...sealedBase,
     executable: main,
     prerequisiteHashes: Object.fromEntries(
       base.prerequisites.map((prerequisite) => [prerequisite.name, prerequisite.contentHash!]),
     ),
-    ...(cwd.path ? { resolvedCwd: cwd.path } : {}),
     status: "ready",
     ready: true,
   };
@@ -1150,9 +1299,9 @@ function selectEnvironment(
   })();
 }
 
-function toolCwd(record: RegisteredLocalTool): string | undefined {
+function toolCwd(record: RegisteredLocalTool): string {
   const cwd = record.manifest.cwd;
-  if (cwd.mode === "inherit") return undefined;
+  if (cwd.mode === "inherit") return process.cwd();
   if (cwd.mode === "fixed") return cwd.path;
   if (record.provenance.kind === "inline") throw new Error("cwd mode asset requires file or Pack provenance");
   return record.provenance.kind === "local_file" ? dirname(record.provenance.source) : record.provenance.source;
@@ -1160,14 +1309,13 @@ function toolCwd(record: RegisteredLocalTool): string | undefined {
 
 async function availableToolCwd(
   record: RegisteredLocalTool,
-): Promise<{ ready: true; path?: string } | { ready: false; reason: string }> {
-  let path: string | undefined;
+): Promise<{ ready: true; path: string } | { ready: false; reason: string }> {
+  let path: string;
   try {
     path = toolCwd(record);
   } catch (cause) {
     return { ready: false, reason: (cause as Error).message };
   }
-  if (!path) return { ready: true };
   try {
     const resolved = await fs.realpath(path);
     const stat = await fs.stat(resolved);
@@ -1232,6 +1380,7 @@ export interface RunLocalToolInput {
   contentHash: string;
   executableHash: string;
   argvHash: string;
+  cwdHash: string;
   prerequisiteHashes?: Readonly<Record<string, string>>;
   env?: NodeJS.ProcessEnv;
 }
@@ -1243,6 +1392,7 @@ export interface LocalToolRunRecord {
   contentHash: string;
   executableHash: string;
   argvHash: string;
+  cwdHash: string;
   prerequisiteHashes: Record<string, string>;
   startedAt: string;
   endedAt?: string;
@@ -1260,6 +1410,7 @@ function beginLocalToolRun(
   record: RegisteredLocalTool,
   executableHash: string,
   argvHash: string,
+  cwdHash: string,
   prerequisiteHashes: Readonly<Record<string, string>>,
   runId: string,
   startedAt: string,
@@ -1272,6 +1423,7 @@ function beginLocalToolRun(
     contentHash: record.contentHash,
     executableHash,
     argvHash,
+    cwdHash,
     prerequisiteHashes: { ...prerequisiteHashes },
     startedAt,
     status: "running",
@@ -1306,6 +1458,7 @@ export async function readLocalToolRun(root: string, runId: string): Promise<Loc
       typeof parsed.toolVersion !== "string" ||
       !["running", "terminal"].includes(parsed.status) ||
       typeof parsed.argvHash !== "string" ||
+      typeof parsed.cwdHash !== "string" ||
       !parsed.prerequisiteHashes ||
       typeof parsed.prerequisiteHashes !== "object"
     ) {
@@ -1361,6 +1514,7 @@ export async function runLocalTool(
     expectedArgvHash: input.argvHash,
     expectedExecutableHash: input.executableHash,
     expectedPrerequisiteHashes: input.prerequisiteHashes ?? {},
+    expectedCwdHash: input.cwdHash,
   });
   if (!check.ready || !check.executable || !check.argv) {
     return {
@@ -1371,6 +1525,7 @@ export async function runLocalTool(
       check,
     };
   }
+  const checkedExecutable = check.executable;
 
   const hostEnv = input.env ?? process.env;
   const selected = await selectEnvironment(root, record.manifest, hostEnv);
@@ -1378,29 +1533,17 @@ export async function runLocalTool(
   const sensitiveInputs = record.manifest.inputs
     .filter((definition) => definition.sensitive)
     .flatMap((definition) => (input.inputs?.[definition.name] ? [input.inputs[definition.name]!] : []));
-  const inheritedSecretValues =
-    record.manifest.authentication.mode === "inherited"
+  const inherited = record.manifest.authentication.inheritEnvironment;
+  const inheritedSecretValues = (
+    inherited === "all"
       ? Object.entries(hostEnv)
-          .filter(
-            ([name, value]) =>
-              SECRET_ENV_PATTERN.test(name) && typeof value === "string" && value.length >= 4,
-          )
-          .map(([, value]) => value as string)
-      : [];
+          .filter(([name]) => SECRET_ENV_PATTERN.test(name))
+          .map(([, value]) => value)
+      : inherited.map((name) => hostEnv[name])
+  ).filter((value): value is string => typeof value === "string" && value.length > 0);
   const redactions = [...selected.secrets, ...sensitiveInputs, ...inheritedSecretValues];
-  const rechecked = await executableIdentity(record, record.manifest.command, hostEnv);
-  if (!rechecked.ready || rechecked.contentHash !== input.executableHash) {
-    return {
-      ok: false,
-      ran: false,
-      kind: "executable_seal_mismatch",
-      error: rechecked.ready
-        ? `resolved executable changed before spawn (expected ${input.executableHash}, got ${rechecked.contentHash})`
-        : rechecked.reason,
-    };
-  }
   for (const prerequisite of record.manifest.prerequisites) {
-    const identity = await executableBytesIdentity(record, prerequisite, hostEnv);
+    const identity = await executableBytesIdentity(root, record, prerequisite, hostEnv);
     const expectedHash = (input.prerequisiteHashes ?? {})[prerequisite.name];
     if (!identity.ready || identity.contentHash !== expectedHash) {
       return {
@@ -1419,19 +1562,20 @@ export async function runLocalTool(
     source: record.provenance,
     contentHash: record.contentHash,
     toolHash: record.toolHash,
-    executable: rechecked,
+    executable: checkedExecutable,
     prerequisites: check.prerequisites,
     argv: executionArgv.map((arg) => redactText(arg, redactions)),
     argvHash: input.argvHash,
+    cwdHash: input.cwdHash,
     prerequisiteHashes,
-    cwd: check.resolvedCwd ?? process.cwd(),
+    cwd: check.resolvedCwd,
     authentication: check.approvalSummary.authentication,
   };
   let processStarted = false;
   let running: LocalToolRunRecord | undefined;
   let result: SpawnResult;
   try {
-    result = await spawnNoShell(rechecked.path, executionArgv, {
+    result = await spawnNoShell(checkedExecutable.sealedPath, executionArgv, {
       cwd: check.resolvedCwd,
       env: selected.env,
       timeoutMs: record.manifest.command.timeoutMs,
@@ -1440,8 +1584,9 @@ export async function runLocalTool(
         running = beginLocalToolRun(
           root,
           record,
-          rechecked.contentHash,
+          checkedExecutable.contentHash,
           input.argvHash,
+          input.cwdHash,
           prerequisiteHashes,
           runId,
           startedAt,
@@ -1483,7 +1628,7 @@ export async function runLocalTool(
   }
   const stdout = redactText(result.stdout, redactions);
   const stderr = redactText(result.stderr, redactions);
-  const outputText = record.manifest.output.source === "stdout" ? stdout : stderr;
+  const outputText = record.manifest.output.source === "stdout" ? result.stdout : result.stderr;
   let structuredOutput: unknown;
   let outputParseError: string | undefined;
   try {
@@ -1500,22 +1645,34 @@ export async function runLocalTool(
           ]),
         )
       : {};
+  const missingEvidence =
+    outputParseError === undefined
+      ? Object.entries(record.manifest.output.evidence)
+          .filter(([name]) => mappedEvidence[name] === undefined)
+          .map(([name, path]) => ({ name, path }))
+      : [];
   const evidence = {
     ...executionContext,
     exitCode: result.exitCode,
     signal: result.signal,
     timedOut: result.timedOut,
+    outputLimitExceeded: result.outputLimitExceeded,
     stdout,
     stderr,
     mapped: mappedEvidence,
+    ...(missingEvidence.length > 0 ? { missingEvidence } : {}),
     ...(outputParseError ? { outputParseError } : {}),
   };
-  if (result.exitCode !== 0 || result.timedOut) {
+  if (result.outputLimitExceeded || result.exitCode !== 0 || result.timedOut) {
     return completeLocalToolRun(root, running, {
       ok: false,
       ran: true,
-      kind: result.timedOut ? "timed_out" : "command_failed",
-      error: result.timedOut ? "local tool timed out" : `local tool exited with code ${String(result.exitCode)}`,
+      kind: result.outputLimitExceeded ? "output_limit_exceeded" : result.timedOut ? "timed_out" : "command_failed",
+      error: result.outputLimitExceeded
+        ? `local tool exceeded the ${MAX_CAPTURE_BYTES}-byte output limit`
+        : result.timedOut
+          ? "local tool timed out"
+          : `local tool exited with code ${String(result.exitCode)}`,
       ...(outputParseError === undefined ? { structuredOutput } : {}),
       evidence,
     });
@@ -1526,6 +1683,18 @@ export async function runLocalTool(
       ran: true,
       kind: "invalid_structured_output",
       error: `tool ran but ${outputParseError}`,
+      evidence,
+    });
+  }
+  if (missingEvidence.length > 0) {
+    return completeLocalToolRun(root, running, {
+      ok: false,
+      ran: true,
+      kind: "evidence_contract_failed",
+      error: `tool ran but did not produce declared evidence: ${missingEvidence
+        .map(({ name, path }) => `${name} (${path})`)
+        .join(", ")}`,
+      structuredOutput,
       evidence,
     });
   }

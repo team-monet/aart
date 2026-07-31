@@ -31,7 +31,7 @@ export const USAGE = `AART CLI — usage:
   aart find-tools [query] [--scope local|remote|all] [--index-url <url>]
   aart tool register <manifest.yaml>
   aart tool check <id> [--version <v>] [--input <json>]
-  aart tool run <id> [--version <v>] [--input <json>] --content-hash <sha256:...> --executable-hash <sha256:...> --argv-hash <sha256:...> [--prerequisite-hashes <json>]
+  aart tool run <id> [--version <v>] [--input <json>] --content-hash <sha256:...> --executable-hash <sha256:...> --argv-hash <sha256:...> --cwd-hash <sha256:...> [--prerequisite-hashes <json>]
   aart tool report <toolrun_id>
   aart tool runs [--tool-id <id>] [--status running|terminal]
   aart find-blocks [query] [--category <category>] [--scope local|remote|all] [--index-url <url>]

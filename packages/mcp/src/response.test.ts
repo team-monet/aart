@@ -135,6 +135,33 @@ describe("wrapResult — the shared envelope (architecture §10.2's [DECISION])"
     expect(wrapped.next).toContain("aart_install_pack");
   });
 
+  it("directs remote-only tool matches through pinned Pack installation and approval", () => {
+    const wrapped = wrapResult("aart_find_tools", {
+      ok: true,
+      matched: true,
+      tools: [
+        {
+          source: "public",
+          installation: { name: "review-tools", version: "1.0.0", contentHash: "sha256:abc" },
+        },
+      ],
+    });
+    expect(wrapped.next).toContain("installation.contentHash");
+    expect(wrapped.next).toContain("approve");
+    expect(wrapped.next.indexOf("Install")).toBeLessThan(wrapped.next.indexOf("aart_check_tool"));
+  });
+
+  it("does not offer installation for remote tool matches from a preview catalog", () => {
+    const wrapped = wrapResult("aart_find_tools", {
+      ok: true,
+      matched: true,
+      indexMode: "preview",
+      tools: [{ source: "public", installable: false }],
+    });
+    expect(wrapped.next).toContain("preview catalog fixtures");
+    expect(wrapped.next).not.toContain("aart_install_pack");
+  });
+
   it("never mutates the input result object", () => {
     const input = { ok: true as const };
     const wrapped = wrapResult("aart_verify", input);

@@ -27,8 +27,9 @@ into that lifecycle rather than bolted on.
 - **Already have a reliable local CLI?** Register it with `aart tool register`,
   rediscover it with `aart find-tools`, and inspect its exact executable,
   argv, prerequisites, inherited/AART-secret authentication, effects, and
-  asset/executable/argv/prerequisite seals with `aart tool check` before a
-  hash-bound no-shell run. Successful spawns return a `runId`; `aart tool
+  asset/executable/argv/cwd/prerequisite seals with `aart tool check` before
+  a hash-bound no-shell run of AART's content-addressed executable snapshot.
+  Successful spawns return a `runId`; `aart tool
   runs` recovers spawn-time records after a caller restart, and `aart tool
   report <runId>` retrieves the durable, redacted evidence. See
   [`AUTHORING.md`](./AUTHORING.md#reusing-an-existing-local-command).

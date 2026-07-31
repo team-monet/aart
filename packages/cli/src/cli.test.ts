@@ -1685,7 +1685,10 @@ describe("aart local tool lifecycle", () => {
     const found = await run(["find-tools", "wait", "for", "Codex", "review"], { cliContext: tc.cli });
     expect(found).toMatchObject({
       ok: true,
-      result: { matched: true, tools: [{ id: "review.wait", availability: { ready: true } }] },
+      result: {
+        matched: true,
+        tools: [{ id: "review.wait", availability: { ready: false, status: "requires_explicit_check" } }],
+      },
     });
 
     const checked = await run(
@@ -1697,6 +1700,7 @@ describe("aart local tool lifecycle", () => {
       check: {
         executable: { contentHash: string };
         argvHash: string;
+        cwdHash: string;
         prerequisiteHashes: Record<string, string>;
       };
     }).check;
@@ -1714,6 +1718,8 @@ describe("aart local tool lifecycle", () => {
         toolCheck.executable.contentHash,
         "--argv-hash",
         toolCheck.argvHash,
+        "--cwd-hash",
+        toolCheck.cwdHash,
         "--prerequisite-hashes",
         JSON.stringify(toolCheck.prerequisiteHashes),
       ],

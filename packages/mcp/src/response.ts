@@ -137,7 +137,7 @@ export type ToolOutcome = "success" | "failure";
 
 const NEXT_TABLE: Readonly<Record<ToolName, Readonly<Record<ToolOutcome, string>>>> = {
   aart_find_tools: {
-    success: "Reuse the closest ready local tool. Call `aart_check_tool` with concrete inputs, show its exact hashes and authority summary to the user, then call `aart_run_tool` only after explicit approval.",
+    success: "Choose the closest registered local tool. Call `aart_check_tool` with concrete inputs, show its exact hashes and authority summary to the user, then call `aart_run_tool` only after explicit approval.",
     failure: "No reusable local tool matched — check `aart_find_workflows`, then Blocks and public Packs before authoring new logic.",
   },
   aart_register_tool: {
@@ -145,7 +145,7 @@ const NEXT_TABLE: Readonly<Record<ToolName, Readonly<Record<ToolOutcome, string>
     failure: "Registration failed — fix the manifest, executable provenance, or immutable-version conflict, then register again.",
   },
   aart_check_tool: {
-    success: "Show the exact command, authority, effects, asset hash, executable hash, argv hash, and prerequisite hashes to the user. After explicit approval, pass those same seals to `aart_run_tool`.",
+    success: "Show the exact command, authority, effects, asset hash, executable hash, argv hash, cwd hash, and prerequisite hashes to the user. After explicit approval, pass those same seals to `aart_run_tool`.",
     failure: "The tool is not ready — fix the reported executable, version, platform, authentication, or input prerequisite and check again.",
   },
   aart_run_tool: {
@@ -313,6 +313,19 @@ export function wrapResult<T extends HandlerResult>(tool: ToolName, result: T): 
   const next =
     tool === "aart_find_packs" && outcome === "success" && result.indexMode === "preview"
       ? "These are preview catalog fixtures, not published packages. Prepare and publish a real Pack before offering installation."
+      : tool === "aart_find_tools" && outcome === "success" && result.indexMode === "preview"
+        ? "These remote tool matches come from preview catalog fixtures, not published packages. Prepare and publish the containing Pack before offering installation."
+      : tool === "aart_find_tools" &&
+          outcome === "success" &&
+          Array.isArray(result.tools) &&
+          result.tools.length > 0 &&
+          result.tools.every(
+            (candidate) =>
+              candidate !== null &&
+              typeof candidate === "object" &&
+              (candidate as Record<string, unknown>).source === "public",
+          )
+        ? "Install the selected result with its exact `installation.name`, `installation.version`, and `installation.contentHash`; review and approve that inert Pack before calling `aart_check_tool` on the installed tool."
       : computeNext(tool, outcome);
   return { ...result, next };
 }

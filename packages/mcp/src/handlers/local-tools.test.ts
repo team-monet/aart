@@ -65,7 +65,7 @@ describe("local tool MCP handlers", () => {
         {
           id: "codex-review.wait",
           authentication: { mode: "inherited" },
-          availability: { status: "ready", ready: true },
+          availability: { status: "requires_explicit_check", ready: false },
           effects: { reads: ["GitHub PR review metadata"], writes: [], network: ["github.com"] },
         },
       ],
@@ -79,6 +79,7 @@ describe("local tool MCP handlers", () => {
     const check = checked.check as {
       executable: { contentHash: string };
       argvHash: string;
+      cwdHash: string;
       prerequisiteHashes: Record<string, string>;
     };
     const ran = await runToolHandler(tc.ctx, {
@@ -87,6 +88,7 @@ describe("local tool MCP handlers", () => {
       contentHash: sealed.contentHash,
       executableHash: check.executable.contentHash,
       argvHash: check.argvHash,
+      cwdHash: check.cwdHash,
       prerequisiteHashes: check.prerequisiteHashes,
     });
     expect(ran).toMatchObject({
@@ -130,13 +132,41 @@ describe("local tool MCP handlers", () => {
     });
     const found = await findToolsHandler(tc.ctx, { query: "Codex review" });
     expect(found).toMatchObject({
-      tools: [{ availability: { ready: false, status: "missing_prerequisite" } }],
+      tools: [{ availability: { ready: false, status: "requires_explicit_check" } }],
     });
     const checked = await checkToolHandler(tc.ctx, {
       id: "codex-review.wait",
       inputs: { target: "team-monet/aart#11" },
     });
     expect(checked).toMatchObject({ ok: false, check: { ready: false, status: "missing_prerequisite" } });
+  });
+
+  it("keeps discovery inert and defers manifest-defined version commands to explicit check", async () => {
+    tc = await createTestContext();
+    const marker = join(tc.root, "version-check-ran");
+    await registerToolHandler(tc.ctx, {
+      tool: toolManifest({
+        command: {
+          executable: process.execPath,
+          resolution: "absolute",
+          args: ["-e", "console.log(JSON.stringify({outcome:'approved'}))"],
+          versionCheck: {
+            args: ["-e", `require('node:fs').writeFileSync(${JSON.stringify(marker)},'ran')`],
+          },
+        },
+        inputs: [],
+      }),
+    });
+
+    await expect(findToolsHandler(tc.ctx, { query: "Codex review" })).resolves.toMatchObject({
+      tools: [{ availability: { status: "requires_explicit_check" } }],
+    });
+    await expect(fs.access(marker)).rejects.toThrow();
+
+    await expect(checkToolHandler(tc.ctx, { id: "codex-review.wait" })).resolves.toMatchObject({
+      ok: true,
+    });
+    await expect(fs.readFile(marker, "utf8")).resolves.toBe("ran");
   });
 
   it("requires concrete required inputs on the explicit review check path", async () => {
@@ -213,6 +243,31 @@ describe("Pack tool declarations", () => {
       matched: true,
       tools: [{ id: "pack-review.wait", source: "pack", provenance: { packName: "review-tools" } }],
     });
+
+    await registerToolHandler(tc.ctx, {
+      tool: { ...manifest, description: "Conflicting local contract at the same id and version" },
+    });
+    const ambiguous = await findToolsHandler(tc.ctx, { query: "pack review wait conflicting" });
+    expect(ambiguous).toMatchObject({
+      matched: true,
+      tools: expect.arrayContaining([
+        expect.objectContaining({
+          id: "pack-review.wait",
+          availability: expect.objectContaining({
+            status: "ambiguous",
+            ready: false,
+            candidates: expect.arrayContaining([
+              expect.objectContaining({ provenance: expect.objectContaining({ kind: "pack" }) }),
+              expect.objectContaining({ provenance: expect.objectContaining({ kind: "inline" }) }),
+            ]),
+          }),
+        }),
+      ]),
+    });
+    await expect(checkToolHandler(tc.ctx, { id: "pack-review.wait" })).resolves.toMatchObject({
+      ok: false,
+      error: expect.stringContaining("ambiguous"),
+    });
   });
 
   it("publishes portable tool metadata into the static index and supports remote search", async () => {
@@ -257,6 +312,7 @@ describe("Pack tool declarations", () => {
           id: "public-review.wait",
           source: "public",
           installable: true,
+          inputs: [{ name: "target", description: "PR target", required: true, sensitive: false }],
           provenance: { packName: "review-tools", packVersion: "1.0.0" },
           installation: {
             name: "review-tools",

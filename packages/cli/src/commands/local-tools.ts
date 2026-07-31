@@ -53,9 +53,6 @@ export async function findToolsCommand(tokens: Tokenized, cli: CliContext): Prom
   });
   return {
     ...wrapResult("aart_find_tools", result),
-    next: result.matched
-      ? "Choose a ready match, then run `aart tool check <id> --input '<json>'` and review its exact hashes and authority."
-      : "Run `aart find-workflows`, then `aart find-blocks`, before authoring new logic.",
   };
 }
 
@@ -84,7 +81,7 @@ export async function localToolCommand(tokens: Tokenized, cli: CliContext): Prom
     return {
       ...wrapResult("aart_check_tool", result),
       next: result.ok
-        ? "Review the command, authority, effects, contentHash, and executable contentHash before running it."
+        ? "Review the command, authority, effects, contentHash, executable contentHash, argvHash, cwdHash, and prerequisite hashes before running it."
         : "Install or configure the reported prerequisite, then check again.",
     };
   }
@@ -93,9 +90,10 @@ export async function localToolCommand(tokens: Tokenized, cli: CliContext): Prom
     const contentHash = flagString(tokens.flags, "content-hash");
     const executableHash = flagString(tokens.flags, "executable-hash");
     const argvHash = flagString(tokens.flags, "argv-hash");
-    if (!contentHash || !executableHash || !argvHash) {
+    const cwdHash = flagString(tokens.flags, "cwd-hash");
+    if (!contentHash || !executableHash || !argvHash || !cwdHash) {
       throw new Error(
-        "tool run requires --content-hash, --executable-hash, and --argv-hash from one reviewed `aart tool check` result",
+        "tool run requires --content-hash, --executable-hash, --argv-hash, and --cwd-hash from one reviewed `aart tool check` result",
       );
     }
     const result = await runToolHandler(cli.aart, {
@@ -105,6 +103,7 @@ export async function localToolCommand(tokens: Tokenized, cli: CliContext): Prom
       contentHash,
       executableHash,
       argvHash,
+      cwdHash,
       prerequisiteHashes: parsePrerequisiteHashes(tokens),
     });
     return wrapResult("aart_run_tool", result);
