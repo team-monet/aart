@@ -1,6 +1,6 @@
 import { promises as fs } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, delimiter, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   checkLocalTool,
@@ -95,11 +95,9 @@ describe("local tool manifest", () => {
 
   it("keeps an already-suffixed Windows PATH command unchanged before trying PATHEXT variants", () => {
     expect(pathExecutableCandidates("node.exe", "win32", ".EXE;.CMD;.BAT")).toEqual(["node.exe"]);
-    expect(pathExecutableCandidates("node", "win32", ".EXE;.CMD")).toEqual([
-      "node",
-      "node.EXE",
-      "node.CMD",
-    ]);
+    expect(pathExecutableCandidates("node", "win32", ".EXE;.CMD")).toEqual(["node", "node.EXE"]);
+    expect(pathExecutableCandidates("node.cmd", "win32", ".EXE;.CMD;.BAT")).toEqual([]);
+    expect(pathExecutableCandidates("node.bat", "win32", ".EXE;.CMD;.BAT")).toEqual([]);
   });
 
   it("allows a Pack-portable external prerequisite but rejects ambiguous executable resolution", () => {
@@ -214,7 +212,12 @@ describe("versioned registration and discovery", () => {
     await fs.writeFile(executable, "#!/bin/sh\nprintf 'changed\\n'\n", { mode: 0o755 });
     const check = await checkLocalTool(storeRoot, registered);
     expect(check.ready).toBe(true);
-    expect(check.executable?.contentHash).toBe(registered.ownedExecutable?.contentHash);
+    expect(check.executable?.sourceContentHash).toBe(registered.ownedExecutable?.contentHash);
+    expect(check.executable?.contentHash).not.toBe(registered.ownedExecutable?.contentHash);
+    expect(check.executable?.interpreter).toMatchObject({
+      contentHash: expect.stringMatching(/^sha256:/),
+      mode: "protected_original",
+    });
   });
 
   it("rejects an asset executable reached through an intermediate symlink outside the manifest directory", async () => {
@@ -275,8 +278,8 @@ describe("preflight and execution", () => {
         prerequisites: [
           {
             name: "node-runtime",
-            executable: process.execPath,
-            resolution: "absolute",
+            executable: basename(process.execPath),
+            resolution: "path",
             versionCheck: {
               args: ["--version"],
               semverRange: ">=20",
@@ -294,7 +297,8 @@ describe("preflight and execution", () => {
       status: "ready",
       argv: ["-e", expect.any(String), "owner/repo#1"],
       executable: { path: process.execPath, contentHash: expect.stringMatching(/^sha256:/) },
-      prerequisites: [{ name: "node-runtime", ready: true }],
+      prerequisites: [{ name: "node-runtime", ready: true, probeDeferred: true }],
+      prerequisitePath: expect.stringContaining("prerequisite-paths"),
     });
     expect(check.approvalSummary.authentication.mode).toBe("inherited");
     expect(check.approvalSummary.capability).toBe("command");
@@ -448,6 +452,67 @@ describe("preflight and execution", () => {
     });
   });
 
+  it("binds a mutable shebang interpreter into the reviewed executable seal", async () => {
+    if (process.platform === "win32") return;
+    const storeRoot = await root();
+    const interpreter = join(storeRoot, "custom-node");
+    const executable = join(storeRoot, "interpreted-tool");
+    await fs.copyFile(process.execPath, interpreter);
+    await fs.chmod(interpreter, 0o755);
+    await fs.writeFile(
+      executable,
+      [
+        "#!/usr/bin/env custom-node",
+        'if (process.argv[2] === "--version") console.log("tool 1.0.0");',
+        'else console.log(JSON.stringify({value:"sealed"}));',
+        "",
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+    const env = { ...process.env, PATH: `${storeRoot}${delimiter}${process.env.PATH ?? ""}` };
+    const registered = await registerLocalTool(
+      storeRoot,
+      manifest({
+        command: {
+          executable,
+          resolution: "absolute",
+          snapshotMode: "standalone",
+          args: [],
+          versionCheck: { args: ["--version"], semverRange: ">=1", match: "tool (\\d+\\.\\d+\\.\\d+)" },
+        },
+        inputs: [],
+        output: { source: "stdout", format: "json", evidence: { value: "$.value" } },
+      }),
+    );
+    const check = await checkLocalTool(storeRoot, registered, { env });
+    expect(check).toMatchObject({
+      ready: true,
+      executable: {
+        contentHash: expect.stringMatching(/^sha256:/),
+        sourceContentHash: expect.stringMatching(/^sha256:/),
+        interpreter: {
+          path: await fs.realpath(interpreter),
+          sealedPath: expect.stringContaining("execution-snapshots"),
+          contentHash: expect.stringMatching(/^sha256:/),
+          mode: "snapshot",
+        },
+      },
+    });
+    expect(check.executable?.contentHash).not.toBe(check.executable?.sourceContentHash);
+
+    await fs.copyFile("/bin/echo", interpreter);
+    await fs.chmod(interpreter, 0o755);
+    const result = await runLocalTool(storeRoot, registered, {
+      contentHash: registered.contentHash,
+      executableHash: check.executable!.contentHash,
+      argvHash: check.argvHash!,
+      cwdHash: check.cwdHash!,
+      prerequisiteHashes: check.prerequisiteHashes,
+      env,
+    });
+    expect(result).toMatchObject({ ok: false, ran: false, kind: "review_seal_mismatch" });
+  });
+
   it("bounds catastrophic version-match expressions outside the MCP event loop", async () => {
     const storeRoot = await root();
     const registered = await registerLocalTool(
@@ -528,34 +593,31 @@ describe("preflight and execution", () => {
     await expect(fs.access(marker)).rejects.toThrow();
   });
 
-  it("refuses a changed prerequisite before executing its version check or probe", async () => {
+  it("refuses a changed native prerequisite before executing its version check or probe", async () => {
     if (process.platform === "win32") return;
     const storeRoot = await root();
-    const prerequisite = join(storeRoot, "prerequisite");
-    const marker = join(storeRoot, "changed-prerequisite-ran");
-    await fs.writeFile(prerequisite, "#!/bin/sh\nprintf 'tool 1.0.0\\n'\n", { mode: 0o755 });
+    const prerequisite = join(storeRoot, "review-helper");
+    await fs.copyFile(process.execPath, prerequisite);
+    await fs.chmod(prerequisite, 0o755);
+    const env = { ...process.env, PATH: `${storeRoot}${delimiter}${process.env.PATH ?? ""}` };
     const registered = await registerLocalTool(
       storeRoot,
       manifest({
         prerequisites: [
           {
             name: "review-helper",
-            executable: prerequisite,
-            resolution: "absolute",
-            snapshotMode: "standalone",
-            versionCheck: { args: ["--version"], semverRange: ">=1", match: "tool (\\d+\\.\\d+\\.\\d+)" },
-            probe: { args: ["probe"], expectedExitCode: 0 },
+            executable: "review-helper",
+            resolution: "path",
+            versionCheck: { args: ["--version"], semverRange: ">=20", match: "v?(\\d+\\.\\d+\\.\\d+)" },
+            probe: { args: ["--version"], expectedExitCode: 0 },
           },
         ],
       }),
     );
-    const check = await checkLocalTool(storeRoot, registered, { inputs: { target: "owner/repo#1" } });
+    const check = await checkLocalTool(storeRoot, registered, { inputs: { target: "owner/repo#1" }, env });
     expect(check.ready).toBe(true);
-    await fs.writeFile(
-      prerequisite,
-      `#!/bin/sh\ntouch ${JSON.stringify(marker)}\nprintf 'tool 2.0.0\\n'\n`,
-      { mode: 0o755 },
-    );
+    await fs.copyFile("/bin/echo", prerequisite);
+    await fs.chmod(prerequisite, 0o755);
 
     const result = await runLocalTool(storeRoot, registered, {
       inputs: { target: "owner/repo#1" },
@@ -564,9 +626,75 @@ describe("preflight and execution", () => {
       argvHash: check.argvHash!,
       cwdHash: check.cwdHash!,
       prerequisiteHashes: check.prerequisiteHashes,
+      env,
     });
     expect(result).toMatchObject({ ok: false, ran: false, kind: "review_seal_mismatch" });
-    await expect(fs.access(marker)).rejects.toThrow();
+  });
+
+  it("routes task subprocesses through reviewed prerequisite snapshots only", async () => {
+    if (process.platform === "win32") return;
+    const storeRoot = await root();
+    const prerequisite = join(storeRoot, "review-helper");
+    const resultFile = join(storeRoot, "sealed-result.json");
+    await fs.copyFile(process.execPath, prerequisite);
+    await fs.chmod(prerequisite, 0o755);
+    const task = [
+      'const fs = require("node:fs");',
+      'const {spawnSync} = require("node:child_process");',
+      `fs.writeFileSync(${JSON.stringify(prerequisite)}, "changed after approval");`,
+      'const child = spawnSync("review-helper", ["-e", "console.log(JSON.stringify({sealed:true}))"], {encoding:"utf8"});',
+      'if (child.error || child.status !== 0) throw child.error ?? new Error(child.stderr);',
+      `fs.writeFileSync(${JSON.stringify(resultFile)}, child.stdout);`,
+      `const output = spawnSync("cat", [${JSON.stringify(resultFile)}], {encoding:"utf8"});`,
+      'if (output.error || output.status !== 0) throw output.error ?? new Error(output.stderr);',
+      "process.stdout.write(output.stdout);",
+    ].join("");
+    const env = { ...process.env, PATH: `${storeRoot}${delimiter}${process.env.PATH ?? ""}` };
+    const registered = await registerLocalTool(
+      storeRoot,
+      manifest({
+        command: { ...manifest().command, args: ["-e", task] },
+        inputs: [],
+        prerequisites: [
+          {
+            name: "review-helper",
+            executable: "review-helper",
+            resolution: "path",
+            versionCheck: {
+              args: ["--version"],
+              semverRange: ">=20",
+              match: "v?(\\d+\\.\\d+\\.\\d+)",
+            },
+          },
+          {
+            name: "output-cat",
+            executable: "cat",
+            resolution: "path",
+          },
+        ],
+        output: { source: "stdout", format: "json", evidence: { sealed: "$.sealed" } },
+      }),
+    );
+    const check = await checkLocalTool(storeRoot, registered, { env });
+    const result = await runLocalTool(storeRoot, registered, {
+      contentHash: registered.contentHash,
+      executableHash: check.executable!.contentHash,
+      argvHash: check.argvHash!,
+      cwdHash: check.cwdHash!,
+      prerequisiteHashes: check.prerequisiteHashes,
+      env,
+    });
+
+    expect(result).toMatchObject({
+      ok: true,
+      ran: true,
+      structuredOutput: { sealed: true },
+      evidence: {
+        prerequisitePath: check.prerequisitePath,
+        prerequisiteHashes: check.prerequisiteHashes,
+      },
+    });
+    await expect(fs.readFile(prerequisite, "utf8")).resolves.toBe("changed after approval");
   });
 
   it("executes the sealed snapshot even when a version check replaces the original executable", async () => {
@@ -574,10 +702,11 @@ describe("preflight and execution", () => {
     const storeRoot = await root();
     const executable = join(storeRoot, "mutable-tool");
     const replacement = join(storeRoot, "replacement-tool");
+    const copyCommand = basename(process.execPath);
     const originalBytes = [
       "#!/bin/sh",
       'if [ "$1" = "--version" ]; then',
-      '  cp "$2" "$3"',
+      `  ${copyCommand} -e 'require("node:fs").copyFileSync(process.argv[1], process.argv[2])' "$2" "$3"`,
       "  printf 'tool 1.0.0\\n'",
       "  exit 0",
       "fi",
@@ -602,6 +731,13 @@ describe("preflight and execution", () => {
             match: "tool (\\d+\\.\\d+\\.\\d+)",
           },
         },
+        prerequisites: [
+          {
+            name: "copy-command",
+            executable: copyCommand,
+            resolution: "path",
+          },
+        ],
         inputs: [],
         output: { source: "stdout", format: "json", evidence: { value: "$.value" } },
       }),
@@ -889,6 +1025,62 @@ describe("preflight and execution", () => {
     expect(Buffer.byteLength((result.evidence as { stdout: string }).stdout, "utf8")).toBeLessThanOrEqual(1_048_576);
   });
 
+  it("defers credentialed prerequisite probes until the approval-bound run", async () => {
+    if (process.platform === "win32") return;
+    const storeRoot = await root();
+    const prerequisite = join(storeRoot, "credential-probe");
+    const marker = join(storeRoot, "credential-probe-ran");
+    await fs.copyFile(process.execPath, prerequisite);
+    await fs.chmod(prerequisite, 0o755);
+    const envWithoutSecret = { ...process.env, PATH: `${storeRoot}${delimiter}${process.env.PATH ?? ""}` };
+    const registered = await registerLocalTool(
+      storeRoot,
+      manifest({
+        prerequisites: [
+          {
+            name: "credential-probe",
+            executable: "credential-probe",
+            resolution: "path",
+            probe: {
+              args: [
+                "-e",
+                `require("node:fs").writeFileSync(${JSON.stringify(marker)}, process.env.LOCAL_TOOL_TOKEN ? "credential-present" : "missing"); process.exit(process.env.LOCAL_TOOL_TOKEN ? 0 : 1)`,
+              ],
+              expectedExitCode: 0,
+            },
+          },
+        ],
+        authentication: {
+          mode: "aart_secrets",
+          description: "Resolve credentials only after the reviewed seals are supplied",
+          inheritEnvironment: [],
+          secrets: [{ ref: "TOOL_TOKEN", env: "LOCAL_TOOL_TOKEN" }],
+        },
+      }),
+    );
+    const check = await checkLocalTool(storeRoot, registered, {
+      inputs: { target: "owner/repo#1" },
+      env: envWithoutSecret,
+    });
+    expect(check).toMatchObject({
+      ready: true,
+      prerequisites: [{ name: "credential-probe", ready: true, probeDeferred: true }],
+    });
+    await expect(fs.access(marker)).rejects.toThrow();
+
+    const result = await runLocalTool(storeRoot, registered, {
+      inputs: { target: "owner/repo#1" },
+      contentHash: registered.contentHash,
+      executableHash: check.executable!.contentHash,
+      argvHash: check.argvHash!,
+      cwdHash: check.cwdHash!,
+      prerequisiteHashes: check.prerequisiteHashes,
+      env: { ...envWithoutSecret, AART_SECRET_TOOL_TOKEN: "approval-bound-secret" },
+    });
+    expect(result).toMatchObject({ ok: true, ran: true });
+    await expect(fs.readFile(marker, "utf8")).resolves.toBe("credential-present");
+  });
+
   it("requires the complete reviewed seal set, runs without a shell, redacts secrets, and maps structured evidence", async () => {
     const storeRoot = await root();
     const sentinel = join(storeRoot, "must-not-exist");
@@ -1151,6 +1343,47 @@ describe("preflight and execution", () => {
       ok: true,
       structuredOutput: { credential: "[REDACTED]" },
       evidence: { mapped: { credential: "[REDACTED]" } },
+    });
+    expect(JSON.stringify(result)).not.toContain(secret);
+  });
+
+  it("redacts secret literals used as structured-output object keys", async () => {
+    const storeRoot = await root();
+    const registered = await registerLocalTool(
+      storeRoot,
+      manifest({
+        command: {
+          executable: process.execPath,
+          resolution: "absolute",
+          args: [
+            "-e",
+            "console.log(JSON.stringify({[process.env.LOCAL_TOOL_TOKEN]:'value'}))",
+          ],
+        },
+        inputs: [],
+        authentication: {
+          mode: "aart_secrets",
+          description: "Inject a secret that must be removed from object keys",
+          inheritEnvironment: [],
+          secrets: [{ ref: "TOOL_TOKEN", env: "LOCAL_TOOL_TOKEN" }],
+        },
+        output: { source: "stdout", format: "json", evidence: {} },
+      }),
+    );
+    const secret = "secret-object-key";
+    const env = { AART_SECRET_TOOL_TOKEN: secret };
+    const check = await checkLocalTool(storeRoot, registered, { env });
+    const result = await runLocalTool(storeRoot, registered, {
+      contentHash: registered.contentHash,
+      executableHash: check.executable!.contentHash,
+      argvHash: check.argvHash!,
+      cwdHash: check.cwdHash!,
+      prerequisiteHashes: check.prerequisiteHashes,
+      env,
+    });
+    expect(result).toMatchObject({
+      ok: true,
+      structuredOutput: { "[REDACTED]": "value" },
     });
     expect(JSON.stringify(result)).not.toContain(secret);
   });

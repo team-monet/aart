@@ -255,6 +255,23 @@ prerequisites:
       args: [auth, status]
       expectedExitCode: 0
     installHint: Install gh and run gh auth login
+  - name: json-query
+    executable: jq
+    resolution: path
+    versionCheck:
+      args: [--version]
+      semverRange: ">=1.6.0"
+      match: "jq-([0-9]+\\.[0-9]+)"
+    installHint: Install jq
+  - name: output-cat
+    executable: cat
+    resolution: path
+  - name: clock
+    executable: date
+    resolution: path
+  - name: poll-delay
+    executable: sleep
+    resolution: path
 platforms: [darwin, linux]
 capabilities: [command]
 effects:
@@ -287,7 +304,8 @@ aart tool run codex-review.wait \
   --executable-hash <reviewed-executable-hash> \
   --argv-hash <reviewed-argv-hash> \
   --cwd-hash <reviewed-cwd-hash> \
-  --prerequisite-hashes '{"authenticated-gh":"<reviewed-gh-hash>"}'
+  --prerequisite-hashes \
+  '{"authenticated-gh":"<reviewed-gh-hash>","json-query":"<reviewed-jq-hash>","output-cat":"<reviewed-cat-hash>","clock":"<reviewed-date-hash>","poll-delay":"<reviewed-sleep-hash>"}'
 
 # The run returns toolrun_<uuid>; retrieve the durable, redacted record later:
 aart tool report <toolrun_id>
@@ -299,13 +317,23 @@ aart tool runs --tool-id codex-review.wait
 `resolution: path` does not silently trust whatever is on `PATH`: inert
 discovery reports the manifest without running it, and the explicit check
 resolves the command to an absolute path, snapshots and hashes its bytes, and
-runs declared version checks and probes against those snapshots. Execution
-requires the exact reviewed executable, argv, cwd, and prerequisite hashes.
-Changing the inputs, working directory, or a helper binary requires a new
-check. Interpreter entrypoints must declare `snapshotMode: standalone`; AART
-also requires their declared `versionCheck` to succeed against the snapshot,
-and rejects undeclared package-relative scripts because copying one entry file
-cannot seal its unlisted package context. Use
+runs declared version checks against those snapshots. Credentialed probes are
+deferred until the approval-bound run, so a check neither resolves AART secrets
+nor exercises inherited authentication. Execution requires the exact reviewed
+executable, argv, cwd, and prerequisite hashes. Changing the inputs, working
+directory, or a helper binary requires a new check.
+
+Every command that the task resolves through `PATH` must be a declared
+prerequisite. AART exposes only a private `PATH` of reviewed native executable
+snapshots to version checks, probes, and the task itself; `.cmd`/`.bat` helpers
+and interpreter-based prerequisites are rejected because `shell: false` cannot
+route them through that boundary portably. Interpreter entrypoints must declare
+`snapshotMode: standalone`; AART binds both the entrypoint and its interpreter
+into the executable hash, directly invokes a snapshot of writable interpreters,
+and binds the path and bytes of OS-protected interpreters. It also requires the
+declared `versionCheck` to succeed in that sealed environment, and rejects
+undeclared package-relative scripts because copying one entry file cannot seal
+its unlisted package context. Use
 `resolution: asset` for bytes owned by a local asset; registration copies them
 inertly into the AART root and includes their hash in the immutable version
 seal. Pack tool declarations intentionally support portable external
