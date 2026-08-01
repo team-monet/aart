@@ -68,7 +68,7 @@ export function computePackContentHash(
   // These fields were introduced after block-only Pack seals existed.
   // Parser-supplied empty defaults must not alter the historical wire
   // representation of YAML that omitted them.
-  for (const key of ["categories", "tags", "workflows"] as const) {
+  for (const key of ["categories", "tags", "workflows", "tools"] as const) {
     if (Array.isArray(hashManifest[key]) && hashManifest[key].length === 0) {
       delete hashManifest[key];
     }

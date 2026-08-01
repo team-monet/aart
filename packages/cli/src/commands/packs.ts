@@ -33,6 +33,7 @@ export async function packCommand(tokens: Tokenized, cli: CliContext): Promise<H
     const result = await installPackHandler(cli.aart, {
       name,
       version: flagString(tokens.flags, "version"),
+      contentHash: flagString(tokens.flags, "content-hash"),
       sourcePath: flagString(tokens.flags, "from"),
     });
     return {

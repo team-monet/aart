@@ -12,6 +12,7 @@
 // (see SEAMS.md for the ValidateFn/RunSuccessFn seams S9/S4/S1 fill in
 // later).
 export * from "./adoption.js";
+export * from "./local-tool-adoption.js";
 export * from "./model-runner.js";
 export * from "./run-success.js";
 export * from "./scoring.js";

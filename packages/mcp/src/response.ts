@@ -19,6 +19,12 @@
 // branching off wherever a run fails.
 
 export const TOOL_NAMES = [
+  "aart_find_tools",
+  "aart_register_tool",
+  "aart_check_tool",
+  "aart_run_tool",
+  "aart_get_tool_run",
+  "aart_list_tool_runs",
   "aart_find_blocks",
   "aart_find_workflows",
   "aart_find_packs",
@@ -68,6 +74,12 @@ export type ToolTier = "core" | "extended";
 
 // architecture §10.1's verbatim core/extended split (spec Fix C).
 export const TOOL_TIERS: Readonly<Record<ToolName, ToolTier>> = {
+  aart_find_tools: "core",
+  aart_register_tool: "core",
+  aart_check_tool: "core",
+  aart_run_tool: "core",
+  aart_get_tool_run: "core",
+  aart_list_tool_runs: "core",
   aart_find_blocks: "core",
   aart_find_workflows: "core",
   aart_find_packs: "core",
@@ -124,6 +136,30 @@ export const TOOL_TIERS: Readonly<Record<ToolName, ToolTier>> = {
 export type ToolOutcome = "success" | "failure";
 
 const NEXT_TABLE: Readonly<Record<ToolName, Readonly<Record<ToolOutcome, string>>>> = {
+  aart_find_tools: {
+    success: "Choose the closest registered local tool. Call `aart_check_tool` with concrete inputs, show its exact hashes and authority summary to the user, then call `aart_run_tool` only after explicit approval.",
+    failure: "No reusable local tool matched — check `aart_find_workflows`, then Blocks and public Packs before authoring new logic.",
+  },
+  aart_register_tool: {
+    success: "Local tool registered as a sealed, versioned asset. Call `aart_find_tools` with the task wording to verify it is discoverable in a fresh session.",
+    failure: "Registration failed — fix the manifest, executable provenance, or immutable-version conflict, then register again.",
+  },
+  aart_check_tool: {
+    success: "Show the exact command, authority, effects, asset hash, executable hash, argv hash, cwd hash, and prerequisite hashes to the user. After explicit approval, pass those same seals to `aart_run_tool`.",
+    failure: "The tool is not ready — fix the reported executable, version, platform, authentication, or input prerequisite and check again.",
+  },
+  aart_run_tool: {
+    success: "Tool completed and its evidence was stored. Call `aart_get_tool_run` with the returned runId to prove the record survives a fresh session.",
+    failure: "The tool did not run or did not complete successfully — inspect `ran`, `kind`, prerequisite details, and evidence before retrying.",
+  },
+  aart_get_tool_run: {
+    success: "Use this durable, redacted record as the source of truth for the executable, argv, terminal status, structured output, and mapped evidence.",
+    failure: "No durable local-tool run matched that runId — use the runId returned by an execution where `ran` was true.",
+  },
+  aart_list_tool_runs: {
+    success: "Inspect running records after a caller disconnect/restart, and call `aart_get_tool_run` for the exact runId you need.",
+    failure: "Could not list durable local-tool runs — check the configured AART root and evidence files.",
+  },
   aart_find_blocks: {
     success: "Review the matching blocks, then check `aart_find_workflows` once more before drafting new workflow logic.",
     failure: "No matching blocks found — broaden the query, call `aart_list_blocks`, and check `aart_find_workflows` before building from scratch.",
@@ -277,6 +313,19 @@ export function wrapResult<T extends HandlerResult>(tool: ToolName, result: T): 
   const next =
     tool === "aart_find_packs" && outcome === "success" && result.indexMode === "preview"
       ? "These are preview catalog fixtures, not published packages. Prepare and publish a real Pack before offering installation."
+      : tool === "aart_find_tools" && outcome === "success" && result.indexMode === "preview"
+        ? "These remote tool matches come from preview catalog fixtures, not published packages. Prepare and publish the containing Pack before offering installation."
+      : tool === "aart_find_tools" &&
+          outcome === "success" &&
+          Array.isArray(result.tools) &&
+          result.tools.length > 0 &&
+          result.tools.every(
+            (candidate) =>
+              candidate !== null &&
+              typeof candidate === "object" &&
+              (candidate as Record<string, unknown>).source === "public",
+          )
+        ? "Install the selected result with its exact `installation.name`, `installation.version`, and `installation.contentHash`; review and approve that inert Pack before calling `aart_check_tool` on the installed tool."
       : computeNext(tool, outcome);
   return { ...result, next };
 }

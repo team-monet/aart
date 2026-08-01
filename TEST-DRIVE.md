@@ -12,6 +12,37 @@ Read the sections in order the first time through — each one assumes the last 
 
 ---
 
+## Reuse a local command before authoring a workflow
+
+If this machine already has a reliable CLI for the task, start with
+`aart find-tools "<task wording>"`. Register its YAML/JSON contract once with
+`aart tool register <manifest>`, then a fresh agent session can rediscover it
+by outcome, trigger wording, keywords, or examples without remembering a
+filesystem path.
+
+`aart tool check <id> --input '<json>'` resolves the fixed binary and argv,
+checks platform/version/additional prerequisites, and returns the exact asset
+and executable hashes, rendered-argv hash, and prerequisite-executable hash
+map plus reads, writes, network effects, cwd, command capability, and
+authentication source. It distinguishes reuse of the current user's
+authenticated tool session from AART-secret injection. A missing or
+incompatible executable is an actionable prerequisite result, not a catalog
+miss or a late spawn failure.
+
+Only pass that complete reviewed seal set to `aart tool run`. The run uses
+`spawn(binary, argv, {shell:false})`, rechecks the seals, redacts declared
+secret values, parses JSON/JSONL/text terminal output, and records executable
+identity/version, argv, exit status, and evidence mappings. It returns a
+`toolrun_<uuid>` only when a process actually started; retrieve that durable,
+redacted record later with `aart tool report <toolrun_id>`. A `running` record
+is written on spawn, so after a caller disconnect/restart use `aart tool runs`
+to recover its id. Terminal completion is atomic, and timeouts terminate the
+whole subprocess tree. See
+[`AUTHORING.md`](./AUTHORING.md#reusing-an-existing-local-command) for a
+complete `watch-codex-review` example.
+
+---
+
 ## (a) Install from the tarball
 
 This mirrors exactly how a real `npm install @team-monet/aart` user would end up, without needing this package to actually be on the npm registry yet.
@@ -236,7 +267,7 @@ This writes two files:
   ```
   It's already in the right shape and the right place (`.mcp.json` in your project root) — Claude Code auto-detects it. Open (or restart) Claude Code with `~/aart-test-drive` as the working directory / project root, and it should pick up an `aart` MCP server automatically. (If your `@team-monet/aart` isn't on the real npm registry yet, swap `"command": "npx", "args": ["-y", "@team-monet/aart", "mcp"]` for `"command": "node", "args": ["/Users/johnlee/code/aart/packages/cli/dist/bin.js", "mcp"]` — points straight at this repo's own built binary.)
 
-- **`AGENTS.md`** — instructions for whatever agent connects: the verify reflex, the reuse-first loop (search workflows → search blocks → adapt or draft → register → validate → run → report), `{{ }}` expression wiring, and approval semantics.
+- **`AGENTS.md`** — instructions for whatever agent connects: the verify reflex, the reuse-first loop (search local tools → search workflows → search blocks → adapt or draft → register → validate → run → report), `{{ }}` expression wiring, and approval semantics.
 
 **What tools appear.** The exact count is intentionally data- and trust-mode-dependent. A fresh project includes the core reuse loop (`aart_find_workflows`, `aart_find_blocks`, register, validate, run, report); environment, eval, and remote tools appear when their corresponding records exist. Verify named capabilities, not a historical fixed total:
 

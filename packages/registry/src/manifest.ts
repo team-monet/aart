@@ -4,6 +4,7 @@ import { valid as validSemver } from "semver";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
 import { computePackContentHash } from "./hash.js";
+import { LocalToolManifestSchema } from "./local-tools.js";
 
 const PACK_NAME_PATTERN = /^[a-z0-9][a-z0-9._-]*$/;
 const SAFE_ASSET_SEGMENT_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
@@ -63,6 +64,26 @@ export const RawPackManifestSchema = z
     secrets: z.array(z.string()).default([]),
     blocks: z.array(safeAssetSegment("block id")).default([]),
     workflows: z.array(safeAssetSegment("workflow id")).default([]),
+    tools: z
+      .array(
+        LocalToolManifestSchema.superRefine((tool, ctx) => {
+          if (tool.command.resolution === "asset") {
+            ctx.addIssue({
+              code: "custom",
+              path: ["command", "resolution"],
+              message: "Pack tools must declare a portable external executable; asset-owned bytes are only supported by local tool registration",
+            });
+          }
+          if (tool.cwd.mode === "asset") {
+            ctx.addIssue({
+              code: "custom",
+              path: ["cwd", "mode"],
+              message: "Pack tools cannot use an asset working directory because Pack support carries only portable external prerequisites",
+            });
+          }
+        }),
+      )
+      .default([]),
   })
   .passthrough()
   .refine((manifest) => new Set(manifest.blocks.map((id) => id.toLocaleLowerCase("en-US"))).size === manifest.blocks.length, {
@@ -73,8 +94,12 @@ export const RawPackManifestSchema = z
     path: ["workflows"],
     message: "workflow ids must be unique",
   })
-  .refine((manifest) => manifest.blocks.length + manifest.workflows.length > 0, {
-    message: "pack manifest must declare at least one block or workflow",
+  .refine((manifest) => new Set(manifest.tools.map((tool) => tool.id.toLocaleLowerCase("en-US"))).size === manifest.tools.length, {
+    path: ["tools"],
+    message: "tool ids must be unique",
+  })
+  .refine((manifest) => manifest.blocks.length + manifest.workflows.length + manifest.tools.length > 0, {
+    message: "pack manifest must declare at least one block, workflow, or tool",
   });
 export type RawPackManifest = z.infer<typeof RawPackManifestSchema>;
 

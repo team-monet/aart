@@ -4,6 +4,32 @@
 // package had to fill.
 export { canonicalize, computePackContentHash } from "./hash.js";
 export {
+  checkLocalTool,
+  computeLocalToolHash,
+  latestToolVersions,
+  listLocalTools,
+  listLocalToolRuns,
+  LocalToolManifestError,
+  LocalToolManifestSchema,
+  LocalToolVersionConflictError,
+  packToolRecord,
+  parseLocalToolManifest,
+  readLocalToolRun,
+  registerLocalTool,
+  runLocalTool,
+  searchLocalTools,
+  type LocalToolManifest,
+  type LocalToolRunRecord,
+  type LocalToolSearchResult,
+  type RegisteredLocalTool,
+  type RegisterLocalToolOptions,
+  type RunLocalToolInput,
+  type ToolAvailabilityStatus,
+  type ToolCheckResult,
+  type ToolPrerequisite,
+  type ToolProvenance,
+} from "./local-tools.js";
+export {
   AART_VERSION,
   assertPackCompatibility,
   PackCompatibilityError,
@@ -42,6 +68,7 @@ export {
   fetchRemoteRegistryIndex,
   searchLocalCatalog,
   searchRemotePacks,
+  searchRemoteTools,
   searchRemoteIndex,
   searchRemoteWorkflows,
   searchWorkflows,
@@ -53,6 +80,7 @@ export {
   type RemoteRegistryIndexDocument,
   type PackCompatibility,
   type PackSearchResult,
+  type RemoteToolSearchResult,
   RemoteRegistryIndexError,
   type WorkflowSearchResult,
 } from "./discovery.js";

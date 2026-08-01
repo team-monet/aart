@@ -99,8 +99,17 @@ export async function preparePackHandler(
     description: raw.description,
     categories: [...new Set(derivedCategories)].sort(),
     tags: [...new Set(raw.tags)].sort(),
-    capabilities: [...new Set(raw.capabilities)].sort(),
-    secrets: [...new Set(raw.secrets)].sort(),
+    capabilities: [...new Set([...raw.capabilities, ...raw.tools.flatMap((tool) => tool.capabilities)])].sort(),
+    secrets: [
+      ...new Set([
+        ...raw.secrets,
+        ...raw.tools.flatMap((tool) =>
+          tool.authentication.mode === "aart_secrets"
+            ? tool.authentication.secrets.map((secret) => secret.ref)
+            : [],
+        ),
+      ]),
+    ].sort(),
     author,
     license: raw.license,
     repository: raw.repository,
@@ -109,6 +118,7 @@ export async function preparePackHandler(
     contentHash: manifest.contentHash,
     blocks,
     workflows,
+    tools: raw.tools,
   };
   if (input.outputPath !== undefined && !options.allowArbitraryOutputPath) {
     throw new Error("custom Pack preparation output paths are CLI-only; MCP writes aart-index-entry.json inside the Pack directory");
@@ -162,6 +172,19 @@ export async function findPacksHandler(_ctx: AartContext, input: FindPacksInput)
     stats: pack.stats,
     blocks: pack.blocks.map((entry) => entry.manifest.id),
     workflows: (pack.workflows ?? []).map((workflow) => ({ id: workflow.id, name: workflow.name })),
+    tools: (pack.tools ?? []).map((tool) => ({
+      id: tool.id,
+      name: tool.name,
+      version: tool.version,
+      description: tool.description,
+      command: tool.command,
+      prerequisites: tool.prerequisites,
+      capabilities: tool.capabilities,
+      effects: tool.effects,
+      cwd: tool.cwd,
+      authentication: tool.authentication,
+      output: tool.output,
+    })),
     installable: index.mode === "production",
     score,
   }));
@@ -178,6 +201,8 @@ export async function findPacksHandler(_ctx: AartContext, input: FindPacksInput)
 export interface InstallPackInput {
   name: string;
   version?: string;
+  /** Expected immutable seal advertised by discovery. */
+  contentHash?: string;
   /** Local package directory for linked/offline installation. Omit for npm. */
   sourcePath?: string;
 }
@@ -209,6 +234,12 @@ async function installPackUnlocked(ctx: AartContext, input: InstallPackInput): P
   if (input.version && raw.version !== input.version) {
     throw new Error(`installed pack ${input.name} declares version ${raw.version}, expected ${input.version}`);
   }
+  const candidate = buildPackManifest(raw, files.blockSources, files.workflowSources);
+  if (input.contentHash !== undefined && candidate.contentHash !== input.contentHash) {
+    throw new Error(
+      `installed pack ${input.name}@${raw.version} content hash ${candidate.contentHash} does not match discovered hash ${input.contentHash}; installation was not registered`,
+    );
+  }
   const provenance = input.sourcePath
     ? ({ kind: "linked", source: resolve(input.sourcePath) } as const)
     : ({ kind: "npm", source: `${npmPackageName}@${raw.version}`, npmPackageName } as const);
@@ -220,7 +251,12 @@ async function installPackUnlocked(ctx: AartContext, input: InstallPackInput): P
     version: manifest.version,
     contentHash: manifest.contentHash,
     approvalStatus: manifest.approvalStatus,
-    assets: { blocks: raw.blocks, workflows: raw.workflows },
+    assets: {
+      blocks: raw.blocks,
+      workflows: raw.workflows,
+      ...(raw.tools.length > 0 ? { tools: raw.tools.map((tool) => tool.id) } : {}),
+    },
+    ...(raw.tools.length > 0 ? { toolDetails: raw.tools } : {}),
     provenance: persisted.state.provenance,
   };
 }
@@ -246,11 +282,22 @@ export async function listPacksHandler(ctx: AartContext, input: ListPacksInput):
           sealStatus: current.contentHash === state.contentHash ? "verified" : "broken",
           displayName: raw.displayName,
           description: raw.description,
-          capabilities: raw.capabilities,
-          secrets: raw.secrets,
+          capabilities: [...new Set([...raw.capabilities, ...raw.tools.flatMap((tool) => tool.capabilities)])].sort(),
+          secrets: [
+            ...new Set([
+              ...raw.secrets,
+              ...raw.tools.flatMap((tool) =>
+                tool.authentication.mode === "aart_secrets"
+                  ? tool.authentication.secrets.map((secret) => secret.ref)
+                  : [],
+              ),
+            ]),
+          ].sort(),
+          ...(raw.tools.length > 0 ? { toolDetails: raw.tools } : {}),
           assets: {
             blocks: raw.blocks,
             workflows: raw.workflows,
+            ...(raw.tools.length > 0 ? { tools: raw.tools.map((tool) => tool.id) } : {}),
           },
         };
       } catch {
@@ -421,5 +468,6 @@ async function approvePackUnlocked(ctx: AartContext, input: ApprovePackInput): P
     approvalStatus: approved.approvalStatus,
     loadedOnNextProcessStart: blocks.map((block) => block.manifest.id),
     registeredDraftWorkflows: workflows.map((workflow) => ({ id: workflow.id, version: workflow.version })),
+    discoverableToolsOnNextProcessStart: raw.tools.map((tool) => ({ id: tool.id, version: tool.version })),
   };
 }
