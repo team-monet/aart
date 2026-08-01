@@ -22,9 +22,9 @@ const DESCRIPTIONS: Record<ToolName, string> = {
   aart_register_tool:
     "Register a local command manifest as an immutable, versioned, searchable asset. Asset-owned executable bytes are copied inertly and sealed; external executables remain explicit prerequisites whose resolved hashes must be reviewed before execution. Interpreter entrypoints must explicitly declare standalone snapshot compatibility and a snapshot version check because package-relative context is not copied implicitly.",
   aart_check_tool:
-    "Resolve one local tool's exact executable snapshot, argv, working directory, versions, platform, authentication source, effects, and prerequisites without running the task itself. Use the returned asset, executable, rendered-argv, cwd, and prerequisite-executable seals as one review boundary before execution.",
+    "Resolve one local tool's exact executable snapshot, rendered task argv, working directory, platform, authentication source, effects, prerequisites, and every declared version-check/probe argv without running any manifest command. Use the returned asset, executable, rendered-argv, cwd, and prerequisite-executable seals as one review boundary before execution.",
   aart_run_tool:
-    "Run a checked local tool only when the caller supplies the exact reviewed asset, executable, rendered-argv, cwd, and prerequisite-executable seals. Execution uses AART's content-addressed executable snapshot with fixed argv and no shell, and returns structured terminal output plus redacted provenance evidence; never call it without explicit approval of the check summary.",
+    "Run a checked local tool only when the caller supplies the exact reviewed asset, executable, rendered-argv, cwd, and prerequisite-executable seals. One stable authentication selection and durable run lifecycle covers every approved version check, probe, and task process; execution uses content-addressed snapshots with fixed argv and no shell. Never call it without explicit approval of the check summary.",
   aart_get_tool_run:
     "Fetch one durable local-tool execution record by runId after aart_run_tool actually spawned a process. Use it in a fresh session to verify the sealed executable, redacted argv/output, exit status, and mapped evidence instead of relying on chat memory.",
   aart_list_tool_runs:

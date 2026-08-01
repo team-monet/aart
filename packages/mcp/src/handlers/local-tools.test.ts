@@ -141,10 +141,10 @@ describe("local tool MCP handlers", () => {
     expect(checked).toMatchObject({ ok: false, check: { ready: false, status: "missing_prerequisite" } });
   });
 
-  it("keeps discovery inert and defers manifest-defined version commands to explicit check", async () => {
+  it("keeps discovery and check inert, then runs reviewed version commands in the durable run", async () => {
     tc = await createTestContext();
     const marker = join(tc.root, "version-check-ran");
-    await registerToolHandler(tc.ctx, {
+    const registered = await registerToolHandler(tc.ctx, {
       tool: toolManifest({
         command: {
           executable: process.execPath,
@@ -163,9 +163,37 @@ describe("local tool MCP handlers", () => {
     });
     await expect(fs.access(marker)).rejects.toThrow();
 
-    await expect(checkToolHandler(tc.ctx, { id: "codex-review.wait" })).resolves.toMatchObject({
+    const checked = await checkToolHandler(tc.ctx, { id: "codex-review.wait" });
+    expect(checked).toMatchObject({
       ok: true,
+      check: {
+        executable: { versionCheckDeferred: true },
+        approvalSummary: {
+          subprocesses: [
+            { phase: "command_version_check", argv: ["-e", expect.any(String)] },
+            { phase: "task", argv: ["-e", expect.any(String)] },
+          ],
+        },
+      },
     });
+    await expect(fs.access(marker)).rejects.toThrow();
+    const sealed = registered.tool as { contentHash: string };
+    const check = checked.check as {
+      executable: { contentHash: string };
+      argvHash: string;
+      cwdHash: string;
+      prerequisiteHashes: Record<string, string>;
+    };
+    await expect(
+      runToolHandler(tc.ctx, {
+        id: "codex-review.wait",
+        contentHash: sealed.contentHash,
+        executableHash: check.executable.contentHash,
+        argvHash: check.argvHash,
+        cwdHash: check.cwdHash,
+        prerequisiteHashes: check.prerequisiteHashes,
+      }),
+    ).resolves.toMatchObject({ ok: true, ran: true });
     await expect(fs.readFile(marker, "utf8")).resolves.toBe("ran");
   });
 

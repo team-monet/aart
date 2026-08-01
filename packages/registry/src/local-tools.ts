@@ -347,6 +347,19 @@ async function replaceFile(path: string, bytes: string | Buffer, mode: number): 
   }
 }
 
+function replaceFileSync(path: string, bytes: string | Buffer, mode: number): void {
+  mkdirSync(dirname(path), { recursive: true });
+  const temporary = `${path}.${randomUUID()}.tmp`;
+  writeFileSync(temporary, bytes, { flag: "wx", mode });
+  try {
+    renameSync(temporary, path);
+  } finally {
+    try {
+      unlinkSync(temporary);
+    } catch {}
+  }
+}
+
 function isWithin(parent: string, child: string): boolean {
   const rel = relative(parent, child);
   return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
@@ -891,9 +904,16 @@ async function inspectVersion(
   identity: ExecutableIdentity,
   check: NonNullable<LocalToolManifest["command"]["versionCheck"]> | undefined,
   env: NodeJS.ProcessEnv,
+  execute: (request: ApprovalBoundSubprocessRequest) => Promise<SpawnResult>,
+  phase: "command_version_check" | "prerequisite_version_check",
+  prerequisite?: string,
 ): Promise<{ raw?: string; version?: string; compatible: boolean; reason?: string }> {
   if (!check) return { compatible: true };
-  const result = await spawnNoShell(identity.launchPath, [...identity.launchArgsPrefix, ...check.args], {
+  const result = await execute({
+    phase,
+    ...(prerequisite ? { prerequisite } : {}),
+    executable: identity,
+    args: check.args,
     env,
     timeoutMs: 5_000,
   });
@@ -1142,8 +1162,11 @@ async function identityWithVersion(
   identity: ExecutableIdentity,
   check: NonNullable<LocalToolManifest["command"]["versionCheck"]> | undefined,
   executionEnv: NodeJS.ProcessEnv,
+  execute: (request: ApprovalBoundSubprocessRequest) => Promise<SpawnResult>,
+  phase: "command_version_check" | "prerequisite_version_check",
+  prerequisite?: string,
 ): Promise<ExecutableIdentity | UnavailableExecutableIdentity> {
-  const version = await inspectVersion(identity, check, executionEnv);
+  const version = await inspectVersion(identity, check, executionEnv, execute, phase, prerequisite);
   if (!version.compatible) {
     return {
       ready: false,
@@ -1191,6 +1214,7 @@ export interface ToolCheckResult {
     sourceContentHash: string;
     contentHash: string;
     version?: string;
+    versionCheckDeferred?: boolean;
     interpreter?: ExecutableIdentity["interpreter"];
   };
   prerequisites: Array<{
@@ -1204,6 +1228,7 @@ export interface ToolCheckResult {
     sourceContentHash?: string;
     contentHash?: string;
     version?: string;
+    versionCheckDeferred?: boolean;
     interpreter?: ExecutableIdentity["interpreter"];
     probeDeferred?: boolean;
     reason?: string;
@@ -1231,13 +1256,28 @@ export interface ToolCheckResult {
     effects: LocalToolManifest["effects"];
     cwd: LocalToolManifest["cwd"];
     output: LocalToolManifest["output"];
+    subprocesses: Array<{
+      phase: "command_version_check" | "prerequisite_version_check" | "prerequisite_probe" | "task";
+      prerequisite?: string;
+      executable: string;
+      argv: string[];
+      authentication: {
+        mode: "inherited" | "aart_secrets";
+        inheritedEnvironment: "all" | string[];
+        secretMappings: Array<{ ref: string; env: string }>;
+      };
+      effects: LocalToolManifest["effects"];
+    }>;
   };
 }
 
-interface ApprovalBoundProbeRequest {
-  prerequisite: LocalToolManifest["prerequisites"][number];
+interface ApprovalBoundSubprocessRequest {
+  phase: "command_version_check" | "prerequisite_version_check" | "prerequisite_probe";
+  prerequisite?: string;
   executable: ExecutableIdentity;
+  args: readonly string[];
   env: NodeJS.ProcessEnv;
+  timeoutMs: number;
 }
 
 function renderArgs(manifest: LocalToolManifest, inputs: Readonly<Record<string, string>> | undefined): string[] {
@@ -1271,8 +1311,64 @@ function reviewArgs(
 function approvalSummary(
   record: RegisteredLocalTool,
   argv?: string[],
+  resolved?: {
+    command: ExecutableIdentity;
+    prerequisites: ReadonlyArray<{
+      manifest: LocalToolManifest["prerequisites"][number];
+      identity: ExecutableIdentity;
+    }>;
+  },
 ): ToolCheckResult["approvalSummary"] {
   const manifest = record.manifest;
+  const secretMappings = manifest.authentication.mode === "aart_secrets" ? manifest.authentication.secrets : [];
+  const subprocessAuthority = {
+    mode: manifest.authentication.mode,
+    inheritedEnvironment: manifest.authentication.inheritEnvironment,
+    secretMappings,
+  };
+  const subprocesses: ToolCheckResult["approvalSummary"]["subprocesses"] = [];
+  if (resolved) {
+    if (manifest.command.versionCheck) {
+      subprocesses.push({
+        phase: "command_version_check",
+        executable: resolved.command.launchPath,
+        argv: [...resolved.command.launchArgsPrefix, ...manifest.command.versionCheck.args],
+        authentication: subprocessAuthority,
+        effects: manifest.effects,
+      });
+    }
+    for (const { manifest: prerequisite, identity } of resolved.prerequisites) {
+      if (prerequisite.versionCheck) {
+        subprocesses.push({
+          phase: "prerequisite_version_check",
+          prerequisite: prerequisite.name,
+          executable: identity.launchPath,
+          argv: [...identity.launchArgsPrefix, ...prerequisite.versionCheck.args],
+          authentication: subprocessAuthority,
+          effects: manifest.effects,
+        });
+      }
+      if (prerequisite.probe) {
+        subprocesses.push({
+          phase: "prerequisite_probe",
+          prerequisite: prerequisite.name,
+          executable: identity.launchPath,
+          argv: [...identity.launchArgsPrefix, ...prerequisite.probe.args],
+          authentication: subprocessAuthority,
+          effects: manifest.effects,
+        });
+      }
+    }
+    if (argv) {
+      subprocesses.push({
+        phase: "task",
+        executable: resolved.command.launchPath,
+        argv: [...resolved.command.launchArgsPrefix, ...argv],
+        authentication: subprocessAuthority,
+        effects: manifest.effects,
+      });
+    }
+  }
   return {
     asset: `${manifest.id}@${manifest.version}`,
     source: record.provenance,
@@ -1287,12 +1383,13 @@ function approvalSummary(
       mode: manifest.authentication.mode,
       description: manifest.authentication.description,
       inheritedEnvironment: manifest.authentication.inheritEnvironment,
-      secretRefs: manifest.authentication.mode === "aart_secrets" ? manifest.authentication.secrets.map((secret) => secret.ref) : [],
-      secretMappings: manifest.authentication.mode === "aart_secrets" ? manifest.authentication.secrets : [],
+      secretRefs: secretMappings.map((secret) => secret.ref),
+      secretMappings,
     },
     effects: manifest.effects,
     cwd: manifest.cwd,
     output: manifest.output,
+    subprocesses,
   };
 }
 
@@ -1308,7 +1405,8 @@ export async function checkLocalTool(
     expectedPrerequisiteHashes?: Readonly<Record<string, string>>;
     expectedCwdHash?: string;
     approvalBound?: boolean;
-    executeApprovalBoundProbe?: (request: ApprovalBoundProbeRequest) => Promise<SpawnResult>;
+    resolveApprovalEnvironment?: () => Promise<NodeJS.ProcessEnv>;
+    executeApprovalBoundSubprocess?: (request: ApprovalBoundSubprocessRequest) => Promise<SpawnResult>;
   } = {},
 ): Promise<ToolCheckResult> {
   const env = options.env ?? process.env;
@@ -1493,13 +1591,31 @@ export async function checkLocalTool(
     };
   }
 
-  let executionEnv: NodeJS.ProcessEnv;
+  const reviewableBase = {
+    ...sealedBase,
+    approvalSummary: approvalSummary(record, argv, {
+      command: mainBytes,
+      prerequisites: prerequisiteBytes,
+    }),
+  };
+
+  let executionEnv: NodeJS.ProcessEnv | undefined;
   if (options.approvalBound === true) {
+    if (!options.resolveApprovalEnvironment || !options.executeApprovalBoundSubprocess) {
+      return {
+        ...reviewableBase,
+        executable: mainBytes,
+        prerequisitePath,
+        status: "invalid_input",
+        ready: false,
+        reason: "approval-bound checks require one durable subprocess lifecycle and one stable execution environment",
+      };
+    }
     try {
-      executionEnv = (await selectEnvironment(root, record.manifest, env)).env;
+      executionEnv = await options.resolveApprovalEnvironment();
     } catch (cause) {
       return {
-        ...sealedBase,
+        ...reviewableBase,
         executable: mainBytes,
         prerequisitePath,
         status: "missing_prerequisite",
@@ -1507,66 +1623,84 @@ export async function checkLocalTool(
         reason: (cause as Error).message,
       };
     }
-  } else {
-    executionEnv = await credentialFreeEnvironment(root, env);
-  }
-  executionEnv.PATH = prerequisitePath;
-
-  const main = await identityWithVersion(mainBytes, record.manifest.command.versionCheck, executionEnv);
-  if (!main.ready) {
-    return {
-      ...sealedBase,
-      prerequisitePath,
-      status: availabilityStatus(main),
-      ready: false,
-      reason: main.reason,
-    };
+    executionEnv.PATH = prerequisitePath;
   }
 
-  for (const { manifest: prerequisite, identity: prerequisiteIdentity } of prerequisiteBytes) {
-    const identity = await identityWithVersion(prerequisiteIdentity, prerequisite.versionCheck, executionEnv);
-    if (!identity.ready) {
-      base.prerequisites.push({
-        name: prerequisite.name,
-        ready: false,
-        reason: identity.reason,
-        installHint: prerequisite.installHint,
-      });
+  let main: ExecutableIdentity = mainBytes;
+  if (options.approvalBound === true) {
+    const versionedMain = await identityWithVersion(
+      mainBytes,
+      record.manifest.command.versionCheck,
+      executionEnv!,
+      options.executeApprovalBoundSubprocess!,
+      "command_version_check",
+    );
+    if (!versionedMain.ready) {
       return {
-        ...sealedBase,
-        executable: main,
+        ...reviewableBase,
         prerequisitePath,
-        status: availabilityStatus(identity),
+        status: availabilityStatus(versionedMain),
         ready: false,
-        reason: `${prerequisite.name}: ${identity.reason}`,
+        reason: versionedMain.reason,
       };
     }
-    if (prerequisite.probe && options.approvalBound === true) {
-      if (!options.executeApprovalBoundProbe) {
-        return {
-          ...sealedBase,
-          executable: main,
-          prerequisitePath,
-          status: "invalid_input",
+    main = versionedMain;
+  }
+  const mainResult = {
+    ...main,
+    ...(options.approvalBound !== true && record.manifest.command.versionCheck
+      ? { versionCheckDeferred: true as const }
+      : {}),
+  };
+
+  for (const { manifest: prerequisite, identity: prerequisiteIdentity } of prerequisiteBytes) {
+    let identity: ExecutableIdentity = prerequisiteIdentity;
+    if (options.approvalBound === true) {
+      const versionedIdentity = await identityWithVersion(
+        prerequisiteIdentity,
+        prerequisite.versionCheck,
+        executionEnv!,
+        options.executeApprovalBoundSubprocess!,
+        "prerequisite_version_check",
+        prerequisite.name,
+      );
+      if (!versionedIdentity.ready) {
+        base.prerequisites.push({
+          name: prerequisite.name,
           ready: false,
-          reason: `${prerequisite.name}: approval-bound probes require durable execution lifecycle recording`,
+          reason: versionedIdentity.reason,
+          installHint: prerequisite.installHint,
+        });
+        return {
+          ...reviewableBase,
+          executable: mainResult,
+          prerequisitePath,
+          status: availabilityStatus(versionedIdentity),
+          ready: false,
+          reason: `${prerequisite.name}: ${versionedIdentity.reason}`,
         };
       }
+      identity = versionedIdentity;
+    }
+    if (prerequisite.probe && options.approvalBound === true) {
       const beforeProbe = await executableBytesIdentity(root, record, prerequisite, env);
       if (!beforeProbe.ready || beforeProbe.contentHash !== identity.contentHash) {
         return {
-          ...sealedBase,
-          executable: main,
+          ...reviewableBase,
+          executable: mainResult,
           prerequisitePath,
           status: "seal_mismatch",
           ready: false,
           reason: `${prerequisite.name}: prerequisite executable changed before its probe`,
         };
       }
-      const probe = await options.executeApprovalBoundProbe({
-        prerequisite,
+      const probe = await options.executeApprovalBoundSubprocess!({
+        phase: "prerequisite_probe",
+        prerequisite: prerequisite.name,
         executable: identity,
-        env: executionEnv,
+        args: prerequisite.probe.args,
+        env: executionEnv!,
+        timeoutMs: 10_000,
       });
       if (probe.exitCode !== prerequisite.probe.expectedExitCode || probe.timedOut || probe.outputLimitExceeded) {
         base.prerequisites.push({
@@ -1587,8 +1721,8 @@ export async function checkLocalTool(
           installHint: prerequisite.installHint,
         });
         return {
-          ...sealedBase,
-          executable: main,
+          ...reviewableBase,
+          executable: mainResult,
           prerequisitePath,
           status: "missing_prerequisite",
           ready: false,
@@ -1607,53 +1741,21 @@ export async function checkLocalTool(
       sourceContentHash: identity.sourceContentHash,
       contentHash: identity.contentHash,
       version: identity.version,
+      versionCheckDeferred: options.approvalBound !== true && prerequisite.versionCheck !== undefined,
       interpreter: identity.interpreter,
       probeDeferred: prerequisite.probe !== undefined && options.approvalBound !== true,
     });
   }
 
   return {
-    ...sealedBase,
-    executable: main,
+    ...reviewableBase,
+    executable: mainResult,
     prerequisiteHashes: Object.fromEntries(
       base.prerequisites.map((prerequisite) => [prerequisite.name, prerequisite.contentHash!]),
     ),
     prerequisitePath,
     status: "ready",
     ready: true,
-  };
-}
-
-async function credentialFreeEnvironment(root: string, hostEnv: NodeJS.ProcessEnv): Promise<NodeJS.ProcessEnv> {
-  const home = join(root, "tools", "preflight-home");
-  const temporary = join(home, "tmp");
-  const config = join(home, "config");
-  const data = join(home, "data");
-  const state = join(home, "state");
-  const cache = join(home, "cache");
-  await Promise.all([home, temporary, config, data, state, cache].map((directory) => fs.mkdir(directory, {
-    recursive: true,
-    mode: 0o700,
-  })));
-  if (process.platform !== "win32") {
-    return {
-      HOME: home,
-      TMPDIR: temporary,
-      XDG_CONFIG_HOME: config,
-      XDG_DATA_HOME: data,
-      XDG_STATE_HOME: state,
-      XDG_CACHE_HOME: cache,
-    };
-  }
-  const system = ["SystemRoot", "WINDIR", "PATHEXT"];
-  return {
-    ...Object.fromEntries(system.flatMap((name) => (hostEnv[name] === undefined ? [] : [[name, hostEnv[name]]]))),
-    HOME: home,
-    USERPROFILE: home,
-    APPDATA: data,
-    LOCALAPPDATA: data,
-    TEMP: temporary,
-    TMP: temporary,
   };
 }
 
@@ -1792,6 +1894,13 @@ export interface LocalToolRunRecord {
   startedAt: string;
   endedAt?: string;
   status: "running" | "terminal";
+  ownerPid?: number;
+  activeProcess?: {
+    phase: "command_version_check" | "prerequisite_version_check" | "prerequisite_probe" | "task";
+    prerequisite?: string;
+    pid: number;
+    executableHash: string;
+  };
   result: Record<string, unknown> & { ok: boolean; ran: true };
 }
 
@@ -1809,6 +1918,7 @@ function beginLocalToolRun(
   prerequisiteHashes: Readonly<Record<string, string>>,
   runId: string,
   startedAt: string,
+  activeProcess: NonNullable<LocalToolRunRecord["activeProcess"]>,
   result: Record<string, unknown> & { ok: boolean; ran: true },
 ): LocalToolRunRecord {
   const durable: LocalToolRunRecord = {
@@ -1822,9 +1932,27 @@ function beginLocalToolRun(
     prerequisiteHashes: { ...prerequisiteHashes },
     startedAt,
     status: "running",
+    ownerPid: process.pid,
+    activeProcess,
     result,
   };
   writeOnceSync(localToolRunPath(root, runId), `${JSON.stringify(durable, null, 2)}\n`, 0o600);
+  return durable;
+}
+
+function advanceLocalToolRun(
+  root: string,
+  running: LocalToolRunRecord,
+  activeProcess: LocalToolRunRecord["activeProcess"],
+  result: Record<string, unknown> & { ok: boolean; ran: true },
+): LocalToolRunRecord {
+  const durable: LocalToolRunRecord = {
+    ...running,
+    result,
+  };
+  if (activeProcess) durable.activeProcess = activeProcess;
+  else delete durable.activeProcess;
+  replaceFileSync(localToolRunPath(root, running.runId), `${JSON.stringify(durable, null, 2)}\n`, 0o600);
   return durable;
 }
 
@@ -1839,6 +1967,7 @@ async function completeLocalToolRun(
     status: "terminal",
     result,
   };
+  delete durable.activeProcess;
   await replaceFile(localToolRunPath(root, running.runId), `${JSON.stringify(durable, null, 2)}\n`, 0o600);
   return { ...result, runId: running.runId, evidenceStored: true };
 }
@@ -1846,6 +1975,7 @@ async function completeLocalToolRun(
 export async function readLocalToolRun(root: string, runId: string): Promise<LocalToolRunRecord | undefined> {
   try {
     const parsed = JSON.parse(await fs.readFile(localToolRunPath(root, runId), "utf8")) as LocalToolRunRecord;
+    const activeProcess = parsed.activeProcess;
     if (
       parsed.runId !== runId ||
       parsed.result?.ran !== true ||
@@ -1855,14 +1985,65 @@ export async function readLocalToolRun(root: string, runId: string): Promise<Loc
       typeof parsed.argvHash !== "string" ||
       typeof parsed.cwdHash !== "string" ||
       !parsed.prerequisiteHashes ||
-      typeof parsed.prerequisiteHashes !== "object"
+      typeof parsed.prerequisiteHashes !== "object" ||
+      (parsed.ownerPid !== undefined && (!Number.isInteger(parsed.ownerPid) || parsed.ownerPid <= 0)) ||
+      (activeProcess !== undefined &&
+        (![
+          "command_version_check",
+          "prerequisite_version_check",
+          "prerequisite_probe",
+          "task",
+        ].includes(activeProcess.phase) ||
+          !Number.isInteger(activeProcess.pid) ||
+          activeProcess.pid <= 0 ||
+          !/^sha256:[a-f0-9]{64}$/.test(activeProcess.executableHash))) ||
+      (parsed.status === "terminal" && activeProcess !== undefined)
     ) {
       throw new Error(`local tool run record "${runId}" failed validation`);
+    }
+    if (
+      parsed.status === "running" &&
+      parsed.ownerPid !== undefined &&
+      !processIsAlive(parsed.ownerPid) &&
+      (!activeProcess || !processIsAlive(activeProcess.pid))
+    ) {
+      const previousEvidence =
+        parsed.result.evidence && typeof parsed.result.evidence === "object" && !Array.isArray(parsed.result.evidence)
+          ? (parsed.result.evidence as Record<string, unknown>)
+          : {};
+      const durable: LocalToolRunRecord = {
+        ...parsed,
+        endedAt: new Date().toISOString(),
+        status: "terminal",
+        result: {
+          ok: false,
+          ran: true,
+          kind: "caller_interrupted",
+          error: "the approval-bound caller and its active subprocess are no longer running",
+          evidence: {
+            ...previousEvidence,
+            ...(activeProcess ? { phase: activeProcess.phase } : {}),
+            callerInterrupted: true,
+          },
+        },
+      };
+      delete durable.activeProcess;
+      await replaceFile(localToolRunPath(root, runId), `${JSON.stringify(durable, null, 2)}\n`, 0o600);
+      return durable;
     }
     return parsed;
   } catch (cause) {
     if ((cause as NodeJS.ErrnoException).code === "ENOENT") return undefined;
     throw cause;
+  }
+}
+
+function processIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (cause) {
+    return (cause as NodeJS.ErrnoException).code !== "ESRCH";
   }
 }
 
@@ -1905,6 +2086,15 @@ export async function runLocalTool(
   const startedAt = new Date().toISOString();
   const runId = `toolrun_${randomUUID()}`;
   const prerequisiteHashes = { ...(input.prerequisiteHashes ?? {}) };
+  const subprocessExecutions: Array<{
+    phase: "command_version_check" | "prerequisite_version_check" | "prerequisite_probe" | "task";
+    prerequisite?: string;
+    executableHash: string;
+    exitCode: number | null;
+    signal: NodeJS.Signals | null;
+    timedOut: boolean;
+    outputLimitExceeded: boolean;
+  }> = [];
   const prerequisiteProbes: Array<{
     name: string;
     executableHash: string;
@@ -1913,8 +2103,125 @@ export async function runLocalTool(
     timedOut: boolean;
     outputLimitExceeded: boolean;
   }> = [];
+  const lifecycleEvidence = {
+    asset: `${record.manifest.id}@${record.manifest.version}`,
+    source: record.provenance,
+    contentHash: record.contentHash,
+    toolHash: record.toolHash,
+    argvHash: input.argvHash,
+    cwdHash: input.cwdHash,
+    prerequisiteHashes,
+  };
   let processStarted = false;
   let running: LocalToolRunRecord | undefined;
+  let lastStartedPhase: NonNullable<LocalToolRunRecord["activeProcess"]>["phase"] | undefined;
+  let lastStartedPrerequisite: string | undefined;
+  let selectedEnvironment: Awaited<ReturnType<typeof selectEnvironment>> | undefined;
+  const hostEnv = input.env ?? process.env;
+  const resolveApprovalEnvironment = async (): Promise<NodeJS.ProcessEnv> => {
+    selectedEnvironment ??= await selectEnvironment(root, record.manifest, hostEnv);
+    return selectedEnvironment.env;
+  };
+  const executeLifecycleSubprocess = async (
+    request: {
+      phase: "command_version_check" | "prerequisite_version_check" | "prerequisite_probe" | "task";
+      prerequisite?: string;
+      executable: Pick<ExecutableIdentity, "launchPath" | "launchArgsPrefix" | "contentHash">;
+      args: readonly string[];
+      env: NodeJS.ProcessEnv;
+      timeoutMs?: number;
+      cwd?: string;
+    },
+    evidenceContext: Record<string, unknown> = lifecycleEvidence,
+  ): Promise<SpawnResult> => {
+    let spawned = false;
+    const result = await spawnNoShell(
+      request.executable.launchPath,
+      [...request.executable.launchArgsPrefix, ...request.args],
+      {
+        cwd: request.cwd,
+        env: request.env,
+        timeoutMs: request.timeoutMs,
+        onSpawn: (pid) => {
+          processStarted = true;
+          spawned = true;
+          lastStartedPhase = request.phase;
+          lastStartedPrerequisite = request.prerequisite;
+          const activeProcess: NonNullable<LocalToolRunRecord["activeProcess"]> = {
+            phase: request.phase,
+            ...(request.prerequisite ? { prerequisite: request.prerequisite } : {}),
+            pid,
+            executableHash: request.executable.contentHash,
+          };
+          const runningResult = {
+            ok: false as const,
+            ran: true as const,
+            kind: "running",
+            evidence: {
+              ...evidenceContext,
+              phase: request.phase,
+              ...(request.prerequisite ? { prerequisite: request.prerequisite } : {}),
+              executableHash: request.executable.contentHash,
+              pid,
+              subprocessExecutions,
+            },
+          };
+          running = running
+            ? advanceLocalToolRun(root, running, activeProcess, runningResult)
+            : beginLocalToolRun(
+                root,
+                record,
+                input.executableHash,
+                input.argvHash,
+                input.cwdHash,
+                prerequisiteHashes,
+                runId,
+                startedAt,
+                activeProcess,
+                runningResult,
+              );
+        },
+      },
+    );
+    if (!spawned) {
+      throw new Error(`${request.phase} closed without emitting a successful spawn event`);
+    }
+    const execution = {
+      phase: request.phase,
+      ...(request.prerequisite ? { prerequisite: request.prerequisite } : {}),
+      executableHash: request.executable.contentHash,
+      exitCode: result.exitCode,
+      signal: result.signal,
+      timedOut: result.timedOut,
+      outputLimitExceeded: result.outputLimitExceeded,
+    };
+    subprocessExecutions.push(execution);
+    if (request.phase === "prerequisite_probe" && request.prerequisite) {
+      prerequisiteProbes.push({
+        name: request.prerequisite,
+        executableHash: request.executable.contentHash,
+        exitCode: result.exitCode,
+        signal: result.signal,
+        timedOut: result.timedOut,
+        outputLimitExceeded: result.outputLimitExceeded,
+      });
+    }
+    if (running) {
+      running = advanceLocalToolRun(root, running, undefined, {
+        ok: false,
+        ran: true,
+        kind: "running",
+        evidence: {
+          ...evidenceContext,
+          phase: "between_subprocesses",
+          lastCompletedPhase: request.phase,
+          ...(request.prerequisite ? { prerequisite: request.prerequisite } : {}),
+          subprocessExecutions,
+        },
+      });
+    }
+    return result;
+  };
   let check: ToolCheckResult;
   try {
     check = await checkLocalTool(root, record, {
@@ -1926,72 +2233,20 @@ export async function runLocalTool(
       expectedPrerequisiteHashes: prerequisiteHashes,
       expectedCwdHash: input.cwdHash,
       approvalBound: true,
-      executeApprovalBoundProbe: async ({ prerequisite, executable, env }) => {
-        let probeStarted = false;
-        const probe = await spawnNoShell(
-          executable.launchPath,
-          [...executable.launchArgsPrefix, ...prerequisite.probe!.args],
-          {
-            env,
-            timeoutMs: 10_000,
-            onSpawn: (pid) => {
-              processStarted = true;
-              probeStarted = true;
-              if (running) return;
-              running = beginLocalToolRun(
-                root,
-                record,
-                input.executableHash,
-                input.argvHash,
-                input.cwdHash,
-                prerequisiteHashes,
-                runId,
-                startedAt,
-                {
-                  ok: false,
-                  ran: true,
-                  kind: "running",
-                  evidence: {
-                    asset: `${record.manifest.id}@${record.manifest.version}`,
-                    source: record.provenance,
-                    contentHash: record.contentHash,
-                    toolHash: record.toolHash,
-                    phase: "prerequisite_probe",
-                    prerequisite: prerequisite.name,
-                    prerequisiteHash: executable.contentHash,
-                    pid,
-                  },
-                },
-              );
-            },
-          },
-        );
-        if (!probeStarted) {
-          throw new Error(`prerequisite probe ${prerequisite.name} closed without emitting a successful spawn event`);
-        }
-        prerequisiteProbes.push({
-          name: prerequisite.name,
-          executableHash: executable.contentHash,
-          exitCode: probe.exitCode,
-          signal: probe.signal,
-          timedOut: probe.timedOut,
-          outputLimitExceeded: probe.outputLimitExceeded,
-        });
-        return probe;
-      },
+      resolveApprovalEnvironment,
+      executeApprovalBoundSubprocess: executeLifecycleSubprocess,
     });
   } catch (cause) {
     const failure = {
       ok: false as const,
       ran: true as const,
       kind: "execution_monitor_failed",
-      error: `approval-bound prerequisite execution failed after spawn: ${(cause as Error).message}`,
+      error: `approval-bound subprocess lifecycle failed after spawn: ${(cause as Error).message}`,
       evidence: {
-        asset: `${record.manifest.id}@${record.manifest.version}`,
-        source: record.provenance,
-        contentHash: record.contentHash,
-        toolHash: record.toolHash,
-        phase: "prerequisite_probe",
+        ...lifecycleEvidence,
+        phase: lastStartedPhase ?? "preflight",
+        ...(lastStartedPrerequisite ? { prerequisite: lastStartedPrerequisite } : {}),
+        subprocessExecutions,
         prerequisiteProbes,
       },
     };
@@ -2011,11 +2266,10 @@ export async function runLocalTool(
         error: check.reason ?? "local tool prerequisites are not ready",
         check,
         evidence: {
-          asset: `${record.manifest.id}@${record.manifest.version}`,
-          source: record.provenance,
-          contentHash: record.contentHash,
-          toolHash: record.toolHash,
-          phase: "prerequisite_probe",
+          ...lifecycleEvidence,
+          phase: lastStartedPhase ?? "preflight",
+          ...(lastStartedPrerequisite ? { prerequisite: lastStartedPrerequisite } : {}),
+          subprocessExecutions,
           prerequisiteProbes,
         },
       });
@@ -2030,9 +2284,15 @@ export async function runLocalTool(
   }
   const checkedExecutable = check.executable;
 
-  const hostEnv = input.env ?? process.env;
-  const selected = await selectEnvironment(root, record.manifest, hostEnv);
-  selected.env.PATH = check.prerequisitePath;
+  if (!selectedEnvironment) {
+    return {
+      ok: false,
+      ran: false,
+      kind: "missing_prerequisite",
+      error: "approval-bound environment was not resolved during the sealed preflight",
+    };
+  }
+  selectedEnvironment.env.PATH = check.prerequisitePath;
   const executionArgv = renderArgs(record.manifest, input.inputs);
   const sensitiveInputs = record.manifest.inputs
     .filter((definition) => definition.sensitive)
@@ -2045,7 +2305,7 @@ export async function runLocalTool(
           .map(([, value]) => value)
       : inherited.map((name) => hostEnv[name])
   ).filter((value): value is string => typeof value === "string" && value.length > 0);
-  const redactions = [...selected.secrets, ...sensitiveInputs, ...inheritedSecretValues];
+  const redactions = [...selectedEnvironment.secrets, ...sensitiveInputs, ...inheritedSecretValues];
   const executionContext = {
     asset: `${record.manifest.id}@${record.manifest.version}`,
     source: record.provenance,
@@ -2060,49 +2320,28 @@ export async function runLocalTool(
     prerequisitePath: check.prerequisitePath,
     cwd: check.resolvedCwd,
     authentication: check.approvalSummary.authentication,
+    subprocessExecutions,
     prerequisiteProbes,
   };
-  let mainProcessStarted = false;
   let result: SpawnResult;
   try {
-    result = await spawnNoShell(checkedExecutable.launchPath, [
-      ...checkedExecutable.launchArgsPrefix,
-      ...executionArgv,
-    ], {
+    result = await executeLifecycleSubprocess({
+      phase: "task",
+      executable: checkedExecutable,
+      args: executionArgv,
       cwd: check.resolvedCwd,
-      env: selected.env,
+      env: selectedEnvironment.env,
       timeoutMs: record.manifest.command.timeoutMs,
-      onSpawn: (pid) => {
-        processStarted = true;
-        mainProcessStarted = true;
-        if (running) return;
-        running = beginLocalToolRun(
-          root,
-          record,
-          checkedExecutable.contentHash,
-          input.argvHash,
-          input.cwdHash,
-          prerequisiteHashes,
-          runId,
-          startedAt,
-          {
-            ok: false,
-            ran: true,
-            kind: "running",
-            evidence: { ...executionContext, pid },
-          },
-        );
-      },
-    });
+    }, executionContext);
   } catch (cause) {
     if (running) {
       return completeLocalToolRun(root, running, {
         ok: false,
         ran: true,
-        kind: mainProcessStarted ? "execution_monitor_failed" : "spawn_failed_after_probe",
-        error: mainProcessStarted
+        kind: lastStartedPhase === "task" ? "execution_monitor_failed" : "spawn_failed_after_preflight",
+        error: lastStartedPhase === "task"
           ? `local tool process started but monitoring failed: ${(cause as Error).message}`
-          : `local tool failed to spawn after a prerequisite probe ran: ${(cause as Error).message}`,
+          : `local tool failed to spawn after approval-bound preflight ran: ${(cause as Error).message}`,
         evidence: executionContext,
       });
     }
@@ -2113,23 +2352,6 @@ export async function runLocalTool(
       error: processStarted
         ? `local tool process started but its running record could not be persisted: ${(cause as Error).message}`
         : `local tool failed to spawn after preflight: ${(cause as Error).message}`,
-    };
-  }
-  if (!mainProcessStarted) {
-    if (running) {
-      return completeLocalToolRun(root, running, {
-        ok: false,
-        ran: true,
-        kind: "spawn_failed_after_probe",
-        error: "local tool closed without emitting a successful spawn event after a prerequisite probe ran",
-        evidence: executionContext,
-      });
-    }
-    return {
-      ok: false,
-      ran: false,
-      kind: "spawn_failed",
-      error: "local tool closed without emitting a successful spawn event",
     };
   }
   if (!running) {

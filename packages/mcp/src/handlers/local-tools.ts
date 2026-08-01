@@ -189,7 +189,7 @@ export async function findToolsHandler(ctx: AartContext, input: FindToolsInput):
           : {
               status: "requires_explicit_check",
               ready: false,
-              reason: "Discovery is inert; call aart_check_tool with concrete inputs to run version checks and probes.",
+              reason: "Discovery is inert; call aart_check_tool with concrete inputs to seal and review every version check, probe, and task before any of them runs.",
             },
       contentHash: record.contentHash,
       toolHash: record.toolHash,
