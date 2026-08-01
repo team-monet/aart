@@ -3,13 +3,14 @@ import {
   linkSync,
   mkdirSync,
   promises as fs,
+  readFileSync,
   renameSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import { delimiter, dirname, extname, isAbsolute, join, relative, resolve } from "node:path";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { Worker } from "node:worker_threads";
 import { coerce, rcompare, satisfies, valid as validSemver, validRange } from "semver";
 import { parse as parseYaml } from "yaml";
@@ -25,6 +26,7 @@ const EVIDENCE_PATH_PATTERN = /^\$(?:\.[A-Za-z_][A-Za-z0-9_-]*|\[\d+\])*$/;
 const MAX_CAPTURE_BYTES = 1_048_576;
 const MAX_TIMEOUT_MS = 2_147_483_647;
 const REGEX_EXECUTION_TIMEOUT_MS = 1_000;
+const CURRENT_PROCESS_START_IDENTITY = processStartIdentity(process.pid);
 
 function isAnyPlatformAbsolute(value: string): boolean {
   return isAbsolute(value) || /^[A-Za-z]:[\\/]/.test(value) || /^\\\\[^\\]+\\[^\\]+/.test(value);
@@ -904,6 +906,7 @@ async function inspectVersion(
   identity: ExecutableIdentity,
   check: NonNullable<LocalToolManifest["command"]["versionCheck"]> | undefined,
   env: NodeJS.ProcessEnv,
+  cwd: string,
   execute: (request: ApprovalBoundSubprocessRequest) => Promise<SpawnResult>,
   phase: "command_version_check" | "prerequisite_version_check",
   prerequisite?: string,
@@ -915,6 +918,7 @@ async function inspectVersion(
     executable: identity,
     args: check.args,
     env,
+    cwd,
     timeoutMs: 5_000,
   });
   if (result.exitCode !== 0 || result.timedOut || result.outputLimitExceeded) {
@@ -1162,11 +1166,12 @@ async function identityWithVersion(
   identity: ExecutableIdentity,
   check: NonNullable<LocalToolManifest["command"]["versionCheck"]> | undefined,
   executionEnv: NodeJS.ProcessEnv,
+  cwd: string,
   execute: (request: ApprovalBoundSubprocessRequest) => Promise<SpawnResult>,
   phase: "command_version_check" | "prerequisite_version_check",
   prerequisite?: string,
 ): Promise<ExecutableIdentity | UnavailableExecutableIdentity> {
-  const version = await inspectVersion(identity, check, executionEnv, execute, phase, prerequisite);
+  const version = await inspectVersion(identity, check, executionEnv, cwd, execute, phase, prerequisite);
   if (!version.compatible) {
     return {
       ready: false,
@@ -1261,6 +1266,7 @@ export interface ToolCheckResult {
       prerequisite?: string;
       executable: string;
       argv: string[];
+      cwd: string;
       authentication: {
         mode: "inherited" | "aart_secrets";
         inheritedEnvironment: "all" | string[];
@@ -1277,6 +1283,7 @@ interface ApprovalBoundSubprocessRequest {
   executable: ExecutableIdentity;
   args: readonly string[];
   env: NodeJS.ProcessEnv;
+  cwd: string;
   timeoutMs: number;
 }
 
@@ -1313,6 +1320,7 @@ function approvalSummary(
   argv?: string[],
   resolved?: {
     command: ExecutableIdentity;
+    cwd: string;
     prerequisites: ReadonlyArray<{
       manifest: LocalToolManifest["prerequisites"][number];
       identity: ExecutableIdentity;
@@ -1333,6 +1341,7 @@ function approvalSummary(
         phase: "command_version_check",
         executable: resolved.command.launchPath,
         argv: [...resolved.command.launchArgsPrefix, ...manifest.command.versionCheck.args],
+        cwd: resolved.cwd,
         authentication: subprocessAuthority,
         effects: manifest.effects,
       });
@@ -1344,6 +1353,7 @@ function approvalSummary(
           prerequisite: prerequisite.name,
           executable: identity.launchPath,
           argv: [...identity.launchArgsPrefix, ...prerequisite.versionCheck.args],
+          cwd: resolved.cwd,
           authentication: subprocessAuthority,
           effects: manifest.effects,
         });
@@ -1354,6 +1364,7 @@ function approvalSummary(
           prerequisite: prerequisite.name,
           executable: identity.launchPath,
           argv: [...identity.launchArgsPrefix, ...prerequisite.probe.args],
+          cwd: resolved.cwd,
           authentication: subprocessAuthority,
           effects: manifest.effects,
         });
@@ -1364,6 +1375,7 @@ function approvalSummary(
         phase: "task",
         executable: resolved.command.launchPath,
         argv: [...resolved.command.launchArgsPrefix, ...argv],
+        cwd: resolved.cwd,
         authentication: subprocessAuthority,
         effects: manifest.effects,
       });
@@ -1595,6 +1607,7 @@ export async function checkLocalTool(
     ...sealedBase,
     approvalSummary: approvalSummary(record, argv, {
       command: mainBytes,
+      cwd: cwd.path,
       prerequisites: prerequisiteBytes,
     }),
   };
@@ -1632,6 +1645,7 @@ export async function checkLocalTool(
       mainBytes,
       record.manifest.command.versionCheck,
       executionEnv!,
+      cwd.path,
       options.executeApprovalBoundSubprocess!,
       "command_version_check",
     );
@@ -1660,6 +1674,7 @@ export async function checkLocalTool(
         prerequisiteIdentity,
         prerequisite.versionCheck,
         executionEnv!,
+        cwd.path,
         options.executeApprovalBoundSubprocess!,
         "prerequisite_version_check",
         prerequisite.name,
@@ -1700,6 +1715,7 @@ export async function checkLocalTool(
         executable: identity,
         args: prerequisite.probe.args,
         env: executionEnv!,
+        cwd: cwd.path,
         timeoutMs: 10_000,
       });
       if (probe.exitCode !== prerequisite.probe.expectedExitCode || probe.timedOut || probe.outputLimitExceeded) {
@@ -1894,12 +1910,16 @@ export interface LocalToolRunRecord {
   startedAt: string;
   endedAt?: string;
   status: "running" | "terminal";
-  ownerPid?: number;
+  ownerProcess?: {
+    pid: number;
+    startIdentity?: string;
+  };
   activeProcess?: {
     phase: "command_version_check" | "prerequisite_version_check" | "prerequisite_probe" | "task";
     prerequisite?: string;
     pid: number;
     executableHash: string;
+    startIdentity?: string;
   };
   result: Record<string, unknown> & { ok: boolean; ran: true };
 }
@@ -1932,7 +1952,10 @@ function beginLocalToolRun(
     prerequisiteHashes: { ...prerequisiteHashes },
     startedAt,
     status: "running",
-    ownerPid: process.pid,
+    ownerProcess: {
+      pid: process.pid,
+      ...(CURRENT_PROCESS_START_IDENTITY ? { startIdentity: CURRENT_PROCESS_START_IDENTITY } : {}),
+    },
     activeProcess,
     result,
   };
@@ -1986,7 +2009,10 @@ export async function readLocalToolRun(root: string, runId: string): Promise<Loc
       typeof parsed.cwdHash !== "string" ||
       !parsed.prerequisiteHashes ||
       typeof parsed.prerequisiteHashes !== "object" ||
-      (parsed.ownerPid !== undefined && (!Number.isInteger(parsed.ownerPid) || parsed.ownerPid <= 0)) ||
+      (parsed.ownerProcess !== undefined &&
+        (!Number.isInteger(parsed.ownerProcess.pid) ||
+          parsed.ownerProcess.pid <= 0 ||
+          (parsed.ownerProcess.startIdentity !== undefined && parsed.ownerProcess.startIdentity.length === 0))) ||
       (activeProcess !== undefined &&
         (![
           "command_version_check",
@@ -1996,16 +2022,17 @@ export async function readLocalToolRun(root: string, runId: string): Promise<Loc
         ].includes(activeProcess.phase) ||
           !Number.isInteger(activeProcess.pid) ||
           activeProcess.pid <= 0 ||
-          !/^sha256:[a-f0-9]{64}$/.test(activeProcess.executableHash))) ||
+          !/^sha256:[a-f0-9]{64}$/.test(activeProcess.executableHash) ||
+          (activeProcess.startIdentity !== undefined && activeProcess.startIdentity.length === 0))) ||
       (parsed.status === "terminal" && activeProcess !== undefined)
     ) {
       throw new Error(`local tool run record "${runId}" failed validation`);
     }
     if (
       parsed.status === "running" &&
-      parsed.ownerPid !== undefined &&
-      !processIsAlive(parsed.ownerPid) &&
-      (!activeProcess || !processIsAlive(activeProcess.pid))
+      parsed.ownerProcess !== undefined &&
+      !processMatchesIdentity(parsed.ownerProcess.pid, parsed.ownerProcess.startIdentity) &&
+      (!activeProcess || !processMatchesIdentity(activeProcess.pid, activeProcess.startIdentity))
     ) {
       const previousEvidence =
         parsed.result.evidence && typeof parsed.result.evidence === "object" && !Array.isArray(parsed.result.evidence)
@@ -2044,6 +2071,51 @@ function processIsAlive(pid: number): boolean {
     return true;
   } catch (cause) {
     return (cause as NodeJS.ErrnoException).code !== "ESRCH";
+  }
+}
+
+function processMatchesIdentity(pid: number, expected: string | undefined): boolean {
+  if (!processIsAlive(pid)) return false;
+  if (expected === undefined) return true;
+  const current = processStartIdentity(pid);
+  return current === undefined || current === expected;
+}
+
+function processStartIdentity(pid: number): string | undefined {
+  try {
+    if (process.platform === "linux") {
+      const stat = readFileSync(`/proc/${pid}/stat`, "utf8").trim();
+      const commandEnd = stat.lastIndexOf(")");
+      if (commandEnd < 0) return undefined;
+      const fields = stat.slice(commandEnd + 2).split(/\s+/);
+      const startTicks = fields[19];
+      if (!startTicks) return undefined;
+      const bootId = readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
+      return `linux:${bootId}:${startTicks}`;
+    }
+    if (process.platform === "win32") {
+      const result = spawnSync(
+        "powershell.exe",
+        [
+          "-NoProfile",
+          "-NonInteractive",
+          "-Command",
+          `(Get-Process -Id ${pid} -ErrorAction Stop).StartTime.ToUniversalTime().Ticks`,
+        ],
+        { encoding: "utf8", timeout: 2_000, windowsHide: true },
+      );
+      const ticks = result.status === 0 ? result.stdout.trim() : "";
+      return ticks ? `win32:${ticks}` : undefined;
+    }
+    const result = spawnSync("/bin/ps", ["-o", "lstart=", "-p", String(pid)], {
+      encoding: "utf8",
+      env: { ...process.env, LC_ALL: "C" },
+      timeout: 2_000,
+    });
+    const started = result.status === 0 ? result.stdout.trim() : "";
+    return started ? `${process.platform}:${started}` : undefined;
+  } catch {
+    return undefined;
   }
 }
 
@@ -2147,11 +2219,13 @@ export async function runLocalTool(
           spawned = true;
           lastStartedPhase = request.phase;
           lastStartedPrerequisite = request.prerequisite;
+          const startIdentity = processStartIdentity(pid);
           const activeProcess: NonNullable<LocalToolRunRecord["activeProcess"]> = {
             phase: request.phase,
             ...(request.prerequisite ? { prerequisite: request.prerequisite } : {}),
             pid,
             executableHash: request.executable.contentHash,
+            ...(startIdentity ? { startIdentity } : {}),
           };
           const runningResult = {
             ok: false as const,

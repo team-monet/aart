@@ -321,7 +321,8 @@ shows the exact sealed executable/argv for every declared version check, probe,
 and task. The check runs none of them, resolves no AART secrets, and exercises
 no inherited authentication. After approval, one hash-bound run selects the
 authentication environment once, then executes version checks, probes, and the
-task through the same durable lifecycle. Execution requires the exact reviewed
+task in the same sealed working directory through one durable lifecycle.
+Execution requires the exact reviewed
 asset, executable, argv, cwd, and prerequisite hashes. Changing a manifest
 command, input, working directory, or helper binary requires a new check.
 
@@ -356,7 +357,9 @@ the subprocess tree, not only the direct child. Failures before any subprocess
 starts remain explicit `ran: false` results; once any approval-bound subprocess
 starts, failure completes the same durable record with `ran: true`. A later
 run-record read also terminalizes an interrupted record once both its owning
-caller and recorded active subprocess are no longer alive.
+caller and recorded active subprocess are no longer alive. Recovery compares
+process-start identity as well as PID, so a service/container restart that
+reuses PID 1 cannot keep an unrelated interrupted run falsely alive.
 
 ## (d) The authoring lifecycle
 

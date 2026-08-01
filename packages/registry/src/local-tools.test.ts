@@ -934,6 +934,69 @@ describe("preflight and execution", () => {
     });
   });
 
+  it("runs every reviewed version check, probe, and task in the sealed working directory", async () => {
+    const storeRoot = await root();
+    const fixedCwd = join(storeRoot, "sealed-cwd");
+    await fs.mkdir(fixedCwd);
+    const registered = await registerLocalTool(
+      storeRoot,
+      manifest({
+        command: {
+          executable: process.execPath,
+          resolution: "absolute",
+          args: ["-e", "console.log(JSON.stringify({cwd:process.cwd()}))"],
+          versionCheck: {
+            args: [
+              "-e",
+              "require('node:fs').writeFileSync('main-version-cwd',process.cwd()); console.log(process.version)",
+            ],
+            semverRange: ">=20",
+            match: "v?(\\d+\\.\\d+\\.\\d+)",
+          },
+        },
+        inputs: [],
+        prerequisites: [
+          {
+            name: "node-runtime",
+            executable: basename(process.execPath),
+            resolution: "path",
+            versionCheck: {
+              args: [
+                "-e",
+                "require('node:fs').writeFileSync('prerequisite-version-cwd',process.cwd()); console.log(process.version)",
+              ],
+              semverRange: ">=20",
+              match: "v?(\\d+\\.\\d+\\.\\d+)",
+            },
+            probe: {
+              args: ["-e", "require('node:fs').writeFileSync('probe-cwd',process.cwd())"],
+              expectedExitCode: 0,
+            },
+          },
+        ],
+        cwd: { mode: "fixed", path: fixedCwd },
+        output: { source: "stdout", format: "json", evidence: { cwd: "$.cwd" } },
+      }),
+    );
+    const check = await checkLocalTool(storeRoot, registered);
+    const canonicalCwd = await fs.realpath(fixedCwd);
+    expect(check.approvalSummary.subprocesses).toHaveLength(4);
+    expect(check.approvalSummary.subprocesses.every((subprocess) => subprocess.cwd === canonicalCwd)).toBe(true);
+    await expect(fs.readdir(fixedCwd)).resolves.toEqual([]);
+
+    const result = await runLocalTool(storeRoot, registered, {
+      contentHash: registered.contentHash,
+      executableHash: check.executable!.contentHash,
+      argvHash: check.argvHash!,
+      cwdHash: check.cwdHash!,
+      prerequisiteHashes: check.prerequisiteHashes,
+    });
+    expect(result).toMatchObject({ ok: true, structuredOutput: { cwd: canonicalCwd } });
+    for (const name of ["main-version-cwd", "prerequisite-version-cwd", "probe-cwd"]) {
+      await expect(fs.readFile(join(fixedCwd, name), "utf8")).resolves.toBe(canonicalCwd);
+    }
+  });
+
   it("preserves UTF-8 characters split across stdout chunks", async () => {
     const storeRoot = await root();
     const registered = await registerLocalTool(
@@ -1038,7 +1101,7 @@ describe("preflight and execution", () => {
     });
   });
 
-  it("repairs an interrupted running record once both caller and subprocess are gone", async () => {
+  it("repairs an interrupted record when a restarted owner reuses the recorded PID", async () => {
     const storeRoot = await root();
     const runId = "toolrun_00000000-0000-4000-8000-000000000013";
     const hash = `sha256:${"0".repeat(64)}`;
@@ -1069,7 +1132,7 @@ describe("preflight and execution", () => {
         prerequisiteHashes: {},
         startedAt: new Date(0).toISOString(),
         status: "running",
-        ownerPid: deadPid,
+        ownerProcess: { pid: process.pid, startIdentity: "stale-owner-start-identity" },
         activeProcess: { phase: "task", pid: deadPid, executableHash: hash },
         result: { ok: false, ran: true, kind: "running", evidence: { phase: "task", pid: deadPid } },
       }),
