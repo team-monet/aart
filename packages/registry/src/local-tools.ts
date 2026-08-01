@@ -1234,6 +1234,12 @@ export interface ToolCheckResult {
   };
 }
 
+interface ApprovalBoundProbeRequest {
+  prerequisite: LocalToolManifest["prerequisites"][number];
+  executable: ExecutableIdentity;
+  env: NodeJS.ProcessEnv;
+}
+
 function renderArgs(manifest: LocalToolManifest, inputs: Readonly<Record<string, string>> | undefined): string[] {
   const values = inputs ?? {};
   for (const input of manifest.inputs) {
@@ -1302,6 +1308,7 @@ export async function checkLocalTool(
     expectedPrerequisiteHashes?: Readonly<Record<string, string>>;
     expectedCwdHash?: string;
     approvalBound?: boolean;
+    executeApprovalBoundProbe?: (request: ApprovalBoundProbeRequest) => Promise<SpawnResult>;
   } = {},
 ): Promise<ToolCheckResult> {
   const env = options.env ?? process.env;
@@ -1535,6 +1542,16 @@ export async function checkLocalTool(
       };
     }
     if (prerequisite.probe && options.approvalBound === true) {
+      if (!options.executeApprovalBoundProbe) {
+        return {
+          ...sealedBase,
+          executable: main,
+          prerequisitePath,
+          status: "invalid_input",
+          ready: false,
+          reason: `${prerequisite.name}: approval-bound probes require durable execution lifecycle recording`,
+        };
+      }
       const beforeProbe = await executableBytesIdentity(root, record, prerequisite, env);
       if (!beforeProbe.ready || beforeProbe.contentHash !== identity.contentHash) {
         return {
@@ -1546,9 +1563,10 @@ export async function checkLocalTool(
           reason: `${prerequisite.name}: prerequisite executable changed before its probe`,
         };
       }
-      const probe = await spawnNoShell(identity.launchPath, [...identity.launchArgsPrefix, ...prerequisite.probe.args], {
+      const probe = await options.executeApprovalBoundProbe({
+        prerequisite,
+        executable: identity,
         env: executionEnv,
-        timeoutMs: 10_000,
       });
       if (probe.exitCode !== prerequisite.probe.expectedExitCode || probe.timedOut || probe.outputLimitExceeded) {
         base.prerequisites.push({
@@ -1884,17 +1902,124 @@ export async function runLocalTool(
       error: `reviewed asset hash ${input.contentHash} does not match current hash ${record.contentHash}`,
     };
   }
-  const check = await checkLocalTool(root, record, {
-    inputs: input.inputs,
-    env: input.env,
-    requireInputs: true,
-    expectedArgvHash: input.argvHash,
-    expectedExecutableHash: input.executableHash,
-    expectedPrerequisiteHashes: input.prerequisiteHashes ?? {},
-    expectedCwdHash: input.cwdHash,
-    approvalBound: true,
-  });
+  const startedAt = new Date().toISOString();
+  const runId = `toolrun_${randomUUID()}`;
+  const prerequisiteHashes = { ...(input.prerequisiteHashes ?? {}) };
+  const prerequisiteProbes: Array<{
+    name: string;
+    executableHash: string;
+    exitCode: number | null;
+    signal: NodeJS.Signals | null;
+    timedOut: boolean;
+    outputLimitExceeded: boolean;
+  }> = [];
+  let processStarted = false;
+  let running: LocalToolRunRecord | undefined;
+  let check: ToolCheckResult;
+  try {
+    check = await checkLocalTool(root, record, {
+      inputs: input.inputs,
+      env: input.env,
+      requireInputs: true,
+      expectedArgvHash: input.argvHash,
+      expectedExecutableHash: input.executableHash,
+      expectedPrerequisiteHashes: prerequisiteHashes,
+      expectedCwdHash: input.cwdHash,
+      approvalBound: true,
+      executeApprovalBoundProbe: async ({ prerequisite, executable, env }) => {
+        let probeStarted = false;
+        const probe = await spawnNoShell(
+          executable.launchPath,
+          [...executable.launchArgsPrefix, ...prerequisite.probe!.args],
+          {
+            env,
+            timeoutMs: 10_000,
+            onSpawn: (pid) => {
+              processStarted = true;
+              probeStarted = true;
+              if (running) return;
+              running = beginLocalToolRun(
+                root,
+                record,
+                input.executableHash,
+                input.argvHash,
+                input.cwdHash,
+                prerequisiteHashes,
+                runId,
+                startedAt,
+                {
+                  ok: false,
+                  ran: true,
+                  kind: "running",
+                  evidence: {
+                    asset: `${record.manifest.id}@${record.manifest.version}`,
+                    source: record.provenance,
+                    contentHash: record.contentHash,
+                    toolHash: record.toolHash,
+                    phase: "prerequisite_probe",
+                    prerequisite: prerequisite.name,
+                    prerequisiteHash: executable.contentHash,
+                    pid,
+                  },
+                },
+              );
+            },
+          },
+        );
+        if (!probeStarted) {
+          throw new Error(`prerequisite probe ${prerequisite.name} closed without emitting a successful spawn event`);
+        }
+        prerequisiteProbes.push({
+          name: prerequisite.name,
+          executableHash: executable.contentHash,
+          exitCode: probe.exitCode,
+          signal: probe.signal,
+          timedOut: probe.timedOut,
+          outputLimitExceeded: probe.outputLimitExceeded,
+        });
+        return probe;
+      },
+    });
+  } catch (cause) {
+    const failure = {
+      ok: false as const,
+      ran: true as const,
+      kind: "execution_monitor_failed",
+      error: `approval-bound prerequisite execution failed after spawn: ${(cause as Error).message}`,
+      evidence: {
+        asset: `${record.manifest.id}@${record.manifest.version}`,
+        source: record.provenance,
+        contentHash: record.contentHash,
+        toolHash: record.toolHash,
+        phase: "prerequisite_probe",
+        prerequisiteProbes,
+      },
+    };
+    if (running) return completeLocalToolRun(root, running, failure);
+    return {
+      ...failure,
+      ran: processStarted,
+      kind: processStarted ? "evidence_persistence_failed" : "spawn_failed",
+    };
+  }
   if (!check.ready || !check.executable || !check.argv) {
+    if (running) {
+      return completeLocalToolRun(root, running, {
+        ok: false,
+        ran: true,
+        kind: check.status === "seal_mismatch" ? "review_seal_mismatch" : check.status,
+        error: check.reason ?? "local tool prerequisites are not ready",
+        check,
+        evidence: {
+          asset: `${record.manifest.id}@${record.manifest.version}`,
+          source: record.provenance,
+          contentHash: record.contentHash,
+          toolHash: record.toolHash,
+          phase: "prerequisite_probe",
+          prerequisiteProbes,
+        },
+      });
+    }
     return {
       ok: false,
       ran: false,
@@ -1921,9 +2046,6 @@ export async function runLocalTool(
       : inherited.map((name) => hostEnv[name])
   ).filter((value): value is string => typeof value === "string" && value.length > 0);
   const redactions = [...selected.secrets, ...sensitiveInputs, ...inheritedSecretValues];
-  const startedAt = new Date().toISOString();
-  const runId = `toolrun_${randomUUID()}`;
-  const prerequisiteHashes = { ...(input.prerequisiteHashes ?? {}) };
   const executionContext = {
     asset: `${record.manifest.id}@${record.manifest.version}`,
     source: record.provenance,
@@ -1938,9 +2060,9 @@ export async function runLocalTool(
     prerequisitePath: check.prerequisitePath,
     cwd: check.resolvedCwd,
     authentication: check.approvalSummary.authentication,
+    prerequisiteProbes,
   };
-  let processStarted = false;
-  let running: LocalToolRunRecord | undefined;
+  let mainProcessStarted = false;
   let result: SpawnResult;
   try {
     result = await spawnNoShell(checkedExecutable.launchPath, [
@@ -1952,6 +2074,8 @@ export async function runLocalTool(
       timeoutMs: record.manifest.command.timeoutMs,
       onSpawn: (pid) => {
         processStarted = true;
+        mainProcessStarted = true;
+        if (running) return;
         running = beginLocalToolRun(
           root,
           record,
@@ -1975,9 +2099,11 @@ export async function runLocalTool(
       return completeLocalToolRun(root, running, {
         ok: false,
         ran: true,
-        kind: "execution_monitor_failed",
-        error: `local tool process started but monitoring failed: ${(cause as Error).message}`,
-        evidence: running.result.evidence,
+        kind: mainProcessStarted ? "execution_monitor_failed" : "spawn_failed_after_probe",
+        error: mainProcessStarted
+          ? `local tool process started but monitoring failed: ${(cause as Error).message}`
+          : `local tool failed to spawn after a prerequisite probe ran: ${(cause as Error).message}`,
+        evidence: executionContext,
       });
     }
     return {
@@ -1989,7 +2115,16 @@ export async function runLocalTool(
         : `local tool failed to spawn after preflight: ${(cause as Error).message}`,
     };
   }
-  if (!running) {
+  if (!mainProcessStarted) {
+    if (running) {
+      return completeLocalToolRun(root, running, {
+        ok: false,
+        ran: true,
+        kind: "spawn_failed_after_probe",
+        error: "local tool closed without emitting a successful spawn event after a prerequisite probe ran",
+        evidence: executionContext,
+      });
+    }
     return {
       ok: false,
       ran: false,
@@ -1997,6 +2132,15 @@ export async function runLocalTool(
       error: "local tool closed without emitting a successful spawn event",
     };
   }
+  if (!running) {
+    return {
+      ok: false,
+      ran: true,
+      kind: "evidence_persistence_failed",
+      error: "local tool process started without a recoverable running record",
+    };
+  }
+  const activeRun = running;
   const stdout = redactText(result.stdout, redactions);
   const stderr = redactText(result.stderr, redactions);
   const outputText = record.manifest.output.source === "stdout" ? result.stdout : result.stderr;
@@ -2035,7 +2179,7 @@ export async function runLocalTool(
     ...(outputParseError ? { outputParseError } : {}),
   };
   if (result.outputLimitExceeded || result.exitCode !== 0 || result.timedOut) {
-    return completeLocalToolRun(root, running, {
+    return completeLocalToolRun(root, activeRun, {
       ok: false,
       ran: true,
       kind: result.outputLimitExceeded ? "output_limit_exceeded" : result.timedOut ? "timed_out" : "command_failed",
@@ -2049,7 +2193,7 @@ export async function runLocalTool(
     });
   }
   if (outputParseError !== undefined) {
-    return completeLocalToolRun(root, running, {
+    return completeLocalToolRun(root, activeRun, {
       ok: false,
       ran: true,
       kind: "invalid_structured_output",
@@ -2058,7 +2202,7 @@ export async function runLocalTool(
     });
   }
   if (missingEvidence.length > 0) {
-    return completeLocalToolRun(root, running, {
+    return completeLocalToolRun(root, activeRun, {
       ok: false,
       ran: true,
       kind: "evidence_contract_failed",
@@ -2069,7 +2213,7 @@ export async function runLocalTool(
       evidence,
     });
   }
-  return completeLocalToolRun(root, running, {
+  return completeLocalToolRun(root, activeRun, {
     ok: true,
     ran: true,
     structuredOutput,

@@ -270,6 +270,65 @@ describe("Pack tool declarations", () => {
     });
   });
 
+  it("deduplicates the same tool contract across local and approved Pack provenance", async () => {
+    tc = await createTestContext();
+    const packageRoot = join(tc.root, "equivalent-tool-pack-source");
+    await fs.mkdir(packageRoot, { recursive: true });
+    await fs.writeFile(
+      join(packageRoot, "package.json"),
+      JSON.stringify({ name: "aart-pack-equivalent-tools", version: "1.0.0" }),
+      "utf8",
+    );
+    const manifest = toolManifest({
+      id: "equivalent-review.wait",
+      command: {
+        executable: process.execPath,
+        resolution: "absolute",
+        args: ["-e", "console.log(JSON.stringify({outcome:'approved'}))"],
+      },
+      inputs: [],
+    });
+    await fs.writeFile(
+      join(packageRoot, "aart-pack.yaml"),
+      [
+        "name: equivalent-tools",
+        "version: 1.0.0",
+        "description: Equivalent local review tool declarations",
+        "tools:",
+        ...JSON.stringify(manifest, null, 2)
+          .split("\n")
+          .map((line, index) => `${index === 0 ? "  - " : "    "}${line}`),
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+
+    const installed = await installPackHandler(tc.ctx, { name: "equivalent-tools", sourcePath: packageRoot });
+    await approvePackHandler(tc.ctx, {
+      name: "equivalent-tools",
+      version: "1.0.0",
+      contentHash: installed.contentHash as string,
+      reviewer: "reviewer",
+    });
+    await registerToolHandler(tc.ctx, { tool: manifest });
+
+    const found = await findToolsHandler(tc.ctx, { query: "Equivalent local review" });
+    expect(found).toMatchObject({
+      matched: true,
+      tools: [
+        {
+          id: "equivalent-review.wait",
+          source: "local",
+          availability: { status: "requires_explicit_check", ready: false },
+        },
+      ],
+    });
+    await expect(checkToolHandler(tc.ctx, { id: "equivalent-review.wait" })).resolves.toMatchObject({
+      ok: true,
+      check: { ready: true },
+    });
+  });
+
   it("publishes portable tool metadata into the static index and supports remote search", async () => {
     tc = await createTestContext();
     const packageRoot = join(tc.root, "prepared-tool-pack");

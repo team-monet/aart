@@ -89,6 +89,32 @@ workflows: [demo-echo-flow]
     await fs.rm(publisherRoot, { recursive: true, force: true });
   });
 
+  it("rejects a Pack whose installed bytes do not match the discovered content hash", async () => {
+    const ctx = createAartContext({ root, trustMode: "governed" });
+    const prepared = await preparePackHandler(ctx, { sourcePath: packageRoot });
+    const discoveredHash = prepared.contentHash as string;
+    const wrongHash = `sha256:${"0".repeat(64)}`;
+
+    await expect(
+      installPackHandler(ctx, {
+        name: "demo",
+        version: "1.0.0",
+        contentHash: wrongHash,
+        sourcePath: packageRoot,
+      }),
+    ).rejects.toThrow("does not match discovered hash");
+    await expect(listPacksHandler(ctx, {})).resolves.toMatchObject({ count: 0, packs: [] });
+
+    await expect(
+      installPackHandler(ctx, {
+        name: "demo",
+        version: "1.0.0",
+        contentHash: discoveredHash,
+        sourcePath: packageRoot,
+      }),
+    ).resolves.toMatchObject({ ok: true, contentHash: discoveredHash, approvalStatus: "unapproved" });
+  });
+
   it("searches a static public index, installs inert, requires approval, then loads the block and reuses the workflow", async () => {
     const publicIndex = {
       packs: [

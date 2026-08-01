@@ -50,7 +50,14 @@ function approvedPackTools(ctx: AartContext): RegisteredLocalTool[] {
 }
 
 async function runnableTools(ctx: AartContext): Promise<RegisteredLocalTool[]> {
-  return [...(await listLocalTools(ctx.root)), ...approvedPackTools(ctx)];
+  const tools = [...(await listLocalTools(ctx.root)), ...approvedPackTools(ctx)];
+  const seen = new Set<string>();
+  return tools.filter((record) => {
+    const key = `${record.manifest.id}\0${record.manifest.version}\0${record.toolHash}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 function latestToolCandidates(records: readonly RegisteredLocalTool[]): RegisteredLocalTool[] {
@@ -74,13 +81,14 @@ function selectTool(
   const selected = version ? candidates : latestToolVersions(candidates);
   const topVersion = selected[0]?.manifest.version;
   const top = candidates.filter((candidate) => candidate.manifest.version === topVersion);
-  const hashes = new Set(top.map((candidate) => candidate.contentHash));
+  const hashes = new Set(top.map((candidate) => candidate.toolHash));
   if (hashes.size > 1) {
     const ambiguousToolResult: HandlerResult = {
       ok: false,
       error: `Local tool "${id}" is ambiguous at version ${topVersion}; multiple sources expose different sealed content.`,
       candidates: top.map((candidate) => ({
         contentHash: candidate.contentHash,
+        toolHash: candidate.toolHash,
         provenance: candidate.provenance,
       })),
     };
@@ -134,7 +142,7 @@ export async function findToolsHandler(ctx: AartContext, input: FindToolsInput):
       (candidate) =>
         candidate.manifest.id === manifest.id &&
         candidate.manifest.version === manifest.version &&
-        candidate.contentHash !== record.contentHash,
+        candidate.toolHash !== record.toolHash,
     );
     const localToolSearchResult = {
       id: manifest.id,
@@ -174,6 +182,7 @@ export async function findToolsHandler(ctx: AartContext, input: FindToolsInput):
               reason: "Multiple sources expose different sealed content at this id and version.",
               candidates: [record, ...conflicting].map((candidate) => ({
                 contentHash: candidate.contentHash,
+                toolHash: candidate.toolHash,
                 provenance: candidate.provenance,
               })),
             }

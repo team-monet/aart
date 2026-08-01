@@ -201,6 +201,8 @@ export async function findPacksHandler(_ctx: AartContext, input: FindPacksInput)
 export interface InstallPackInput {
   name: string;
   version?: string;
+  /** Expected immutable seal advertised by discovery. */
+  contentHash?: string;
   /** Local package directory for linked/offline installation. Omit for npm. */
   sourcePath?: string;
 }
@@ -231,6 +233,12 @@ async function installPackUnlocked(ctx: AartContext, input: InstallPackInput): P
   }
   if (input.version && raw.version !== input.version) {
     throw new Error(`installed pack ${input.name} declares version ${raw.version}, expected ${input.version}`);
+  }
+  const candidate = buildPackManifest(raw, files.blockSources, files.workflowSources);
+  if (input.contentHash !== undefined && candidate.contentHash !== input.contentHash) {
+    throw new Error(
+      `installed pack ${input.name}@${raw.version} content hash ${candidate.contentHash} does not match discovered hash ${input.contentHash}; installation was not registered`,
+    );
   }
   const provenance = input.sourcePath
     ? ({ kind: "linked", source: resolve(input.sourcePath) } as const)

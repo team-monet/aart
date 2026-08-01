@@ -1081,6 +1081,83 @@ describe("preflight and execution", () => {
     await expect(fs.readFile(marker, "utf8")).resolves.toBe("credential-present");
   });
 
+  it("records a failed approval-bound prerequisite probe as a real execution", async () => {
+    if (process.platform === "win32") return;
+    const storeRoot = await root();
+    const prerequisite = join(storeRoot, "failing-probe");
+    const probeMarker = join(storeRoot, "probe-ran");
+    const commandMarker = join(storeRoot, "command-ran");
+    await fs.copyFile(process.execPath, prerequisite);
+    await fs.chmod(prerequisite, 0o755);
+    const env = { ...process.env, PATH: `${storeRoot}${delimiter}${process.env.PATH ?? ""}` };
+    const registered = await registerLocalTool(
+      storeRoot,
+      manifest({
+        command: {
+          executable: process.execPath,
+          resolution: "absolute",
+          args: [
+            "-e",
+            `require("node:fs").writeFileSync(${JSON.stringify(commandMarker)}, "ran"); console.log(JSON.stringify({outcome:"approved"}))`,
+          ],
+        },
+        inputs: [],
+        prerequisites: [
+          {
+            name: "failing-probe",
+            executable: "failing-probe",
+            resolution: "path",
+            probe: {
+              args: [
+                "-e",
+                `require("node:fs").writeFileSync(${JSON.stringify(probeMarker)}, "ran"); process.exit(7)`,
+              ],
+              expectedExitCode: 0,
+            },
+          },
+        ],
+      }),
+    );
+    const check = await checkLocalTool(storeRoot, registered, { env });
+    expect(check).toMatchObject({
+      ready: true,
+      prerequisites: [{ name: "failing-probe", ready: true, probeDeferred: true }],
+    });
+
+    const result = await runLocalTool(storeRoot, registered, {
+      contentHash: registered.contentHash,
+      executableHash: check.executable!.contentHash,
+      argvHash: check.argvHash!,
+      cwdHash: check.cwdHash!,
+      prerequisiteHashes: check.prerequisiteHashes,
+      env,
+    });
+    expect(result).toMatchObject({
+      ok: false,
+      ran: true,
+      kind: "missing_prerequisite",
+      runId: expect.stringMatching(/^toolrun_/),
+      evidenceStored: true,
+      evidence: {
+        phase: "prerequisite_probe",
+        prerequisiteProbes: [
+          {
+            name: "failing-probe",
+            exitCode: 7,
+            timedOut: false,
+            outputLimitExceeded: false,
+          },
+        ],
+      },
+    });
+    await expect(fs.readFile(probeMarker, "utf8")).resolves.toBe("ran");
+    await expect(fs.access(commandMarker)).rejects.toThrow();
+    await expect(readLocalToolRun(storeRoot, result.runId as string)).resolves.toMatchObject({
+      status: "terminal",
+      result: { ok: false, ran: true, kind: "missing_prerequisite" },
+    });
+  });
+
   it("requires the complete reviewed seal set, runs without a shell, redacts secrets, and maps structured evidence", async () => {
     const storeRoot = await root();
     const sentinel = join(storeRoot, "must-not-exist");
