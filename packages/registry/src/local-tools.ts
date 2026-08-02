@@ -825,14 +825,7 @@ async function prepareSealedPrerequisitePath(
   await fs.chmod(directory, 0o700);
   const expectedNames = new Set<string>();
   for (const { manifest, identity } of prerequisites) {
-    const extension = process.platform === "win32" ? extname(identity.path) : "";
-    const names = new Set([
-      manifest.executable,
-      ...(extension && !manifest.executable.toLowerCase().endsWith(extension.toLowerCase())
-        ? [`${manifest.executable}${extension}`]
-        : []),
-    ]);
-    for (const name of names) {
+    for (const name of sealedPrerequisiteNames(manifest, identity)) {
       expectedNames.add(name);
       const target = join(directory, name);
       try {
@@ -861,6 +854,90 @@ async function prepareSealedPrerequisitePath(
     throw new Error(`sealed prerequisite PATH contains undeclared aliases: ${unexpected.join(", ")}`);
   }
   return fs.realpath(directory);
+}
+
+function sealedPrerequisiteNames(
+  manifest: LocalToolManifest["prerequisites"][number],
+  identity: ExecutableIdentity,
+): string[] {
+  const extension = process.platform === "win32" ? extname(identity.path) : "";
+  return [
+    manifest.executable,
+    ...(extension && !manifest.executable.toLowerCase().endsWith(extension.toLowerCase())
+      ? [`${manifest.executable}${extension}`]
+      : []),
+  ];
+}
+
+async function verifySealedExecutable(identity: ExecutableIdentity, label: string): Promise<void> {
+  const entrypointHash = sha256(await fs.readFile(identity.sealedPath));
+  if (entrypointHash !== identity.sourceContentHash) {
+    throw new Error(`${label} entrypoint seal is broken (expected ${identity.sourceContentHash}, got ${entrypointHash})`);
+  }
+  await fs.access(identity.sealedPath, constants.X_OK);
+  if (identity.mode === "protected_original" && (await fs.realpath(identity.sealedPath)) !== identity.path) {
+    throw new Error(`${label} entrypoint seal no longer resolves to its protected executable`);
+  }
+  if (!identity.interpreter) {
+    if (identity.launchPath !== identity.sealedPath) {
+      throw new Error(`${label} launch path no longer matches its sealed executable`);
+    }
+    return;
+  }
+  const interpreterHash = sha256(await fs.readFile(identity.interpreter.sealedPath));
+  if (interpreterHash !== identity.interpreter.contentHash) {
+    throw new Error(
+      `${label} interpreter seal is broken (expected ${identity.interpreter.contentHash}, got ${interpreterHash})`,
+    );
+  }
+  await fs.access(identity.interpreter.sealedPath, constants.X_OK);
+  if (
+    identity.interpreter.mode === "protected_original" &&
+    (await fs.realpath(identity.interpreter.sealedPath)) !== identity.interpreter.path
+  ) {
+    throw new Error(`${label} interpreter seal no longer resolves to its protected executable`);
+  }
+  if (identity.launchPath !== identity.interpreter.sealedPath) {
+    throw new Error(`${label} launch path no longer matches its sealed interpreter`);
+  }
+}
+
+async function verifySealedExecutionArtifacts(
+  main: ExecutableIdentity,
+  prerequisites: ReadonlyArray<{
+    manifest: LocalToolManifest["prerequisites"][number];
+    identity: ExecutableIdentity;
+  }>,
+  prerequisitePath: string,
+): Promise<string | undefined> {
+  try {
+    await verifySealedExecutable(main, "command");
+    const expectedNames = new Set<string>();
+    for (const { manifest, identity } of prerequisites) {
+      await verifySealedExecutable(identity, `prerequisite ${manifest.name}`);
+      for (const name of sealedPrerequisiteNames(manifest, identity)) {
+        expectedNames.add(name);
+        const alias = join(prerequisitePath, name);
+        const aliasHash = sha256(await fs.readFile(alias));
+        if (aliasHash !== identity.sourceContentHash) {
+          throw new Error(
+            `prerequisite ${manifest.name} alias "${name}" seal is broken (expected ${identity.sourceContentHash}, got ${aliasHash})`,
+          );
+        }
+        await fs.access(alias, constants.X_OK);
+        if (identity.mode === "protected_original" && (await fs.realpath(alias)) !== identity.path) {
+          throw new Error(`prerequisite ${manifest.name} alias "${name}" no longer points to its protected executable`);
+        }
+      }
+    }
+    const unexpected = (await fs.readdir(prerequisitePath)).filter((name) => !expectedNames.has(name));
+    if (unexpected.length > 0) {
+      throw new Error(`sealed prerequisite PATH contains undeclared aliases: ${unexpected.join(", ")}`);
+    }
+    return undefined;
+  } catch (cause) {
+    return `approval-bound subprocess changed sealed execution artifacts: ${(cause as Error).message}`;
+  }
 }
 
 function boundedRegexExec(pattern: string, input: string): Promise<Array<string | null> | undefined> {
@@ -1649,6 +1726,17 @@ export async function checkLocalTool(
       options.executeApprovalBoundSubprocess!,
       "command_version_check",
     );
+    const sealFailure = await verifySealedExecutionArtifacts(mainBytes, prerequisiteBytes, prerequisitePath);
+    if (sealFailure) {
+      return {
+        ...reviewableBase,
+        executable: mainBytes,
+        prerequisitePath,
+        status: "seal_mismatch",
+        ready: false,
+        reason: sealFailure,
+      };
+    }
     if (!versionedMain.ready) {
       return {
         ...reviewableBase,
@@ -1679,6 +1767,17 @@ export async function checkLocalTool(
         "prerequisite_version_check",
         prerequisite.name,
       );
+      const sealFailure = await verifySealedExecutionArtifacts(mainBytes, prerequisiteBytes, prerequisitePath);
+      if (sealFailure) {
+        return {
+          ...reviewableBase,
+          executable: mainResult,
+          prerequisitePath,
+          status: "seal_mismatch",
+          ready: false,
+          reason: sealFailure,
+        };
+      }
       if (!versionedIdentity.ready) {
         base.prerequisites.push({
           name: prerequisite.name,
@@ -1718,6 +1817,17 @@ export async function checkLocalTool(
         cwd: cwd.path,
         timeoutMs: 10_000,
       });
+      const sealFailure = await verifySealedExecutionArtifacts(mainBytes, prerequisiteBytes, prerequisitePath);
+      if (sealFailure) {
+        return {
+          ...reviewableBase,
+          executable: mainResult,
+          prerequisitePath,
+          status: "seal_mismatch",
+          ready: false,
+          reason: sealFailure,
+        };
+      }
       if (probe.exitCode !== prerequisite.probe.expectedExitCode || probe.timedOut || probe.outputLimitExceeded) {
         base.prerequisites.push({
           name: prerequisite.name,
@@ -1761,6 +1871,20 @@ export async function checkLocalTool(
       interpreter: identity.interpreter,
       probeDeferred: prerequisite.probe !== undefined && options.approvalBound !== true,
     });
+  }
+
+  if (options.approvalBound === true) {
+    const sealFailure = await verifySealedExecutionArtifacts(mainBytes, prerequisiteBytes, prerequisitePath);
+    if (sealFailure) {
+      return {
+        ...reviewableBase,
+        executable: mainResult,
+        prerequisitePath,
+        status: "seal_mismatch",
+        ready: false,
+        reason: sealFailure,
+      };
+    }
   }
 
   return {
@@ -2028,11 +2152,14 @@ export async function readLocalToolRun(root: string, runId: string): Promise<Loc
     ) {
       throw new Error(`local tool run record "${runId}" failed validation`);
     }
+    const ownerlessLegacyRun =
+      parsed.status === "running" && parsed.ownerProcess === undefined && activeProcess === undefined;
     if (
       parsed.status === "running" &&
-      parsed.ownerProcess !== undefined &&
-      !processMatchesIdentity(parsed.ownerProcess.pid, parsed.ownerProcess.startIdentity) &&
-      (!activeProcess || !processMatchesIdentity(activeProcess.pid, activeProcess.startIdentity))
+      (ownerlessLegacyRun ||
+        (parsed.ownerProcess !== undefined &&
+          !processMatchesIdentity(parsed.ownerProcess.pid, parsed.ownerProcess.startIdentity) &&
+          (!activeProcess || !processMatchesIdentity(activeProcess.pid, activeProcess.startIdentity))))
     ) {
       const previousEvidence =
         parsed.result.evidence && typeof parsed.result.evidence === "object" && !Array.isArray(parsed.result.evidence)
@@ -2046,11 +2173,14 @@ export async function readLocalToolRun(root: string, runId: string): Promise<Loc
           ok: false,
           ran: true,
           kind: "caller_interrupted",
-          error: "the approval-bound caller and its active subprocess are no longer running",
+          error: ownerlessLegacyRun
+            ? "legacy running evidence has no durable caller or subprocess ownership identity"
+            : "the approval-bound caller and its active subprocess are no longer running",
           evidence: {
             ...previousEvidence,
             ...(activeProcess ? { phase: activeProcess.phase } : {}),
             callerInterrupted: true,
+            ...(ownerlessLegacyRun ? { legacyOwnerMissing: true } : {}),
           },
         },
       };

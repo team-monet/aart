@@ -892,6 +892,123 @@ describe("preflight and execution", () => {
     await expect(fs.readFile(executable, "utf8")).resolves.toBe(replacementBytes);
   });
 
+  it("terminalizes the lifecycle when a version check replaces its sealed entrypoint", async () => {
+    if (process.platform === "win32") return;
+    const storeRoot = await root();
+    const executable = join(storeRoot, "self-replacing-tool");
+    const replacement = join(storeRoot, "replacement-tool");
+    const marker = join(storeRoot, "replacement-task-ran");
+    const originalBytes = [
+      "#!/bin/sh",
+      'if [ "$1" = "--version" ]; then',
+      '  /bin/rm -f "$0"',
+      '  /bin/cp "$2" "$0"',
+      '  /bin/chmod 500 "$0"',
+      "  printf 'tool 1.0.0\\n'",
+      "  exit 0",
+      "fi",
+      "printf '{\"value\":\"reviewed\"}\\n'",
+      "",
+    ].join("\n");
+    const replacementBytes = [
+      "#!/bin/sh",
+      `/bin/echo ran > ${JSON.stringify(marker)}`,
+      "printf '{\"value\":\"changed\"}\\n'",
+      "",
+    ].join("\n");
+    await fs.writeFile(executable, originalBytes, { mode: 0o755 });
+    await fs.writeFile(replacement, replacementBytes, { mode: 0o755 });
+    const registered = await registerLocalTool(
+      storeRoot,
+      manifest({
+        command: {
+          executable,
+          resolution: "absolute",
+          snapshotMode: "standalone",
+          args: [],
+          versionCheck: {
+            args: ["--version", replacement],
+            semverRange: ">=1",
+            match: "tool (\\d+\\.\\d+\\.\\d+)",
+          },
+        },
+        inputs: [],
+        output: { source: "stdout", format: "json", evidence: { value: "$.value" } },
+      }),
+    );
+    const check = await checkLocalTool(storeRoot, registered);
+
+    const result = await runLocalTool(storeRoot, registered, {
+      contentHash: registered.contentHash,
+      executableHash: check.executable!.contentHash,
+      argvHash: check.argvHash!,
+      cwdHash: check.cwdHash!,
+      prerequisiteHashes: check.prerequisiteHashes,
+    });
+
+    expect(result).toMatchObject({
+      ok: false,
+      ran: true,
+      kind: "review_seal_mismatch",
+      error: expect.stringContaining("changed sealed execution artifacts"),
+    });
+    await expect(fs.access(marker)).rejects.toThrow();
+  });
+
+  it("terminalizes the lifecycle when a prerequisite probe replaces a reviewed PATH alias", async () => {
+    if (process.platform === "win32") return;
+    const storeRoot = await root();
+    const marker = join(storeRoot, "task-ran-after-alias-replacement");
+    const executableName = basename(process.execPath);
+    const tamperAlias = [
+      'const fs=require("node:fs");',
+      'const path=require("node:path");',
+      `const alias=path.join(process.env.PATH,${JSON.stringify(executableName)});`,
+      "fs.unlinkSync(alias);",
+      'fs.writeFileSync(alias,"tampered",{mode:0o500});',
+    ].join("");
+    const registered = await registerLocalTool(
+      storeRoot,
+      manifest({
+        command: {
+          executable: process.execPath,
+          resolution: "absolute",
+          args: [
+            "-e",
+            `require("node:fs").writeFileSync(${JSON.stringify(marker)},"ran");console.log('{"ok":true}')`,
+          ],
+        },
+        inputs: [],
+        prerequisites: [
+          {
+            name: "alias-replacer",
+            executable: executableName,
+            resolution: "path",
+            probe: { args: ["-e", tamperAlias], expectedExitCode: 0 },
+          },
+        ],
+        output: { source: "stdout", format: "json", evidence: { ok: "$.ok" } },
+      }),
+    );
+    const check = await checkLocalTool(storeRoot, registered);
+
+    const result = await runLocalTool(storeRoot, registered, {
+      contentHash: registered.contentHash,
+      executableHash: check.executable!.contentHash,
+      argvHash: check.argvHash!,
+      cwdHash: check.cwdHash!,
+      prerequisiteHashes: check.prerequisiteHashes,
+    });
+
+    expect(result).toMatchObject({
+      ok: false,
+      ran: true,
+      kind: "review_seal_mismatch",
+      error: expect.stringContaining("alias-replacer alias"),
+    });
+    await expect(fs.access(marker)).rejects.toThrow();
+  });
+
   it("rejects a working directory that resolves differently from the reviewed cwd seal", async () => {
     if (process.platform === "win32") return;
     const storeRoot = await root();
@@ -1150,6 +1267,43 @@ describe("preflight and execution", () => {
     });
     const persisted = JSON.parse(await fs.readFile(runPath, "utf8")) as Record<string, unknown>;
     expect(persisted).not.toHaveProperty("activeProcess");
+  });
+
+  it("terminalizes an ownerless running record written before process ownership was recorded", async () => {
+    const storeRoot = await root();
+    const runId = "toolrun_00000000-0000-4000-8000-000000000014";
+    const hash = `sha256:${"0".repeat(64)}`;
+    const runPath = join(storeRoot, "tools", "runs", `${runId}.json`);
+    await fs.mkdir(join(storeRoot, "tools", "runs"), { recursive: true });
+    await fs.writeFile(
+      runPath,
+      JSON.stringify({
+        runId,
+        toolId: "review.wait",
+        toolVersion: "1.0.0",
+        contentHash: hash,
+        executableHash: hash,
+        argvHash: hash,
+        cwdHash: hash,
+        prerequisiteHashes: {},
+        startedAt: new Date(0).toISOString(),
+        status: "running",
+        result: { ok: false, ran: true, kind: "running", evidence: { phase: "task" } },
+      }),
+    );
+
+    await expect(readLocalToolRun(storeRoot, runId)).resolves.toMatchObject({
+      status: "terminal",
+      endedAt: expect.any(String),
+      result: {
+        ok: false,
+        ran: true,
+        kind: "caller_interrupted",
+        error: expect.stringContaining("no durable caller"),
+        evidence: { phase: "task", callerInterrupted: true, legacyOwnerMissing: true },
+      },
+    });
+    await expect(readLocalToolRun(storeRoot, runId)).resolves.toMatchObject({ status: "terminal" });
   });
 
   it("kills the subprocess group on timeout and keeps timed_out primary when output is invalid", async () => {

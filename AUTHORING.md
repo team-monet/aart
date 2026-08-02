@@ -322,6 +322,10 @@ and task. The check runs none of them, resolves no AART secrets, and exercises
 no inherited authentication. After approval, one hash-bound run selects the
 authentication environment once, then executes version checks, probes, and the
 task in the same sealed working directory through one durable lifecycle.
+After every approval-bound version check or probe, AART revalidates the command
+snapshot, interpreter snapshot, and every private `PATH` alias before another
+subprocess can start; a changed seal terminalizes that run instead of reaching
+the task.
 Execution requires the exact reviewed
 asset, executable, argv, cwd, and prerequisite hashes. Changing a manifest
 command, input, working directory, or helper binary requires a new check.
@@ -360,6 +364,8 @@ run-record read also terminalizes an interrupted record once both its owning
 caller and recorded active subprocess are no longer alive. Recovery compares
 process-start identity as well as PID, so a service/container restart that
 reuses PID 1 cannot keep an unrelated interrupted run falsely alive.
+Ownerless `running` records from releases before ownership identities were
+stored are migrated to the same terminal interrupted state when read.
 
 ## (d) The authoring lifecycle
 
