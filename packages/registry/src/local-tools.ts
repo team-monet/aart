@@ -2349,13 +2349,11 @@ export async function runLocalTool(
           spawned = true;
           lastStartedPhase = request.phase;
           lastStartedPrerequisite = request.prerequisite;
-          const startIdentity = processStartIdentity(pid);
           const activeProcess: NonNullable<LocalToolRunRecord["activeProcess"]> = {
             phase: request.phase,
             ...(request.prerequisite ? { prerequisite: request.prerequisite } : {}),
             pid,
             executableHash: request.executable.contentHash,
-            ...(startIdentity ? { startIdentity } : {}),
           };
           const runningResult = {
             ok: false as const,
@@ -2384,6 +2382,10 @@ export async function runLocalTool(
                 activeProcess,
                 runningResult,
               );
+          const startIdentity = processStartIdentity(pid);
+          if (startIdentity && running) {
+            running = advanceLocalToolRun(root, running, { ...activeProcess, startIdentity }, runningResult);
+          }
         },
       },
     );
@@ -2461,14 +2463,27 @@ export async function runLocalTool(
       kind: processStarted ? "evidence_persistence_failed" : "spawn_failed",
     };
   }
+  const sensitiveInputs = record.manifest.inputs
+    .filter((definition) => definition.sensitive)
+    .flatMap((definition) => (input.inputs?.[definition.name] ? [input.inputs[definition.name]!] : []));
+  const inherited = record.manifest.authentication.inheritEnvironment;
+  const inheritedSecretValues = (
+    inherited === "all"
+      ? Object.entries(hostEnv)
+          .filter(([name]) => SECRET_ENV_PATTERN.test(name))
+          .map(([, value]) => value)
+      : inherited.map((name) => hostEnv[name])
+  ).filter((value): value is string => typeof value === "string" && value.length > 0);
+  const redactions = [...(selectedEnvironment?.secrets ?? []), ...sensitiveInputs, ...inheritedSecretValues];
+  const redactedCheck = redactStructured(check, redactions) as ToolCheckResult;
   if (!check.ready || !check.executable || !check.argv) {
     if (running) {
       return completeLocalToolRun(root, running, {
         ok: false,
         ran: true,
         kind: check.status === "seal_mismatch" ? "review_seal_mismatch" : check.status,
-        error: check.reason ?? "local tool prerequisites are not ready",
-        check,
+        error: redactedCheck.reason ?? "local tool prerequisites are not ready",
+        check: redactedCheck,
         evidence: {
           ...lifecycleEvidence,
           phase: lastStartedPhase ?? "preflight",
@@ -2482,8 +2497,8 @@ export async function runLocalTool(
       ok: false,
       ran: false,
       kind: check.status === "seal_mismatch" ? "review_seal_mismatch" : check.status,
-      error: check.reason ?? "local tool prerequisites are not ready",
-      check,
+      error: redactedCheck.reason ?? "local tool prerequisites are not ready",
+      check: redactedCheck,
     };
   }
   const checkedExecutable = check.executable;
@@ -2498,25 +2513,13 @@ export async function runLocalTool(
   }
   selectedEnvironment.env.PATH = check.prerequisitePath;
   const executionArgv = renderArgs(record.manifest, input.inputs);
-  const sensitiveInputs = record.manifest.inputs
-    .filter((definition) => definition.sensitive)
-    .flatMap((definition) => (input.inputs?.[definition.name] ? [input.inputs[definition.name]!] : []));
-  const inherited = record.manifest.authentication.inheritEnvironment;
-  const inheritedSecretValues = (
-    inherited === "all"
-      ? Object.entries(hostEnv)
-          .filter(([name]) => SECRET_ENV_PATTERN.test(name))
-          .map(([, value]) => value)
-      : inherited.map((name) => hostEnv[name])
-  ).filter((value): value is string => typeof value === "string" && value.length > 0);
-  const redactions = [...selectedEnvironment.secrets, ...sensitiveInputs, ...inheritedSecretValues];
   const executionContext = {
     asset: `${record.manifest.id}@${record.manifest.version}`,
     source: record.provenance,
     contentHash: record.contentHash,
     toolHash: record.toolHash,
-    executable: checkedExecutable,
-    prerequisites: check.prerequisites,
+    executable: redactStructured(checkedExecutable, redactions),
+    prerequisites: redactStructured(check.prerequisites, redactions),
     argv: executionArgv.map((arg) => redactText(arg, redactions)),
     argvHash: input.argvHash,
     cwdHash: input.cwdHash,

@@ -1496,6 +1496,52 @@ describe("preflight and execution", () => {
     await expect(fs.readFile(marker, "utf8")).resolves.toBe("credential-present");
   });
 
+  it("redacts a credential parsed from approval-bound version output", async () => {
+    const storeRoot = await root();
+    const secret = "1.2.3";
+    const registered = await registerLocalTool(
+      storeRoot,
+      manifest({
+        command: {
+          ...manifest().command,
+          versionCheck: {
+            args: ["-e", "console.log(process.env.LOCAL_TOOL_TOKEN)"],
+            semverRange: ">=9",
+            match: "(\\d+\\.\\d+\\.\\d+)",
+          },
+        },
+        authentication: {
+          mode: "aart_secrets",
+          description: "Resolve the version credential only for the approved lifecycle",
+          inheritEnvironment: [],
+          secrets: [{ ref: "TOOL_TOKEN", env: "LOCAL_TOOL_TOKEN" }],
+        },
+      }),
+    );
+    const check = await checkLocalTool(storeRoot, registered, { inputs: { target: "owner/repo#1" } });
+
+    const result = await runLocalTool(storeRoot, registered, {
+      inputs: { target: "owner/repo#1" },
+      contentHash: registered.contentHash,
+      executableHash: check.executable!.contentHash,
+      argvHash: check.argvHash!,
+      cwdHash: check.cwdHash!,
+      prerequisiteHashes: check.prerequisiteHashes,
+      env: { AART_SECRET_TOOL_TOKEN: secret },
+    });
+
+    expect(result).toMatchObject({
+      ok: false,
+      ran: true,
+      kind: "incompatible",
+      error: expect.stringContaining("[REDACTED]"),
+      check: { reason: expect.stringContaining("[REDACTED]") },
+    });
+    expect(JSON.stringify(result)).not.toContain(secret);
+    const run = await readLocalToolRun(storeRoot, result.runId as string);
+    expect(JSON.stringify(run)).not.toContain(secret);
+  });
+
   it("selects credentials once for probe and task even when the secret source disappears", async () => {
     if (process.platform === "win32") return;
     const storeRoot = await root();

@@ -224,6 +224,13 @@ When a trusted local command already does the job, register its contract
 instead of wrapping it in a server workflow or rebuilding it as a polling
 script. A local tool manifest is inert metadata until a hash-bound run:
 
+Local tools are trusted host code, not a same-user sandbox. Approval authorizes
+the reviewed command and any descendants it creates to run with the declared
+host authority. Executable seals prevent review-to-launch drift and detect
+changes at lifecycle checkpoints; they cannot contain a deliberately hostile
+process that keeps running under the same OS identity. Never register untrusted
+bytes as a local tool; use an isolated Block boundary for untrusted logic.
+
 ```yaml
 id: codex-review.wait
 name: Wait for Codex review
@@ -322,10 +329,10 @@ and task. The check runs none of them, resolves no AART secrets, and exercises
 no inherited authentication. After approval, one hash-bound run selects the
 authentication environment once, then executes version checks, probes, and the
 task in the same sealed working directory through one durable lifecycle.
-After every approval-bound version check or probe, AART revalidates the command
-snapshot, interpreter snapshot, and every private `PATH` alias before another
-subprocess can start; a changed seal terminalizes that run instead of reaching
-the task.
+After every completed approval-bound version check or probe, AART revalidates
+the command snapshot, interpreter snapshot, and every private `PATH` alias
+before launching the next lifecycle subprocess; a changed seal terminalizes
+that run instead of reaching the task.
 Execution requires the exact reviewed
 asset, executable, argv, cwd, and prerequisite hashes. Changing a manifest
 command, input, working directory, or helper binary requires a new check.
