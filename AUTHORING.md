@@ -359,10 +359,12 @@ command capability.
 `GITHUB_TOKEN`. `aart_secrets` is the separate mode for explicit
 `AART_SECRET_<NAME>`/`secrets.json` injection. The check summary names which
 mode applies to every subprocess before anything runs.
-The first process that starts creates one durable `running` record; every later
-version check, probe, and task spawn atomically advances that same record's
-`activeProcess` phase and PID before non-blocking OS process-start identity
-inspection enriches it. Terminal completion clears `activeProcess` and adds
+The owner process identity is resolved lazily when a run is invoked, before any
+approved subprocess starts. The first spawn therefore creates one durable
+`running` record with stable owner identity; every later version check, probe,
+and task spawn atomically advances that same record's `activeProcess` phase and
+PID before non-blocking child identity inspection enriches it. Terminal
+completion clears `activeProcess` and adds
 output and exit evidence. Non-zero exits and timeouts remain the primary
 failure even if their partial output cannot be parsed, and a timeout terminates
 the subprocess tree, not only the direct child. Failures before any subprocess

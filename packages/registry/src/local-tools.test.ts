@@ -1184,6 +1184,7 @@ describe("preflight and execution", () => {
         status: "running",
         argvHash: check.argvHash,
         cwdHash: check.cwdHash,
+        ownerProcess: { pid: process.pid, startIdentity: expect.any(String) },
         activeProcess: {
           phase: "task",
           pid: expect.any(Number),
@@ -1304,6 +1305,37 @@ describe("preflight and execution", () => {
       },
     });
     await expect(readLocalToolRun(storeRoot, runId)).resolves.toMatchObject({ status: "terminal" });
+  });
+
+  it("preserves an ownerless legacy running record while its evidence PID is alive", async () => {
+    const storeRoot = await root();
+    const runId = "toolrun_00000000-0000-4000-8000-000000000015";
+    const hash = `sha256:${"0".repeat(64)}`;
+    const runPath = join(storeRoot, "tools", "runs", `${runId}.json`);
+    await fs.mkdir(join(storeRoot, "tools", "runs"), { recursive: true });
+    await fs.writeFile(
+      runPath,
+      JSON.stringify({
+        runId,
+        toolId: "review.wait",
+        toolVersion: "1.0.0",
+        contentHash: hash,
+        executableHash: hash,
+        argvHash: hash,
+        cwdHash: hash,
+        prerequisiteHashes: {},
+        startedAt: new Date(0).toISOString(),
+        status: "running",
+        result: { ok: false, ran: true, kind: "running", evidence: { phase: "task", pid: process.pid } },
+      }),
+    );
+
+    await expect(readLocalToolRun(storeRoot, runId)).resolves.toMatchObject({
+      status: "running",
+      result: { kind: "running", evidence: { phase: "task", pid: process.pid } },
+    });
+    const persisted = JSON.parse(await fs.readFile(runPath, "utf8")) as Record<string, unknown>;
+    expect(persisted).not.toHaveProperty("endedAt");
   });
 
   it("kills the subprocess group on timeout and keeps timed_out primary when output is invalid", async () => {

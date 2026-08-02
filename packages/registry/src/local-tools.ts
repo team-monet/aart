@@ -26,7 +26,12 @@ const EVIDENCE_PATH_PATTERN = /^\$(?:\.[A-Za-z_][A-Za-z0-9_-]*|\[\d+\])*$/;
 const MAX_CAPTURE_BYTES = 1_048_576;
 const MAX_TIMEOUT_MS = 2_147_483_647;
 const REGEX_EXECUTION_TIMEOUT_MS = 1_000;
-const CURRENT_PROCESS_START_IDENTITY = processStartIdentity(process.pid);
+let currentProcessStartIdentityPromise: Promise<string | undefined> | undefined;
+
+function currentProcessStartIdentity(): Promise<string | undefined> {
+  currentProcessStartIdentityPromise ??= processStartIdentity(process.pid);
+  return currentProcessStartIdentityPromise;
+}
 
 function isAnyPlatformAbsolute(value: string): boolean {
   return isAbsolute(value) || /^[A-Za-z]:[\\/]/.test(value) || /^\\\\[^\\]+\\[^\\]+/.test(value);
@@ -2062,6 +2067,7 @@ function beginLocalToolRun(
   prerequisiteHashes: Readonly<Record<string, string>>,
   runId: string,
   startedAt: string,
+  ownerStartIdentity: string,
   activeProcess: NonNullable<LocalToolRunRecord["activeProcess"]>,
   result: Record<string, unknown> & { ok: boolean; ran: true },
 ): LocalToolRunRecord {
@@ -2078,6 +2084,7 @@ function beginLocalToolRun(
     status: "running",
     ownerProcess: {
       pid: process.pid,
+      startIdentity: ownerStartIdentity,
     },
     activeProcess,
     result,
@@ -2106,7 +2113,6 @@ function enrichLocalToolRunProcessIdentities(
   root: string,
   runId: string,
   activeProcess: NonNullable<LocalToolRunRecord["activeProcess"]>,
-  ownerStartIdentity: string | undefined,
   activeStartIdentity: string | undefined,
 ): LocalToolRunRecord | undefined {
   const path = localToolRunPath(root, runId);
@@ -2120,10 +2126,6 @@ function enrichLocalToolRunProcessIdentities(
 
   let changed = false;
   const durable: LocalToolRunRecord = { ...current };
-  if (ownerStartIdentity && current.ownerProcess?.pid === process.pid && !current.ownerProcess.startIdentity) {
-    durable.ownerProcess = { ...current.ownerProcess, startIdentity: ownerStartIdentity };
-    changed = true;
-  }
   if (
     activeStartIdentity &&
     current.activeProcess?.pid === activeProcess.pid &&
@@ -2188,8 +2190,18 @@ export async function readLocalToolRun(root: string, runId: string): Promise<Loc
     ) {
       throw new Error(`local tool run record "${runId}" failed validation`);
     }
-    const ownerlessLegacyRun =
+    const previousEvidence =
+      parsed.result.evidence && typeof parsed.result.evidence === "object" && !Array.isArray(parsed.result.evidence)
+        ? (parsed.result.evidence as Record<string, unknown>)
+        : {};
+    const legacyEvidencePid =
+      Number.isInteger(previousEvidence.pid) && (previousEvidence.pid as number) > 0
+        ? (previousEvidence.pid as number)
+        : undefined;
+    const ownerlessLegacyRunning =
       parsed.status === "running" && parsed.ownerProcess === undefined && activeProcess === undefined;
+    const ownerlessLegacyRun =
+      ownerlessLegacyRunning && (legacyEvidencePid === undefined || !processIsAlive(legacyEvidencePid));
     const ownerNoLongerMatches =
       parsed.status === "running" &&
       parsed.ownerProcess !== undefined &&
@@ -2202,10 +2214,6 @@ export async function readLocalToolRun(root: string, runId: string): Promise<Loc
       (ownerlessLegacyRun ||
         (parsed.ownerProcess !== undefined && ownerNoLongerMatches && activeNoLongerMatches))
     ) {
-      const previousEvidence =
-        parsed.result.evidence && typeof parsed.result.evidence === "object" && !Array.isArray(parsed.result.evidence)
-          ? (parsed.result.evidence as Record<string, unknown>)
-          : {};
       const durable: LocalToolRunRecord = {
         ...parsed,
         endedAt: new Date().toISOString(),
@@ -2325,6 +2333,15 @@ export async function runLocalTool(
       error: `reviewed asset hash ${input.contentHash} does not match current hash ${record.contentHash}`,
     };
   }
+  const ownerStartIdentity = await currentProcessStartIdentity();
+  if (!ownerStartIdentity) {
+    return {
+      ok: false,
+      ran: false,
+      kind: "process_identity_unavailable",
+      error: "could not resolve the local-tool owner process identity before execution",
+    };
+  }
   const startedAt = new Date().toISOString();
   const runId = `toolrun_${randomUUID()}`;
   const prerequisiteHashes = { ...(input.prerequisiteHashes ?? {}) };
@@ -2419,16 +2436,16 @@ export async function runLocalTool(
                 prerequisiteHashes,
                 runId,
                 startedAt,
+                ownerStartIdentity,
                 activeProcess,
                 runningResult,
               );
-          void Promise.all([CURRENT_PROCESS_START_IDENTITY, processStartIdentity(pid)])
-            .then(([ownerStartIdentity, activeStartIdentity]) => {
+          void processStartIdentity(pid)
+            .then((activeStartIdentity) => {
               const enriched = enrichLocalToolRunProcessIdentities(
                 root,
                 runId,
                 activeProcess,
-                ownerStartIdentity,
                 activeStartIdentity,
               );
               if (enriched && running?.runId === runId && running.status === "running") running = enriched;
