@@ -361,8 +361,9 @@ command capability.
 mode applies to every subprocess before anything runs.
 The first process that starts creates one durable `running` record; every later
 version check, probe, and task spawn atomically advances that same record's
-`activeProcess` phase and PID. Terminal completion clears `activeProcess` and
-adds output and exit evidence. Non-zero exits and timeouts remain the primary
+`activeProcess` phase and PID before non-blocking OS process-start identity
+inspection enriches it. Terminal completion clears `activeProcess` and adds
+output and exit evidence. Non-zero exits and timeouts remain the primary
 failure even if their partial output cannot be parsed, and a timeout terminates
 the subprocess tree, not only the direct child. Failures before any subprocess
 starts remain explicit `ran: false` results; once any approval-bound subprocess

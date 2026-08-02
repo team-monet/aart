@@ -10,7 +10,7 @@ import {
 } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import { delimiter, dirname, extname, isAbsolute, join, relative, resolve } from "node:path";
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { Worker } from "node:worker_threads";
 import { coerce, rcompare, satisfies, valid as validSemver, validRange } from "semver";
 import { parse as parseYaml } from "yaml";
@@ -2078,7 +2078,6 @@ function beginLocalToolRun(
     status: "running",
     ownerProcess: {
       pid: process.pid,
-      ...(CURRENT_PROCESS_START_IDENTITY ? { startIdentity: CURRENT_PROCESS_START_IDENTITY } : {}),
     },
     activeProcess,
     result,
@@ -2100,6 +2099,43 @@ function advanceLocalToolRun(
   if (activeProcess) durable.activeProcess = activeProcess;
   else delete durable.activeProcess;
   replaceFileSync(localToolRunPath(root, running.runId), `${JSON.stringify(durable, null, 2)}\n`, 0o600);
+  return durable;
+}
+
+function enrichLocalToolRunProcessIdentities(
+  root: string,
+  runId: string,
+  activeProcess: NonNullable<LocalToolRunRecord["activeProcess"]>,
+  ownerStartIdentity: string | undefined,
+  activeStartIdentity: string | undefined,
+): LocalToolRunRecord | undefined {
+  const path = localToolRunPath(root, runId);
+  let current: LocalToolRunRecord;
+  try {
+    current = JSON.parse(readFileSync(path, "utf8")) as LocalToolRunRecord;
+  } catch {
+    return undefined;
+  }
+  if (current.runId !== runId || current.status !== "running") return undefined;
+
+  let changed = false;
+  const durable: LocalToolRunRecord = { ...current };
+  if (ownerStartIdentity && current.ownerProcess?.pid === process.pid && !current.ownerProcess.startIdentity) {
+    durable.ownerProcess = { ...current.ownerProcess, startIdentity: ownerStartIdentity };
+    changed = true;
+  }
+  if (
+    activeStartIdentity &&
+    current.activeProcess?.pid === activeProcess.pid &&
+    current.activeProcess.phase === activeProcess.phase &&
+    current.activeProcess.prerequisite === activeProcess.prerequisite &&
+    !current.activeProcess.startIdentity
+  ) {
+    durable.activeProcess = { ...current.activeProcess, startIdentity: activeStartIdentity };
+    changed = true;
+  }
+  if (!changed) return current;
+  replaceFileSync(path, `${JSON.stringify(durable, null, 2)}\n`, 0o600);
   return durable;
 }
 
@@ -2154,12 +2190,17 @@ export async function readLocalToolRun(root: string, runId: string): Promise<Loc
     }
     const ownerlessLegacyRun =
       parsed.status === "running" && parsed.ownerProcess === undefined && activeProcess === undefined;
+    const ownerNoLongerMatches =
+      parsed.status === "running" &&
+      parsed.ownerProcess !== undefined &&
+      !(await processMatchesIdentity(parsed.ownerProcess.pid, parsed.ownerProcess.startIdentity));
+    const activeNoLongerMatches =
+      ownerNoLongerMatches &&
+      (activeProcess === undefined || !(await processMatchesIdentity(activeProcess.pid, activeProcess.startIdentity)));
     if (
       parsed.status === "running" &&
       (ownerlessLegacyRun ||
-        (parsed.ownerProcess !== undefined &&
-          !processMatchesIdentity(parsed.ownerProcess.pid, parsed.ownerProcess.startIdentity) &&
-          (!activeProcess || !processMatchesIdentity(activeProcess.pid, activeProcess.startIdentity))))
+        (parsed.ownerProcess !== undefined && ownerNoLongerMatches && activeNoLongerMatches))
     ) {
       const previousEvidence =
         parsed.result.evidence && typeof parsed.result.evidence === "object" && !Array.isArray(parsed.result.evidence)
@@ -2204,27 +2245,27 @@ function processIsAlive(pid: number): boolean {
   }
 }
 
-function processMatchesIdentity(pid: number, expected: string | undefined): boolean {
+async function processMatchesIdentity(pid: number, expected: string | undefined): Promise<boolean> {
   if (!processIsAlive(pid)) return false;
   if (expected === undefined) return true;
-  const current = processStartIdentity(pid);
+  const current = await processStartIdentity(pid);
   return current === undefined || current === expected;
 }
 
-function processStartIdentity(pid: number): string | undefined {
+async function processStartIdentity(pid: number): Promise<string | undefined> {
   try {
     if (process.platform === "linux") {
-      const stat = readFileSync(`/proc/${pid}/stat`, "utf8").trim();
+      const stat = (await fs.readFile(`/proc/${pid}/stat`, "utf8")).trim();
       const commandEnd = stat.lastIndexOf(")");
       if (commandEnd < 0) return undefined;
       const fields = stat.slice(commandEnd + 2).split(/\s+/);
       const startTicks = fields[19];
       if (!startTicks) return undefined;
-      const bootId = readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
+      const bootId = (await fs.readFile("/proc/sys/kernel/random/boot_id", "utf8")).trim();
       return `linux:${bootId}:${startTicks}`;
     }
     if (process.platform === "win32") {
-      const result = spawnSync(
+      const result = await spawnNoShell(
         "powershell.exe",
         [
           "-NoProfile",
@@ -2232,17 +2273,16 @@ function processStartIdentity(pid: number): string | undefined {
           "-Command",
           `(Get-Process -Id ${pid} -ErrorAction Stop).StartTime.ToUniversalTime().Ticks`,
         ],
-        { encoding: "utf8", timeout: 2_000, windowsHide: true },
+        { timeoutMs: 2_000 },
       );
-      const ticks = result.status === 0 ? result.stdout.trim() : "";
+      const ticks = result.exitCode === 0 && !result.timedOut ? result.stdout.trim() : "";
       return ticks ? `win32:${ticks}` : undefined;
     }
-    const result = spawnSync("/bin/ps", ["-o", "lstart=", "-p", String(pid)], {
-      encoding: "utf8",
+    const result = await spawnNoShell("/bin/ps", ["-o", "lstart=", "-p", String(pid)], {
       env: { ...process.env, LC_ALL: "C" },
-      timeout: 2_000,
+      timeoutMs: 2_000,
     });
-    const started = result.status === 0 ? result.stdout.trim() : "";
+    const started = result.exitCode === 0 && !result.timedOut ? result.stdout.trim() : "";
     return started ? `${process.platform}:${started}` : undefined;
   } catch {
     return undefined;
@@ -2382,10 +2422,18 @@ export async function runLocalTool(
                 activeProcess,
                 runningResult,
               );
-          const startIdentity = processStartIdentity(pid);
-          if (startIdentity && running) {
-            running = advanceLocalToolRun(root, running, { ...activeProcess, startIdentity }, runningResult);
-          }
+          void Promise.all([CURRENT_PROCESS_START_IDENTITY, processStartIdentity(pid)])
+            .then(([ownerStartIdentity, activeStartIdentity]) => {
+              const enriched = enrichLocalToolRunProcessIdentities(
+                root,
+                runId,
+                activeProcess,
+                ownerStartIdentity,
+                activeStartIdentity,
+              );
+              if (enriched && running?.runId === runId && running.status === "running") running = enriched;
+            })
+            .catch(() => undefined);
         },
       },
     );
