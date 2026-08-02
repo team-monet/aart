@@ -224,6 +224,13 @@ When a trusted local command already does the job, register its contract
 instead of wrapping it in a server workflow or rebuilding it as a polling
 script. A local tool manifest is inert metadata until a hash-bound run:
 
+Local tools are trusted host code, not a same-user sandbox. Approval authorizes
+the reviewed command and any descendants it creates to run with the declared
+host authority. Executable seals prevent review-to-launch drift and detect
+changes at lifecycle checkpoints; they cannot contain a deliberately hostile
+process that keeps running under the same OS identity. Never register untrusted
+bytes as a local tool; use an isolated Block boundary for untrusted logic.
+
 ```yaml
 id: codex-review.wait
 name: Wait for Codex review
@@ -317,11 +324,18 @@ aart tool runs --tool-id codex-review.wait
 `resolution: path` does not silently trust whatever is on `PATH`: inert
 discovery reports the manifest without running it, and the explicit check
 resolves the command to an absolute path, snapshots and hashes its bytes, and
-runs declared version checks against those snapshots. Credentialed probes are
-deferred until the approval-bound run, so a check neither resolves AART secrets
-nor exercises inherited authentication. Execution requires the exact reviewed
-executable, argv, cwd, and prerequisite hashes. Changing the inputs, working
-directory, or a helper binary requires a new check.
+shows the exact sealed executable/argv for every declared version check, probe,
+and task. The check runs none of them, resolves no AART secrets, and exercises
+no inherited authentication. After approval, one hash-bound run selects the
+authentication environment once, then executes version checks, probes, and the
+task in the same sealed working directory through one durable lifecycle.
+After every completed approval-bound version check or probe, AART revalidates
+the command snapshot, interpreter snapshot, and every private `PATH` alias
+before launching the next lifecycle subprocess; a changed seal terminalizes
+that run instead of reaching the task.
+Execution requires the exact reviewed
+asset, executable, argv, cwd, and prerequisite hashes. Changing a manifest
+command, input, working directory, or helper binary requires a new check.
 
 Every command that the task resolves through `PATH` must be a declared
 prerequisite. AART exposes only a private `PATH` of reviewed native executable
@@ -344,14 +358,24 @@ command capability.
 (for example the user's `gh` session) and requests no duplicate
 `GITHUB_TOKEN`. `aart_secrets` is the separate mode for explicit
 `AART_SECRET_<NAME>`/`secrets.json` injection. The check summary names which
-mode applies before anything runs.
-Every process that actually starts gets a durable `running` evidence record
-on its spawn event, including the reviewed argv/prerequisite seals. Terminal
-completion atomically adds output and exit evidence; non-zero exits and
-timeouts remain the primary failure even if their partial output cannot be
-parsed. A timeout terminates the subprocess tree, not only the direct child.
-Preflight and spawn failures remain explicit `ran: false` results and do not
-fabricate a run record.
+mode applies to every subprocess before anything runs.
+The owner process identity is resolved lazily when a run is invoked, before any
+approved subprocess starts. The first spawn therefore creates one durable
+`running` record with stable owner identity; every later version check, probe,
+and task spawn atomically advances that same record's `activeProcess` phase and
+PID before non-blocking child identity inspection enriches it. Terminal
+completion clears `activeProcess` and adds
+output and exit evidence. Non-zero exits and timeouts remain the primary
+failure even if their partial output cannot be parsed, and a timeout terminates
+the subprocess tree, not only the direct child. Failures before any subprocess
+starts remain explicit `ran: false` results; once any approval-bound subprocess
+starts, failure completes the same durable record with `ran: true`. A later
+run-record read also terminalizes an interrupted record once both its owning
+caller and recorded active subprocess are no longer alive. Recovery compares
+process-start identity as well as PID, so a service/container restart that
+reuses PID 1 cannot keep an unrelated interrupted run falsely alive.
+Ownerless `running` records from releases before ownership identities were
+stored are migrated to the same terminal interrupted state when read.
 
 ## (d) The authoring lifecycle
 

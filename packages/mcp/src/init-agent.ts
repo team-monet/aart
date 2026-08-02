@@ -172,7 +172,7 @@ You're about to do something by hand, or via a throwaway script. Pause: will thi
 - **Governed** — the workflow's approval state and gates are explicit and enforced by trust mode, not implicit in whether a human happened to glance at a diff.
 - **Evidence** — every run writes an ordered per-step trace, pass/fail, and artifacts. \`aart_get_report\` proves it, it doesn't just claim it.
 
-A truly one-off probe is still fine as a raw command. When a reliable local CLI already performs the job, register and reuse it as a local tool: \`aart_find_tools\` discovers it without running manifest commands, \`aart_check_tool\` seals a content-addressed executable snapshot plus the exact rendered argv, working directory, and prerequisite executables for one review, \`aart_run_tool\` requires those same seals before executing the snapshot without a shell and stores a running record as soon as the process starts, \`aart_list_tool_runs\` recovers that record after a caller restart, and \`aart_get_tool_run\` retrieves its full redacted evidence. Use a workflow when several reusable steps or durable server execution are the actual outcome.
+A truly one-off probe is still fine as a raw command. When a reliable local CLI already performs the job, register and reuse it as a local tool: \`aart_find_tools\` discovers it without running manifest commands, \`aart_check_tool\` seals a content-addressed executable snapshot plus the exact rendered task, version-check, and probe argv, working directory, authority, effects, and prerequisite executables without running any of them, and \`aart_run_tool\` requires those same seals before one stable authentication selection and durable lifecycle executes every approved subprocess without a shell. \`aart_list_tool_runs\` recovers the current phase/PID after a caller restart, and \`aart_get_tool_run\` retrieves its full redacted evidence. Use a workflow when several reusable steps or durable server execution are the actual outcome.
 
 ## The authoring loop
 
@@ -204,7 +204,7 @@ Climb the ladder, stopping at the first rung that works: reuse an existing local
 ## Rules
 
 - Reference only block ids that actually exist (\`aart_find_blocks\`/\`aart_get_block\` first).
-- Never call \`aart_run_tool\` until the user has reviewed the exact \`aart_check_tool\` command, authority, effects, asset hash, and executable hash.
+- Never call \`aart_run_tool\` until the user has reviewed every exact task/version-check/probe command in \`aart_check_tool\`, its authority and effects, and the complete asset/executable/argv/cwd/prerequisite seal set.
 - Treat the run report as the source of truth for whether something worked — never claim success without one.
 - Every tool result names the next step of this loop in its \`next\` field — follow it rather than re-deriving the loop from scratch each time.
 `;
